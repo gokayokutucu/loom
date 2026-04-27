@@ -1814,7 +1814,7 @@ function Sidebar({
       <div className="sidebar-bottom">
         <button className="new-chat-button" onClick={onNewConversation}>
           <Plus size={16} />
-          <span>New conversation</span>
+          <span>New loom</span>
         </button>
       </div>
 
@@ -2233,7 +2233,7 @@ function ChatTranscript({
                   onClick={() => onThread(displayResponse)}
                 >
                   <GitFork size={13} />
-                  <strong>Thread</strong>
+                  <strong>Loom</strong>
                 </button>
               </div>
             </div>
