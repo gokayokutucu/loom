@@ -40,22 +40,22 @@ A UI can render many views over the same graph, but the graph model stays stable
 
 ## 3. Canonical Objects
 
-## 3.1 Conversation
+## 3.1 Loom
 
-A **Conversation** is the top-level narrative container.
+A **Loom** is the top-level narrative container.
 
-A Conversation may be:
+A Loom may be:
 
 - created from scratch
-- created from a fork / thread action
+- created from a fork / Weft action
 - created from a derived composition flow
 
 Suggested fields:
 
-- `conversationId`
+- `loomId`
 - `title`
 - `originType: root | fork | derived`
-- `forkedFromConversationId?`
+- `forkedFromLoomId?`
 - `forkedFromResponseId?`
 - `createdAt`
 - `updatedAt`
@@ -63,7 +63,7 @@ Suggested fields:
 - `isDeleted`
 
 ### Rule
-A Conversation is an owner container.
+A Loom is an owner container.
 It is not just a visual tab.
 
 ---
@@ -73,16 +73,16 @@ It is not just a visual tab.
 A **Response** is the atomic knowledge node.
 
 A Response:
-- belongs to a Conversation
+- belongs to a Loom
 - may reply to a prior Response or user turn
 - may be bookmarked
 - may be referenced elsewhere
-- may become the anchor of a forked Conversation
+- may become the anchor of a forked Loom
 
 Suggested fields:
 
 - `responseId`
-- `conversationId`
+- `loomId`
 - `parentResponseId?`
 - `role: user | assistant | system`
 - `content`
@@ -120,10 +120,10 @@ A **Bookmark** is the promotion layer that makes something first-class and Loom-
 
 A Bookmark may point to:
 
-- a Conversation
+- a Loom
 - a Response
 - a selected passage
-- a thread/fork lineage
+- a Weft/fork lineage
 - a response set
 
 Suggested fields:
@@ -136,7 +136,7 @@ Suggested fields:
 - `createdAt`
 
 ### Rule
-Bookmarking is the user-acceptance step that promotes temporary conversational content into durable Loom objects.
+Bookmarking is the user-acceptance step that promotes temporary Loom content into durable Loom objects.
 
 ---
 
@@ -146,13 +146,13 @@ A **ReferenceMention** represents the reuse of one Loom object inside another co
 
 Examples:
 - a Response referenced inside a composer
-- a Conversation referenced from another Conversation
+- a Loom referenced from another Loom
 - a bookmarked object reused inside a prompt
 
 Suggested fields:
 
 - `mentionId`
-- `sourceConversationId`
+- `sourceLoomId`
 - `targetType`
 - `targetId`
 - `createdAt`
@@ -169,19 +169,19 @@ This distinction is critical.
 
 ## 4. Non-Canonical Objects
 
-## 4.1 Thread
+## 4.1 Weft
 
-User-facing term: **Thread**
+User-facing term: **Weft**
 
 Internal meaning:
-A Thread is better modeled as a **lineage/fork projection** rather than a standalone owner object.
+A Weft is better modeled as a **lineage/fork projection** rather than a standalone owner object.
 
 That means:
-- the UI can call it Thread
+- the UI can call it Weft
 - but the deeper model should treat it as a **projection or fork lineage scope**
 
 ### Rule
-Thread is primarily a graph-derived path, not necessarily a new owner container unless it becomes a new Conversation.
+Weft is primarily a graph-derived path, not necessarily a new owner container unless it becomes a new Loom.
 
 ---
 
@@ -191,8 +191,8 @@ A **Window** is not an owner object.
 A Window is a **bounded projection over the Loom graph**.
 
 Examples:
-- ConversationWindow
-- ThreadWindow
+- LoomWindow
+- WeftWindow
 - ReferenceWindow
 - TimeWindow
 - ContextWindow
@@ -217,9 +217,9 @@ Suggested relationship types:
 - `anchored_to`
 
 ### Example
-- Conversation `contains` Response
+- Loom `contains` Response
 - ReferenceMention `references` Response
-- Conversation `forked_from` Response
+- Loom `forked_from` Response
 - Bookmark `bookmarked_as` Response
 - QuickQuestion `anchored_to` Response
 
@@ -253,21 +253,21 @@ It should depend on:
 
 ## 7.1 Fork from Response
 
-If the user chooses Thread/Fork on a Response:
+If the user chooses Weft/Fork on a Response:
 - the selected Response and its ancestry define the lineage seed
-- a new Conversation may be created from that point
-- the new Conversation should store:
+- a new Loom may be created from that point
+- the new Loom should store:
   - `originType = fork`
   - `forkedFromResponseId`
-  - `forkedFromConversationId`
+  - `forkedFromLoomId`
 
-## 7.2 Thread vs Conversation
+## 7.2 Weft vs Loom
 
 User-facing:
-- Thread button may say “Thread”
+- Weft button may say “Weft”
 
 System-facing:
-- operation is closer to `Fork Conversation from Response`
+- operation is closer to `Fork Loom from Response`
 
 ---
 
@@ -275,17 +275,17 @@ System-facing:
 
 ## 8.1 Reusing a Response
 
-If Response A is linked inside another conversation:
+If Response A is linked inside another Loom:
 - do not clone Response A as a new canonical node
 - create a `ReferenceMention` that points to Response A
 
 This preserves provenance and avoids graph duplication.
 
-## 8.2 Reusing a Conversation
+## 8.2 Reusing a Loom
 
-If one Conversation references another:
-- do not nest the target Conversation inside the source
-- create a ReferenceMention from source to target Conversation
+If one Loom references another:
+- do not nest the target Loom inside the source
+- create a ReferenceMention from source to target Loom
 
 ---
 
@@ -295,7 +295,7 @@ A QuickQuestion can stay temporary.
 It becomes durable only if the user explicitly promotes it.
 
 Possible promotions:
-- convert to thread/fork
+- convert to Weft/fork
 - bookmark
 - preserve as a durable QuickQuestion node
 
@@ -308,7 +308,7 @@ These must remain true:
 1. A canonical object keeps a stable internal identity.
 2. Bookmarking is the promotion step for addressability.
 3. Reference reuse creates mentions, not clones.
-4. A Thread is a lineage/fork concept, not only a visual comment chain.
+4. A Weft is a lineage/fork concept, not only a visual comment chain.
 5. A Window is a projection, not an owner.
 
 ---
@@ -317,25 +317,25 @@ These must remain true:
 
 ### Scenario
 
-- User is in Conversation A
+- User is in Loom A
 - Response R12 is useful
 - User bookmarks R12
 - Bookmark B7 is created
 - Loom address becomes available
-- Later, in Conversation B, user links R12 into a new prompt
+- Later, in Loom B, user links R12 into a new prompt
 
 ### Result
 
 Canonical objects:
-- Conversation A
+- Loom A
 - Response R12
 - Bookmark B7
-- Conversation B
+- Loom B
 
 Edges:
 - A `contains` R12
 - B7 `bookmarked_as` R12
-- Mention M3 in Conversation B `references` R12
+- Mention M3 in Loom B `references` R12
 
 No duplicate Response is created.
 
@@ -345,12 +345,12 @@ No duplicate Response is created.
 
 The graph truth of Loom AI is:
 
-- **Conversation** is the owner container
+- **Loom** is the owner container
 - **Response** is the atomic reusable content node
 - **Bookmark** is the promotion and addressability layer
 - **ReferenceMention** is the reuse layer
 - **QuickQuestion** may begin ephemeral and later promote
-- **Thread** is best treated as a lineage/fork path rather than a simple visual comment chain
+- **Weft** is best treated as a lineage/fork path rather than a simple visual comment chain
 - **Window** is a projection over the graph, not an owning structure
 
 ---

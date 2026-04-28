@@ -22,7 +22,7 @@ This document is the addressing truth layer.
 It complements, but does not replace:
 
 - `loom_graph_model.md`
-- `conversation_tree_and_navigation_model.md`
+- `loom_tree_and_navigation_model.md`
 - `composer_and_reference_model.md`
 - `interaction_patterns.md`
 
@@ -81,7 +81,7 @@ Every canonical Loom object must have a stable internal identity.
 
 Examples:
 
-- Conversation
+- Loom
 - Response
 - Bookmark
 - Fragment
@@ -90,7 +90,7 @@ Examples:
 Suggested shapes:
 
 ```text
-loom://o/conversation/CNV_01J...
+loom://o/loom/LOM_01J...
 loom://o/response/RSP_01J...
 loom://o/bookmark/BMK_01J...
 loom://o/fragment/FRG_01J...
@@ -108,7 +108,7 @@ Stable object identity must never depend on:
 
 - title
 - visible slug
-- current conversation order
+- current Loom order
 - response index in the UI
 - current window/view
 - current branch depth
@@ -128,7 +128,7 @@ Examples:
 ```text
 loom://research-synthesis/address-bar-local-ai-web
 loom://research-synthesis/address-bar-local-ai-web?id=RSP_01J...
-loom://citations/provenance-graph-map?id=CNV_01J...
+loom://citations/provenance-graph-map?id=LOM_01J...
 ```
 
 Or a more structured form:
@@ -179,14 +179,14 @@ Content hash should be treated as a **snapshot/revision aid**, not as the primar
 
 ## 5. Canonical Addressable Targets
 
-## 5.1 Conversation
+## 5.1 Loom
 
-A Conversation can be addressed by stable object identity.
+A Loom can be addressed by stable object identity.
 
 Example:
 
 ```text
-loom://o/conversation/CNV_01J...
+loom://o/loom/LOM_01J...
 ```
 
 Human-readable alias example:
@@ -197,9 +197,9 @@ loom://research-synthesis
 
 ### Notes
 
-- Conversation titles may change.
-- Conversation branches may change.
-- The stable conversation ID must not change.
+- Loom titles may change.
+- Loom branches may change.
+- The stable Loom ID must not change.
 
 ---
 
@@ -277,7 +277,7 @@ loom://fragments/cevap-soyle-olabilir?id=FRG_01J...
 Suggested fragment metadata:
 
 - `sourceResponseId`
-- `sourceConversationId`
+- `sourceLoomId`
 - `rangeStart`
 - `rangeEnd`
 - `snapshotHash?`
@@ -289,44 +289,44 @@ It is a derived canonical object pointing back to its source.
 
 ---
 
-## 5.5 Thread / Lineage Path
+## 5.5 Weft / Lineage Path
 
-User-facing term: **Thread**
+User-facing term: **Weft**
 
-But in Loom’s deeper model, a Thread is usually better treated as a **lineage/fork projection** rather than a simple owner object.
+But in Loom’s deeper model, a Weft is usually better treated as a **lineage/fork projection** rather than a simple owner object.
 
 This creates an important rule:
 
 ### Rule
 
-A Thread/lineage path is not automatically a canonical stable object by default.
+A Weft/lineage path is not automatically a canonical stable object by default.
 
 ### Rule
 
-A Thread becomes durable/user-addressable only when explicitly promoted/bookmarked or otherwise materialized into a stable object.
+A Weft becomes durable/user-addressable only when explicitly promoted/bookmarked or otherwise materialized into a stable object.
 
 That means:
 
 - internal projection view may exist without a first-class public address
-- promoted thread lineage may get a Bookmark-backed or object-backed address
+- promoted Weft lineage may get a Bookmark-backed or object-backed address
 
 Example promoted lineage address:
 
 ```text
-loom://o/bookmark/BMK_01J_THREAD...
+loom://o/bookmark/BMK_01J_WEFT...
 ```
 
 or
 
 ```text
-loom://threads/citation-reuse-and-provenance?id=BMK_01J_THREAD...
+loom://wefts/citation-reuse-and-provenance?id=BMK_01J_WEFT...
 ```
 
 ---
 
 ## 6. Non-Canonical Reuse: Reference Mentions
 
-A Response reused inside another prompt or conversation should not create a duplicate canonical Response.
+A Response reused inside another prompt or Loom should not create a duplicate canonical Response.
 
 Instead, it creates a **ReferenceMention** in the new context.
 
@@ -353,7 +353,7 @@ Addresses should identify the target canonical object, not the mention instance,
 
 ## 7.1 Why Promotion Exists
 
-Not every conversational artifact should instantly become a durable Loom addressable object.
+Not every Loom artifact should instantly become a durable Loom addressable object.
 
 Examples of temporary things:
 
@@ -469,7 +469,7 @@ Examples:
 
 ```text
 loom://o/response/RSP_01J...?view=lineage
-loom://o/response/RSP_01J...?panel=threads
+loom://o/response/RSP_01J...?panel=wefts
 loom://o/response/RSP_01J...?window=reference
 ```
 
@@ -490,7 +490,7 @@ Changing the current UI layout or panel system must not invalidate the base obje
 
 A human-readable alias may be generated from:
 
-- conversation title
+- Loom title
 - bookmark title
 - response semantic title
 - fragment label
@@ -598,7 +598,7 @@ Use content hashes for:
 - imported artifact verification
 - fragment fidelity checks
 
-Do **not** use content hash as the only canonical identity for Conversations or Responses.
+Do **not** use content hash as the only canonical identity for Looms or Responses.
 
 ### Why not?
 
@@ -619,10 +619,10 @@ That means the better rule is:
 
 ## 14. Example Address Forms
 
-## 14.1 Canonical Conversation
+## 14.1 Canonical Loom
 
 ```text
-loom://o/conversation/CNV_01J8ABC...
+loom://o/loom/LOM_01J8ABC...
 ```
 
 ## 14.2 Canonical Response

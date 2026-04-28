@@ -9,7 +9,7 @@
 
 ## 1. Product Thesis
 
-Loom AI starts as an **AI Conversation Browser**.
+Loom AI starts as an **AI Loom Browser**.
 
 It is not positioned first as a chatbot, not first as a generic AI workspace, and not first as an AI operating system. Its initial purpose is more precise:
 
@@ -23,34 +23,34 @@ It is **not** the canonical place for every detailed interaction, graph, node, w
 Detailed semantics and interaction rules should live in companion documents, such as:
 
 - **Loom Graph Model** — canonical objects, edges, promotion rules, fork rules, bookmark rules, and addressability
-- **Conversation Tree & Navigation Model** — sidebar tree, node types, commit-flow style lineage, Back/Forward behavior, and history semantics
+- **Loom Tree & Navigation Model** — sidebar tree, node types, commit-flow style lineage, Back/Forward behavior, and history semantics
 - **Composer & Reference Model** — inline references, selection-derived reference chips, `#` trigger behavior, drag-to-link, undo/redo, and linked-reference synchronization
 - **Interaction Patterns** — context menus, tooltips, hover actions, selection popovers, Ask flow, archive/delete behavior, and bookmark card behavior
 
 This separation keeps the product story readable while allowing the interaction and data model to evolve without overloading the positioning document.
 
-Users already generate a large amount of knowledge through AI conversations, but current chat interfaces trap that knowledge inside long vertical transcripts. Once a conversation grows, the user loses orientation:
+Users already generate a large amount of knowledge through AI Looms, but current chat interfaces trap that knowledge inside long vertical transcripts. Once a Loom grows, the user loses orientation:
 
 - where a specific answer was given
 - which answer led to which follow-up
 - which response should be reused in another context
-- how two different conversations relate to each other
+- how two different Looms relate to each other
 - how to revisit or compare prior reasoning without copying and pasting fragments manually
 
 Loom AI treats AI outputs as **addressable knowledge objects** rather than disposable text blocks.
 
 In Loom AI:
 
-- a **Conversation** behaves like a site
+- a **Loom** behaves like a site
 - a **Response / Q+A item** behaves like a page
 - a **Bookmark** behaves like a saved destination
 - **History** behaves like browser navigation memory
 - **Links** connect one knowledge object to another
 - a **Graph View** acts as an optional site map / reasoning map
 
-This is why the correct primary mental model is not “threaded chat app,” but:
+This is why the correct primary mental model is not “wefted chat app,” but:
 
-> **browser for AI conversations**
+> **browser for AI Looms**
 
 ---
 
@@ -58,12 +58,12 @@ This is why the correct primary mental model is not “threaded chat app,” but
 
 ### 2.1 Primary Positioning
 
-**Loom AI is a browser for AI conversations.**
+**Loom AI is a browser for AI Looms.**
 
 It allows users to:
 
-- navigate AI conversations with **Back** and **Forward**
-- search conversations, looms, and Q+A items through an **Address Bar**
+- navigate AI Looms with **Back** and **Forward**
+- search Looms, Wefts, and Q+A items through an **Address Bar**
 - save and organize reusable knowledge via **Bookmarks**
 - compose new prompts by dragging addressable responses into the input area
 - revisit prior reasoning through **History** and deep links
@@ -86,13 +86,13 @@ Those may become future layers, but V1 must stay focused.
 
 The longer-term trajectory can evolve in layers:
 
-- **V1**: AI Conversation Browser
-- **V2**: Personal Conversation Web
+- **V1**: AI Loom Browser
+- **V2**: Personal Loom Web
 - **V3**: Extensible AI Workspace / AI OS
 
 This layered framing is important. The first release must win by solving one painful problem clearly:
 
-> **Users lose their place in AI conversations and cannot navigate or reuse them naturally.**
+> **Users lose their place in AI Looms and cannot navigate or reuse them naturally.**
 
 ---
 
@@ -107,7 +107,7 @@ Most AI chat interfaces are still fundamentally linear:
 - one text input
 - weak linking between answers
 - weak revisitability
-- weak cross-conversation composition
+- weak cross-Loom composition
 
 This structure works for short exchanges but breaks down for deeper usage.
 
@@ -132,7 +132,7 @@ Loom AI exists to solve the following concrete problems:
 
 4. **Composition problem**
 
-   - Users often want to combine multiple answers, threads, or conversations into one new question.
+   - Users often want to combine multiple answers, Wefts, or Looms into one new question.
    - Current UIs make this clumsy.
 
 5. **Orientation problem**
@@ -141,7 +141,7 @@ Loom AI exists to solve the following concrete problems:
 
 6. **Search problem**
 
-   - Users remember “something about that answer,” not always which conversation it was in.
+   - Users remember “something about that answer,” not always which Loom it was in.
    - Search needs to behave like a local search engine over the user’s AI web.
 
 ---
@@ -203,17 +203,17 @@ Instead of leaving this information trapped in a transcript, Loom AI exposes it 
 
 | Browser Concept    | Loom AI Equivalent                                              |
 | ------------------ | --------------------------------------------------------------- |
-| Website            | Conversation                                                    |
+| Website            | Loom                                                    |
 | Web page           | Response / Q+A item                                             |
 | URL                | Loom address                                                    |
 | Bookmark           | User-promoted saved destination / reusable Loom object handle    |
 | Address bar        | Local search + navigation + direct addressing                   |
 | Back / Forward     | AI navigation history                                           |
 | History            | Loom navigation history timeline                                |
-| Search suggestions | Conversations, looms, titled Q+A, bookmarks, semantic matches   |
+| Search suggestions | Looms, Wefts, titled Q+A, bookmarks, semantic matches   |
 | Site map           | Optional Graph View                                             |
-| Tabs               | Conversations                                                   |
-| Commit graph / branch line | Conversation tree / lineage view                        |
+| Tabs               | Looms                                                   |
+| Commit graph / branch line | Loom tree / lineage view                        |
 
 This metaphor is not cosmetic. It is the functional core of the UX.
 
@@ -227,8 +227,8 @@ This metaphor is not cosmetic. It is the functional core of the UX.
 
 ### 6.2 Approved Interaction Terms
 
-- **Conversation**
 - **Loom**
+- **Weft**
 - **Bookmark**
 - **Link**
 - **Ask**
@@ -237,10 +237,43 @@ This metaphor is not cosmetic. It is the functional core of the UX.
 - **Graph View**
 - **References**
 
-### 6.3 Renamed Terms
+## Core Terminology (Authoritative)
 
-- “Quick Ask” is renamed to **Ask**
-- “Add to Thread” is renamed to **Link**
+- **Loom**
+  The primary container. Replaces Conversation.
+  A Loom is a navigable AI workspace, similar to a website.
+
+- **Weft**
+  The lineage / flow / fork path within a Loom.
+  Replaces Thread.
+  Represents how reasoning evolves.
+
+- **Response**
+  An atomic Q+A node.
+
+- **Link**
+  An action that connects Loom objects.
+
+- **Reference**
+  A Link materialized inside the composer or prompt.
+  Represents usage of an existing Loom object.
+
+- **Bookmark**
+  The promotion layer.
+  Converts ephemeral content into addressable Loom objects.
+
+- **Loom History**
+  Navigation memory across Loom objects.
+
+- **Window**
+  A projection over Loom graph (ConversationWindow, WeftWindow, etc.)
+
+## Legacy Terms (for reference only):
+
+- “Quick Ask” → now **Ask**
+- “Add to Thread” → now **Link**
+
+These are historical terms and should not appear in the UI.
 
 ---
 
@@ -252,8 +285,8 @@ Every important knowledge unit can become addressable.
 
 The product should support addressability for at least:
 
-- **Conversation**
-- **Thread**
+- **Loom**
+- **Weft**
 - **Q+A item / Response item**
 - **Bookmark collection / response set**
 
@@ -281,19 +314,19 @@ The acceptance model is:
 
 This keeps the system trustworthy.
 
-### 7.4 Conversation Tree and Lineage Model
+### 7.4 Loom Tree and Lineage Model
 
-Loom AI should also support a **conversation tree** / **lineage view** in the sidebar.
+Loom AI should also support a **Loom tree** / **lineage view** in the sidebar.
 This view should feel closer to a **commit flow** than to a generic folder tree.
 
 Key ideas:
 
-- a **Conversation** may start from scratch or be forked from an existing response / Loom lineage point
-- a **Conversation** may link to other conversations
+- a **Loom** may start from scratch or be forked from an existing response / Loom lineage point
+- a **Loom** may link to other Looms
 - a **Response** may be bookmarked and become Loom-addressable
 - a **Response** may be re-linked elsewhere, creating a new reference node in another flow
 - a **Quick Question** may remain ephemeral or become a durable node if promoted into a Loom/fork
-- a **Thread** should be treated as a lineage/fork path rather than only a visual comment chain
+- a **Weft** should be treated as a lineage/fork path rather than only a visual comment chain
 
 The sidebar should ultimately be able to render:
 
@@ -332,7 +365,7 @@ The user should quickly understand:
 - Bookmark
 - History
 - Address Bar
-- Tab-like conversations
+- Tab-like Looms
 - drag and drop into the prompt composer
 
 Advanced graph behavior should be discoverable later, not mandatory on day one.
@@ -346,7 +379,7 @@ Users should be able to:
 - drag bookmarks into it
 - insert linked response chips
 - type natural language around them
-- create a new conversation or Loom branch from linked knowledge objects
+- create a new Loom or Weft branch from linked knowledge objects
 
 The internal representation can serialize to Markdown links, but the visual UI should remain richer and safer than raw Markdown editing.
 
@@ -370,33 +403,33 @@ This section defines the intended V1 scope.
 
 ## 9.1 V1 Core Promise
 
-> Navigate, search, bookmark, link, and revisit AI conversations like a browser.
+> Navigate, search, bookmark, link, and revisit AI Looms like a browser.
 
 If V1 does this well, it is already valuable.
 
 ### 9.2 Must-Have V1 Features
 
-#### A. Sidebar Conversation Tabs
+#### A. Sidebar Loom Tabs
 
-Conversations should behave like tabs.
+Looms should behave like tabs.
 
 Requirements:
 
-- each conversation is visible as a selectable navigation unit
-- active conversation is clearly indicated
-- closing a conversation via **X** does **not** delete it
-- closing via X should **archive** the conversation
+- each Loom is visible as a selectable navigation unit
+- active Loom is clearly indicated
+- closing a Loom via **X** does **not** delete it
+- closing via X should **archive** the Loom
 - permanent delete must be a separate destructive action under the **kebab menu**
 
 Archive behavior:
 
-- archived conversation is removed from active tab view
+- archived Loom is removed from active tab view
 - it can still exist in archive/history/bookmark systems depending on policy
 
 Delete behavior:
 
-- user can permanently delete a conversation from kebab menu
-- if deleted, address targets from that conversation may become unreachable
+- user can permanently delete a Loom from kebab menu
+- if deleted, address targets from that Loom may become unreachable
 - the user must be warned that references pointing there may break
 
 #### B. Back / Forward Navigation
@@ -435,8 +468,8 @@ It should behave like a hybrid of:
 
 When the user types, suggestions should include:
 
-- conversations
-- looms
+- Looms
+- Wefts
 - titled Q+A items
 - bookmarks
 - semantic matches
@@ -446,7 +479,7 @@ The Address Bar should support:
 
 - direct navigation to a Loom address
 - title-based matching
-- semantic search over local conversation content
+- semantic search over local Loom content
 - autocomplete suggestions similar to a search engine experience
 
 This is the “Perplexity-like” part of the product.
@@ -457,14 +490,14 @@ Users must be able to bookmark:
 
 - a response / Q+A item
 - a response set
-- a thread
-- a conversation
+- a Weft
+- a Loom
 
 Bookmark usage in V1:
 
 - fast save from the UI
 - list visible in a bookmark surface
-- drag and drop into the prompt input dock
+- drag and drop into the prompt composer
 - titles editable by the user
 
 AI-generated titles are allowed as a starting point, but user editing is essential.
@@ -503,7 +536,7 @@ This mini popup supports:
 When closing the mini popup, the user can choose to:
 
 - discard it
-- convert it into a thread
+- convert it into a Weft
 - bookmark it
 
 This is important: not every quick interaction must become permanent, but it must be possible to promote it into a durable object.
@@ -514,10 +547,10 @@ AI-generated references should not be immediately canonical.
 
 Requirements:
 
-- AI may suggest references to other Q+A items, threads, or conversations
+- AI may suggest references to other Q+A items, Wefts, or Looms
 - suggested references are visually distinct from accepted Loom links
 - they are not yet hard references
-- user can choose **Bookmark** to convert the relevant conversation state/path into real Loom references
+- user can choose **Bookmark** to convert the relevant Loom state/path into real Loom references
 - Bookmark creates accepted, addressable references
 - bookmarked object titles are editable by the user
 
@@ -529,7 +562,7 @@ V1 may include a secondary graph view if feasible, but it is not the primary sur
 
 Purpose:
 
-- show linked Q+A items, conversations, and derived paths as connected nodes
+- show linked Q+A items, Looms, and derived paths as connected nodes
 - help power users inspect relationships visually
 - act like an LMCanvas-style exploration surface
 
@@ -550,7 +583,7 @@ The following should not define V1:
 - full OpenClaw-like runtime identity
 - plugin marketplace as a launch requirement
 - automatic hard-link generation without user approval
-- complex permanent visible thread trees as the primary navigation model
+- complex permanent visible Weft trees as the primary navigation model
 - replacing the underlying AI model layer
 - trying to be an all-in-one productivity suite
 
@@ -566,12 +599,12 @@ The current agreed direction is ChatGPT-like but browser-enhanced.
 
 From left to right:
 
-1. **Sidebar / Conversation Tree**
+1. **Sidebar / Loom Tree**
 
-   - chat list and grouped conversations
+   - chat list and grouped Looms
    - archived items access
    - browser-like navigation surface
-   - long-term support for a **conversation tree / lineage view** with object types
+   - long-term support for a **Loom tree / lineage view** with object types
    - should feel closer to a **commit-flow sidebar** than to a plain file tree
 
 2. **Chat Window**
@@ -595,7 +628,7 @@ Left side:
 
 Center:
 
-- current conversation title / location context
+- current Loom title / location context
 
 Right side:
 
@@ -603,7 +636,7 @@ Right side:
 - **Share** button
 - optionally bookmark or graph-view access depending on final placement
 
-Back and Forward are not cosmetic controls. They are expected to support navigation across the conversation tree / lineage graph in a browser-like way.
+Back and Forward are not cosmetic controls. They are expected to support navigation across the Loom tree / lineage graph in a browser-like way.
 
 ### 11.3 Input Area
 
@@ -629,8 +662,8 @@ V1 must support real addressability.
 
 At minimum:
 
-- Conversation
-- Loom / fork lineage
+- Loom
+- Weft / fork lineage
 - Q+A / Response item
 - Bookmark set / response set
 
@@ -650,7 +683,7 @@ Markdown link syntax is considered a good **canonical text representation**.
 Example:
 
 ```markdown
-"[Kırmızı Benekli Alabalık](loom://baliklar-hakkinde/alabalik/thread/t3/kirmizi-benekli/r12)'larda olduğu gibi olacaksa bir de [Balık Çiflikleri](loom://denizlerde-balık-çiflikleri/levrek/thread/t5/alabalik-melezleme/r6)'nde kullanım nasıl olur. Bunu konuşalım"
+"[Kırmızı Benekli Alabalık](loom://baliklar-hakkinde/alabalik/weft/t3/kirmizi-benekli/r12)'larda olduğu gibi olacaksa bir de [Balık Çiflikleri](loom://denizlerde-balık-çiflikleri/levrek/weft/t5/alabalik-melezleme/r6)'nde kullanım nasıl olur. Bunu konuşalım"
 ```
 
 V1 recommendation:
@@ -686,7 +719,7 @@ Users must retain control over:
 - which suggested references become real
 - which titles are used
 - whether a quick Ask result becomes durable
-- whether a conversation is archived or deleted
+- whether a Loom is archived or deleted
 
 ---
 
@@ -698,9 +731,9 @@ This must be explicit because Loom relies on addressability.
 
 Archive is a soft-close / soft-remove behavior.
 
-- clicking X on a conversation tab archives it
+- clicking X on a Loom tab archives it
 - archive should not be treated as permanent deletion
-- archived conversations may still remain resolvable unless explicitly purged
+- archived Looms may still remain resolvable unless explicitly purged
 
 ### 14.2 Delete
 
@@ -708,11 +741,11 @@ Delete is destructive.
 
 - initiated from kebab menu
 - should require clear confirmation
-- must explain that existing references to this conversation may become unreachable
+- must explain that existing references to this Loom may become unreachable
 
 ### 14.3 Unreachable References
 
-If a conversation or item is deleted:
+If a Loom or item is deleted:
 
 - reference resolution may fail
 - UI should show an understandable broken-reference state
@@ -730,10 +763,10 @@ The Address Bar should act as the user’s **local search engine**.
 
 V1 search suggestions may come from:
 
-- conversation titles
+- Loom titles
 - user-edited bookmark titles
 - AI-generated Q+A titles
-- Loom titles
+- Weft titles
 - recent history
 - semantic match against stored Q+A content
 
@@ -743,7 +776,7 @@ Autocomplete suggestions must feel strong and useful because they are central to
 
 Suggestion rows may include:
 
-- type icon (conversation / Loom / item / bookmark)
+- type icon (Loom / Weft / item / bookmark)
 - title
 - short subtitle or path
 - recent/semantic badge if useful
@@ -783,9 +816,9 @@ But V1 should not try to ship all of that at once.
 
 ### 17.1 Final Positioning
 
-**Loom AI is an AI Conversation Browser.**
+**Loom AI is an AI Loom Browser.**
 
-It turns conversations, Loom branches, and responses into addressable, navigable objects that users can:
+It turns Looms, Wefts, and responses into addressable, navigable objects that users can:
 
 - browse
 - search
@@ -797,7 +830,7 @@ It turns conversations, Loom branches, and responses into addressable, navigable
 ### 17.2 V1 Must Ship These Core Ideas Clearly
 
 - browser-like Back/Forward
-- tab-like conversations
+- tab-like Looms
 - address bar with local search + suggestions
 - bookmarks as reusable knowledge handles
 - rich Loom references for prompt composition
@@ -810,7 +843,7 @@ It turns conversations, Loom branches, and responses into addressable, navigable
 
 V1 is successful if users feel:
 
-- “I can finally find my way around AI conversations.”
+- “I can finally find my way around AI Looms.”
 - “I can reuse past answers without copy-paste chaos.”
 - “This feels like browsing my own AI web.”
 - “I wish standard chat products worked like this.”
@@ -821,8 +854,8 @@ V1 is successful if users feel:
 
 Loom AI should begin with one sharp promise:
 
-> **AI conversations should be navigable like the web.**
+> **AI Looms should be navigable like the web.**
 
-This document should remain the **north-star positioning and V1 scope document**. Detailed object semantics, conversation-tree rules, lineage behavior, and interaction contracts should be split into dedicated companion documents instead of being continuously appended here.
+This document should remain the **north-star positioning and V1 scope document**. Detailed object semantics, loom-tree rules, lineage behavior, and interaction contracts should be split into dedicated companion documents instead of being continuously appended here.
 
 If this is executed cleanly, Loom AI can later grow into something much larger. But that larger vision must be earned through a strong V1, not assumed before it exists.

@@ -32,7 +32,7 @@ The documents below define the deeper product semantics and interaction rules.
    - Runtime ledger events
    - Recursive CTE query patterns
 
-4. **Conversation Tree and Navigation Model**
+4. **Loom Tree and Navigation Model**
    - Sidebar tree
    - Commit-flow / lineage view
    - Node rendering
@@ -41,7 +41,7 @@ The documents below define the deeper product semantics and interaction rules.
    - Window / projection rules
 
 5. **Composer and Reference Model**
-   - Per-conversation composer state
+   - Per-Loom composer state
    - Inline references
    - Selection-derived references
    - `#` trigger
@@ -69,7 +69,7 @@ The documents below define the deeper product semantics and interaction rules.
 - Put structural truth in **Graph Model**.
 - Put identity and URL truth in **Loom Addressing and Resolution Model**.
 - Put database persistence truth in **SQLite Graph Storage Model**.
-- Put navigation truth in **Conversation Tree and Navigation Model**.
+- Put navigation truth in **Loom Tree and Navigation Model**.
 - Put editor/composer truth in **Composer and Reference Model**.
 - Put reusable UX behavior in **Interaction Patterns**.
 - Put durable architecture decisions in **Loom Architecture Ledger**.

@@ -1,4 +1,4 @@
-# Conversation Tree and Navigation Model
+# Loom Tree and Navigation Model
 
 **Document Type**: Sidebar Tree, Lineage, and Navigation Semantics  
 **Status**: Draft 1.0
@@ -7,7 +7,7 @@
 
 ## 1. Purpose
 
-This document defines how Loom AI renders and navigates the conversation graph.
+This document defines how Loom AI renders and navigates the Loom graph.
 
 It answers:
 
@@ -35,14 +35,14 @@ That means the sidebar must express:
 
 ---
 
-## 3. Sidebar as Conversation Tree
+## 3. Sidebar as Loom Tree
 
-The sidebar should eventually support a **conversation tree / lineage view**.
+The sidebar should eventually support a **Loom tree / lineage view**.
 
 It should be able to render:
 
-- Conversations
-- Threads / forked paths
+- Looms
+- Wefts / forked paths
 - Bookmarked responses if surfaced there
 - Object type markers
 - Branch relationships
@@ -64,9 +64,9 @@ Not closer to:
 
 Suggested node types:
 
-- `Conversation`
+- `Loom`
 - `Response`
-- `Thread/Fork`
+- `Weft/Fork`
 - `Bookmark`
 - `QuickQuestion` when promoted
 
@@ -76,15 +76,15 @@ Type should not rely only on text labels; iconography and structural placement s
 
 ---
 
-## 5. Thread / Fork in the Tree
+## 5. Weft / Fork in the Tree
 
-When the user clicks the **Thread** action under a response:
+When the user clicks the **Weft** action under a response:
 - that response and its ancestry define a fork lineage
 - a new path is created
-- that path may become a new Conversation branch
+- that path may become a new Loom branch
 
 User-facing:
-- “Thread”
+- “Weft”
 
 System-facing:
 - fork / lineage branch
@@ -100,7 +100,7 @@ They are browser-like navigation controls over Loom destinations.
 
 A destination may be:
 
-- a Conversation root
+- a Loom root
 - a deep Response
 - a Bookmark target
 - a Graph node target
@@ -121,12 +121,12 @@ This should behave like a browser, not like a simple tab switcher.
 Navigation history should be a real stack of visited destinations.
 
 ### What should create a history entry
-- opening a Conversation
+- opening a Loom
 - opening a Bookmark
 - selecting from Address Bar suggestions
 - clicking a Graph node
 - jumping from History
-- opening a Thread/Fork target
+- opening a Weft/Fork target
 - deep navigation to a Response/Q+A item
 
 ### What should not create noisy entries
@@ -161,13 +161,13 @@ In Loom AI, a **Window** is a bounded projection over the graph.
 
 It is not an owner.
 
-### 9.1 ConversationWindow
+### 9.1 LoomWindow
 Shows:
-- the active Conversation
+- the active Loom
 - its contained responses
 - its local references
 
-### 9.2 ThreadWindow
+### 9.2 WeftWindow
 Shows:
 - a lineage/fork path from a chosen response anchor
 
@@ -210,7 +210,7 @@ Clicking a Graph node should create a normal navigation entry.
 
 ## 11. Grouping and Tab Groups
 
-Conversation grouping in the sidebar may behave like browser tab groups.
+Loom grouping in the sidebar may behave like browser tab groups.
 
 A group is:
 - a visual/organizational navigation grouping
@@ -218,7 +218,7 @@ A group is:
 
 Group operations:
 - create group
-- add/remove conversation from group
+- add/remove Loom from group
 - rename group
 - ungroup
 
@@ -226,12 +226,12 @@ This is navigation organization, not graph truth.
 
 ---
 
-## 12. New Conversation Draft and Navigation
+## 12. New Loom Draft and Navigation
 
-A new conversation starts as a clean draft.
+A new Loom starts as a clean draft.
 
 Rules:
-- it should not materialize into the sidebar as a real conversation until first meaningful send
+- it should not materialize into the sidebar as a real Loom until first meaningful send
 - it may still be treated as a temporary destination
 - returning Back/Forward to a still-valid draft should restore it sensibly
 - abandoned empty drafts should not create ghost nodes

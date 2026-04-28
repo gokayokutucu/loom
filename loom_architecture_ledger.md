@@ -19,14 +19,14 @@ Loom needs human-readable addresses without making titles, slugs, response order
 Loom is entity-addressed first. Stable internal object IDs are canonical. Human-readable aliases are secondary resolver inputs. Snapshot hashes and revision numbers are optional precision layers for exact historical content, not primary identity.
 
 **Consequences**
-Renaming a conversation, response, bookmark, or alias does not break canonical resolution. Address Bar URLs can remain readable while resolver correctness is anchored to object IDs.
+Renaming a Loom, response, bookmark, or alias does not break canonical resolution. Address Bar URLs can remain readable while resolver correctness is anchored to object IDs.
 
 ---
 
 ## 2026-04-28T00:05:00+03:00 — Phase 1 — Bookmark as promotion boundary
 
 **Context**
-Temporary conversational artifacts should not all become durable user-facing Loom objects automatically.
+Temporary Loom artifacts should not all become durable user-facing Loom objects automatically.
 
 **Decision**
 Bookmarking is the primary user-acceptance and promotion step. A bookmark promotes its target into a resolvable, reusable Loom destination while preserving the target object's canonical identity.
@@ -39,7 +39,7 @@ Bookmark is not a trivial saved shortcut. It is an addressability boundary and s
 ## 2026-04-28T00:10:00+03:00 — Phase 1 — Windows are projections
 
 **Context**
-Loom has Conversation, Loom/Thread, Reference, Time, and Context windows. These must not own or duplicate objects.
+Loom has LoomWindow, WeftWindow, ReferenceWindow, TimeWindow, and ContextWindow projections. These must not own or duplicate objects.
 
 **Decision**
 Windows are bounded projections over the graph. Address resolution targets an object first, then applies optional window/view parameters.
@@ -107,7 +107,7 @@ Runtime history is inspectable without creating an event-sourcing dependency. SQ
 Windows can be represented in the database, but they must not become owners or alternate object identities.
 
 **Decision**
-Window reads apply after object resolution. Conversation, Loom/Lineage, Reference, Time, and Context windows are projections or caches over existing object IDs.
+Window reads apply after object resolution. Loom, Weft/Lineage, Reference, Time, and Context windows are projections or caches over existing object IDs.
 
 **Consequences**
 The same object can appear in multiple windows. Invalid window requests return `window_invalid`; they do not become object lookup failures.

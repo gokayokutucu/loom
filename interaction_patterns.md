@@ -46,7 +46,7 @@ Examples:
 Context menus are a power-user layer.
 They must not be the only way to access important actions.
 
-### 3.1 Conversation Context Menu
+### 3.1 Loom Context Menu
 Suggested items:
 - Open
 - Pin / Unpin
@@ -145,7 +145,7 @@ Bookmark cards should have:
 
 ## 7. Icon Picker
 
-Conversation icons/favicons may be customized using a Bear-like picker.
+Loom icons/favicons may be customized using a Bear-like picker.
 
 ### Behavior
 - compact dark popover/modal
@@ -153,7 +153,7 @@ Conversation icons/favicons may be customized using a Bear-like picker.
 - selected state visible
 - Done / Cancel
 - current icon shown
-- icon persists per conversation
+- icon persists per Loom
 
 ---
 
@@ -175,7 +175,7 @@ Archive and Delete must never feel ambiguous.
 
 ## 9. Grouping Interaction
 
-Dragging one conversation over another and holding for >1 second may create a group.
+Dragging one Loom over another and holding for >1 second may create a group.
 
 Rules:
 - drag into group joins group
@@ -191,7 +191,7 @@ Rules:
 The transcript should:
 - fade/slip smoothly under the bottom composer area
 - have a floating scroll-to-bottom button when not at the latest message
-- show only scrollbar thumb when appropriate, not the full track/rail in the main conversation panel
+- show only scrollbar thumb when appropriate, not the full track/rail in the main Loom panel
 
 ---
 

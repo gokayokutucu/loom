@@ -14,7 +14,7 @@ SQLite is not the product semantics. Product semantics remain defined by:
 
 - `loom_graph_model.md`
 - `loom_addressing_and_resolution_model.md`
-- `conversation_tree_and_navigation_model.md`
+- `loom_tree_and_navigation_model.md`
 - `composer_and_reference_model.md`
 
 The web prototype uses a repository adapter seam. Electron can later provide a SQLite-backed implementation of the same repository interface.
@@ -36,7 +36,7 @@ The web prototype uses a repository adapter seam. Electron can later provide a S
 ## Table Families
 
 - `loom_objects`: canonical identity, type, status, timestamps.
-- Typed tables: `conversations`, `responses`, `quick_questions`, `bookmarks`, `fragments`, `reference_mentions`.
+- Typed tables: `looms`, `responses`, `quick_questions`, `bookmarks`, `fragments`, `reference_mentions`.
 - `loom_edges`: typed relationships such as `contains`, `references`, `forked_from`, `promoted_from`, `anchored_to`, `mentions`.
 - Addressing: `loom_addresses`, `loom_address_aliases`, `loom_revisions`.
 - Windows: `loom_windows`, `loom_window_members`.
@@ -136,12 +136,12 @@ FROM reference_mentions rm
 WHERE rm.target_object_id = :object_id;
 ```
 
-### References from a conversation
+### References from a Loom
 
 ```sql
 SELECT rm.*
 FROM reference_mentions rm
-WHERE rm.source_conversation_id = :conversation_id;
+WHERE rm.source_loom_id = :loom_id;
 ```
 
 ### Bookmark lookup
@@ -163,29 +163,29 @@ LEFT JOIN loom_objects o ON o.object_id = aa.target_object_id
 WHERE o.object_id IS NULL OR o.status IN ('deleted', 'unreachable');
 ```
 
-### ConversationWindow projection
+### LoomWindow projection
 
 ```sql
-WITH RECURSIVE conversation_objects(object_id, depth) AS (
+WITH RECURSIVE loom_objects(object_id, depth) AS (
   SELECT lw.anchor_object_id, 0
   FROM loom_windows lw
-  WHERE lw.window_id = :window_id AND lw.window_type = 'conversation'
+  WHERE lw.window_id = :window_id AND lw.window_type = 'loom'
   UNION ALL
-  SELECT e.to_object_id, conversation_objects.depth + 1
+  SELECT e.to_object_id, loom_objects.depth + 1
   FROM loom_edges e
-  JOIN conversation_objects ON e.from_object_id = conversation_objects.object_id
+  JOIN loom_objects ON e.from_object_id = loom_objects.object_id
   WHERE e.edge_type = 'contains'
 )
-SELECT * FROM conversation_objects ORDER BY depth;
+SELECT * FROM loom_objects ORDER BY depth;
 ```
 
-### Loom/Lineage window projection
+### Weft/Lineage window projection
 
 ```sql
 WITH RECURSIVE branch(object_id, depth) AS (
   SELECT lw.anchor_object_id, 0
   FROM loom_windows lw
-  WHERE lw.window_id = :window_id AND lw.window_type IN ('loom', 'lineage')
+  WHERE lw.window_id = :window_id AND lw.window_type IN ('weft', 'lineage')
   UNION ALL
   SELECT e.to_object_id, branch.depth + 1
   FROM loom_edges e
@@ -250,7 +250,7 @@ The app should depend on a `LoomGraphRepository` interface:
 - read lineage ancestors
 - read descendants from a branch root
 - read reference neighborhoods
-- read window projections for Conversation, Loom/Lineage, Reference, Time, and Context windows
+- read window projections for Loom, Weft/Lineage, Reference, Time, and Context windows
 
 The current browser adapter may be in-memory. The future Electron adapter should execute the SQL schema directly.
 

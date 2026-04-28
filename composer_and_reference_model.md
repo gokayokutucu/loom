@@ -11,14 +11,14 @@ This document defines how the Loom AI composer works.
 
 It covers:
 
-- per-conversation composer state
+- per-Loom composer state
 - inline references
 - selection-derived references
 - `#` insertion trigger
 - drag-to-link
 - linked references management
 - Undo / Redo
-- new conversation drafts
+- new Loom drafts
 
 ---
 
@@ -35,9 +35,9 @@ But it should still feel:
 
 ---
 
-## 3. Composer State is Conversation-scoped
+## 3. Composer State is Loom-scoped
 
-Each Conversation must have its own composer draft state.
+Each Loom must have its own composer draft state.
 
 Suggested draft state contains:
 - prompt text
@@ -49,18 +49,18 @@ Suggested draft state contains:
 - Undo / Redo history
 
 ### Rule
-No global shared input state across conversations.
+No global shared input state across Looms.
 
 ---
 
-## 4. New Conversation Draft
+## 4. New Loom Draft
 
-Clicking **New Conversation** should open a clean draft page.
+Clicking **New Loom** should open a clean draft page.
 
 Rules:
 - the draft is empty
-- it does not immediately materialize as a sidebar conversation item
-- it becomes a real conversation only after first meaningful send
+- it does not immediately materialize as a sidebar Loom item
+- it becomes a real Loom only after first meaningful send
 - empty abandoned drafts should not leave ghost tabs
 
 ### Empty-state composer
@@ -86,8 +86,8 @@ Recommended terminology:
 Typing `#` in the composer should open an inline suggestion menu.
 
 Suggestions should be grouped into:
-- Conversations
 - Looms
+- Wefts
 - Bookmarks
 
 Behavior:
@@ -133,7 +133,7 @@ The linked-items control near the composer should be named:
 This control opens a linked references panel/dropdown.
 
 It should:
-- show all currently linked references for the active conversation
+- show all currently linked references for the active Loom
 - have a badge count
 - support remove actions
 - stay perfectly synchronized with the actual prompt state
@@ -145,7 +145,7 @@ It should:
 Users should be able to drag addressable Loom objects into the composer.
 
 Valid drag sources include:
-- Sidebar conversation item
+- Sidebar Loom item
 - History item
 - Address Bar compass/current destination
 - Bookmark item
@@ -173,7 +173,7 @@ Single-source-of-truth behavior is mandatory.
 
 ## 12. Undo / Redo
 
-Undo / Redo must be composer-level and conversation-scoped.
+Undo / Redo must be composer-level and Loom-scoped.
 
 It must cover:
 - text insertion/deletion/replacement
@@ -209,11 +209,11 @@ This makes Undo feel editor-like rather than noisy.
 
 ## 14. Auto-scroll Rule
 
-If the user is scrolled upward in the active conversation and starts typing in the composer:
+If the user is scrolled upward in the active Loom and starts typing in the composer:
 - automatically scroll to the bottom
 
 Reason:
-typing means re-entering the active live conversation context.
+typing means re-entering the active live Loom context.
 
 ---
 
@@ -233,7 +233,7 @@ Controls should remain compact and consistent with a chat-first experience.
 
 ## 16. Invariants
 
-1. Composer state is per-conversation.
+1. Composer state is per-Loom.
 2. References and text are edited in one coherent model.
 3. Selection-derived references and inline references are distinct presentation modes.
 4. Undo / Redo covers all meaningful composer mutations.
@@ -248,7 +248,7 @@ The Loom AI composer should behave like:
 - a text-first editor
 - with inline semantic references
 - with selection-derived attached references
-- with conversation-scoped drafts
+- with Loom-scoped drafts
 - with synchronized linked-reference management
 - with editor-grade Undo / Redo
 
@@ -261,7 +261,7 @@ Composer references map to graph persistence as `ReferenceMention` objects.
 Rules:
 
 - Inserting a Loom reference creates or updates a ReferenceMention use-instance.
-- The target Conversation, Response, Bookmark, or Fragment is not cloned.
+- The target Loom, Response, Bookmark, or Fragment is not cloned.
 - Selection-derived reference chips may promote to Fragment objects when bookmarked or otherwise accepted.
 - Removing a reference removes the use-instance from the active draft state and should emit a runtime ledger event when the change is durable.
 - Address serialization should use the resolver contract from `loom_addressing_and_resolution_model.md`.
