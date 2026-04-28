@@ -229,3 +229,19 @@ Interaction patterns in Loom AI should feel:
 
 The app should never feel like a pile of unrelated floating interactions.
 It should feel like one coherent AI browser product.
+
+---
+
+## 14. Broken Reference and Ledger Interaction
+
+Interactions that create, retire, or break graph identity should map to runtime ledger events when persisted.
+
+Examples:
+
+- Bookmark action: `bookmark_created`, `address_created`
+- Loom/fork action: `fork_created`
+- Drag-to-link or `#` reference insertion: `reference_mention_created`
+- Selection promotion: `fragment_created`
+- Archive/delete: `object_archived`, `object_deleted`, and possibly `broken_reference_detected`
+
+Broken references must surface explicitly. UI should not silently remove stale links, aliases, or reference mentions.

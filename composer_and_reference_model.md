@@ -87,7 +87,7 @@ Typing `#` in the composer should open an inline suggestion menu.
 
 Suggestions should be grouped into:
 - Conversations
-- Threads
+- Looms
 - Bookmarks
 
 Behavior:
@@ -251,3 +251,17 @@ The Loom AI composer should behave like:
 - with conversation-scoped drafts
 - with synchronized linked-reference management
 - with editor-grade Undo / Redo
+
+---
+
+## 18. Graph Persistence Alignment
+
+Composer references map to graph persistence as `ReferenceMention` objects.
+
+Rules:
+
+- Inserting a Loom reference creates or updates a ReferenceMention use-instance.
+- The target Conversation, Response, Bookmark, or Fragment is not cloned.
+- Selection-derived reference chips may promote to Fragment objects when bookmarked or otherwise accepted.
+- Removing a reference removes the use-instance from the active draft state and should emit a runtime ledger event when the change is durable.
+- Address serialization should use the resolver contract from `loom_addressing_and_resolution_model.md`.

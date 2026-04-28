@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   Archive,
   ArrowUp,
@@ -70,7 +70,14 @@ import {
   markHistoryOlder,
   type NavigationDirection,
 } from "./services/navigation";
-import { normalizeLoomTitle, toLoomMarkdown } from "./services/loomProtocol";
+import {
+  createMockLoomGraphRepository,
+  isLoomAddress,
+  linkFromResolvedObject,
+  normalizeLoomTitle,
+  resolveLoomAddress,
+  toLoomMarkdown,
+} from "./services/loomProtocol";
 import type {
   AddressSuggestion,
   BookmarkItem,
@@ -188,6 +195,13 @@ interface VisibleLineageNode {
   active: boolean;
   inActiveLineage: boolean;
   activeDescendantHidden: boolean;
+}
+
+interface MeasuredLoomRow {
+  id: string;
+  top: number;
+  height: number;
+  centerY: number;
 }
 
 type ComposerReferenceGroup = "Conversations" | "Looms" | "Bookmarks";
@@ -554,6 +568,16 @@ function App() {
     return [...conversationOptions, ...loomOptions, ...bookmarkOptions];
   }, [bookmarks, conversationResponses, conversations]);
 
+  const loomGraphRepository = useMemo(
+    () =>
+      createMockLoomGraphRepository({
+        conversations,
+        responsesByConversation: conversationResponses,
+        bookmarks,
+      }),
+    [bookmarks, conversationResponses, conversations]
+  );
+
   useEffect(() => {
     function handlePointerDown(event: PointerEvent) {
       if (
@@ -593,13 +617,43 @@ function App() {
     };
   }, [addressFocused, askState, contextMenu, selectionAskState]);
 
+  function normalizeResolvedDestination(
+    destination: LoomLink | AddressSuggestion | HistoryEntry
+  ): LoomLink | AddressSuggestion | HistoryEntry {
+    const resolution = resolveLoomAddress(destination.path, loomGraphRepository);
+    if (resolution.status === "resolved") {
+      const resolvedObject = resolution.targetObject ?? resolution.object;
+      return resolvedObject
+        ? { ...destination, ...linkFromResolvedObject(resolvedObject) }
+        : destination;
+    }
+    if (resolution.status === "alias_stale" && resolution.object) {
+      return {
+        ...destination,
+        ...linkFromResolvedObject(resolution.object),
+        path: resolution.staleAliasReplacement ?? destination.path,
+      };
+    }
+    if (resolution.status === "not_found") return destination;
+    return {
+      ...destination,
+      badge:
+        resolution.status === "deleted"
+          ? "Deleted"
+          : resolution.status === "window_invalid"
+            ? "Invalid window"
+            : "Broken reference",
+    };
+  }
+
   function restoreDestination(destination: LoomLink | AddressSuggestion | HistoryEntry) {
-    setActiveObjectTitle(destination.title);
+    const resolvedDestination = normalizeResolvedDestination(destination);
+    setActiveObjectTitle(resolvedDestination.title);
     const conversation = conversations.find((item) =>
-      destination.path.startsWith(item.path)
+      resolvedDestination.path.startsWith(item.path)
     );
     if (conversation) setActiveConversationId(conversation.id);
-    if (destination.path === "loom://drafts/new-conversation") {
+    if (resolvedDestination.path === "loom://drafts/new-conversation") {
       setDraftConversation((current) =>
         current ?? {
           id: EPHEMERAL_DRAFT_ID,
@@ -617,7 +671,7 @@ function App() {
       }));
       setActiveConversationId(EPHEMERAL_DRAFT_ID);
     }
-    pendingScrollPathRef.current = destination.path;
+    pendingScrollPathRef.current = resolvedDestination.path;
     setAddressFocused(false);
     setAddressQuery("");
     setSelectedSuggestion(0);
@@ -625,33 +679,39 @@ function App() {
   }
 
   function pushNavigationEntry(destination: LoomLink | AddressSuggestion | HistoryEntry) {
+    const resolvedDestination = normalizeResolvedDestination(destination);
     setNavigationStack((current) => {
       const base = current.slice(0, navigationIndex + 1);
       const last = base[base.length - 1];
-      if (last?.path === destination.path && last.title === destination.title) {
+      if (
+        last?.path === resolvedDestination.path &&
+        last.title === resolvedDestination.title
+      ) {
         setNavigationIndex(base.length - 1);
         return base;
       }
-      const next = [...base, createHistoryEntry(destination)];
+      const next = [...base, createHistoryEntry(resolvedDestination)];
       setNavigationIndex(next.length - 1);
       return next;
     });
   }
 
   function replaceNavigationEntry(destination: LoomLink | AddressSuggestion | HistoryEntry) {
+    const resolvedDestination = normalizeResolvedDestination(destination);
     setNavigationStack((current) => {
-      if (!current[navigationIndex]) return [createHistoryEntry(destination)];
+      if (!current[navigationIndex]) return [createHistoryEntry(resolvedDestination)];
       return current.map((entry, index) =>
-        index === navigationIndex ? createHistoryEntry(destination) : entry
+        index === navigationIndex ? createHistoryEntry(resolvedDestination) : entry
       );
     });
   }
 
   function visitDestination(destination: LoomLink | AddressSuggestion | HistoryEntry) {
-    restoreDestination(destination);
-    pushNavigationEntry(destination);
+    const resolvedDestination = normalizeResolvedDestination(destination);
+    restoreDestination(resolvedDestination);
+    pushNavigationEntry(resolvedDestination);
     setHistory((current) => [
-      createHistoryEntry(destination),
+      createHistoryEntry(resolvedDestination),
       ...markHistoryOlder(current),
     ]);
   }
@@ -772,6 +832,20 @@ function App() {
     if (event.key === "Enter" && filteredSuggestions[selectedSuggestion]) {
       event.preventDefault();
       visitDestination(filteredSuggestions[selectedSuggestion]);
+    }
+    if (
+      event.key === "Enter" &&
+      !filteredSuggestions[selectedSuggestion] &&
+      isLoomAddress(addressQuery)
+    ) {
+      event.preventDefault();
+      visitDestination({
+        id: `address-${Date.now()}`,
+        type: "recent",
+        title: addressQuery,
+        path: addressQuery,
+        badge: "Address",
+      });
     }
     if (event.key === "Escape") {
       setAddressFocused(false);
@@ -3586,14 +3660,54 @@ function LoomsPanel({
   );
   const laneWindowEnd = laneWindowStart + LOOMS_MAX_VISIBLE_LANES - 1;
   const [logViewportHeight, setLogViewportHeight] = useState(0);
+  const [contentOverlayHeight, setContentOverlayHeight] = useState(LOOMS_ROW_HEIGHT);
+  const [rowMeasurements, setRowMeasurements] = useState<Record<string, MeasuredLoomRow>>({});
   const selectedIndex = Math.max(
     0,
     visibleNodes.findIndex((item) => item.node.id === selectedId)
   );
-  const logRef = useRef<HTMLDivElement>(null);
+  const scrollBodyRef = useRef<HTMLDivElement>(null);
+  const rowRefs = useRef(new globalThis.Map<string, HTMLDivElement>());
   const activeScrollNode =
     visibleNodes.find((item) => item.active) ??
     visibleNodes.find((item) => item.activeDescendantHidden);
+
+  const registerRowRef = useCallback((id: string, element: HTMLDivElement | null) => {
+    if (element) rowRefs.current.set(id, element);
+    else rowRefs.current.delete(id);
+  }, []);
+
+  const measureVisibleRows = useCallback(() => {
+    const scrollBody = scrollBodyRef.current;
+    if (!scrollBody) return;
+
+    const scrollRect = scrollBody.getBoundingClientRect();
+    const nextMeasurements: Record<string, MeasuredLoomRow> = {};
+
+    visibleNodes.forEach((item) => {
+      const rowElement = rowRefs.current.get(item.node.id);
+      if (!rowElement) return;
+      const rowRect = rowElement.getBoundingClientRect();
+      const top = rowRect.top - scrollRect.top + scrollBody.scrollTop;
+      const height = rowRect.height;
+      nextMeasurements[item.node.id] = {
+        id: item.node.id,
+        top,
+        height,
+        centerY: top + height / 2,
+      };
+    });
+
+    const measuredContentHeight = Math.max(
+      LOOMS_ROW_HEIGHT,
+      scrollBody.clientHeight,
+      ...Object.values(nextMeasurements).map((row) => row.top + row.height)
+    );
+
+    setRowMeasurements(nextMeasurements);
+    setContentOverlayHeight(measuredContentHeight);
+    setLogViewportHeight(scrollBody.clientHeight);
+  }, [visibleNodes]);
 
   useEffect(() => {
     if (!menu) return;
@@ -3624,9 +3738,9 @@ function LoomsPanel({
   }, [activePath, visibleNodes.length]);
 
   useEffect(() => {
-    if (!activeScrollNode || !logRef.current) return;
-    const container = logRef.current;
-    const row = logRef.current.querySelector<HTMLElement>(
+    if (!activeScrollNode || !scrollBodyRef.current) return;
+    const container = scrollBodyRef.current;
+    const row = scrollBodyRef.current.querySelector<HTMLElement>(
       `[data-lineage-node-id="${activeScrollNode.node.id}"]`
     );
     if (!row) return;
@@ -3634,25 +3748,30 @@ function LoomsPanel({
     container.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
   }, [activeScrollNode?.node.id]);
 
+  useLayoutEffect(() => {
+    measureVisibleRows();
+  }, [measureVisibleRows, selectedId, collapsedIds]);
+
   useEffect(() => {
-    const container = logRef.current;
+    const container = scrollBodyRef.current;
     if (!container) return;
 
-    const updateViewportHeight = () => {
-      setLogViewportHeight(container.clientHeight);
+    const updateMeasurements = () => {
+      measureVisibleRows();
     };
 
-    updateViewportHeight();
+    updateMeasurements();
 
     if (typeof ResizeObserver === "undefined") {
-      window.addEventListener("resize", updateViewportHeight);
-      return () => window.removeEventListener("resize", updateViewportHeight);
+      window.addEventListener("resize", updateMeasurements);
+      return () => window.removeEventListener("resize", updateMeasurements);
     }
 
-    const observer = new ResizeObserver(updateViewportHeight);
+    const observer = new ResizeObserver(updateMeasurements);
     observer.observe(container);
+    rowRefs.current.forEach((rowElement) => observer.observe(rowElement));
     return () => observer.disconnect();
-  }, []);
+  }, [measureVisibleRows]);
 
   if (!root) {
     return (
@@ -3754,9 +3873,16 @@ function LoomsPanel({
           Lane {laneWindowStart + 1}-{Math.min(laneWindowEnd + 1, maxLane + 1)} / {maxLane + 1}
         </span>
       </div>
-      <div className="looms-log" role="tree" aria-label="Conversation Loom lineage" ref={logRef}>
-        <LoomsGraphGutter rows={visibleNodes} focusLane={focusLane} viewportHeight={logViewportHeight} />
-        <div className="looms-log__rows">
+      <div className="looms-log" role="tree" aria-label="Conversation Loom lineage">
+        <LoomsViewportRails rows={visibleNodes} focusLane={focusLane} viewportHeight={logViewportHeight} />
+        <div className="looms-log__scroll-body" ref={scrollBodyRef}>
+          <LoomsContentOverlay
+            rows={visibleNodes}
+            focusLane={focusLane}
+            rowMeasurements={rowMeasurements}
+            height={contentOverlayHeight}
+          />
+          <div className="looms-log__rows">
         {visibleNodes.map(({ node, hasChildren, collapsed, active, inActiveLineage, activeDescendantHidden }) => {
           const Icon =
             node.type === "conversation"
@@ -3782,6 +3908,7 @@ function LoomsPanel({
               key={node.id}
               role="treeitem"
               data-lineage-node-id={node.id}
+              ref={(element) => registerRowRef(node.id, element)}
               aria-expanded={hasChildren ? !collapsed : undefined}
               onContextMenu={(event) => {
                 event.preventDefault();
@@ -3840,6 +3967,7 @@ function LoomsPanel({
             </div>
           );
         })}
+          </div>
         </div>
       </div>
       {menu && (
@@ -3873,7 +4001,37 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
 }
 
-function LoomsGraphGutter({
+function getLoomLaneProjection(rows: VisibleLineageNode[], focusLane: number) {
+  const maxLane = Math.max(0, ...rows.map((row) => row.lane));
+  const laneWindowStart = clampNumber(
+    focusLane - (LOOMS_MAX_VISIBLE_LANES - 1),
+    0,
+    Math.max(0, maxLane - (LOOMS_MAX_VISIBLE_LANES - 1))
+  );
+  const laneWindowEnd = laneWindowStart + LOOMS_MAX_VISIBLE_LANES - 1;
+  const visibleLanes = Array.from(
+    { length: LOOMS_MAX_VISIBLE_LANES },
+    (_, index) => laneWindowStart + index
+  );
+  const activeLanes = new Set(rows.filter((row) => row.inActiveLineage).map((row) => row.lane));
+  const hasActiveLeftOverflow = Array.from(activeLanes).some((lane) => lane < laneWindowStart);
+  const hasActiveRightOverflow = Array.from(activeLanes).some((lane) => lane > laneWindowEnd);
+  const viewportOffsetX = laneWindowStart * LOOMS_LANE_SPACING;
+  const worldXForLane = (lane: number) => LOOMS_LANE_BASE_X + lane * LOOMS_LANE_SPACING;
+
+  return {
+    activeLanes,
+    hasActiveLeftOverflow,
+    hasActiveRightOverflow,
+    laneWindowEnd,
+    laneWindowStart,
+    viewportOffsetX,
+    visibleLanes,
+    worldXForLane,
+  };
+}
+
+function LoomsViewportRails({
   rows,
   focusLane,
   viewportHeight,
@@ -3882,41 +4040,108 @@ function LoomsGraphGutter({
   focusLane: number;
   viewportHeight: number;
 }) {
-  const rowHeight = LOOMS_ROW_HEIGHT;
-  const gutterWidth = LOOMS_GUTTER_WIDTH;
-  const maxVisibleLanes = LOOMS_MAX_VISIBLE_LANES;
-  const laneSpacing = LOOMS_LANE_SPACING;
-  const laneBaseX = LOOMS_LANE_BASE_X;
-  const contentHeight = Math.max(rowHeight, rows.length * rowHeight);
-  const height = Math.max(contentHeight, viewportHeight);
-  const indexById = new globalThis.Map(rows.map((row, index) => [row.node.id, index]));
-  const activeLanes = new Set(rows.filter((row) => row.inActiveLineage).map((row) => row.lane));
-  const maxLane = Math.max(0, ...rows.map((row) => row.lane));
-  const laneWindowStart = clampNumber(
-    focusLane - (maxVisibleLanes - 1),
-    0,
-    Math.max(0, maxLane - (maxVisibleLanes - 1))
+  const height = Math.max(1, viewportHeight);
+  const {
+    activeLanes,
+    hasActiveLeftOverflow,
+    hasActiveRightOverflow,
+    laneWindowEnd,
+    laneWindowStart,
+    viewportOffsetX,
+    visibleLanes,
+    worldXForLane,
+  } = getLoomLaneProjection(rows, focusLane);
+  const clipId = "looms-rails-viewport";
+
+  return (
+    <div className="looms-log__viewport-rails" aria-hidden="true">
+      <svg
+        className="looms-log__rails-svg"
+        width={LOOMS_GUTTER_WIDTH}
+        height={height}
+        viewBox={`0 0 ${LOOMS_GUTTER_WIDTH} ${height}`}
+        preserveAspectRatio="none"
+      >
+        <defs>
+          <clipPath id={clipId}>
+            <rect x="0" y="0" width={LOOMS_GUTTER_WIDTH} height={height} />
+          </clipPath>
+        </defs>
+        <g clipPath={`url(#${clipId})`}>
+          <g
+            className="looms-log__lane-world"
+            style={{ transform: `translateX(${-viewportOffsetX}px)` }}
+          >
+            {visibleLanes.map((lane) => {
+              const isEdgeOverflow =
+                (lane === laneWindowStart && hasActiveLeftOverflow) ||
+                (lane === laneWindowEnd && hasActiveRightOverflow);
+              return (
+                <line
+                  key={`rail-${lane}`}
+                  x1={worldXForLane(lane)}
+                  x2={worldXForLane(lane)}
+                  y1={0}
+                  y2={height}
+                  className={[
+                    "looms-log__lane-line",
+                    activeLanes.has(lane) ? "is-active" : "",
+                    isEdgeOverflow ? "is-window-edge" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                />
+              );
+            })}
+          </g>
+        </g>
+        {hasActiveLeftOverflow && (
+          <path d={`M 5 0 L 5 ${height}`} className="looms-log__overflow-indicator left" />
+        )}
+        {hasActiveRightOverflow && (
+          <path
+            d={`M ${LOOMS_GUTTER_WIDTH - 5} 0 L ${LOOMS_GUTTER_WIDTH - 5} ${height}`}
+            className="looms-log__overflow-indicator right"
+          />
+        )}
+      </svg>
+    </div>
   );
-  const laneWindowEnd = laneWindowStart + maxVisibleLanes - 1;
-  const visibleLanes = Array.from({ length: maxVisibleLanes }, (_, index) => laneWindowStart + index);
-  const hasActiveLeftOverflow = Array.from(activeLanes).some((lane) => lane < laneWindowStart);
-  const hasActiveRightOverflow = Array.from(activeLanes).some((lane) => lane > laneWindowEnd);
-  const viewportOffsetX = laneWindowStart * laneSpacing;
-  const worldXForLane = (lane: number) => laneBaseX + lane * laneSpacing;
-  const clipId = "looms-gutter-viewport";
+}
+
+function LoomsContentOverlay({
+  rows,
+  focusLane,
+  rowMeasurements,
+  height,
+}: {
+  rows: VisibleLineageNode[];
+  focusLane: number;
+  rowMeasurements: Record<string, MeasuredLoomRow>;
+  height: number;
+}) {
+  const overlayHeight = Math.max(LOOMS_ROW_HEIGHT, height);
+  const {
+    laneWindowEnd,
+    laneWindowStart,
+    viewportOffsetX,
+    worldXForLane,
+  } = getLoomLaneProjection(rows, focusLane);
+  const rowById = new globalThis.Map(rows.map((row) => [row.node.id, row]));
+  const clipId = "looms-content-viewport";
 
   return (
     <svg
-      className="looms-log__gutter"
-      width={gutterWidth}
-      height={height}
-      viewBox={`0 0 ${gutterWidth} ${height}`}
+      className="looms-log__content-overlay"
+      width={LOOMS_GUTTER_WIDTH}
+      height={overlayHeight}
+      viewBox={`0 0 ${LOOMS_GUTTER_WIDTH} ${overlayHeight}`}
       preserveAspectRatio="none"
       aria-hidden="true"
     >
       <defs>
         <clipPath id={clipId}>
-          <rect x="0" y="0" width={gutterWidth} height={height} />
+          <rect x="0" y="0" width={LOOMS_GUTTER_WIDTH} height={overlayHeight} />
         </clipPath>
       </defs>
       <g clipPath={`url(#${clipId})`}>
@@ -3924,36 +4149,17 @@ function LoomsGraphGutter({
           className="looms-log__lane-world"
           style={{ transform: `translateX(${-viewportOffsetX}px)` }}
         >
-          {visibleLanes.map((lane) => {
-            const x = worldXForLane(lane);
-            const isEdgeOverflow =
-              (lane === laneWindowStart && hasActiveLeftOverflow) ||
-              (lane === laneWindowEnd && hasActiveRightOverflow);
-            return (
-              <line
-                key={`lane-${lane}`}
-                x1={x}
-                x2={x}
-                y1={0}
-                y2={height}
-                className={[
-                  "looms-log__lane-line",
-                  activeLanes.has(lane) ? "is-active" : "",
-                  isEdgeOverflow ? "is-window-edge" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-              />
-            );
-          })}
-          {rows.map((row, index) => {
-            const cy = index * rowHeight + rowHeight / 2;
+          {rows.map((row) => {
+            const measuredRow = rowMeasurements[row.node.id];
+            if (!measuredRow) return null;
+
+            const cy = measuredRow.centerY;
             const x = worldXForLane(row.lane);
             const isOffWindow = row.lane < laneWindowStart || row.lane > laneWindowEnd;
-            const parentIndex = row.parentId ? indexById.get(row.parentId) : undefined;
-            const parentRow = parentIndex !== undefined ? rows[parentIndex] : null;
-            const parentY = parentIndex !== undefined ? parentIndex * rowHeight + rowHeight / 2 : null;
+            const parentRow = row.parentId ? rowById.get(row.parentId) : undefined;
+            const parentMeasurement = row.parentId ? rowMeasurements[row.parentId] : undefined;
             const parentX = parentRow ? worldXForLane(parentRow.lane) : null;
+            const parentY = parentMeasurement?.centerY ?? null;
             const path =
               parentX !== null && parentY !== null
                 ? `M ${parentX} ${parentY} C ${parentX} ${(parentY + cy) / 2}, ${x} ${(parentY + cy) / 2}, ${x} ${cy}`
@@ -3962,15 +4168,6 @@ function LoomsGraphGutter({
               ? parentRow.lane < laneWindowStart || parentRow.lane > laneWindowEnd
               : false;
             const pathOffWindow = isOffWindow || parentOffWindow;
-            const className = [
-              "looms-log__node-dot",
-              row.active ? "is-active" : "",
-              row.collapsed ? "is-collapsed" : "",
-              row.activeDescendantHidden ? "has-active-descendant" : "",
-              isOffWindow ? "is-off-window" : "",
-            ]
-              .filter(Boolean)
-              .join(" ");
 
             return (
               <g key={row.node.id}>
@@ -3986,18 +4183,25 @@ function LoomsGraphGutter({
                       .join(" ")}
                   />
                 )}
-                <circle cx={x} cy={cy} r={row.active ? 5 : 4} className={className} />
+                <circle
+                  cx={x}
+                  cy={cy}
+                  r={row.active ? 5 : 4}
+                  className={[
+                    "looms-log__node-dot",
+                    row.active ? "is-active" : "",
+                    row.collapsed ? "is-collapsed" : "",
+                    row.activeDescendantHidden ? "has-active-descendant" : "",
+                    isOffWindow ? "is-off-window" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                />
               </g>
             );
           })}
         </g>
       </g>
-      {hasActiveLeftOverflow && (
-        <path d={`M 5 0 L 5 ${height}`} className="looms-log__overflow-indicator left" />
-      )}
-      {hasActiveRightOverflow && (
-        <path d={`M ${gutterWidth - 5} 0 L ${gutterWidth - 5} ${height}`} className="looms-log__overflow-indicator right" />
-      )}
     </svg>
   );
 }

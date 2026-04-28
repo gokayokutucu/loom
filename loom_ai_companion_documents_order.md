@@ -17,7 +17,22 @@ The documents below define the deeper product semantics and interaction rules.
    - Fork rules
    - Addressability
 
-2. **Conversation Tree and Navigation Model**
+2. **Loom Addressing and Resolution Model**
+   - Stable object identity
+   - Human-readable aliases
+   - Bookmark promotion
+   - Snapshot/revision selectors
+   - Window-aware resolution
+   - Broken reference states
+
+3. **SQLite Graph Storage Model**
+   - Persistence schema
+   - Graph edge tables
+   - Address and alias tables
+   - Runtime ledger events
+   - Recursive CTE query patterns
+
+4. **Conversation Tree and Navigation Model**
    - Sidebar tree
    - Commit-flow / lineage view
    - Node rendering
@@ -25,7 +40,7 @@ The documents below define the deeper product semantics and interaction rules.
    - History stack
    - Window / projection rules
 
-3. **Composer and Reference Model**
+5. **Composer and Reference Model**
    - Per-conversation composer state
    - Inline references
    - Selection-derived references
@@ -34,7 +49,7 @@ The documents below define the deeper product semantics and interaction rules.
    - Undo / Redo
    - Linked references synchronization
 
-4. **Interaction Patterns**
+6. **Interaction Patterns**
    - Context menus
    - Tooltips
    - Ask flow
@@ -43,13 +58,21 @@ The documents below define the deeper product semantics and interaction rules.
    - Icon picker
    - Group interactions
 
+7. **Loom Architecture Ledger**
+   - Architecture decisions
+   - Phase decisions
+   - Resolver/schema/window consequences
+
 ## Recommended Writing Rule
 
 - Keep `loom_ai_product_positioning_and_v_1_scope.md` high-level.
 - Put structural truth in **Graph Model**.
+- Put identity and URL truth in **Loom Addressing and Resolution Model**.
+- Put database persistence truth in **SQLite Graph Storage Model**.
 - Put navigation truth in **Conversation Tree and Navigation Model**.
 - Put editor/composer truth in **Composer and Reference Model**.
 - Put reusable UX behavior in **Interaction Patterns**.
+- Put durable architecture decisions in **Loom Architecture Ledger**.
 
 ## Important Note
 

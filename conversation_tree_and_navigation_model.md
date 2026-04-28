@@ -257,3 +257,18 @@ The navigation model of Loom AI should be:
 - graph-backed in semantics
 - window-based in projection
 - consistent across Sidebar, Address Bar, History, and Graph View
+
+---
+
+## 15. Address Resolver Integration
+
+Navigation entries should store enough data to restore a resolved Loom destination:
+
+- canonical object identity when available
+- human-readable alias path for display
+- optional window/view selector
+- title and type snapshot for history readability
+
+Back/Forward should navigate resolved destinations, not raw labels. If an alias is stale or a target becomes deleted/unreachable, the resolver must return an explicit broken state so navigation can show recovery UI instead of silently failing.
+
+Window-specific navigation applies after object resolution. A `ReferenceWindow`, `TimeWindow`, `ContextWindow`, or `LoomWindow` is a projection over graph objects, not the owner of those objects.

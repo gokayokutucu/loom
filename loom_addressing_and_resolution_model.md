@@ -718,3 +718,42 @@ The Loom addressing model should be understood like this:
 In one sentence:
 
 > Loom is **entity-addressed first**, with optional human-readable aliases and optional snapshot/content-hash precision.
+
+---
+
+## 18. Implementation Alignment: Graph Persistence and Resolver Boundary
+
+The V1 implementation uses this document as the canonical addressing spec.
+
+### 18.1 Resolver Contract
+
+Address resolution must return an explicit state:
+
+- `resolved`
+- `not_found`
+- `deleted`
+- `alias_stale`
+- `snapshot_missing`
+- `window_invalid`
+- `broken_reference`
+
+The resolver pipeline is:
+
+1. parse the Loom address
+2. resolve canonical object ID or active alias
+3. validate object status
+4. validate optional revision/snapshot selector
+5. apply optional view/window selector
+6. return a destination or explicit failure state
+
+### 18.2 SQLite Persistence Boundary
+
+SQLite stores graph identity and relationships through canonical objects, typed payload tables, graph edges, canonical addresses, aliases, revisions, windows, navigation history, and append-only runtime ledger events.
+
+The React app must not call SQLite directly. It should call a repository/resolver seam so the browser prototype can use in-memory data while Electron later provides SQLite-backed persistence.
+
+### 18.3 Window-aware Resolution
+
+Window selectors such as `?view=lineage` or `?window=reference` never replace object identity.
+
+Resolution always targets an object first. The requested window is applied second. If the object exists but the requested projection is invalid, the result is `window_invalid`, not `not_found`.

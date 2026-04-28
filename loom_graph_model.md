@@ -352,3 +352,18 @@ The graph truth of Loom AI is:
 - **QuickQuestion** may begin ephemeral and later promote
 - **Thread** is best treated as a lineage/fork path rather than a simple visual comment chain
 - **Window** is a projection over the graph, not an owning structure
+
+---
+
+## 13. SQLite Persistence Alignment
+
+The graph model maps to SQLite through `sqlite_graph_storage_model.md` and `schema/001_loom_graph.sql`.
+
+Persistence rules:
+
+- `loom_objects.object_id` is the canonical graph identity.
+- Typed tables store object-specific payloads.
+- `loom_edges` stores relationships such as `contains`, `references`, `forked_from`, `promoted_from`, `anchored_to`, and `mentions`.
+- Bookmark promotion creates durable address records without cloning the target object.
+- ReferenceMention rows are use-instances and must not duplicate the target Response.
+- Windows may cache projection membership, but they never own objects.
