@@ -1760,8 +1760,8 @@ kbd {
   grid-template-columns: 22px minmax(0, 1fr) 28px;
   align-items: start;
   gap: 9px;
-  min-height: 76px;
-  padding: 8px 6px 24px 8px;
+  min-height: 68px;
+  padding: 8px 6px 22px 8px;
   cursor: grab;
   transition: background 140ms ease-out;
 }
@@ -1796,7 +1796,8 @@ kbd {
   grid-template-rows: auto auto;
   align-content: start;
   align-self: start;
-  gap: 5px;
+  gap: 3px;
+  margin-bottom: 8px;
   min-width: 0;
   background: transparent;
   color: inherit;
@@ -1871,7 +1872,7 @@ kbd {
   justify-items: center;
   align-items: stretch;
   min-width: 24px;
-  min-height: 74px;
+  min-height: 24px;
   opacity: 0.72;
   transition: opacity 140ms ease-out;
 }
