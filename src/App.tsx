@@ -38,6 +38,7 @@ import {
   Plus,
   Puzzle,
   Rocket,
+  RotateCcw,
   Search,
   Share2,
   Shield,
@@ -83,7 +84,7 @@ import type {
 
 const iconForType: Record<LoomObjectType, typeof Globe2> = {
   conversation: Globe2,
-  thread: GitBranch,
+  loom: GitBranch,
   response: FileText,
   bookmark: Bookmark,
   semantic: Sparkles,
@@ -128,7 +129,7 @@ function getConversationIconOption(iconKey?: string) {
   );
 }
 
-type ActivePanel = "bookmarks" | "history" | "archive" | null;
+type ActivePanel = "bookmarks" | "history" | "looms" | "archive" | null;
 
 interface AskState {
   response: ResponseItem;
@@ -156,7 +157,40 @@ interface ContextMenuState {
   items: ContextMenuItem[];
 }
 
-type ComposerReferenceGroup = "Conversations" | "Threads" | "Bookmarks";
+interface ForkRecord {
+  id: string;
+  parentConversationId: string;
+  parentResponseId: string;
+  childConversationId: string;
+  title: string;
+}
+
+type LineageNodeType = "conversation" | "loom" | "response" | "quick";
+
+interface LineageNode {
+  id: string;
+  type: LineageNodeType;
+  title: string;
+  path: string;
+  subtitle: string;
+  conversationId: string;
+  responseId?: string;
+  children: LineageNode[];
+}
+
+interface VisibleLineageNode {
+  node: LineageNode;
+  depth: number;
+  parentId: string | null;
+  lane: number;
+  hasChildren: boolean;
+  collapsed: boolean;
+  active: boolean;
+  inActiveLineage: boolean;
+  activeDescendantHidden: boolean;
+}
+
+type ComposerReferenceGroup = "Conversations" | "Looms" | "Bookmarks";
 
 interface ComposerReferenceOption extends LoomLink {
   group: ComposerReferenceGroup;
@@ -205,7 +239,7 @@ const seedComposerLink: LoomLink = {
   id: "seed-link",
   type: "response",
   title: "Inline reference composition rules",
-  path: "loom://loom-ai/navigation-architecture/thread/composer/r-inline-references",
+  path: "loom://loom-ai/navigation-architecture/loom/composer/r-inline-references",
   badge: "Linked",
 };
 
@@ -213,9 +247,117 @@ const initialNavigationDestination: LoomLink = {
   id: "r-address-bar",
   type: "response",
   title: "Address Bar as local AI web navigator",
-  path: "loom://loom-ai/navigation-architecture/thread/browser/r-address-bar",
+  path: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
   badge: "Response",
 };
+
+const initialForkRecords: ForkRecord[] = [
+  {
+    id: "fork-architecture-browser-shell",
+    parentConversationId: "c-architecture",
+    parentResponseId: "r-address-bar",
+    childConversationId: "c-browser-shell",
+    title: "Browser shell branch",
+  },
+  {
+    id: "fork-architecture-memory",
+    parentConversationId: "c-architecture",
+    parentResponseId: "r-address-bar",
+    childConversationId: "c-memory",
+    title: "Semantic ranking branch",
+  },
+  {
+    id: "fork-architecture-onboarding",
+    parentConversationId: "c-architecture",
+    parentResponseId: "r-address-bar",
+    childConversationId: "c-onboarding",
+    title: "First-run address branch",
+  },
+  {
+    id: "fork-architecture-prompts",
+    parentConversationId: "c-architecture",
+    parentResponseId: "r-composer",
+    childConversationId: "c-prompts",
+    title: "Prompt reuse branch",
+  },
+  {
+    id: "fork-architecture-bookmarks",
+    parentConversationId: "c-architecture",
+    parentResponseId: "r-composer",
+    childConversationId: "c-bookmarks",
+    title: "Bookmark reuse branch",
+  },
+  {
+    id: "fork-architecture-security",
+    parentConversationId: "c-architecture",
+    parentResponseId: "r-archive-delete",
+    childConversationId: "c-security",
+    title: "Broken references branch",
+  },
+  {
+    id: "fork-archive-support",
+    parentConversationId: "c-architecture",
+    parentResponseId: "r-archive-delete",
+    childConversationId: "c-support",
+    title: "Reference recovery branch",
+  },
+  {
+    id: "fork-prompts-drafts",
+    parentConversationId: "c-prompts",
+    parentResponseId: "r-library",
+    childConversationId: "c-drafts",
+    title: "Long-form drafting branch",
+  },
+  {
+    id: "fork-drafts-integrations",
+    parentConversationId: "c-drafts",
+    parentResponseId: "r-workspace",
+    childConversationId: "c-integrations",
+    title: "Host integration branch",
+  },
+  {
+    id: "fork-integrations-privacy",
+    parentConversationId: "c-integrations",
+    parentResponseId: "r-host-shell",
+    childConversationId: "c-privacy",
+    title: "Local resolver branch",
+  },
+  {
+    id: "fork-security-support",
+    parentConversationId: "c-security",
+    parentResponseId: "r-threats",
+    childConversationId: "c-release",
+    title: "Release risk branch",
+  },
+  {
+    id: "fork-memory-research",
+    parentConversationId: "c-memory",
+    parentResponseId: "r-ranking",
+    childConversationId: "c-research",
+    title: "Research retrieval branch",
+  },
+  {
+    id: "fork-research-citations",
+    parentConversationId: "c-research",
+    parentResponseId: "r-synthesis",
+    childConversationId: "c-citations",
+    title: "Citation provenance branch",
+  },
+  {
+    id: "fork-citations-graph",
+    parentConversationId: "c-citations",
+    parentResponseId: "r-provenance",
+    childConversationId: "c-graph-map",
+    title: "Evidence map branch",
+  },
+  {
+    id: "fork-bookmarks-launch",
+    parentConversationId: "c-bookmarks",
+    parentResponseId: "r-bookmark-panel",
+    childConversationId: "c-launch",
+    title: "Launch bookmark story branch",
+  },
+];
 
 const seedComposerText = `Use the linked Loom references to draft the V1 onboarding prompt for a power user. <span class="inline-loom-token" contenteditable="false" draggable="true" data-loom-id="${seedComposerLink.id}" data-loom-path="${seedComposerLink.path}" data-loom-title="${seedComposerLink.title}" data-loom-type="${seedComposerLink.type}" data-loom-badge="${seedComposerLink.badge}">[[${seedComposerLink.title}]]</span>`;
 
@@ -225,7 +367,7 @@ const LOOM_LINK_MIME = "application/loom-link";
 
 const typeLabel: Record<LoomObjectType, string> = {
   conversation: "Conversation",
-  thread: "Thread",
+  loom: "Loom",
   response: "Response",
   bookmark: "Bookmark",
   semantic: "Semantic",
@@ -271,6 +413,7 @@ function App() {
   const [conversationResponses, setConversationResponses] = useState<
     Record<string, ResponseItem[]>
   >(seedResponsesByConversation);
+  const [forkRecords, setForkRecords] = useState<ForkRecord[]>(initialForkRecords);
   const [pinnedConversationIds, setPinnedConversationIds] = useState<string[]>(
     seedConversations
       .filter((conversation) => conversation.pinned)
@@ -390,15 +533,15 @@ function App() {
       group: "Conversations" as const,
       subtitle: conversation.folder,
     }));
-    const threadOptions = Object.values(conversationResponses)
+    const loomOptions = Object.values(conversationResponses)
       .flat()
       .map((response) => ({
         id: response.id,
         type: "response" as const,
         title: response.title,
         path: response.address,
-        badge: "Thread",
-        group: "Threads" as const,
+        badge: "Loom",
+        group: "Looms" as const,
         subtitle: "Q+A response",
       }));
     const bookmarkOptions = bookmarks.map((bookmark) => ({
@@ -408,7 +551,7 @@ function App() {
       subtitle: bookmark.lastUsed,
     }));
 
-    return [...conversationOptions, ...threadOptions, ...bookmarkOptions];
+    return [...conversationOptions, ...loomOptions, ...bookmarkOptions];
   }, [bookmarks, conversationResponses, conversations]);
 
   useEffect(() => {
@@ -984,14 +1127,76 @@ function App() {
     bookmarkLoomLink({ ...link, badge: link.badge ?? "Bookmark" });
   }
 
-  function forkResponseThread(response: ResponseItem) {
+  function buildLineageTree() {
+    if (!activeConversation) return null;
+    const conversationsById = new globalThis.Map(conversations.map((conversation) => [conversation.id, conversation]));
+    let rootConversation = activeConversation;
+    let parentFork = forkRecords.find(
+      (record) => record.childConversationId === rootConversation.id
+    );
+    while (parentFork) {
+      const parent = conversationsById.get(parentFork.parentConversationId);
+      if (!parent) break;
+      rootConversation = parent;
+      parentFork = forkRecords.find(
+        (record) => record.childConversationId === rootConversation.id
+      );
+    }
+
+    const buildConversationNode = (
+      conversation: Conversation,
+      asLoom: boolean,
+      forkTitle?: string
+    ): LineageNode => {
+      const responses = conversationResponses[conversation.id] ?? [];
+      return {
+        id: `${asLoom ? "loom" : "conversation"}-${conversation.id}`,
+        type: asLoom ? "loom" : "conversation",
+        title: asLoom ? forkTitle ?? conversation.title : conversation.title,
+        path: conversation.path,
+        subtitle: asLoom ? conversation.title : "Conversation root",
+        conversationId: conversation.id,
+        children: responses.map((response) => ({
+          id: `response-${conversation.id}-${response.id}`,
+          type: "response" as const,
+          title: response.title,
+          path: response.address,
+          subtitle: "Response",
+          conversationId: conversation.id,
+          responseId: response.id,
+          children: forkRecords
+            .filter(
+              (record) =>
+                record.parentConversationId === conversation.id &&
+                record.parentResponseId === response.id
+            )
+            .map((record) => {
+              const childConversation = conversationsById.get(record.childConversationId);
+              return childConversation
+                ? buildConversationNode(childConversation, true, record.title)
+                : null;
+            })
+            .filter((node): node is LineageNode => Boolean(node)),
+        })),
+      };
+    };
+
+    return buildConversationNode(rootConversation, false);
+  }
+
+  const lineageRoot = useMemo(
+    buildLineageTree,
+    [activeConversation, conversationResponses, conversations, forkRecords]
+  );
+
+  function forkResponseLoom(response: ResponseItem) {
     if (!activeConversation) return;
     const sourceResponses = conversationResponses[activeConversation.id] ?? [];
     const responseIndex = sourceResponses.findIndex((item) => item.id === response.id);
     if (responseIndex < 0) return;
-    const id = `c-thread-${Date.now()}`;
-    const path = `${activeConversation.path}/thread/${id}`;
-    const title = normalizeLoomTitle(`Thread: ${response.title}`);
+    const id = `c-loom-${Date.now()}`;
+    const path = `${activeConversation.path}/loom/${id}`;
+    const title = normalizeLoomTitle(`Loom: ${response.title}`);
     const conversation: Conversation = {
       id,
       title,
@@ -1010,6 +1215,16 @@ function App() {
       ...current,
       [id]: lineage,
     }));
+    setForkRecords((current) => [
+      ...current,
+      {
+        id: `fork-${activeConversation.id}-${response.id}-${id}`,
+        parentConversationId: activeConversation.id,
+        parentResponseId: response.id,
+        childConversationId: id,
+        title: `Loom from ${response.title}`,
+      },
+    ]);
     setComposerDrafts((current) => ({
       ...current,
       [id]: { html: "", links: [] },
@@ -1023,7 +1238,7 @@ function App() {
       type: "conversation",
       title,
       path,
-      badge: "Thread",
+      badge: "Loom",
     };
     pushNavigationEntry(destination);
     setHistory((current) => [
@@ -1251,6 +1466,7 @@ function App() {
         canBack={navigationIndex > 0}
         canForward={navigationIndex < navigationStack.length - 1}
         graphMode={graphMode}
+        activePanel={activePanel}
         sidebarCollapsed={sidebarCollapsed}
         currentBookmarked={bookmarks.some(
           (bookmark) => bookmark.path === currentActiveDestination.path
@@ -1372,7 +1588,7 @@ function App() {
                   responses={activeResponses}
                   onLink={linkObject}
                   onAsk={openAsk}
-                  onThread={forkResponseThread}
+                  onLoom={forkResponseLoom}
                   onToggleSuggestedBookmark={toggleSuggestedBookmark}
                   bookmarkedPaths={new Set(bookmarks.map((bookmark) => bookmark.path))}
                   onSelectionAsk={onSelectionAsk}
@@ -1420,10 +1636,18 @@ function App() {
           activePanel={activePanel}
           bookmarks={bookmarks}
           history={history}
+          lineageRoot={lineageRoot}
+          activeDestination={currentActiveDestination}
           archived={archived}
           onClose={() => setActivePanel(null)}
           onVisit={visitDestination}
           onInsert={linkObject}
+          onBookmark={bookmarkLoomLink}
+          onOpenGraph={(destination) => {
+            visitDestination(destination);
+            setGraphMode(true);
+            setActivePanel(null);
+          }}
           onRenameBookmark={renameBookmark}
           onRemoveBookmark={removeBookmark}
           onOpenBookmarkMenu={(event, bookmark) =>
@@ -1473,13 +1697,13 @@ function App() {
             bookmarkResponse(askState.response);
             closeSelectionAskFlow();
           }}
-          onThread={() => {
+          onLoom={() => {
             visitDestination({
-              id: `thread-${askState.response.id}`,
-              type: "thread",
+              id: `loom-${askState.response.id}`,
+              type: "loom",
               title: `Ask follow-up: ${askState.response.title}`,
-              path: askState.response.address.replace("/r-", "/thread/ask/r-"),
-              badge: "Thread",
+              path: askState.response.address.replace("/r-", "/loom/ask/r-"),
+              badge: "Loom",
             });
             closeSelectionAskFlow();
           }}
@@ -1710,7 +1934,7 @@ function Sidebar({
           onClick={() => onOpenPanel("history")}
         >
           <History size={16} />
-          Thread History
+          Loom History
         </button>
         <button
           className={activePanel === "archive" ? "nav-row active" : "nav-row"}
@@ -1814,7 +2038,8 @@ function Sidebar({
       <div className="sidebar-bottom">
         <button className="new-chat-button" onClick={onNewConversation}>
           <Plus size={16} />
-          <span>New loom</span>
+          <span>New Loom</span>
+          <kbd>⌘ L</kbd>
         </button>
       </div>
 
@@ -1926,6 +2151,7 @@ interface TopBrowserBarProps {
   canBack: boolean;
   canForward: boolean;
   graphMode: boolean;
+  activePanel: ActivePanel;
   sidebarCollapsed: boolean;
   currentBookmarked: boolean;
   currentDestination: LoomLink;
@@ -1938,7 +2164,7 @@ interface TopBrowserBarProps {
   onContextNav: (event: React.MouseEvent, direction: NavigationDirection) => void;
   onBookmarkCurrent: () => void;
   onToggleSidebar: () => void;
-  onTogglePanel: (panel: "bookmarks" | "history") => void;
+  onTogglePanel: (panel: "bookmarks" | "history" | "looms") => void;
   onToggleGraph: () => void;
 }
 
@@ -1953,6 +2179,7 @@ function TopBrowserBar({
   canBack,
   canForward,
   graphMode,
+  activePanel,
   sidebarCollapsed,
   currentBookmarked,
   currentDestination,
@@ -2057,12 +2284,20 @@ function TopBrowserBar({
 
       <div className="top-actions">
         <button
-          className="chrome-button history-icon-button"
+          className={activePanel === "history" ? "chrome-button history-icon-button active" : "chrome-button history-icon-button"}
           onClick={() => onTogglePanel("history")}
-          aria-label="Open Thread History"
+          aria-label="Open Loom History"
           title="History"
         >
           <History size={16} />
+        </button>
+        <button
+          className={activePanel === "looms" ? "chrome-button active" : "chrome-button"}
+          onClick={() => onTogglePanel("looms")}
+          aria-label="Open Looms"
+          title="Looms"
+        >
+          <GitBranch size={16} />
         </button>
         <button
           className={graphMode ? "chrome-button active" : "chrome-button"}
@@ -2134,7 +2369,7 @@ function ChatTranscript({
   responses,
   onLink,
   onAsk,
-  onThread,
+  onLoom,
   onToggleSuggestedBookmark,
   bookmarkedPaths,
   onSelectionAsk,
@@ -2146,7 +2381,7 @@ function ChatTranscript({
   responses: ResponseItem[];
   onLink: (link: LoomLink) => void;
   onAsk: (response: ResponseItem) => void;
-  onThread: (response: ResponseItem) => void;
+  onLoom: (response: ResponseItem) => void;
   onToggleSuggestedBookmark: (link: LoomLink) => void;
   bookmarkedPaths: Set<string>;
   onSelectionAsk: (response: ResponseItem) => void;
@@ -2206,14 +2441,25 @@ function ChatTranscript({
               </div>
 
               <div className="reference-strip">
-                {displayResponse.suggestedLinks.map((link) => (
-                  <SuggestedLinkChip
-                    key={link.id}
-                    link={link}
-                    bookmarked={bookmarkedPaths.has(link.path)}
-                    onToggleBookmark={onToggleSuggestedBookmark}
-                  />
-                ))}
+                <button
+                  className={isBookmarkedResponse ? "link-chip response-bookmark-chip bookmarked" : "link-chip response-bookmark-chip"}
+                  onClick={() => onToggleSuggestedBookmark(toLinkFromResponse(displayResponse))}
+                  aria-pressed={isBookmarkedResponse}
+                  aria-label={isBookmarkedResponse ? `Remove bookmark for ${displayResponse.title}` : `Bookmark suggested ${displayResponse.title}`}
+                >
+                  <Bookmark size={13} fill={isBookmarkedResponse ? "currentColor" : "none"} />
+                  {isBookmarkedResponse ? (
+                    <strong>Bookmark</strong>
+                  ) : displayResponse.suggestedLinks[0] ? (
+                    <>
+                      <em>Suggested</em>
+                      <Sparkles size={13} />
+                      <span>{displayResponse.suggestedLinks[0].title}</span>
+                    </>
+                  ) : (
+                    <strong>Bookmark</strong>
+                  )}
+                </button>
                 <button
                   className="link-chip response-action-chip"
                   onClick={() => onLink(toLinkFromResponse(displayResponse))}
@@ -2230,7 +2476,7 @@ function ChatTranscript({
                 </button>
                 <button
                   className="link-chip response-action-chip"
-                  onClick={() => onThread(displayResponse)}
+                  onClick={() => onLoom(displayResponse)}
                 >
                   <GitFork size={13} />
                   <strong>Loom</strong>
@@ -2255,34 +2501,6 @@ function ResponseActions({
         <MoreHorizontal size={14} />
       </button>
     </div>
-  );
-}
-
-function SuggestedLinkChip({
-  link,
-  bookmarked,
-  onToggleBookmark,
-}: {
-  link: LoomLink;
-  bookmarked: boolean;
-  onToggleBookmark: (link: LoomLink) => void;
-}) {
-  return (
-    <button
-      className={bookmarked ? "link-chip suggested bookmarked" : "link-chip suggested"}
-      onClick={() => onToggleBookmark(link)}
-      aria-pressed={bookmarked}
-    >
-      <Bookmark size={13} fill={bookmarked ? "currentColor" : "none"} />
-      <strong>Bookmark</strong>
-      {!bookmarked && (
-        <>
-          <Sparkles size={13} />
-          <span>{link.title}</span>
-          <em>Suggested</em>
-        </>
-      )}
-    </button>
   );
 }
 
@@ -2357,7 +2575,7 @@ function PromptComposer({
   }, [mention?.query, referenceOptions]);
 
   const groupedMentionOptions = useMemo(() => {
-    const groups: ComposerReferenceGroup[] = ["Conversations", "Threads", "Bookmarks"];
+    const groups: ComposerReferenceGroup[] = ["Conversations", "Looms", "Bookmarks"];
     return groups
       .map((group) => ({
         group,
@@ -3117,10 +3335,14 @@ function RightPanel({
   activePanel,
   bookmarks,
   history,
+  lineageRoot,
+  activeDestination,
   archived,
   onClose,
   onVisit,
   onInsert,
+  onBookmark,
+  onOpenGraph,
   onRenameBookmark,
   onRemoveBookmark,
   onOpenBookmarkMenu,
@@ -3131,10 +3353,14 @@ function RightPanel({
   activePanel: ActivePanel;
   bookmarks: BookmarkItem[];
   history: HistoryEntry[];
+  lineageRoot: LineageNode | null;
+  activeDestination: LoomLink;
   archived: Conversation[];
   onClose: () => void;
   onVisit: (destination: LoomLink) => void;
   onInsert: (destination: LoomLink) => void;
+  onBookmark: (destination: LoomLink) => void;
+  onOpenGraph: (destination: LoomLink) => void;
   onRenameBookmark: (bookmark: BookmarkItem) => void;
   onRemoveBookmark: (bookmark: BookmarkItem) => void;
   onOpenBookmarkMenu: (event: React.MouseEvent, bookmark: BookmarkItem) => void;
@@ -3145,15 +3371,24 @@ function RightPanel({
   const [bookmarkDragActive, setBookmarkDragActive] = useState(false);
 
   if (!activePanel) return null;
+  const panelLabel =
+    activePanel === "bookmarks"
+      ? "Bookmarks"
+      : activePanel === "history"
+        ? "Loom History"
+        : activePanel === "looms"
+          ? "Looms"
+          : "Archive";
 
   return (
-    <aside className="right-panel" aria-label={`${activePanel} panel`}>
+    <aside className="right-panel" aria-label={`${panelLabel} panel`}>
       <div className="panel-header">
         <div>
-          <span>{activePanel}</span>
+          <span>{panelLabel}</span>
           <h2>
             {activePanel === "bookmarks" && "Saved destinations"}
-            {activePanel === "history" && "Thread History"}
+            {activePanel === "history" && "Loom History"}
+            {activePanel === "looms" && "Looms"}
             {activePanel === "archive" && "Archived conversations"}
           </h2>
         </div>
@@ -3195,7 +3430,6 @@ function RightPanel({
               key={bookmark.id}
               bookmark={bookmark}
               onVisit={onVisit}
-              onInsert={onInsert}
               onRemove={onRemoveBookmark}
               onOpenContextMenu={onOpenBookmarkMenu}
             />
@@ -3227,6 +3461,16 @@ function RightPanel({
         </div>
       )}
 
+      {activePanel === "looms" && (
+        <LoomsPanel
+          root={lineageRoot}
+          activePath={activeDestination.path}
+          onVisit={onVisit}
+          onBookmark={onBookmark}
+          onOpenGraph={onOpenGraph}
+        />
+      )}
+
       {activePanel === "archive" && (
         <div className="panel-list">
           {archived.length === 0 ? (
@@ -3239,12 +3483,21 @@ function RightPanel({
                   <small>{conversation.path}</small>
                 </div>
                 <div className="archive-actions">
-                  <button onClick={() => onRestore(conversation)}>Restore</button>
+                  <Tooltip label="Restore">
+                    <button
+                      className="archive-icon-button"
+                      onClick={() => onRestore(conversation)}
+                      aria-label={`Restore ${conversation.title}`}
+                    >
+                      <RotateCcw size={13} />
+                    </button>
+                  </Tooltip>
                   <button
-                  className="danger"
-                  onClick={() => onDeleteRequest(conversation)}
+                    className="archive-icon-button danger"
+                    onClick={() => onDeleteRequest(conversation)}
+                    aria-label={`Delete ${conversation.title}`}
                   >
-                    Delete
+                    <X size={13} />
                   </button>
                 </div>
               </div>
@@ -3256,16 +3509,507 @@ function RightPanel({
   );
 }
 
+function LoomsPanel({
+  root,
+  activePath,
+  onVisit,
+  onBookmark,
+  onOpenGraph,
+}: {
+  root: LineageNode | null;
+  activePath: string;
+  onVisit: (destination: LoomLink) => void;
+  onBookmark: (destination: LoomLink) => void;
+  onOpenGraph: (destination: LoomLink) => void;
+}) {
+  const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [menu, setMenu] = useState<{ x: number; y: number; node: LineageNode } | null>(null);
+
+  function nodeToLink(node: LineageNode): LoomLink {
+    return {
+      id: node.id,
+      type:
+        node.type === "conversation"
+          ? "conversation"
+          : node.type === "response"
+            ? "response"
+            : "loom",
+      title: node.title,
+      path: node.path,
+      badge: node.type === "loom" ? "Loom" : node.type === "response" ? "Response" : "Conversation",
+    };
+  }
+
+  function containsActive(node: LineageNode): boolean {
+    return node.path === activePath || node.children.some(containsActive);
+  }
+
+  function collectIds(node: LineageNode): string[] {
+    return [node.id, ...node.children.flatMap(collectIds)];
+  }
+
+  function collectCollapsibleIds(node: LineageNode): string[] {
+    return [
+      ...(node.children.length > 0 ? [node.id] : []),
+      ...node.children.flatMap(collectCollapsibleIds),
+    ];
+  }
+
+  function flatten(node: LineageNode, depth = 0, parentId: string | null = null): VisibleLineageNode[] {
+    const collapsed = collapsedIds.has(node.id);
+    const current: VisibleLineageNode = {
+      node,
+      depth,
+      parentId,
+      lane: depth,
+      hasChildren: node.children.length > 0,
+      collapsed,
+      active: node.path === activePath,
+      inActiveLineage: containsActive(node),
+      activeDescendantHidden: collapsed && node.path !== activePath && containsActive(node),
+    };
+    if (collapsed) return [current];
+    return [current, ...node.children.flatMap((child) => flatten(child, depth + 1, node.id))];
+  }
+
+  const visibleNodes = useMemo(() => (root ? flatten(root) : []), [root, collapsedIds, activePath]);
+  const focusLane =
+    visibleNodes.find((item) => item.node.id === selectedId)?.lane ??
+    visibleNodes.find((item) => item.active)?.lane ??
+    0;
+  const maxLane = Math.max(0, ...visibleNodes.map((item) => item.lane));
+  const laneWindowStart = clampNumber(
+    focusLane - (LOOMS_MAX_VISIBLE_LANES - 1),
+    0,
+    Math.max(0, maxLane - (LOOMS_MAX_VISIBLE_LANES - 1))
+  );
+  const laneWindowEnd = laneWindowStart + LOOMS_MAX_VISIBLE_LANES - 1;
+  const [logViewportHeight, setLogViewportHeight] = useState(0);
+  const selectedIndex = Math.max(
+    0,
+    visibleNodes.findIndex((item) => item.node.id === selectedId)
+  );
+  const logRef = useRef<HTMLDivElement>(null);
+  const activeScrollNode =
+    visibleNodes.find((item) => item.active) ??
+    visibleNodes.find((item) => item.activeDescendantHidden);
+
+  useEffect(() => {
+    if (!menu) return;
+    function closeMenu(event: PointerEvent) {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest(".loom-node-menu")) return;
+      setMenu(null);
+    }
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key === "Escape") setMenu(null);
+    }
+    document.addEventListener("pointerdown", closeMenu);
+    document.addEventListener("keydown", closeOnEscape);
+    return () => {
+      document.removeEventListener("pointerdown", closeMenu);
+      document.removeEventListener("keydown", closeOnEscape);
+    };
+  }, [menu]);
+
+  useEffect(() => {
+    if (!visibleNodes.length) return;
+    const activeNode = visibleNodes.find((item) => item.active);
+    setSelectedId((current) =>
+      current && visibleNodes.some((item) => item.node.id === current)
+        ? current
+        : activeNode?.node.id ?? visibleNodes[0].node.id
+    );
+  }, [activePath, visibleNodes.length]);
+
+  useEffect(() => {
+    if (!activeScrollNode || !logRef.current) return;
+    const container = logRef.current;
+    const row = logRef.current.querySelector<HTMLElement>(
+      `[data-lineage-node-id="${activeScrollNode.node.id}"]`
+    );
+    if (!row) return;
+    const top = row.offsetTop - container.clientHeight / 2 + row.clientHeight / 2;
+    container.scrollTo({ top: Math.max(0, top), behavior: "smooth" });
+  }, [activeScrollNode?.node.id]);
+
+  useEffect(() => {
+    const container = logRef.current;
+    if (!container) return;
+
+    const updateViewportHeight = () => {
+      setLogViewportHeight(container.clientHeight);
+    };
+
+    updateViewportHeight();
+
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", updateViewportHeight);
+      return () => window.removeEventListener("resize", updateViewportHeight);
+    }
+
+    const observer = new ResizeObserver(updateViewportHeight);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
+
+  if (!root) {
+    return (
+      <div className="looms-empty">
+        <GitBranch size={22} />
+        <p>No active lineage yet.</p>
+      </div>
+    );
+  }
+
+  function toggleNode(node: LineageNode) {
+    if (node.children.length === 0) return;
+    setCollapsedIds((current) => {
+      const next = new Set(current);
+      if (next.has(node.id)) next.delete(node.id);
+      else next.add(node.id);
+      return next;
+    });
+  }
+
+  function focusActiveLineage() {
+    if (!root) return;
+    function findNode(node: LineageNode, id: string): LineageNode | null {
+      if (node.id === id) return node;
+      for (const child of node.children) {
+        const match = findNode(child, id);
+        if (match) return match;
+      }
+      return null;
+    }
+    setCollapsedIds(new Set(collectCollapsibleIds(root).filter((id) => {
+      const node = findNode(root, id);
+      return node ? !containsActive(node) : false;
+    })));
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    const current = visibleNodes[selectedIndex];
+    if (!current) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setSelectedId(visibleNodes[Math.min(selectedIndex + 1, visibleNodes.length - 1)].node.id);
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setSelectedId(visibleNodes[Math.max(selectedIndex - 1, 0)].node.id);
+    }
+    if (event.key === "ArrowLeft") {
+      event.preventDefault();
+      if (current.hasChildren && !current.collapsed) toggleNode(current.node);
+      else {
+        const parent = [...visibleNodes]
+          .slice(0, selectedIndex)
+          .reverse()
+          .find((item) => item.depth < current.depth);
+        if (parent) setSelectedId(parent.node.id);
+      }
+    }
+    if (event.key === "ArrowRight") {
+      event.preventDefault();
+      if (current.hasChildren && current.collapsed) toggleNode(current.node);
+      else if (visibleNodes[selectedIndex + 1]?.depth > current.depth) {
+        setSelectedId(visibleNodes[selectedIndex + 1].node.id);
+      }
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      onVisit(nodeToLink(current.node));
+    }
+  }
+
+  function handleMenuAction(action: string) {
+    if (!menu || !root) return;
+    const { node } = menu;
+    if (action === "open") onVisit(nodeToLink(node));
+    if (action === "graph") onOpenGraph(nodeToLink(node));
+    if (action === "bookmark") onBookmark(nodeToLink(node));
+    if (action === "copy") void browserHostShell.copyText(node.path);
+    if (action === "collapse") setCollapsedIds((current) => new Set([...current, node.id]));
+    if (action === "expand") setCollapsedIds((current) => {
+      const next = new Set(current);
+      collectIds(node).forEach((id) => next.delete(id));
+      return next;
+    });
+    if (action === "focus") {
+      setCollapsedIds(new Set(collectCollapsibleIds(root).filter((id) => !collectIds(node).includes(id))));
+    }
+    if (action === "collapse-others") focusActiveLineage();
+    if (action === "expand-all") setCollapsedIds(new Set());
+    setMenu(null);
+  }
+
+  return (
+    <div className="looms-panel" onKeyDown={handleKeyDown} tabIndex={0}>
+      <div className="looms-toolbar">
+        <button onClick={focusActiveLineage}>Focus current</button>
+        <button onClick={() => setCollapsedIds(new Set())}>Expand all</button>
+        <span className="looms-depth-indicator">
+          Lane {laneWindowStart + 1}-{Math.min(laneWindowEnd + 1, maxLane + 1)} / {maxLane + 1}
+        </span>
+      </div>
+      <div className="looms-log" role="tree" aria-label="Conversation Loom lineage" ref={logRef}>
+        <LoomsGraphGutter rows={visibleNodes} focusLane={focusLane} viewportHeight={logViewportHeight} />
+        <div className="looms-log__rows">
+        {visibleNodes.map(({ node, hasChildren, collapsed, active, inActiveLineage, activeDescendantHidden }) => {
+          const Icon =
+            node.type === "conversation"
+              ? Globe2
+              : node.type === "loom"
+                ? GitFork
+                : node.type === "quick"
+                  ? MessageSquare
+                  : FileText;
+          return (
+            <div
+              className={[
+                "looms-log__row",
+                active ? "active" : "",
+                inActiveLineage ? "in-lineage" : "",
+                hasChildren ? "branch-node" : "leaf-node",
+                collapsed ? "collapsed" : "",
+                activeDescendantHidden ? "collapsed-active-lineage" : "",
+                selectedId === node.id ? "selected" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              key={node.id}
+              role="treeitem"
+              data-lineage-node-id={node.id}
+              aria-expanded={hasChildren ? !collapsed : undefined}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setSelectedId(node.id);
+                setMenu({
+                  x: Math.min(event.clientX, window.innerWidth - 250),
+                  y: Math.min(event.clientY, window.innerHeight - 300),
+                  node,
+                });
+              }}
+            >
+              <button
+                className="looms-log__row-hit"
+                onClick={() => {
+                  setSelectedId(node.id);
+                  if (hasChildren) {
+                    toggleNode(node);
+                    return;
+                  }
+                  onVisit(nodeToLink(node));
+                }}
+                onDoubleClick={() => {
+                  setSelectedId(node.id);
+                  onVisit(nodeToLink(node));
+                }}
+                title={
+                  hasChildren
+                    ? collapsed
+                      ? "Expand branch. Double-click or press Enter to open."
+                      : "Collapse branch. Double-click or press Enter to open."
+                    : "Open"
+                }
+              >
+                <span aria-hidden="true" />
+                <span className="looms-log__main">
+                  <span className="looms-log__title-row">
+                    <span className={hasChildren ? "looms-log__disclosure" : "looms-log__disclosure empty"}>
+                      {hasChildren ? (collapsed ? "›" : "⌄") : ""}
+                    </span>
+                    <span className={`looms-log__icon looms-log__icon--${node.type}`} aria-hidden="true">
+                      <Icon size={13} />
+                    </span>
+                    <span className="looms-log__title">{node.title}</span>
+                    {hasChildren && collapsed && (
+                      <span className="looms-log__branch-state">
+                        {activeDescendantHidden ? "Current inside" : "Collapsed"}
+                      </span>
+                    )}
+                    <span className="looms-log__type">
+                      {node.type === "conversation" ? "Conversation" : node.type === "loom" ? "Loom" : node.type === "quick" ? "Quick" : "Response"}
+                    </span>
+                  </span>
+                  <span className="looms-log__subtitle">{node.subtitle}</span>
+                </span>
+              </button>
+            </div>
+          );
+        })}
+        </div>
+      </div>
+      {menu && (
+        <div
+          className="loom-node-menu"
+          style={{ left: menu.x, top: menu.y }}
+          onMouseLeave={() => undefined}
+        >
+          <button onClick={() => handleMenuAction("open")}>Open</button>
+          <button onClick={() => handleMenuAction("graph")}>Open in Graph View</button>
+          <button onClick={() => handleMenuAction("bookmark")}>Bookmark</button>
+          <button onClick={() => handleMenuAction("copy")}>Copy Loom Address</button>
+          <button onClick={() => handleMenuAction("collapse")} disabled={menu.node.children.length === 0}>Collapse Branch</button>
+          <button onClick={() => handleMenuAction("expand")} disabled={menu.node.children.length === 0}>Expand Branch</button>
+          <button onClick={() => handleMenuAction("focus")}>Focus This Branch</button>
+          <button onClick={() => handleMenuAction("collapse-others")}>Collapse Others</button>
+          <button onClick={() => handleMenuAction("expand-all")}>Expand All</button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const LOOMS_MAX_VISIBLE_LANES = 4;
+const LOOMS_ROW_HEIGHT = 46;
+const LOOMS_GUTTER_WIDTH = 78;
+const LOOMS_LANE_SPACING = 16;
+const LOOMS_LANE_BASE_X = 17;
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function LoomsGraphGutter({
+  rows,
+  focusLane,
+  viewportHeight,
+}: {
+  rows: VisibleLineageNode[];
+  focusLane: number;
+  viewportHeight: number;
+}) {
+  const rowHeight = LOOMS_ROW_HEIGHT;
+  const gutterWidth = LOOMS_GUTTER_WIDTH;
+  const maxVisibleLanes = LOOMS_MAX_VISIBLE_LANES;
+  const laneSpacing = LOOMS_LANE_SPACING;
+  const laneBaseX = LOOMS_LANE_BASE_X;
+  const contentHeight = Math.max(rowHeight, rows.length * rowHeight);
+  const height = Math.max(contentHeight, viewportHeight);
+  const indexById = new globalThis.Map(rows.map((row, index) => [row.node.id, index]));
+  const activeLanes = new Set(rows.filter((row) => row.inActiveLineage).map((row) => row.lane));
+  const maxLane = Math.max(0, ...rows.map((row) => row.lane));
+  const laneWindowStart = clampNumber(
+    focusLane - (maxVisibleLanes - 1),
+    0,
+    Math.max(0, maxLane - (maxVisibleLanes - 1))
+  );
+  const laneWindowEnd = laneWindowStart + maxVisibleLanes - 1;
+  const visibleLanes = Array.from({ length: maxVisibleLanes }, (_, index) => laneWindowStart + index);
+  const hasActiveLeftOverflow = Array.from(activeLanes).some((lane) => lane < laneWindowStart);
+  const hasActiveRightOverflow = Array.from(activeLanes).some((lane) => lane > laneWindowEnd);
+  const viewportOffsetX = laneWindowStart * laneSpacing;
+  const worldXForLane = (lane: number) => laneBaseX + lane * laneSpacing;
+  const clipId = "looms-gutter-viewport";
+
+  return (
+    <svg
+      className="looms-log__gutter"
+      width={gutterWidth}
+      height={height}
+      viewBox={`0 0 ${gutterWidth} ${height}`}
+      preserveAspectRatio="none"
+      aria-hidden="true"
+    >
+      <defs>
+        <clipPath id={clipId}>
+          <rect x="0" y="0" width={gutterWidth} height={height} />
+        </clipPath>
+      </defs>
+      <g clipPath={`url(#${clipId})`}>
+        <g
+          className="looms-log__lane-world"
+          style={{ transform: `translateX(${-viewportOffsetX}px)` }}
+        >
+          {visibleLanes.map((lane) => {
+            const x = worldXForLane(lane);
+            const isEdgeOverflow =
+              (lane === laneWindowStart && hasActiveLeftOverflow) ||
+              (lane === laneWindowEnd && hasActiveRightOverflow);
+            return (
+              <line
+                key={`lane-${lane}`}
+                x1={x}
+                x2={x}
+                y1={0}
+                y2={height}
+                className={[
+                  "looms-log__lane-line",
+                  activeLanes.has(lane) ? "is-active" : "",
+                  isEdgeOverflow ? "is-window-edge" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
+              />
+            );
+          })}
+          {rows.map((row, index) => {
+            const cy = index * rowHeight + rowHeight / 2;
+            const x = worldXForLane(row.lane);
+            const isOffWindow = row.lane < laneWindowStart || row.lane > laneWindowEnd;
+            const parentIndex = row.parentId ? indexById.get(row.parentId) : undefined;
+            const parentRow = parentIndex !== undefined ? rows[parentIndex] : null;
+            const parentY = parentIndex !== undefined ? parentIndex * rowHeight + rowHeight / 2 : null;
+            const parentX = parentRow ? worldXForLane(parentRow.lane) : null;
+            const path =
+              parentX !== null && parentY !== null
+                ? `M ${parentX} ${parentY} C ${parentX} ${(parentY + cy) / 2}, ${x} ${(parentY + cy) / 2}, ${x} ${cy}`
+                : null;
+            const parentOffWindow = parentRow
+              ? parentRow.lane < laneWindowStart || parentRow.lane > laneWindowEnd
+              : false;
+            const pathOffWindow = isOffWindow || parentOffWindow;
+            const className = [
+              "looms-log__node-dot",
+              row.active ? "is-active" : "",
+              row.collapsed ? "is-collapsed" : "",
+              row.activeDescendantHidden ? "has-active-descendant" : "",
+              isOffWindow ? "is-off-window" : "",
+            ]
+              .filter(Boolean)
+              .join(" ");
+
+            return (
+              <g key={row.node.id}>
+                {path && (
+                  <path
+                    d={path}
+                    className={[
+                      "looms-log__fork-path",
+                      row.inActiveLineage ? "is-active" : "",
+                      pathOffWindow ? "is-off-window" : "",
+                    ]
+                      .filter(Boolean)
+                      .join(" ")}
+                  />
+                )}
+                <circle cx={x} cy={cy} r={row.active ? 5 : 4} className={className} />
+              </g>
+            );
+          })}
+        </g>
+      </g>
+      {hasActiveLeftOverflow && (
+        <path d={`M 5 0 L 5 ${height}`} className="looms-log__overflow-indicator left" />
+      )}
+      {hasActiveRightOverflow && (
+        <path d={`M ${gutterWidth - 5} 0 L ${gutterWidth - 5} ${height}`} className="looms-log__overflow-indicator right" />
+      )}
+    </svg>
+  );
+}
+
 function BookmarkRow({
   bookmark,
   onVisit,
-  onInsert,
   onRemove,
   onOpenContextMenu,
 }: {
   bookmark: BookmarkItem;
   onVisit: (destination: BookmarkItem) => void;
-  onInsert: (destination: BookmarkItem) => void;
   onRemove: (destination: BookmarkItem) => void;
   onOpenContextMenu: (event: React.MouseEvent, destination: BookmarkItem) => void;
 }) {
@@ -3298,15 +4042,6 @@ function BookmarkRow({
             aria-label={`Delete ${bookmark.editableTitle}`}
           >
             <X size={13} />
-          </button>
-        </Tooltip>
-        <Tooltip label="Link">
-          <button
-            className="bookmark-rail-button link"
-            onClick={() => onInsert(bookmark)}
-            aria-label={`Link ${bookmark.editableTitle} into prompt`}
-          >
-            <Link2 size={14} />
           </button>
         </Tooltip>
       </div>
@@ -3371,13 +4106,13 @@ function AskPopover({
   onUpdate,
   onClose,
   onBookmark,
-  onThread,
+  onLoom,
 }: {
   state: AskState;
   onUpdate: (state: AskState) => void;
   onClose: () => void;
   onBookmark: () => void;
-  onThread: () => void;
+  onLoom: () => void;
 }) {
   const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
   const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null);
@@ -3472,7 +4207,7 @@ function AskPopover({
         </div>
       )}
       <div className="ask-actions">
-        <button tabIndex={0} onClick={onThread}>Convert to thread</button>
+        <button tabIndex={0} onClick={onLoom}>Convert to Loom</button>
         <button tabIndex={0} onClick={onBookmark}>Bookmark</button>
         <button
           className="primary"
@@ -3539,7 +4274,7 @@ function GraphView({
         <span>Graph View</span>
         <h1>Site map for the active AI conversation web</h1>
         <p>
-          Conversations, threads, Q+A items, suggested references, and bookmarked
+          Conversations, Looms, Q+A items, suggested references, and bookmarked
           links appear as navigable nodes. Browser mode remains the primary workspace.
         </p>
       </div>

@@ -36,7 +36,7 @@ export const conversations: Conversation[] = [
   },
   {
     id: "c-security",
-    title: "Security review threads",
+    title: "Security review Looms",
     path: "loom://engineering/security-review",
     folder: "Engineering",
     summary: "Threat modeling and mitigation Q+A history.",
@@ -145,7 +145,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
     {
       id: "r-address-bar",
       title: "Address Bar as local AI web navigator",
-      address: "loom://loom-ai/navigation-architecture/thread/browser/r-address-bar",
+      address: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
       question:
         "How should the address bar work if Loom AI is a browser for conversations?",
       answer: [
@@ -158,7 +158,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
           id: "s-semantic-memory",
           type: "semantic",
           title: "Semantic memory ranking",
-          path: "loom://research/synthesis-workflow/thread/search/r-ranking",
+          path: "loom://research/synthesis-workflow/loom/search/r-ranking",
           badge: "Suggested",
         },
       ],
@@ -167,7 +167,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
           id: "p-inline-references",
           type: "response",
           title: "Inline reference composition rules",
-          path: "loom://loom-ai/navigation-architecture/thread/composer/r-inline-references",
+          path: "loom://loom-ai/navigation-architecture/loom/composer/r-inline-references",
           badge: "Linked",
         },
       ],
@@ -176,7 +176,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
     {
       id: "r-archive-delete",
       title: "Archive is a browser close, delete is destructive",
-      address: "loom://loom-ai/navigation-architecture/thread/lifecycle/r-archive-delete",
+      address: "loom://loom-ai/navigation-architecture/loom/lifecycle/r-archive-delete",
       question:
         "What should happen when someone closes a conversation tab?",
       answer: [
@@ -186,9 +186,9 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
       suggestedLinks: [
         {
           id: "s-broken-links",
-          type: "thread",
+          type: "loom",
           title: "Broken reference recovery",
-          path: "loom://engineering/security-review/thread/data-trust",
+          path: "loom://engineering/security-review/loom/data-trust",
           badge: "Suggested",
         },
       ],
@@ -197,7 +197,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
     {
       id: "r-composer",
       title: "Hypertext composer beats copy-paste",
-      address: "loom://loom-ai/navigation-architecture/thread/composer/r-inline-references",
+      address: "loom://loom-ai/navigation-architecture/loom/composer/r-inline-references",
       question:
         "How should prompt composition work when users reuse prior answers?",
       answer: [
@@ -220,7 +220,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
     {
       id: "r-synthesis",
       title: "Research answers need durable destinations",
-      address: "loom://research/synthesis-workflow/thread/revisitability/r-synthesis",
+      address: "loom://research/synthesis-workflow/loom/revisitability/r-synthesis",
       question: "Why does research work benefit from Loom addresses?",
       answer: [
         "Research conversations frequently produce answers that are useful days later. A stable destination lets the user revisit the exact reasoning without scrolling through a transcript or copying fragments into a notes app.",
@@ -235,10 +235,10 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
     {
       id: "r-library",
       title: "Prompt patterns as reusable bookmarks",
-      address: "loom://prompts/reuse-library/thread/patterns/r-library",
+      address: "loom://prompts/reuse-library/loom/patterns/r-library",
       question: "How should prompt reuse appear in the UI?",
       answer: [
-        "Prompt patterns should appear as saved destinations, not static snippets. The user should be able to drag them into the composer alongside prior responses and threads.",
+        "Prompt patterns should appear as saved destinations, not static snippets. The user should be able to drag them into the composer alongside prior responses and Looms.",
       ],
       suggestedLinks: [],
       bookmarkedLinks: [],
@@ -248,7 +248,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
     {
       id: "r-threats",
       title: "Data trust and broken reference handling",
-      address: "loom://engineering/security-review/thread/data-trust/r-threats",
+      address: "loom://engineering/security-review/loom/data-trust/r-threats",
       question: "What breaks when references are deleted?",
       answer: [
         "Deleted objects can leave unresolved Loom references. The UI should show a clear broken-reference state and avoid silent disappearance.",
@@ -261,7 +261,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
     {
       id: "r-positioning",
       title: "The browser metaphor is the launch hook",
-      address: "loom://go-to-market/launch-narrative/thread/v1/r-positioning",
+      address: "loom://go-to-market/launch-narrative/loom/v1/r-positioning",
       question: "What is the shortest V1 product promise?",
       answer: [
         "Navigate, search, bookmark, link, and revisit AI conversations like a browser.",
@@ -269,6 +269,248 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
       suggestedLinks: [],
       bookmarkedLinks: [],
       bookmarked: true,
+    },
+  ],
+  "c-onboarding": [
+    {
+      id: "r-empty-start",
+      title: "Empty start should feel like a browser search surface",
+      address: "loom://product/onboarding-browser-flow/loom/empty-state/r-empty-start",
+      question: "How should a new Loom begin before there is a transcript?",
+      answer: [
+        "The new conversation state should feel closer to a focused browser/search page than a blank chat log. The composer can sit centered until the first ask materializes the Loom.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-first-reference",
+      title: "First reference teaches the web model",
+      address: "loom://product/onboarding-browser-flow/loom/references/r-first-reference",
+      question: "What should the first reusable reference teach?",
+      answer: [
+        "The first inserted reference should show that prior answers are destinations, not pasted text. It should remain lightweight and clearly removable.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-bookmarks": [
+    {
+      id: "r-bookmark-panel",
+      title: "Bookmark panel as saved destinations",
+      address: "loom://product/bookmark-interaction-polish/loom/panel/r-bookmark-panel",
+      question: "How should bookmarks feel in Loom AI?",
+      answer: [
+        "Bookmarks should behave like browser destinations with stable titles, readable paths, right-click menus, and drag-to-reference behavior.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-bookmark-card-actions",
+      title: "Bookmark cards keep actions off the content",
+      address: "loom://product/bookmark-interaction-polish/loom/cards/r-bookmark-card-actions",
+      question: "Where should bookmark actions live?",
+      answer: [
+        "Primary reading metadata belongs in the card body. Destructive actions should stay in a compact rail or context menu so the destination remains scannable.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-graph-map": [
+    {
+      id: "r-site-map",
+      title: "Graph view is a secondary site map",
+      address: "loom://product/graph-view-site-map/loom/site-map/r-site-map",
+      question: "What is Graph View for?",
+      answer: [
+        "Graph View should help users inspect relationships and return to browser mode. It is not the primary work surface.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-evidence-map",
+      title: "Evidence map can reveal provenance clusters",
+      address: "loom://product/graph-view-site-map/loom/evidence/r-evidence-map",
+      question: "How should evidence clusters appear?",
+      answer: [
+        "Evidence clusters should remain readable as a site map, highlighting source relationships without turning the main app into a mind map.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-browser-shell": [
+    {
+      id: "r-shell-shortcuts",
+      title: "Browser shell keyboard shortcuts",
+      address: "loom://product/browser-shell-keyboard-navigation/loom/shortcuts/r-shell-shortcuts",
+      question: "Which shortcuts make Loom feel browser-native?",
+      answer: [
+        "Back, Forward, Address Bar focus, and context menu shortcuts should follow browser expectations while remaining scoped to Loom destinations.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-history-menu",
+      title: "Right-click history menus build confidence",
+      address: "loom://product/browser-shell-keyboard-navigation/loom/history-menu/r-history-menu",
+      question: "Why should Back and Forward have menus?",
+      answer: [
+        "Right-click history menus let users inspect where they will go before navigating. This is critical when destinations are responses and Loom branches.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-memory": [
+    {
+      id: "r-ranking",
+      title: "Semantic ranking needs browser confidence",
+      address: "loom://research/semantic-memory-ranking/loom/ranking/r-ranking",
+      question: "How should semantic matches appear in the omnibox?",
+      answer: [
+        "Semantic results should look navigable and accountable: type, title, path, and confidence badge all matter.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-recency",
+      title: "Recency is a navigation signal",
+      address: "loom://research/semantic-memory-ranking/loom/recency/r-recency",
+      question: "How does recent activity affect search?",
+      answer: [
+        "Recent destinations should rank as browser memory, not as a separate database filter.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-citations": [
+    {
+      id: "r-provenance",
+      title: "Selected text becomes a reusable reference",
+      address: "loom://research/citation-provenance-review/loom/selection/r-provenance",
+      question: "How should selected text move into composition?",
+      answer: [
+        "Selected text can become an attached Loom reference without forcing it into the sentence body. Provenance stays visible and removable.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-citation-audit",
+      title: "Citation audit trails stay addressable",
+      address: "loom://research/citation-provenance-review/loom/audit/r-citation-audit",
+      question: "How should citation audits be revisited?",
+      answer: [
+        "Audit trails should remain addressable so a user can revisit why a reference entered a prompt and which answer it came from.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-drafts": [
+    {
+      id: "r-workspace",
+      title: "Draft workspace composes from live Loom references",
+      address: "loom://writing/draft-workspace-comparisons/loom/workspace/r-workspace",
+      question: "How should drafting reuse prior conversations?",
+      answer: [
+        "A drafting workspace should accept live Loom references inline and preserve their source paths under the hood.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-editing-history",
+      title: "Editor history must understand references",
+      address: "loom://writing/draft-workspace-comparisons/loom/history/r-editing-history",
+      question: "What makes undo feel natural?",
+      answer: [
+        "Text bursts can coalesce, but Loom reference insertion, deletion, and movement should remain distinct undo boundaries.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-integrations": [
+    {
+      id: "r-host-shell",
+      title: "Host shell adapters keep Electron optional",
+      address: "loom://engineering/mcp-plugin-integration/loom/host-shell/r-host-shell",
+      question: "How should the web prototype stay Electron-ready?",
+      answer: [
+        "Navigation, context menus, storage, and protocol resolution should sit behind adapters so the renderer can move into Electron later.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-plugin-boundary",
+      title: "Plugin boundary should not leak shell assumptions",
+      address: "loom://engineering/mcp-plugin-integration/loom/plugin-boundary/r-plugin-boundary",
+      question: "Where should plugin behavior attach?",
+      answer: [
+        "Plugins should attach through Loom objects and host adapters, not by taking over the browser shell.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-privacy": [
+    {
+      id: "r-local-resolution",
+      title: "Local address resolution protects private memory",
+      address: "loom://engineering/private-address-resolution/loom/local/r-local-resolution",
+      question: "How should Loom addresses resolve privately?",
+      answer: [
+        "The resolver should prefer local state and explicit user action before any external lookup.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-release": [
+    {
+      id: "r-release-risk",
+      title: "Release checklist needs broken-reference coverage",
+      address: "loom://go-to-market/v1-release-checklist/loom/risk/r-release-risk",
+      question: "What must be tested before launch?",
+      answer: [
+        "Archive, restore, delete warnings, broken references, Back/Forward, and bookmarked destinations need full lifecycle coverage.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-support": [
+    {
+      id: "r-recovery",
+      title: "Broken reference recovery should explain next steps",
+      address: "loom://support/broken-reference-workflows/loom/recovery/r-recovery",
+      question: "What should users see when a reference breaks?",
+      answer: [
+        "The UI should explain whether the target was archived, deleted, or moved, and offer recovery paths where possible.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-restore-paths",
+      title: "Archive restore keeps destinations intact",
+      address: "loom://support/broken-reference-workflows/loom/archive/r-restore-paths",
+      question: "How should archive restoration behave?",
+      answer: [
+        "Restoring from archive should bring the conversation back without changing its address or breaking existing Loom references.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
     },
   ],
 };
@@ -279,7 +521,7 @@ export const bookmarks: BookmarkItem[] = [
     type: "response",
     title: "Address Bar as local AI web navigator",
     editableTitle: "Address Bar navigator rules",
-    path: "loom://loom-ai/navigation-architecture/thread/browser/r-address-bar",
+    path: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
     badge: "Response",
     lastUsed: "Used 12 min ago",
   },
@@ -288,17 +530,17 @@ export const bookmarks: BookmarkItem[] = [
     type: "response",
     title: "Hypertext composer beats copy-paste",
     editableTitle: "Inline reference composition model",
-    path: "loom://loom-ai/navigation-architecture/thread/composer/r-inline-references",
+    path: "loom://loom-ai/navigation-architecture/loom/composer/r-inline-references",
     badge: "Response",
     lastUsed: "Used today",
   },
   {
     id: "b-research",
-    type: "thread",
+    type: "loom",
     title: "Research answers need durable destinations",
-    editableTitle: "Research revisitability thread",
-    path: "loom://research/synthesis-workflow/thread/revisitability",
-    badge: "Thread",
+    editableTitle: "Research revisitability loom",
+    path: "loom://research/synthesis-workflow/loom/revisitability",
+    badge: "Loom",
     lastUsed: "Yesterday",
   },
   {
@@ -317,7 +559,7 @@ export const initialHistory: HistoryEntry[] = [
     id: "h-1",
     type: "response",
     title: "Address Bar as local AI web navigator",
-    path: "loom://loom-ai/navigation-architecture/thread/browser/r-address-bar",
+    path: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
     visitedAt: "Now",
   },
   {
@@ -329,9 +571,9 @@ export const initialHistory: HistoryEntry[] = [
   },
   {
     id: "h-3",
-    type: "thread",
+    type: "loom",
     title: "Inline reference composition rules",
-    path: "loom://loom-ai/navigation-architecture/thread/composer",
+    path: "loom://loom-ai/navigation-architecture/loom/composer",
     visitedAt: "22 min ago",
   },
   {
@@ -357,8 +599,8 @@ export const addressSuggestions: AddressSuggestion[] = [
     id: "a-2",
     type: "response",
     title: "Address Bar as local AI web navigator",
-    subtitle: "Q+A item in Browser thread",
-    path: "loom://loom-ai/navigation-architecture/thread/browser/r-address-bar",
+    subtitle: "Q+A item in Browser loom",
+    path: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
     badge: "Bookmark",
     iconLabel: "Response",
   },
@@ -367,7 +609,7 @@ export const addressSuggestions: AddressSuggestion[] = [
     type: "bookmark",
     title: "Inline reference composition model",
     subtitle: "Saved destination",
-    path: "loom://loom-ai/navigation-architecture/thread/composer/r-inline-references",
+    path: "loom://loom-ai/navigation-architecture/loom/composer/r-inline-references",
     badge: "Bookmark",
     iconLabel: "Bookmark",
   },
@@ -376,7 +618,7 @@ export const addressSuggestions: AddressSuggestion[] = [
     type: "semantic",
     title: "Search and navigation are the same action",
     subtitle: "Semantic match from response body",
-    path: "loom://loom-ai/navigation-architecture/thread/browser/r-address-bar",
+    path: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
     badge: "Semantic",
     iconLabel: "Semantic",
   },

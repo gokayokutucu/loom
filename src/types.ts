@@ -2,7 +2,7 @@ import type { LucideIcon } from "lucide-react";
 
 export type LoomObjectType =
   | "conversation"
-  | "thread"
+  | "loom"
   | "response"
   | "bookmark"
   | "semantic"
