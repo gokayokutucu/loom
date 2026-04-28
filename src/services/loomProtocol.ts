@@ -1,13 +1,16 @@
 import type {
   BookmarkItem,
   Conversation,
+  LoomAliasRecord,
   LoomAddressParseResult,
+  LoomGraphEdge,
   LoomGraphRepository,
   LoomLink,
   LoomObjectKind,
   LoomObjectType,
   LoomResolutionResult,
   LoomResolvedObject,
+  LoomWindowProjection,
   LoomWindowType,
   ResponseItem,
 } from "../types";
@@ -109,12 +112,32 @@ export function resolveLoomAddress(
   repository: LoomGraphRepository
 ): LoomResolutionResult {
   const parsed = parseLoomAddress(raw);
+  const aliasRecord =
+    parsed.kind === "alias" && parsed.aliasUri
+      ? repository.resolveAliasUri(parsed.aliasUri)
+      : undefined;
   const object =
     parsed.kind === "canonical" && parsed.objectId
       ? repository.findByObjectId(parsed.objectId) ??
         repository.findByCanonicalUri(raw)
-      : parsed.aliasUri
-        ? repository.findByAliasUri(parsed.aliasUri)
+      : aliasRecord?.targetObject ??
+        (parsed.aliasUri ? repository.findByAliasUri(parsed.aliasUri) : undefined);
+
+  if (aliasRecord && !aliasRecord.isActive) {
+    return {
+      status: "alias_stale",
+      parsed,
+      object: aliasRecord.targetObject,
+      canonicalUri: aliasRecord.targetObject.canonicalUri,
+      aliasUri: aliasRecord.targetObject.aliasUri,
+      staleAliasReplacement: aliasRecord.replacementAliasUri,
+      reason: "The alias resolves, but it is retired or no longer the active primary alias.",
+    };
+  }
+
+  const bookmarkTarget =
+    object?.kind === "bookmark" && object.targetObjectId
+      ? repository.findByObjectId(object.targetObjectId)
         : undefined;
 
   if (!object) {
@@ -147,6 +170,30 @@ export function resolveLoomAddress(
     };
   }
 
+  if (bookmarkTarget?.status === "deleted") {
+    return {
+      status: "deleted",
+      parsed,
+      object,
+      targetObject: bookmarkTarget,
+      canonicalUri: object.canonicalUri,
+      aliasUri: object.aliasUri,
+      reason: "The bookmark target object was deleted.",
+    };
+  }
+
+  if (bookmarkTarget?.status === "unreachable") {
+    return {
+      status: "broken_reference",
+      parsed,
+      object,
+      targetObject: bookmarkTarget,
+      canonicalUri: object.canonicalUri,
+      aliasUri: object.aliasUri,
+      reason: "The bookmark target object is unreachable.",
+    };
+  }
+
   const primaryAlias = repository.findPrimaryAlias(object.objectId);
   if (
     parsed.kind === "alias" &&
@@ -163,6 +210,18 @@ export function resolveLoomAddress(
       aliasUri: object.aliasUri,
       staleAliasReplacement: primaryAlias,
       reason: "The alias resolves, but it is not the current primary alias.",
+    };
+  }
+
+  const requestedWindow = parsed.selector.window ?? parsed.selector.view;
+  if (requestedWindow && !repository.supportsWindow(object.objectId, requestedWindow)) {
+    return {
+      status: "window_invalid",
+      parsed,
+      object,
+      canonicalUri: object.canonicalUri,
+      aliasUri: object.aliasUri,
+      reason: "The object resolved, but the requested window is not valid for it.",
     };
   }
 
@@ -194,27 +253,11 @@ export function resolveLoomAddress(
     };
   }
 
-  const requestedWindow = parsed.selector.window ?? parsed.selector.view;
-  if (requestedWindow && !repository.supportsWindow(object.objectId, requestedWindow)) {
-    return {
-      status: "window_invalid",
-      parsed,
-      object,
-      canonicalUri: object.canonicalUri,
-      aliasUri: object.aliasUri,
-      reason: "The object resolved, but the requested window is not valid for it.",
-    };
-  }
-
-  const targetObject = object.targetObjectId
-    ? repository.findByObjectId(object.targetObjectId)
-    : undefined;
-
   return {
     status: "resolved",
     parsed,
     object,
-    targetObject,
+    targetObject: bookmarkTarget,
     canonicalUri: object.canonicalUri,
     aliasUri: object.aliasUri,
   };
@@ -276,40 +319,58 @@ export function createMockLoomGraphRepository({
 }): LoomGraphRepository {
   const objects = new Map<string, LoomResolvedObject>();
   const canonical = new Map<string, LoomResolvedObject>();
-  const aliases = new Map<string, LoomResolvedObject>();
+  const aliases = new Map<string, LoomAliasRecord>();
+  const edges: LoomGraphEdge[] = [];
+  const conversationObjectIds = new Map<string, string>();
 
   function addObject(object: LoomResolvedObject) {
     objects.set(object.objectId, object);
     canonical.set(object.canonicalUri, object);
-    if (object.aliasUri) aliases.set(object.aliasUri, object);
+    if (object.aliasUri) {
+      aliases.set(object.aliasUri, {
+        aliasUri: object.aliasUri,
+        targetObject: object,
+        isActive: true,
+      });
+    }
+  }
+
+  function addEdge(fromObjectId: string, toObjectId: string, edgeType: LoomGraphEdge["edgeType"]) {
+    edges.push({
+      edgeId: `edge-${edges.length + 1}`,
+      fromObjectId,
+      toObjectId,
+      edgeType,
+    });
   }
 
   conversations.forEach((conversation) => {
-    addObject(
-      makeObject({
-        kind: "conversation",
-        id: conversation.id,
-        title: conversation.title,
-        aliasUri: conversation.path,
-      })
-    );
+    const object = makeObject({
+      kind: "conversation",
+      id: conversation.id,
+      title: conversation.title,
+      aliasUri: conversation.path,
+    });
+    addObject(object);
+    conversationObjectIds.set(conversation.id, object.objectId);
   });
 
   Object.entries(responsesByConversation).forEach(([conversationId, responses]) => {
     responses.forEach((response) => {
-      addObject(
-        makeObject({
-          kind: "response",
-          id: `${conversationId}_${response.id}`,
-          title: response.title,
-          aliasUri: response.address,
-        })
-      );
+      const object = makeObject({
+        kind: "response",
+        id: `${conversationId}_${response.id}`,
+        title: response.title,
+        aliasUri: response.address,
+      });
+      addObject(object);
+      const conversationObjectId = conversationObjectIds.get(conversationId);
+      if (conversationObjectId) addEdge(conversationObjectId, object.objectId, "contains");
     });
   });
 
   bookmarks.forEach((bookmark) => {
-    const target = aliases.get(bookmark.path);
+    const target = aliases.get(bookmark.path)?.targetObject;
     addObject(
       makeObject({
         kind: "bookmark",
@@ -330,10 +391,26 @@ export function createMockLoomGraphRepository({
       return canonical.get(uri);
     },
     findByAliasUri(uri) {
+      const alias = aliases.get(uri);
+      return alias?.isActive ? alias.targetObject : undefined;
+    },
+    resolveAliasUri(uri) {
       return aliases.get(uri);
     },
     findPrimaryAlias(objectId) {
       return objects.get(objectId)?.aliasUri;
+    },
+    findBookmarkByTargetObjectId(objectId) {
+      return Array.from(objects.values()).find(
+        (object) => object.kind === "bookmark" && object.targetObjectId === objectId
+      );
+    },
+    findBookmarkByUri(uri) {
+      const alias = aliases.get(uri);
+      if (alias?.targetObject.kind === "bookmark") return alias.targetObject;
+      return Array.from(objects.values()).find(
+        (object) => object.kind === "bookmark" && object.aliasUri === uri
+      );
     },
     findRevision(objectId, revision) {
       return Boolean(objects.get(objectId)) && revision >= 1;
@@ -351,6 +428,71 @@ export function createMockLoomGraphRepository({
       if (windowType === "reference" || windowType === "context") return true;
       if (windowType === "time") return true;
       return false;
+    },
+    getLineage(objectId) {
+      const lineage: LoomResolvedObject[] = [];
+      const seen = new Set<string>();
+      let currentId: string | undefined = objectId;
+      while (currentId && !seen.has(currentId)) {
+        seen.add(currentId);
+        const object = objects.get(currentId);
+        if (object) lineage.push(object);
+        currentId = edges.find((edge) => edge.toObjectId === currentId)?.fromObjectId;
+      }
+      return lineage;
+    },
+    getDescendants(objectId) {
+      const descendants: LoomResolvedObject[] = [];
+      const queue = [objectId];
+      const seen = new Set<string>(queue);
+      while (queue.length) {
+        const currentId = queue.shift();
+        edges
+          .filter((edge) => edge.fromObjectId === currentId)
+          .forEach((edge) => {
+            if (seen.has(edge.toObjectId)) return;
+            seen.add(edge.toObjectId);
+            queue.push(edge.toObjectId);
+            const object = objects.get(edge.toObjectId);
+            if (object) descendants.push(object);
+          });
+      }
+      return descendants;
+    },
+    getReferenceNeighborhood(objectId) {
+      return edges.filter(
+        (edge) =>
+          (edge.edgeType === "references" || edge.edgeType === "mentions") &&
+          (edge.fromObjectId === objectId || edge.toObjectId === objectId)
+      );
+    },
+    getWindowProjection(objectId, windowType): LoomWindowProjection | undefined {
+      if (!this.supportsWindow(objectId, windowType)) return undefined;
+      if (windowType === "conversation" || windowType === "loom" || windowType === "lineage") {
+        return {
+          windowType,
+          anchorObjectId: objectId,
+          objectIds: [objectId, ...this.getDescendants(objectId).map((object) => object.objectId)],
+        };
+      }
+      if (windowType === "reference") {
+        const neighborhood = this.getReferenceNeighborhood(objectId);
+        return {
+          windowType,
+          anchorObjectId: objectId,
+          objectIds: Array.from(
+            new Set([
+              objectId,
+              ...neighborhood.flatMap((edge) => [edge.fromObjectId, edge.toObjectId]),
+            ])
+          ),
+        };
+      }
+      return {
+        windowType,
+        anchorObjectId: objectId,
+        objectIds: [objectId],
+      };
     },
   };
 }

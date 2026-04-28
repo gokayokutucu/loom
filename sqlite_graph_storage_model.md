@@ -49,32 +49,74 @@ The SQL draft lives in `schema/001_loom_graph.sql`.
 
 ## Query Patterns
 
-### Conversation lineage
+### Canonical object lookup
 
 ```sql
-WITH RECURSIVE lineage(object_id, depth) AS (
-  SELECT :object_id, 0
-  UNION ALL
-  SELECT e.to_object_id, lineage.depth + 1
-  FROM loom_edges e
-  JOIN lineage ON e.from_object_id = lineage.object_id
-  WHERE e.edge_type IN ('contains', 'forked_from')
-)
-SELECT * FROM lineage;
+SELECT *
+FROM loom_objects
+WHERE object_id = :object_id;
 ```
 
-### Fork ancestry
+### Canonical URI resolution
+
+```sql
+SELECT o.*, a.canonical_uri
+FROM loom_addresses a
+JOIN loom_objects o ON o.object_id = a.target_object_id
+WHERE a.canonical_uri = :canonical_uri;
+```
+
+### Active alias resolution
+
+```sql
+SELECT o.*, aa.alias_uri
+FROM loom_address_aliases aa
+JOIN loom_objects o ON o.object_id = aa.target_object_id
+WHERE aa.alias_uri = :alias_uri
+  AND aa.is_active = 1;
+```
+
+### Stale alias detection
+
+```sql
+SELECT old_alias.alias_uri AS stale_alias,
+       primary_alias.alias_uri AS replacement_alias,
+       o.*
+FROM loom_address_aliases old_alias
+JOIN loom_objects o ON o.object_id = old_alias.target_object_id
+LEFT JOIN loom_address_aliases primary_alias
+  ON primary_alias.target_object_id = old_alias.target_object_id
+ AND primary_alias.is_active = 1
+WHERE old_alias.alias_uri = :alias_uri
+  AND old_alias.is_active = 0;
+```
+
+### Lineage ancestors
 
 ```sql
 WITH RECURSIVE ancestors(object_id, depth) AS (
   SELECT :object_id, 0
   UNION ALL
-  SELECT e.to_object_id, ancestors.depth + 1
+  SELECT e.from_object_id, ancestors.depth + 1
   FROM loom_edges e
-  JOIN ancestors ON e.from_object_id = ancestors.object_id
-  WHERE e.edge_type = 'forked_from'
+  JOIN ancestors ON e.to_object_id = ancestors.object_id
+  WHERE e.edge_type IN ('contains', 'forked_from', 'derived_from')
 )
 SELECT * FROM ancestors ORDER BY depth;
+```
+
+### Descendants from a branch root
+
+```sql
+WITH RECURSIVE descendants(object_id, depth) AS (
+  SELECT :root_object_id, 0
+  UNION ALL
+  SELECT e.to_object_id, descendants.depth + 1
+  FROM loom_edges e
+  JOIN descendants ON e.from_object_id = descendants.object_id
+  WHERE e.edge_type IN ('contains', 'forked_from', 'derived_from')
+)
+SELECT * FROM descendants ORDER BY depth;
 ```
 
 ### Reference neighborhood
@@ -86,27 +128,30 @@ WHERE e.edge_type IN ('references', 'mentions')
   AND (e.from_object_id = :object_id OR e.to_object_id = :object_id);
 ```
 
+### References to an object
+
+```sql
+SELECT rm.*
+FROM reference_mentions rm
+WHERE rm.target_object_id = :object_id;
+```
+
+### References from a conversation
+
+```sql
+SELECT rm.*
+FROM reference_mentions rm
+WHERE rm.source_conversation_id = :conversation_id;
+```
+
 ### Bookmark lookup
 
 ```sql
-SELECT b.bookmark_id, b.target_object_id, a.canonical_uri
+SELECT b.bookmark_id, b.object_id AS bookmark_object_id, b.target_object_id, b.loom_address
 FROM bookmarks b
-JOIN loom_addresses a ON a.target_object_id = b.object_id
-WHERE b.bookmark_id = :bookmark_id OR b.loom_address = :loom_address;
-```
-
-### Address resolution
-
-```sql
-SELECT o.*
-FROM loom_addresses a
-JOIN loom_objects o ON o.object_id = a.target_object_id
-WHERE a.canonical_uri = :uri
-UNION
-SELECT o.*
-FROM loom_address_aliases aa
-JOIN loom_objects o ON o.object_id = aa.target_object_id
-WHERE aa.alias_uri = :uri AND aa.is_active = 1;
+WHERE b.bookmark_id = :bookmark_id
+   OR b.loom_address = :loom_address
+   OR b.target_object_id = :target_object_id;
 ```
 
 ### Broken aliases and references
@@ -118,27 +163,75 @@ LEFT JOIN loom_objects o ON o.object_id = aa.target_object_id
 WHERE o.object_id IS NULL OR o.status IN ('deleted', 'unreachable');
 ```
 
-### Thread/Loom window projection
+### ConversationWindow projection
+
+```sql
+WITH RECURSIVE conversation_objects(object_id, depth) AS (
+  SELECT lw.anchor_object_id, 0
+  FROM loom_windows lw
+  WHERE lw.window_id = :window_id AND lw.window_type = 'conversation'
+  UNION ALL
+  SELECT e.to_object_id, conversation_objects.depth + 1
+  FROM loom_edges e
+  JOIN conversation_objects ON e.from_object_id = conversation_objects.object_id
+  WHERE e.edge_type = 'contains'
+)
+SELECT * FROM conversation_objects ORDER BY depth;
+```
+
+### Loom/Lineage window projection
 
 ```sql
 WITH RECURSIVE branch(object_id, depth) AS (
-  SELECT anchor_object_id, 0 FROM loom_windows WHERE window_id = :window_id
+  SELECT lw.anchor_object_id, 0
+  FROM loom_windows lw
+  WHERE lw.window_id = :window_id AND lw.window_type IN ('loom', 'lineage')
   UNION ALL
   SELECT e.to_object_id, branch.depth + 1
   FROM loom_edges e
   JOIN branch ON e.from_object_id = branch.object_id
-  WHERE e.edge_type IN ('contains', 'forked_from')
+  WHERE e.edge_type IN ('contains', 'forked_from', 'derived_from')
 )
 SELECT * FROM branch ORDER BY depth;
 ```
 
-### Time window projection
+### ReferenceWindow projection
+
+```sql
+SELECT DISTINCT object_id
+FROM (
+  SELECT :anchor_object_id AS object_id
+  UNION ALL
+  SELECT e.from_object_id
+  FROM loom_edges e
+  WHERE e.edge_type IN ('references', 'mentions')
+    AND e.to_object_id = :anchor_object_id
+  UNION ALL
+  SELECT e.to_object_id
+  FROM loom_edges e
+  WHERE e.edge_type IN ('references', 'mentions')
+    AND e.from_object_id = :anchor_object_id
+);
+```
+
+### TimeWindow projection
 
 ```sql
 SELECT o.*
 FROM loom_objects o
 WHERE o.updated_at >= :from_time AND o.updated_at < :to_time
 ORDER BY o.updated_at DESC;
+```
+
+### ContextWindow projection
+
+```sql
+SELECT wm.object_id, wm.sort_key, wm.metadata_json
+FROM loom_window_members wm
+JOIN loom_windows w ON w.window_id = wm.window_id
+WHERE w.window_id = :window_id
+  AND w.window_type = 'context'
+ORDER BY wm.sort_key;
 ```
 
 ---
@@ -150,7 +243,45 @@ The app should depend on a `LoomGraphRepository` interface:
 - find by canonical object ID
 - find by canonical URI
 - find by active alias URI
+- detect stale/retired aliases and replacement alias
+- find bookmark by target object or URI
 - validate revision/snapshot selectors
 - validate window support
+- read lineage ancestors
+- read descendants from a branch root
+- read reference neighborhoods
+- read window projections for Conversation, Loom/Lineage, Reference, Time, and Context windows
 
 The current browser adapter may be in-memory. The future Electron adapter should execute the SQL schema directly.
+
+---
+
+## Runtime Ledger Rules
+
+`loom_ledger_events` is append-only. Application code may insert events but must not update or delete existing ledger rows.
+
+The ledger records audit/debug/history events. It does not replace canonical tables such as `loom_objects`, `loom_edges`, `bookmarks`, or `loom_address_aliases`.
+
+Required event types:
+
+- `bookmark_created`
+- `address_created`
+- `alias_created`
+- `alias_updated`
+- `alias_retired`
+- `fork_created`
+- `reference_mention_created`
+- `fragment_created`
+- `object_archived`
+- `object_deleted`
+- `broken_reference_detected`
+- `revision_created`
+
+Sample inspection query:
+
+```sql
+SELECT event_type, object_id, related_object_id, payload_json, created_at
+FROM loom_ledger_events
+WHERE object_id = :object_id OR related_object_id = :object_id
+ORDER BY created_at ASC;
+```

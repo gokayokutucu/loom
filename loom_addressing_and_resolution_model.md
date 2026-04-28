@@ -742,8 +742,8 @@ The resolver pipeline is:
 1. parse the Loom address
 2. resolve canonical object ID or active alias
 3. validate object status
-4. validate optional revision/snapshot selector
-5. apply optional view/window selector
+4. apply optional view/window selector
+5. validate optional revision/snapshot selector
 6. return a destination or explicit failure state
 
 ### 18.2 SQLite Persistence Boundary

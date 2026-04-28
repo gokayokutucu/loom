@@ -24,6 +24,16 @@ export type LoomWindowType =
   | "context"
   | "lineage";
 
+export type LoomGraphEdgeType =
+  | "contains"
+  | "references"
+  | "forked_from"
+  | "derived_from"
+  | "bookmarked_as"
+  | "promoted_from"
+  | "anchored_to"
+  | "mentions";
+
 export type LoomObjectStatus = "active" | "archived" | "deleted" | "unreachable";
 
 export type LoomResolutionStatus =
@@ -62,6 +72,13 @@ export interface LoomResolvedObject {
   targetObjectId?: string;
 }
 
+export interface LoomAliasRecord {
+  aliasUri: string;
+  targetObject: LoomResolvedObject;
+  isActive: boolean;
+  replacementAliasUri?: string;
+}
+
 export interface LoomResolutionResult {
   status: LoomResolutionStatus;
   parsed: LoomAddressParseResult;
@@ -73,14 +90,48 @@ export interface LoomResolutionResult {
   reason?: string;
 }
 
+export interface LoomGraphEdge {
+  edgeId: string;
+  fromObjectId: string;
+  toObjectId: string;
+  edgeType: LoomGraphEdgeType;
+}
+
+export interface LoomWindowProjection {
+  windowType: LoomWindowType;
+  anchorObjectId: string;
+  objectIds: string[];
+}
+
+export type LoomLedgerEventType =
+  | "bookmark_created"
+  | "address_created"
+  | "alias_created"
+  | "alias_updated"
+  | "alias_retired"
+  | "fork_created"
+  | "reference_mention_created"
+  | "fragment_created"
+  | "object_archived"
+  | "object_deleted"
+  | "broken_reference_detected"
+  | "revision_created";
+
 export interface LoomGraphRepository {
   findByObjectId(objectId: string): LoomResolvedObject | undefined;
   findByCanonicalUri(uri: string): LoomResolvedObject | undefined;
   findByAliasUri(uri: string): LoomResolvedObject | undefined;
+  resolveAliasUri(uri: string): LoomAliasRecord | undefined;
   findPrimaryAlias(objectId: string): string | undefined;
+  findBookmarkByTargetObjectId(objectId: string): LoomResolvedObject | undefined;
+  findBookmarkByUri(uri: string): LoomResolvedObject | undefined;
   findRevision(objectId: string, revision: number): boolean;
   findSnapshot(objectId: string, snapshot: string): boolean;
   supportsWindow(objectId: string, windowType: LoomWindowType): boolean;
+  getLineage(objectId: string): LoomResolvedObject[];
+  getDescendants(objectId: string): LoomResolvedObject[];
+  getReferenceNeighborhood(objectId: string): LoomGraphEdge[];
+  getWindowProjection(objectId: string, windowType: LoomWindowType): LoomWindowProjection | undefined;
 }
 
 export interface Conversation {

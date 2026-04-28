@@ -239,6 +239,7 @@ Interactions that create, retire, or break graph identity should map to runtime 
 Examples:
 
 - Bookmark action: `bookmark_created`, `address_created`
+- Alias changes: `alias_created`, `alias_updated`, `alias_retired`
 - Loom/fork action: `fork_created`
 - Drag-to-link or `#` reference insertion: `reference_mention_created`
 - Selection promotion: `fragment_created`

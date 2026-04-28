@@ -24,8 +24,8 @@ CREATE TABLE IF NOT EXISTS conversations (
   object_id TEXT NOT NULL UNIQUE REFERENCES loom_objects(object_id),
   title TEXT NOT NULL,
   origin_type TEXT NOT NULL CHECK (origin_type IN ('root', 'fork', 'derived', 'imported')),
-  forked_from_conversation_id TEXT,
-  forked_from_response_id TEXT,
+  forked_from_conversation_id TEXT REFERENCES conversations(conversation_id),
+  forked_from_response_id TEXT REFERENCES responses(response_id),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS responses (
   response_id TEXT PRIMARY KEY,
   object_id TEXT NOT NULL UNIQUE REFERENCES loom_objects(object_id),
   conversation_id TEXT NOT NULL REFERENCES conversations(conversation_id),
-  parent_response_id TEXT,
+  parent_response_id TEXT REFERENCES responses(response_id),
   role TEXT NOT NULL CHECK (role IN ('user', 'assistant', 'system')),
   title TEXT,
   content_json TEXT NOT NULL,
@@ -164,6 +164,7 @@ CREATE TABLE IF NOT EXISTS loom_ledger_events (
     event_type IN (
       'bookmark_created',
       'address_created',
+      'alias_created',
       'alias_updated',
       'alias_retired',
       'fork_created',
@@ -181,6 +182,18 @@ CREATE TABLE IF NOT EXISTS loom_ledger_events (
   created_at TEXT NOT NULL
 );
 
+CREATE TRIGGER IF NOT EXISTS trg_loom_ledger_events_no_update
+BEFORE UPDATE ON loom_ledger_events
+BEGIN
+  SELECT RAISE(ABORT, 'loom_ledger_events is append-only');
+END;
+
+CREATE TRIGGER IF NOT EXISTS trg_loom_ledger_events_no_delete
+BEFORE DELETE ON loom_ledger_events
+BEGIN
+  SELECT RAISE(ABORT, 'loom_ledger_events is append-only');
+END;
+
 CREATE INDEX IF NOT EXISTS idx_loom_objects_type_status
   ON loom_objects(object_type, status);
 
@@ -193,14 +206,26 @@ CREATE INDEX IF NOT EXISTS idx_edges_from_type
 CREATE INDEX IF NOT EXISTS idx_edges_to_type
   ON loom_edges(to_object_id, edge_type);
 
+CREATE INDEX IF NOT EXISTS idx_addresses_target_primary
+  ON loom_addresses(target_object_id, is_primary);
+
 CREATE INDEX IF NOT EXISTS idx_aliases_target_active
   ON loom_address_aliases(target_object_id, is_active);
+
+CREATE INDEX IF NOT EXISTS idx_bookmarks_target
+  ON bookmarks(target_object_id);
 
 CREATE INDEX IF NOT EXISTS idx_revisions_target
   ON loom_revisions(target_object_id, revision_number);
 
 CREATE INDEX IF NOT EXISTS idx_windows_anchor
   ON loom_windows(anchor_object_id, window_type);
+
+CREATE INDEX IF NOT EXISTS idx_window_members_object
+  ON loom_window_members(object_id);
+
+CREATE INDEX IF NOT EXISTS idx_navigation_history_time
+  ON loom_navigation_history(created_at);
 
 CREATE INDEX IF NOT EXISTS idx_ledger_event_type_time
   ON loom_ledger_events(event_type, created_at);
