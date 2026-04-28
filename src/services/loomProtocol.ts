@@ -505,7 +505,7 @@ export function linkFromResolvedObject(object: LoomResolvedObject): LoomLink {
     path: object.aliasUri ?? object.canonicalUri,
     badge:
       object.kind === "conversation"
-        ? "Conversation"
+        ? "Loom"
         : object.kind === "bookmark"
           ? "Bookmark"
           : "Response",

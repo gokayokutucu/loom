@@ -12,8 +12,23 @@ export const browserHostShell: HostShellAdapter = {
   },
   async copyText(value) {
     if (navigator.clipboard?.writeText) {
-      await navigator.clipboard.writeText(value);
+      try {
+        await navigator.clipboard.writeText(value);
+        return;
+      } catch {
+        // Fall through to the textarea fallback for browsers that deny async clipboard writes.
+      }
     }
+    const textarea = document.createElement("textarea");
+    textarea.value = value;
+    textarea.setAttribute("readonly", "true");
+    textarea.style.position = "fixed";
+    textarea.style.left = "-9999px";
+    textarea.style.top = "0";
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand("copy");
+    document.body.removeChild(textarea);
   },
   openContextMenu(_request) {
     return false;

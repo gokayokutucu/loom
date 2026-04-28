@@ -540,7 +540,7 @@ export const bookmarks: BookmarkItem[] = [
     title: "Research answers need durable destinations",
     editableTitle: "Research revisitability loom",
     path: "loom://research/synthesis-workflow/loom/revisitability",
-    badge: "Loom",
+    badge: "Weft",
     lastUsed: "Yesterday",
   },
   {
@@ -549,7 +549,7 @@ export const bookmarks: BookmarkItem[] = [
     title: "Launch narrative options",
     editableTitle: "V1 launch promise",
     path: "loom://go-to-market/launch-narrative",
-    badge: "Conversation",
+    badge: "Loom",
     lastUsed: "Apr 24",
   },
 ];
@@ -590,10 +590,10 @@ export const addressSuggestions: AddressSuggestion[] = [
     id: "a-1",
     type: "conversation",
     title: "Loom AI navigation architecture",
-    subtitle: "Conversation",
+    subtitle: "Loom",
     path: "loom://loom-ai/navigation-architecture",
     badge: "Recent",
-    iconLabel: "Conversation",
+    iconLabel: "Loom",
   },
   {
     id: "a-2",

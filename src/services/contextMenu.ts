@@ -4,6 +4,7 @@ export type ContextMenuKind =
   | "conversation"
   | "response"
   | "bookmark"
+  | "history-entry"
   | "group"
   | "history-back"
   | "history-forward";
@@ -44,6 +45,7 @@ export type ContextMenuPayload =
   | { kind: "conversation"; conversation: Conversation; pinned: boolean }
   | { kind: "response"; response: ResponseItem }
   | { kind: "bookmark"; bookmark: BookmarkItem }
+  | { kind: "history-entry"; entry: HistoryEntry }
   | { kind: "group"; group: TabGroup }
   | { kind: "history-back" | "history-forward"; entries: HistoryEntry[] };
 
@@ -87,6 +89,13 @@ export function getContextMenuItems(payload: ContextMenuPayload): ContextMenuIte
         { id: "rename", label: "Rename bookmark" },
         { id: "copy-address", label: "Copy Loom Address" },
         { id: "remove", label: "Remove bookmark", danger: true, separatorBefore: true },
+      ];
+    case "history-entry":
+      return [
+        { id: "open", label: "Open" },
+        { id: "insert", label: "Link" },
+        { id: "bookmark", label: "Bookmark" },
+        { id: "copy-address", label: "Copy Loom Address" },
       ];
     case "group":
       return [

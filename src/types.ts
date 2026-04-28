@@ -117,6 +117,32 @@ export type LoomLedgerEventType =
   | "broken_reference_detected"
   | "revision_created";
 
+export interface LoomLedgerEvent {
+  ledgerEventId: string;
+  eventType: LoomLedgerEventType;
+  objectId?: string;
+  relatedObjectId?: string;
+  payload?: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface LoomReferenceMentionRecord {
+  mentionId: string;
+  objectId: string;
+  sourceConversationId: string;
+  targetObjectId: string;
+  sourcePath: string;
+  targetPath: string;
+  createdAt: string;
+}
+
+export interface LoomBookmarkPromotionResult {
+  bookmark: BookmarkItem;
+  bookmarkObject: LoomResolvedObject;
+  targetObject: LoomResolvedObject;
+  ledgerEvents: LoomLedgerEvent[];
+}
+
 export interface LoomGraphRepository {
   findByObjectId(objectId: string): LoomResolvedObject | undefined;
   findByCanonicalUri(uri: string): LoomResolvedObject | undefined;
@@ -132,6 +158,17 @@ export interface LoomGraphRepository {
   getDescendants(objectId: string): LoomResolvedObject[];
   getReferenceNeighborhood(objectId: string): LoomGraphEdge[];
   getWindowProjection(objectId: string, windowType: LoomWindowType): LoomWindowProjection | undefined;
+}
+
+export interface LoomGraphMutationRepository extends LoomGraphRepository {
+  promoteBookmark(link: LoomLink): LoomBookmarkPromotionResult;
+  createReferenceMention(input: {
+    sourceConversationId: string;
+    sourcePath: string;
+    target: LoomLink;
+  }): LoomReferenceMentionRecord | undefined;
+  emitBrokenReference(target: LoomLink, reason: string): LoomLedgerEvent;
+  getLedgerEvents(): LoomLedgerEvent[];
 }
 
 export interface Conversation {
@@ -152,6 +189,10 @@ export interface LoomLink {
   title: string;
   path: string;
   badge?: string;
+  targetObjectId?: string;
+  canonicalUri?: string;
+  referenceMentionId?: string;
+  resolutionStatus?: LoomResolutionStatus;
 }
 
 export interface ResponseItem {

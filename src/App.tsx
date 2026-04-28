@@ -6,13 +6,10 @@ import {
   ArrowRight,
   Bookmark,
   BookOpen,
-  Bot,
   Boxes,
   Brain,
-  Check,
   Clock3,
   Compass,
-  CornerDownLeft,
   Code2,
   Cpu,
   Database,
@@ -40,12 +37,12 @@ import {
   Rocket,
   RotateCcw,
   Search,
+  Settings,
   Share2,
   Shield,
   Sparkles,
   Target,
   Terminal,
-  Trash2,
   WandSparkles,
   Workflow,
   X,
@@ -71,13 +68,42 @@ import {
   type NavigationDirection,
 } from "./services/navigation";
 import {
-  createMockLoomGraphRepository,
   isLoomAddress,
   linkFromResolvedObject,
   normalizeLoomTitle,
   resolveLoomAddress,
   toLoomMarkdown,
 } from "./services/loomProtocol";
+import {
+  createRuntimeLoomGraphRepository,
+  readRuntimeBookmarks,
+  writeRuntimeBookmarks,
+} from "./services/loomRuntimeGraph";
+import {
+  getComposerModelLabel,
+  getProfileModel,
+  readAIProviderSettings,
+  runModelProfileRequest,
+  writeAIProviderSettings,
+  type AIProviderSettings,
+  type ModelEffort,
+  type ModelProfileId,
+} from "./services/modelProviders";
+import { AppShell } from "./components/AppShell";
+import { AddressBar } from "./components/AddressBar";
+import { AIProviderSettingsModal } from "./components/AIProviderSettings";
+import { AskPopup, type AskPopupState } from "./components/AskPopup";
+import { BookmarkView } from "./components/BookmarkView";
+import { ChangeIconPopover } from "./components/ChangeIconPopover";
+import { ContextMenu, type ContextMenuState } from "./components/ContextMenu";
+import { ConversationView } from "./components/ConversationView";
+import { DeleteConversationDialog } from "./components/DeleteConversationDialog";
+import { GraphView } from "./components/GraphView";
+import { HistoryView } from "./components/HistoryView";
+import { ReferencesListBox } from "./components/ReferencesListBox";
+import { SelectionPopover } from "./components/SelectionPopover";
+import { TopBar } from "./components/TopBar";
+import { WeftView } from "./components/WeftView";
 import type {
   AddressSuggestion,
   BookmarkItem,
@@ -85,6 +111,7 @@ import type {
   HistoryEntry,
   LoomLink,
   LoomObjectType,
+  LoomResolutionResult,
   ResponseItem,
   TabGroup,
 } from "./types";
@@ -138,12 +165,7 @@ function getConversationIconOption(iconKey?: string) {
 
 type ActivePanel = "bookmarks" | "history" | "looms" | "archive" | null;
 
-interface AskState {
-  response: ResponseItem;
-  selectedText: string;
-  question: string;
-  answered: boolean;
-}
+type AskState = AskPopupState;
 
 interface SelectionAskState {
   response: ResponseItem;
@@ -155,13 +177,6 @@ interface SelectionAskState {
 interface SelectionReferenceState {
   draftKey: string;
   link: LoomLink;
-}
-
-interface ContextMenuState {
-  x: number;
-  y: number;
-  payload: ContextMenuPayload;
-  items: ContextMenuItem[];
 }
 
 interface ForkRecord {
@@ -380,13 +395,19 @@ const EPHEMERAL_DRAFT_ID = "draft-new-conversation";
 const LOOM_LINK_MIME = "application/loom-link";
 
 const typeLabel: Record<LoomObjectType, string> = {
-  conversation: "Conversation",
-  loom: "Loom",
+  conversation: "Loom",
+  loom: "Weft",
   response: "Response",
   bookmark: "Bookmark",
   semantic: "Semantic",
   recent: "Recent",
 };
+
+function displayObjectTypeLabel(label?: string) {
+  if (label === "Conversation") return "Loom";
+  if (label === "Loom") return "Weft";
+  return label;
+}
 
 function setLoomDragPayload(event: React.DragEvent, link: LoomLink) {
   event.dataTransfer.effectAllowed = "copy";
@@ -454,7 +475,9 @@ function App() {
       links: [seedComposerLink],
     },
   });
-  const [bookmarks, setBookmarks] = useState<BookmarkItem[]>(seedBookmarks);
+  const [bookmarks, setBookmarks] = useState<BookmarkItem[]>(() =>
+    readRuntimeBookmarks(seedBookmarks)
+  );
   const [history, setHistory] = useState<HistoryEntry[]>(initialHistory);
   const [navigationStack, setNavigationStack] = useState<HistoryEntry[]>([
     createHistoryEntry(initialNavigationDestination),
@@ -462,6 +485,8 @@ function App() {
   const [navigationIndex, setNavigationIndex] = useState(0);
   const [addressFocused, setAddressFocused] = useState(false);
   const [addressQuery, setAddressQuery] = useState("");
+  const [addressFeedback, setAddressFeedback] =
+    useState<LoomResolutionResult | null>(null);
   const [selectedSuggestion, setSelectedSuggestion] = useState(0);
   const [askState, setAskState] = useState<AskState | null>(null);
   const [selectionAskState, setSelectionAskState] =
@@ -472,6 +497,14 @@ function App() {
   const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
   const [iconPickerTarget, setIconPickerTarget] = useState<Conversation | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [providerSettings, setProviderSettings] = useState<AIProviderSettings>(() =>
+    readAIProviderSettings()
+  );
+  const [providerSettingsOpen, setProviderSettingsOpen] = useState(false);
+  const [composerRuntimeState, setComposerRuntimeState] = useState<{
+    running: boolean;
+    message: string | null;
+  }>({ running: false, message: null });
   const [responseTitleOverrides, setResponseTitleOverrides] = useState<
     Record<string, string>
   >({});
@@ -525,7 +558,7 @@ function App() {
         type: "conversation",
         title: activeConversation.title,
         path: activeConversation.path,
-        badge: "Conversation",
+        badge: typeLabel.conversation,
       };
     }
     return {
@@ -543,7 +576,7 @@ function App() {
       type: "conversation" as const,
       title: conversation.title,
       path: conversation.path,
-      badge: "Conversation",
+      badge: typeLabel.conversation,
       group: "Conversations" as const,
       subtitle: conversation.folder,
     }));
@@ -554,7 +587,7 @@ function App() {
         type: "response" as const,
         title: response.title,
         path: response.address,
-        badge: "Loom",
+        badge: typeLabel.response,
         group: "Looms" as const,
         subtitle: "Q+A response",
       }));
@@ -570,13 +603,65 @@ function App() {
 
   const loomGraphRepository = useMemo(
     () =>
-      createMockLoomGraphRepository({
+      createRuntimeLoomGraphRepository({
         conversations,
         responsesByConversation: conversationResponses,
         bookmarks,
       }),
     [bookmarks, conversationResponses, conversations]
   );
+
+  useEffect(() => {
+    writeRuntimeBookmarks(bookmarks);
+  }, [bookmarks]);
+
+  function saveProviderSettings(nextSettings: AIProviderSettings) {
+    setProviderSettings(nextSettings);
+    writeAIProviderSettings(nextSettings);
+  }
+
+  function plainTextFromDraft(draft: ComposerDraft) {
+    return draft.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  }
+
+  function responseSlug(value: string) {
+    return (
+      value
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "")
+        .slice(0, 42) || "response"
+    );
+  }
+
+  function answerParagraphs(value: string) {
+    return value
+      .split(/\n{2,}/)
+      .map((part) => part.trim())
+      .filter(Boolean);
+  }
+
+  function providerErrorMessage(error: unknown) {
+    return error instanceof Error ? error.message : "The selected model provider failed.";
+  }
+
+  function isDestinationBookmarked(destination: LoomLink) {
+    const destinationResolution = resolveLoomAddress(destination.path, loomGraphRepository);
+    const destinationObjectId =
+      destinationResolution.status === "resolved"
+        ? (destinationResolution.targetObject ?? destinationResolution.object)?.objectId
+        : destination.targetObjectId;
+    return bookmarks.some((bookmark) => {
+      if (bookmark.path === destination.path) return true;
+      if (destinationObjectId && bookmark.targetObjectId === destinationObjectId) return true;
+      const bookmarkResolution = resolveLoomAddress(bookmark.path, loomGraphRepository);
+      const bookmarkTargetId =
+        bookmarkResolution.status === "resolved"
+          ? (bookmarkResolution.targetObject ?? bookmarkResolution.object)?.objectId
+          : bookmark.targetObjectId;
+      return Boolean(destinationObjectId && bookmarkTargetId === destinationObjectId);
+    });
+  }
 
   useEffect(() => {
     function handlePointerDown(event: PointerEvent) {
@@ -587,6 +672,7 @@ function App() {
       ) {
         setAddressFocused(false);
         setAddressQuery("");
+        setAddressFeedback(null);
       }
       if (contextMenu) {
         setContextMenu(null);
@@ -604,6 +690,7 @@ function App() {
       if (event.key === "Escape") {
         setAddressFocused(false);
         setAddressQuery("");
+        setAddressFeedback(null);
         setContextMenu(null);
         if (selectionAskState || askState) closeSelectionAskFlow();
       }
@@ -646,6 +733,38 @@ function App() {
     };
   }
 
+  function resolveNavigationDestination(
+    destination: LoomLink | AddressSuggestion | HistoryEntry,
+    options: { allowUnresolved?: boolean } = {}
+  ):
+    | { ok: true; destination: LoomLink | AddressSuggestion | HistoryEntry }
+    | { ok: false; resolution: LoomResolutionResult } {
+    if (!isLoomAddress(destination.path)) return { ok: true, destination };
+    const resolution = resolveLoomAddress(destination.path, loomGraphRepository);
+    if (resolution.status === "resolved") {
+      const resolvedObject = resolution.targetObject ?? resolution.object;
+      return {
+        ok: true,
+        destination: resolvedObject
+          ? {
+              ...destination,
+              ...linkFromResolvedObject(resolvedObject),
+              targetObjectId: resolvedObject.objectId,
+              canonicalUri: resolvedObject.canonicalUri,
+              resolutionStatus: resolution.status,
+            }
+          : destination,
+      };
+    }
+    if (resolution.status === "not_found" && options.allowUnresolved) {
+      return { ok: true, destination };
+    }
+    if (resolution.status === "broken_reference") {
+      loomGraphRepository.emitBrokenReference(destination, resolution.reason ?? "Navigation failed");
+    }
+    return { ok: false, resolution };
+  }
+
   function restoreDestination(destination: LoomLink | AddressSuggestion | HistoryEntry) {
     const resolvedDestination = normalizeResolvedDestination(destination);
     setActiveObjectTitle(resolvedDestination.title);
@@ -674,6 +793,7 @@ function App() {
     pendingScrollPathRef.current = resolvedDestination.path;
     setAddressFocused(false);
     setAddressQuery("");
+    setAddressFeedback(null);
     setSelectedSuggestion(0);
     setGraphMode(false);
   }
@@ -706,8 +826,17 @@ function App() {
     });
   }
 
-  function visitDestination(destination: LoomLink | AddressSuggestion | HistoryEntry) {
-    const resolvedDestination = normalizeResolvedDestination(destination);
+  function visitDestination(
+    destination: LoomLink | AddressSuggestion | HistoryEntry,
+    options: { allowUnresolved?: boolean } = {}
+  ) {
+    const resolution = resolveNavigationDestination(destination, options);
+    if (!resolution.ok) {
+      setAddressFeedback(resolution.resolution);
+      setAddressFocused(true);
+      return;
+    }
+    const resolvedDestination = resolution.destination;
     restoreDestination(resolvedDestination);
     pushNavigationEntry(resolvedDestination);
     setHistory((current) => [
@@ -790,32 +919,79 @@ function App() {
     }));
   }
 
+  function resolveReferenceLink(link: LoomLink): LoomLink {
+    if (link.referenceMentionId || link.resolutionStatus) return link;
+    const resolution = resolveLoomAddress(link.path, loomGraphRepository);
+    if (resolution.status !== "resolved") {
+      loomGraphRepository.emitBrokenReference(link, resolution.reason ?? "Reference target did not resolve");
+      return {
+        ...link,
+        badge:
+          resolution.status === "deleted"
+            ? "Deleted"
+            : resolution.status === "window_invalid"
+              ? "Invalid window"
+              : "Broken reference",
+        resolutionStatus: resolution.status,
+      };
+    }
+    const targetObject = resolution.targetObject ?? resolution.object;
+    const mention = targetObject
+      ? loomGraphRepository.createReferenceMention({
+          sourceConversationId: activeConversationId,
+          sourcePath: activeConversation?.path ?? currentActiveDestination.path,
+          target: link,
+        })
+      : undefined;
+    return targetObject
+      ? {
+          ...link,
+          id: targetObject.objectId,
+          path: targetObject.aliasUri ?? targetObject.canonicalUri,
+          targetObjectId: targetObject.objectId,
+          canonicalUri: targetObject.canonicalUri,
+          referenceMentionId: mention?.mentionId,
+          resolutionStatus: "resolved",
+        }
+      : link;
+  }
+
   function linkObject(link: LoomLink) {
+    if (
+      activeComposerDraft.links.some(
+        (item) =>
+          item.path === link.path ||
+          (link.targetObjectId && item.targetObjectId === link.targetObjectId)
+      )
+    ) {
+      return;
+    }
+    const stableLink = resolveReferenceLink(link);
+    if (
+      stableLink.targetObjectId &&
+      activeComposerDraft.links.some(
+        (item) =>
+          item.targetObjectId === stableLink.targetObjectId || item.path === stableLink.path
+      )
+    ) {
+      return;
+    }
     updateComposerDraft(activeDraftKey, (draft) => ({
       ...draft,
-      links: draft.links.some((item) => item.path === link.path)
+      links: draft.links.some((item) => item.path === stableLink.path)
         ? draft.links
-        : [...draft.links, link],
+        : [...draft.links, stableLink],
     }));
   }
 
   function bookmarkResponse(response: ResponseItem) {
-    setBookmarks((current) => {
-      if (current.some((item) => item.path === response.address)) return current;
-      return [
-        {
-          id: `b-${response.id}`,
-          type: "response",
-          title: response.title,
-          editableTitle: response.title,
-          path: response.address,
-          badge: "Response",
-          lastUsed: "Just saved",
-        },
-        ...current,
-      ];
+    bookmarkLoomLink({
+      id: response.id,
+      type: "response",
+      title: response.title,
+      path: response.address,
+      badge: "Response",
     });
-    setActivePanel("bookmarks");
   }
 
   function handleAddressKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
@@ -888,6 +1064,10 @@ function App() {
 
   function openGroupMenu(event: React.MouseEvent, group: TabGroup) {
     openContextMenu(event, { kind: "group", group });
+  }
+
+  function copyLoomAddress(destination: Pick<LoomLink, "path" | "canonicalUri">) {
+    void browserHostShell.copyText(destination.canonicalUri ?? destination.path);
   }
 
   function nextGroupName(groups: TabGroup[]) {
@@ -1018,7 +1198,7 @@ function App() {
       type: "conversation",
       title: conversation.title,
       path: conversation.path,
-      badge: "Conversation",
+      badge: typeLabel.conversation,
     };
     pushNavigationEntry(destination);
     setHistory((current) => [
@@ -1056,7 +1236,7 @@ function App() {
 
   function materializeDraftConversation(draft: ComposerDraft) {
     if (activeConversationId !== EPHEMERAL_DRAFT_ID || !draftConversation) return;
-    const plainText = draft.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+    const plainText = plainTextFromDraft(draft);
     const meaningful = plainText.length > 0 || draft.links.length > 0;
     if (!meaningful) return;
     const id = `c-${Date.now()}`;
@@ -1086,13 +1266,115 @@ function App() {
       type: "conversation",
       title,
       path: conversation.path,
-      badge: "Conversation",
+      badge: typeLabel.conversation,
     };
     replaceNavigationEntry(destination);
     setHistory((current) => [
       createHistoryEntry(destination),
       ...markHistoryOlder(current),
     ]);
+  }
+
+  async function sendComposerToModel(
+    draft: ComposerDraft,
+    options: { effort: ModelEffort }
+  ) {
+    const prompt = plainTextFromDraft(draft);
+    const meaningful = prompt.length > 0 || draft.links.length > 0;
+    if (!meaningful || composerRuntimeState.running) return false;
+
+    setComposerRuntimeState({
+      running: true,
+      message: `Sending to ${getProfileModel(providerSettings, "main").name}...`,
+    });
+    const linkContext = draft.links.map((link) => `${link.title}: ${link.path}`);
+    const targetConversationId =
+      activeConversationId === EPHEMERAL_DRAFT_ID || !activeConversation
+        ? `c-${Date.now()}`
+        : activeConversation.id;
+    const targetConversation =
+      activeConversationId === EPHEMERAL_DRAFT_ID || !activeConversation
+        ? {
+            ...(draftConversation ?? {
+              id: targetConversationId,
+              folder: "Drafts",
+              iconKey: "compass",
+              summary: "New conversation created from a prompt draft.",
+            }),
+            id: targetConversationId,
+            title: normalizeLoomTitle(
+              prompt ? prompt.slice(0, 54) : "New Loom conversation"
+            ),
+            path: `loom://drafts/${targetConversationId}`,
+            summary: "New conversation created from a prompt draft.",
+          }
+        : activeConversation;
+
+    try {
+      const result = await runModelProfileRequest(providerSettings, {
+        profile: "main",
+        effort: options.effort,
+        prompt: prompt || "Use the attached Loom references to continue this conversation.",
+        context: linkContext,
+        system:
+          "You are Loom AI. Answer clearly, preserve linked-reference provenance, and keep the response useful for later Loom reuse.",
+      });
+      const responseId = `r-${Date.now()}`;
+      const title = normalizeLoomTitle(prompt ? prompt.slice(0, 64) : "Model response");
+      const response: ResponseItem = {
+        id: responseId,
+        title,
+        address: `${targetConversation.path}/r-${responseSlug(title)}`,
+        question: prompt || "Use the linked Loom references.",
+        answer: answerParagraphs(result.text),
+        suggestedLinks: [],
+        bookmarkedLinks: [],
+      };
+
+      if (activeConversationId === EPHEMERAL_DRAFT_ID || !activeConversation) {
+        setConversations((current) => [targetConversation, ...current]);
+        setDraftConversation(null);
+        setActiveConversationId(targetConversation.id);
+      }
+
+      setConversationResponses((current) => ({
+        ...current,
+        [targetConversation.id]: [...(current[targetConversation.id] ?? []), response],
+      }));
+      setComposerDrafts((current) => {
+        const { [EPHEMERAL_DRAFT_ID]: _discard, ...rest } = current;
+        return {
+          ...rest,
+          [targetConversation.id]: { html: "", links: [] },
+        };
+      });
+      setActiveObjectTitle(response.title);
+      const destination: LoomLink = {
+        id: response.id,
+        type: "response",
+        title: response.title,
+        path: response.address,
+        badge: typeLabel.response,
+      };
+      if (activeConversationId === EPHEMERAL_DRAFT_ID) replaceNavigationEntry(destination);
+      else pushNavigationEntry(destination);
+      setHistory((current) => [
+        createHistoryEntry(destination),
+        ...markHistoryOlder(current),
+      ]);
+      pendingScrollPathRef.current = response.address;
+      setComposerRuntimeState({
+        running: false,
+        message: `Main model responded with ${result.modelId}.`,
+      });
+      return true;
+    } catch (error) {
+      setComposerRuntimeState({
+        running: false,
+        message: providerErrorMessage(error),
+      });
+      return false;
+    }
   }
 
   function openHistoryMenu(event: React.MouseEvent, direction: NavigationDirection) {
@@ -1152,25 +1434,23 @@ function App() {
       type: "conversation",
       title: conversation.title,
       path: conversation.path,
-      badge: "Conversation",
+      badge: typeLabel.conversation,
     });
   }
 
   function bookmarkLoomLink(link: LoomLink) {
+    const promotion = loomGraphRepository.promoteBookmark(link);
     setBookmarks((current) => {
-      if (current.some((item) => item.path === link.path)) return current;
-      return [
-        {
-          id: `b-${link.id}-${Date.now()}`,
-          type: link.type,
-          title: link.title,
-          editableTitle: link.title,
-          path: link.path,
-          badge: link.badge ?? typeLabel[link.type],
-          lastUsed: "Just saved",
-        },
-        ...current,
-      ];
+      if (
+        current.some(
+          (item) =>
+            item.path === promotion.bookmark.path ||
+            item.targetObjectId === promotion.targetObject.objectId
+        )
+      ) {
+        return current;
+      }
+      return [promotion.bookmark, ...current];
     });
     setActivePanel("bookmarks");
   }
@@ -1193,7 +1473,16 @@ function App() {
   }
 
   function toggleSuggestedBookmark(link: LoomLink) {
-    const existing = bookmarks.find((bookmark) => bookmark.path === link.path);
+    const resolved = resolveLoomAddress(link.path, loomGraphRepository);
+    const targetObjectId =
+      resolved.status === "resolved"
+        ? (resolved.targetObject ?? resolved.object)?.objectId
+        : undefined;
+    const existing = bookmarks.find(
+      (bookmark) =>
+        bookmark.path === link.path ||
+        (targetObjectId && bookmark.targetObjectId === targetObjectId)
+    );
     if (existing) {
       removeBookmark(existing);
       return;
@@ -1312,7 +1601,7 @@ function App() {
       type: "conversation",
       title,
       path,
-      badge: "Loom",
+      badge: typeLabel.loom,
     };
     pushNavigationEntry(destination);
     setHistory((current) => [
@@ -1360,7 +1649,7 @@ function App() {
           type: "conversation",
           title: conversation.title,
           path: conversation.path,
-          badge: "Conversation",
+          badge: typeLabel.conversation,
         });
         setActivePanel(null);
       }
@@ -1368,7 +1657,7 @@ function App() {
       if (item.id === "rename") renameConversation(conversation);
       if (item.id === "change-icon") setIconPickerTarget(conversation);
       if (item.id === "bookmark") bookmarkConversation(conversation);
-      if (item.id === "copy-address") void browserHostShell.copyText(conversation.path);
+      if (item.id === "copy-address") copyLoomAddress(conversation);
       if (item.id === "archive") archiveConversation(conversation);
       if (item.id === "delete") setDeleteTarget(conversation);
     }
@@ -1401,8 +1690,16 @@ function App() {
       if (item.id === "open") visitDestination(bookmark);
       if (item.id === "insert") linkObject(bookmark);
       if (item.id === "rename") renameBookmark(bookmark);
-      if (item.id === "copy-address") void browserHostShell.copyText(bookmark.path);
+      if (item.id === "copy-address") copyLoomAddress(bookmark);
       if (item.id === "remove") removeBookmark(bookmark);
+    }
+
+    if (payload.kind === "history-entry") {
+      const { entry } = payload;
+      if (item.id === "open") visitDestination(entry);
+      if (item.id === "insert") linkObject(entry);
+      if (item.id === "bookmark") bookmarkLoomLink(entry);
+      if (item.id === "copy-address") copyLoomAddress(entry);
     }
 
     if (payload.kind === "group") {
@@ -1425,6 +1722,44 @@ function App() {
       question: "",
       answered: false,
     });
+  }
+
+  async function submitQuickQuestion() {
+    if (!askState || askState.running) return;
+    const prompt = askState.question.trim();
+    if (!prompt) {
+      setAskState({ ...askState, error: "Write a quick question first." });
+      return;
+    }
+    setAskState({ ...askState, running: true, error: undefined });
+    try {
+      const result = await runModelProfileRequest(providerSettings, {
+        profile: "quick",
+        effort: "Low",
+        prompt,
+        context: [
+          `Selected text: ${askState.selectedText}`,
+          `Response title: ${askState.response.title}`,
+          `Response address: ${askState.response.address}`,
+        ],
+        system:
+          "Answer this as a short Loom quick question. Be concise and stay anchored to the selected text.",
+      });
+      setAskState({
+        ...askState,
+        running: false,
+        answered: true,
+        answer: result.text,
+        error: undefined,
+      });
+    } catch (error) {
+      setAskState({
+        ...askState,
+        running: false,
+        answered: false,
+        error: providerErrorMessage(error),
+      });
+    }
   }
 
   function clearSelectionHighlight() {
@@ -1528,7 +1863,7 @@ function App() {
   }
 
   return (
-    <div className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
+    <AppShell sidebarCollapsed={sidebarCollapsed}>
       <TopBrowserBar
         addressBarRef={addressBarRef}
         location={currentLocation}
@@ -1536,19 +1871,19 @@ function App() {
         addressFocused={addressFocused}
         addressQuery={addressQuery}
         suggestions={filteredSuggestions}
+        resolutionFeedback={addressFeedback}
         selectedSuggestion={selectedSuggestion}
         canBack={navigationIndex > 0}
         canForward={navigationIndex < navigationStack.length - 1}
         graphMode={graphMode}
         activePanel={activePanel}
         sidebarCollapsed={sidebarCollapsed}
-        currentBookmarked={bookmarks.some(
-          (bookmark) => bookmark.path === currentActiveDestination.path
-        )}
+        currentBookmarked={isDestinationBookmarked(currentActiveDestination)}
         currentDestination={currentActiveDestination}
         onAddressFocus={() => setAddressFocused(true)}
         onAddressChange={(value) => {
           setAddressQuery(value);
+          setAddressFeedback(null);
           setSelectedSuggestion(0);
         }}
         onAddressKeyDown={handleAddressKeyDown}
@@ -1563,13 +1898,16 @@ function App() {
         onTogglePanel={(panel) => {
           setAddressFocused(false);
           setActivePanel(activePanel === panel ? null : panel);
+          setAddressFeedback(null);
         }}
         onToggleGraph={() => {
           setAddressFocused(false);
           setAddressQuery("");
+          setAddressFeedback(null);
           setGraphMode((current) => !current);
           setActivePanel(null);
         }}
+        onOpenProviderSettings={() => setProviderSettingsOpen(true)}
       />
 
       <div className="app-body">
@@ -1596,7 +1934,7 @@ function App() {
               type: "conversation",
               title: conversation.title,
               path: conversation.path,
-              badge: "Conversation",
+              badge: typeLabel.conversation,
             });
             setActivePanel(null);
           }}
@@ -1609,7 +1947,7 @@ function App() {
 
         <main className="workspace">
 
-        <div className={isNewConversationDraft ? "content-area empty-draft-mode" : "content-area"}>
+        <ConversationView emptyDraft={isNewConversationDraft}>
           {isNewConversationDraft ? (
             <section className="empty-conversation-start" aria-label="New conversation">
               <div className="empty-conversation-copy">
@@ -1626,6 +1964,10 @@ function App() {
                     : []
                 }
                 referenceOptions={composerReferenceOptions}
+                providerSettings={providerSettings}
+                runtimeState={composerRuntimeState}
+                onProviderSettingsChange={saveProviderSettings}
+                onOpenProviderSettings={() => setProviderSettingsOpen(true)}
                 onDraftChange={setActiveComposerDraft}
                 onRemoveLink={(link) =>
                   updateComposerDraft(activeDraftKey, (draft) => ({
@@ -1634,6 +1976,7 @@ function App() {
                   }))
                 }
                 onDropLink={linkObject}
+                onResolveReference={resolveReferenceLink}
                 onRemoveAttachedReference={() => {
                   setSelectionReference(null);
                   clearSelectionHighlight();
@@ -1641,7 +1984,7 @@ function App() {
                 onReadyToFocus={(focus) => {
                   composerFocusRef.current = focus;
                 }}
-                onSend={materializeDraftConversation}
+                onSend={sendComposerToModel}
                 onUserTyping={scrollTranscriptToBottom}
               />
             </section>
@@ -1683,6 +2026,10 @@ function App() {
                     : []
                 }
                 referenceOptions={composerReferenceOptions}
+                providerSettings={providerSettings}
+                runtimeState={composerRuntimeState}
+                onProviderSettingsChange={saveProviderSettings}
+                onOpenProviderSettings={() => setProviderSettingsOpen(true)}
                 onDraftChange={setActiveComposerDraft}
                 onRemoveLink={(link) =>
                   updateComposerDraft(activeDraftKey, (draft) => ({
@@ -1691,6 +2038,7 @@ function App() {
                   }))
                 }
                 onDropLink={linkObject}
+                onResolveReference={resolveReferenceLink}
                 onRemoveAttachedReference={() => {
                   setSelectionReference(null);
                   clearSelectionHighlight();
@@ -1698,12 +2046,12 @@ function App() {
                 onReadyToFocus={(focus) => {
                   composerFocusRef.current = focus;
                 }}
-                onSend={materializeDraftConversation}
+                onSend={sendComposerToModel}
                 onUserTyping={scrollTranscriptToBottom}
               />
             </>
           )}
-        </div>
+        </ConversationView>
         </main>
 
         <RightPanel
@@ -1727,6 +2075,9 @@ function App() {
           onOpenBookmarkMenu={(event, bookmark) =>
             openContextMenu(event, { kind: "bookmark", bookmark })
           }
+          onOpenHistoryMenu={(event, entry) =>
+            openContextMenu(event, { kind: "history-entry", entry })
+          }
           onDropBookmark={bookmarkLoomLink}
           onRestore={restoreConversation}
           onDeleteRequest={setDeleteTarget}
@@ -1742,7 +2093,7 @@ function App() {
       )}
 
       {iconPickerTarget && (
-        <ConversationIconPicker
+        <ChangeIconPopover
           conversation={
             conversations.find((item) => item.id === iconPickerTarget.id) ??
             iconPickerTarget
@@ -1754,7 +2105,7 @@ function App() {
       )}
 
       {selectionAskState && (
-        <SelectionActionPopover
+        <SelectionPopover
           x={selectionAskState.x}
           y={selectionAskState.y}
           onAsk={() => launchSelectionAsk("ask")}
@@ -1763,7 +2114,7 @@ function App() {
       )}
 
       {askState && (
-        <AskPopover
+        <AskPopup
           state={askState}
           onUpdate={setAskState}
           onClose={closeSelectionAskFlow}
@@ -1777,10 +2128,19 @@ function App() {
               type: "loom",
               title: `Ask follow-up: ${askState.response.title}`,
               path: askState.response.address.replace("/r-", "/loom/ask/r-"),
-              badge: "Loom",
+              badge: typeLabel.loom,
             });
             closeSelectionAskFlow();
           }}
+          onSubmit={submitQuickQuestion}
+        />
+      )}
+
+      {providerSettingsOpen && (
+        <AIProviderSettingsModal
+          settings={providerSettings}
+          onSave={saveProviderSettings}
+          onClose={() => setProviderSettingsOpen(false)}
         />
       )}
 
@@ -1791,7 +2151,7 @@ function App() {
           onConfirm={() => deleteConversation(deleteTarget)}
         />
       )}
-    </div>
+    </AppShell>
   );
 }
 
@@ -1892,7 +2252,7 @@ function Sidebar({
       type: "conversation",
       title: conversation.title,
       path: conversation.path,
-      badge: "Conversation",
+      badge: typeLabel.conversation,
     };
   }
 
@@ -2221,6 +2581,7 @@ interface TopBrowserBarProps {
   addressFocused: boolean;
   addressQuery: string;
   suggestions: AddressSuggestion[];
+  resolutionFeedback: LoomResolutionResult | null;
   selectedSuggestion: number;
   canBack: boolean;
   canForward: boolean;
@@ -2240,6 +2601,7 @@ interface TopBrowserBarProps {
   onToggleSidebar: () => void;
   onTogglePanel: (panel: "bookmarks" | "history" | "looms") => void;
   onToggleGraph: () => void;
+  onOpenProviderSettings: () => void;
 }
 
 function TopBrowserBar({
@@ -2249,6 +2611,7 @@ function TopBrowserBar({
   addressFocused,
   addressQuery,
   suggestions,
+  resolutionFeedback,
   selectedSuggestion,
   canBack,
   canForward,
@@ -2268,9 +2631,10 @@ function TopBrowserBar({
   onToggleSidebar,
   onTogglePanel,
   onToggleGraph,
+  onOpenProviderSettings,
 }: TopBrowserBarProps) {
   return (
-    <header className="top-browser-bar">
+    <TopBar>
       <div className="nav-cluster">
         <div className="chrome-product" aria-label="Loom browser chrome">
           <span className="chrome-window-dots" aria-hidden="true">
@@ -2310,10 +2674,7 @@ function TopBrowserBar({
         </button>
       </div>
 
-      <div
-        ref={addressBarRef}
-        className={addressFocused ? "address-cluster focused" : "address-cluster"}
-      >
+      <AddressBar addressBarRef={addressBarRef} focused={addressFocused}>
         <button
           className={currentBookmarked ? "icon-button address-bookmark-button active" : "icon-button address-bookmark-button"}
           onClick={onBookmarkCurrent}
@@ -2346,6 +2707,7 @@ function TopBrowserBar({
           {addressFocused && (
             <AddressSuggestionList
               suggestions={suggestions}
+              resolutionFeedback={resolutionFeedback}
               selectedSuggestion={selectedSuggestion}
               onVisit={onVisit}
             />
@@ -2354,9 +2716,17 @@ function TopBrowserBar({
         <button className="icon-button address-share-button" aria-label="Share">
           <Share2 size={16} />
         </button>
-      </div>
+      </AddressBar>
 
       <div className="top-actions">
+        <button
+          className="chrome-button"
+          onClick={onOpenProviderSettings}
+          aria-label="Open AI Provider Settings"
+          title="AI Providers"
+        >
+          <Settings size={16} />
+        </button>
         <button
           className={activePanel === "history" ? "chrome-button history-icon-button active" : "chrome-button history-icon-button"}
           onClick={() => onTogglePanel("history")}
@@ -2382,25 +2752,65 @@ function TopBrowserBar({
           Graph
         </button>
       </div>
-    </header>
+    </TopBar>
   );
 }
 
 function AddressSuggestionList({
   suggestions,
+  resolutionFeedback,
   selectedSuggestion,
   onVisit,
 }: {
   suggestions: AddressSuggestion[];
+  resolutionFeedback: LoomResolutionResult | null;
   selectedSuggestion: number;
-  onVisit: (destination: AddressSuggestion) => void;
+  onVisit: (destination: LoomLink | AddressSuggestion) => void;
 }) {
+  const feedbackTitle =
+    resolutionFeedback?.status === "alias_stale"
+      ? "This Loom address has moved."
+      : resolutionFeedback?.status === "not_found"
+        ? "No Loom object found."
+        : resolutionFeedback?.status === "deleted"
+          ? "This Loom object was deleted."
+          : resolutionFeedback?.status === "snapshot_missing"
+            ? "That revision or snapshot is not available."
+            : resolutionFeedback?.status === "window_invalid"
+              ? "That window is not valid for this object."
+              : resolutionFeedback?.status === "broken_reference"
+                ? "This Loom reference is broken."
+                : null;
   return (
     <div className="suggestion-popover" role="listbox">
       <div className="suggestion-heading">
         <span>Go somewhere in your AI web</span>
         <kbd>Enter</kbd>
       </div>
+      {resolutionFeedback && feedbackTitle && (
+        <div className="address-resolution-feedback" role="status">
+          <strong>{feedbackTitle}</strong>
+          <span>{resolutionFeedback.reason}</span>
+          {resolutionFeedback.status === "alias_stale" &&
+            resolutionFeedback.staleAliasReplacement && (
+              <button
+                onClick={() =>
+                  onVisit({
+                    id: `alias-${resolutionFeedback.staleAliasReplacement}`,
+                    type: "recent",
+                    title: resolutionFeedback.object?.title ?? "Updated Loom address",
+                    path: resolutionFeedback.staleAliasReplacement ?? "",
+                    badge: "Alias",
+                    targetObjectId: resolutionFeedback.object?.objectId,
+                    canonicalUri: resolutionFeedback.canonicalUri,
+                  })
+                }
+              >
+                Open updated address
+              </button>
+            )}
+        </div>
+      )}
       {suggestions.length === 0 ? (
         <div className="empty-state">No matching Loom destinations.</div>
       ) : (
@@ -2584,11 +2994,16 @@ function PromptComposer({
   draft,
   attachedReferences,
   referenceOptions,
+  providerSettings,
+  runtimeState,
+  onProviderSettingsChange,
+  onOpenProviderSettings,
   onDraftChange,
   onRemoveLink,
   onRemoveAttachedReference,
   onReadyToFocus,
   onDropLink,
+  onResolveReference,
   onSend,
   onUserTyping,
 }: {
@@ -2597,12 +3012,17 @@ function PromptComposer({
   draft: ComposerDraft;
   attachedReferences: LoomLink[];
   referenceOptions: ComposerReferenceOption[];
+  providerSettings: AIProviderSettings;
+  runtimeState: { running: boolean; message: string | null };
+  onProviderSettingsChange: (settings: AIProviderSettings) => void;
+  onOpenProviderSettings: () => void;
   onDraftChange: (draft: ComposerDraft) => void;
   onRemoveLink: (link: LoomLink) => void;
   onRemoveAttachedReference: (link: LoomLink) => void;
   onReadyToFocus: (focus: () => void) => void;
   onDropLink: (link: LoomLink) => void;
-  onSend: (draft: ComposerDraft) => void;
+  onResolveReference: (link: LoomLink) => LoomLink;
+  onSend: (draft: ComposerDraft, options: { effort: ModelEffort }) => Promise<boolean>;
   onUserTyping: () => void;
 }) {
   const editorRef = useRef<HTMLDivElement | null>(null);
@@ -2620,7 +3040,35 @@ function PromptComposer({
   const [referencePickerOpen, setReferencePickerOpen] = useState(false);
   const [referenceSearch, setReferenceSearch] = useState("");
   const [dragActive, setDragActive] = useState(false);
-  const [model, setModel] = useState("Loom Auto");
+  const [modelEffort, setModelEffort] = useState<ModelEffort>("Medium");
+  const activeProfile = providerSettings.profiles.activeComposerProfile;
+  const activeProfileModel = getProfileModel(providerSettings, activeProfile);
+  const installedModels = providerSettings.ollama.models.filter((model) => model.installed);
+  const selectableModels = installedModels.length > 0 ? installedModels : providerSettings.ollama.models;
+  const selectedModelId =
+    activeProfile === "quick"
+      ? providerSettings.profiles.quickModelId
+      : providerSettings.profiles.mainModelId;
+
+  function setActiveComposerProfile(profile: ModelProfileId) {
+    onProviderSettingsChange({
+      ...providerSettings,
+      profiles: {
+        ...providerSettings.profiles,
+        activeComposerProfile: profile,
+      },
+    });
+  }
+
+  function setComposerProfileModel(modelId: string) {
+    onProviderSettingsChange({
+      ...providerSettings,
+      profiles: {
+        ...providerSettings.profiles,
+        [activeProfile === "quick" ? "quickModelId" : "mainModelId"]: modelId,
+      },
+    });
+  }
 
   useEffect(() => {
     onReadyToFocus(() => {
@@ -2716,6 +3164,10 @@ function PromptComposer({
     token.dataset.loomTitle = link.title;
     token.dataset.loomType = link.type;
     if (link.badge) token.dataset.loomBadge = link.badge;
+    if (link.targetObjectId) token.dataset.loomTargetObjectId = link.targetObjectId;
+    if (link.canonicalUri) token.dataset.loomCanonicalUri = link.canonicalUri;
+    if (link.referenceMentionId) token.dataset.loomReferenceMentionId = link.referenceMentionId;
+    if (link.resolutionStatus) token.dataset.loomResolutionStatus = link.resolutionStatus;
     token.title = toLoomMarkdown(link);
     token.textContent = `[[${link.title}]]`;
     return token;
@@ -2859,6 +3311,10 @@ function PromptComposer({
         title,
         path,
         badge: token.dataset.loomBadge,
+        targetObjectId: token.dataset.loomTargetObjectId,
+        canonicalUri: token.dataset.loomCanonicalUri,
+        referenceMentionId: token.dataset.loomReferenceMentionId,
+        resolutionStatus: token.dataset.loomResolutionStatus as LoomLink["resolutionStatus"],
       });
     });
     return {
@@ -2927,24 +3383,27 @@ function PromptComposer({
     range: Range,
     intent: ComposerEditIntent = "reference-insert"
   ) {
-    const token = makeToken(link);
+    const resolvedLink = onResolveReference(link);
+    const token = makeToken(resolvedLink);
     range.deleteContents();
     range.insertNode(document.createTextNode(" "));
     range.insertNode(token);
     placeCaretAfter(token);
-    insertedPathsRef.current.add(link.path);
-    onDropLink(link);
+    insertedPathsRef.current.add(resolvedLink.path);
+    onDropLink(resolvedLink);
     window.requestAnimationFrame(() => commitDraftChange(intent));
     setMention(null);
   }
 
   function insertTokenAtEnd(link: LoomLink) {
     const editor = editorRef.current;
-    if (!editor) return;
-    const token = makeToken(link);
+    if (!editor) return link;
+    const resolvedLink = onResolveReference(link);
+    const token = makeToken(resolvedLink);
     if (editor.textContent?.trim()) editor.append(document.createTextNode(" "));
     editor.append(token, document.createTextNode(" "));
-    insertedPathsRef.current.add(link.path);
+    insertedPathsRef.current.add(resolvedLink.path);
+    return resolvedLink;
   }
 
   function getDropRange(event: React.DragEvent) {
@@ -3039,12 +3498,13 @@ function PromptComposer({
     insertTokenAtRange(option, range);
   }
 
-  function submitComposer() {
+  async function submitComposer() {
+    if (runtimeState.running) return;
     const nextDraft = extractDraftFromEditor();
     onDraftChange(nextDraft);
     onUserTyping();
-    onSend(nextDraft);
-    applyDraftSnapshot({ html: "", links: [] });
+    const sent = await onSend(nextDraft, { effort: modelEffort });
+    if (sent) applyDraftSnapshot({ html: "", links: [] });
   }
 
   function handleEditorKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
@@ -3110,6 +3570,10 @@ function PromptComposer({
       title,
       path,
       badge: token.dataset.loomBadge,
+      targetObjectId: token.dataset.loomTargetObjectId,
+      canonicalUri: token.dataset.loomCanonicalUri,
+      referenceMentionId: token.dataset.loomReferenceMentionId,
+      resolutionStatus: token.dataset.loomResolutionStatus as LoomLink["resolutionStatus"],
     });
     event.dataTransfer.setData("application/loom-token-path", path);
   }
@@ -3171,8 +3635,8 @@ function PromptComposer({
               movedTokenPath ? "reference-move" : "reference-insert"
             );
           } else {
-            insertTokenAtEnd(link);
-            onDropLink(link);
+            const resolvedLink = insertTokenAtEnd(link);
+            onDropLink(resolvedLink);
             window.requestAnimationFrame(() =>
               commitDraftChange(movedTokenPath ? "reference-move" : "reference-insert")
             );
@@ -3282,15 +3746,47 @@ function PromptComposer({
           </div>
           <span>Type # to insert Loom references inline.</span>
           <select
-            className="model-select"
-            value={model}
-            onChange={(event) => setModel(event.target.value)}
-            aria-label="Select model"
+            className="model-effort-select"
+            value={modelEffort}
+            onChange={(event) => setModelEffort(event.target.value as ModelEffort)}
+            aria-label="Select model working power"
+            title="Model working power"
           >
-            <option>Loom Auto</option>
-            <option>Deep Research</option>
-            <option>Fast Draft</option>
+            <option>Low</option>
+            <option>Medium</option>
+            <option>High</option>
           </select>
+          <select
+            className="model-select"
+            value={activeProfile}
+            onChange={(event) => setActiveComposerProfile(event.target.value as ModelProfileId)}
+            aria-label="Select model profile"
+            title={getComposerModelLabel(providerSettings)}
+          >
+            <option value="quick">Quick · {getProfileModel(providerSettings, "quick").name}</option>
+            <option value="main">Main · {getProfileModel(providerSettings, "main").name}</option>
+          </select>
+          <select
+            className="model-picker-select"
+            value={selectedModelId}
+            onChange={(event) => setComposerProfileModel(event.target.value)}
+            aria-label="Select model"
+            title={`${activeProfile === "quick" ? "Quick" : "Main"} model: ${activeProfileModel.name}`}
+          >
+            {selectableModels.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.name}
+              </option>
+            ))}
+          </select>
+          <button
+            className="composer-icon-action"
+            onClick={onOpenProviderSettings}
+            aria-label="Open AI Provider Settings"
+            title="AI Providers"
+          >
+            <Settings size={15} />
+          </button>
           <button className="composer-icon-action" aria-label="Voice input" title="Voice input">
             <Mic size={15} />
           </button>
@@ -3298,10 +3794,24 @@ function PromptComposer({
             className="send-button"
             aria-label="Send"
             onClick={submitComposer}
+            disabled={runtimeState.running}
           >
             <ArrowUp size={16} />
           </button>
         </div>
+        {runtimeState.message && (
+          <p
+            className={
+              runtimeState.running
+                ? "composer-runtime-status"
+                : runtimeState.message.includes("responded")
+                  ? "composer-runtime-status"
+                  : "composer-runtime-status error"
+            }
+          >
+            {runtimeState.message}
+          </p>
+        )}
       </div>
     </section>
   );
@@ -3380,7 +3890,7 @@ function LinkedReferenceDropdown({
           aria-label="Search linked references"
         />
       </label>
-      <div className="linked-reference-list">
+      <ReferencesListBox>
         {links.length === 0 ? (
           <div className="empty-state">No linked references.</div>
         ) : (
@@ -3400,7 +3910,7 @@ function LinkedReferenceDropdown({
             );
           })
         )}
-      </div>
+      </ReferencesListBox>
     </div>
   );
 }
@@ -3420,6 +3930,7 @@ function RightPanel({
   onRenameBookmark,
   onRemoveBookmark,
   onOpenBookmarkMenu,
+  onOpenHistoryMenu,
   onDropBookmark,
   onRestore,
   onDeleteRequest,
@@ -3438,6 +3949,7 @@ function RightPanel({
   onRenameBookmark: (bookmark: BookmarkItem) => void;
   onRemoveBookmark: (bookmark: BookmarkItem) => void;
   onOpenBookmarkMenu: (event: React.MouseEvent, bookmark: BookmarkItem) => void;
+  onOpenHistoryMenu: (event: React.MouseEvent, entry: HistoryEntry) => void;
   onDropBookmark: (link: LoomLink) => void;
   onRestore: (conversation: Conversation) => void;
   onDeleteRequest: (conversation: Conversation) => void;
@@ -3472,8 +3984,8 @@ function RightPanel({
       </div>
 
       {activePanel === "bookmarks" && (
-        <div
-          className={bookmarkDragActive ? "panel-list bookmark-drop-target drag-over" : "panel-list bookmark-drop-target"}
+        <BookmarkView
+          dragActive={bookmarkDragActive}
           onDragEnter={(event) => {
             if (event.dataTransfer.types.includes(LOOM_LINK_MIME)) {
               event.preventDefault();
@@ -3508,41 +4020,35 @@ function RightPanel({
               onOpenContextMenu={onOpenBookmarkMenu}
             />
           ))}
-        </div>
+        </BookmarkView>
       )}
 
       {activePanel === "history" && (
-        <div className="panel-list">
-          {history.map((entry) => {
-            const Icon = iconForType[entry.type];
-            return (
-              <button
-                key={entry.id}
-                className="history-row"
-                draggable
-                onDragStart={(event) => setLoomDragPayload(event, entry)}
-                onClick={() => onVisit(entry)}
-              >
-                <Icon size={15} />
-                <span>
-                  <strong>{entry.title}</strong>
-                  <small>{entry.path}</small>
-                </span>
-                <em>{entry.visitedAt}</em>
-              </button>
-            );
-          })}
-        </div>
+        <HistoryView>
+          {history.map((entry) => (
+            <DestinationRow
+              key={entry.id}
+              destination={entry}
+              timestamp={entry.visitedAt}
+              showBadge={false}
+              className="history-destination-row"
+              onVisit={onVisit}
+              onOpenContextMenu={onOpenHistoryMenu}
+            />
+          ))}
+        </HistoryView>
       )}
 
       {activePanel === "looms" && (
-        <LoomsPanel
-          root={lineageRoot}
-          activePath={activeDestination.path}
-          onVisit={onVisit}
-          onBookmark={onBookmark}
-          onOpenGraph={onOpenGraph}
-        />
+        <WeftView>
+          <LoomsPanel
+            root={lineageRoot}
+            activePath={activeDestination.path}
+            onVisit={onVisit}
+            onBookmark={onBookmark}
+            onOpenGraph={onOpenGraph}
+          />
+        </WeftView>
       )}
 
       {activePanel === "archive" && (
@@ -3550,32 +4056,47 @@ function RightPanel({
           {archived.length === 0 ? (
             <div className="empty-state">Archived conversations will appear here.</div>
           ) : (
-            archived.map((conversation) => (
-              <div className="archive-row" key={conversation.id}>
-                <div>
-                  <strong>{conversation.title}</strong>
-                  <small>{conversation.path}</small>
-                </div>
-                <div className="archive-actions">
-                  <Tooltip label="Restore">
-                    <button
-                      className="archive-icon-button"
-                      onClick={() => onRestore(conversation)}
-                      aria-label={`Restore ${conversation.title}`}
-                    >
-                      <RotateCcw size={13} />
-                    </button>
-                  </Tooltip>
-                  <button
-                    className="archive-icon-button danger"
-                    onClick={() => onDeleteRequest(conversation)}
-                    aria-label={`Delete ${conversation.title}`}
-                  >
-                    <X size={13} />
-                  </button>
-                </div>
-              </div>
-            ))
+            archived.map((conversation) => {
+              const destination: LoomLink = {
+                id: conversation.id,
+                type: "conversation",
+                title: conversation.title,
+                path: conversation.path,
+                badge: typeLabel.conversation,
+              };
+              return (
+                <DestinationRow
+                  key={conversation.id}
+                  destination={destination}
+                  timestamp="Archived"
+                  showBadge={false}
+                  className="archive-destination-row"
+                  onVisit={() => onRestore(conversation)}
+                  actions={
+                    <>
+                      <Tooltip label="Restore">
+                        <button
+                          className="bookmark-rail-button"
+                          onClick={() => onRestore(conversation)}
+                          aria-label={`Restore ${conversation.title}`}
+                        >
+                          <RotateCcw size={13} />
+                        </button>
+                      </Tooltip>
+                      <Tooltip label="Delete">
+                        <button
+                          className="bookmark-rail-button danger"
+                          onClick={() => onDeleteRequest(conversation)}
+                          aria-label={`Delete ${conversation.title}`}
+                        >
+                          <X size={13} />
+                        </button>
+                      </Tooltip>
+                    </>
+                  }
+                />
+              );
+            })
           )}
         </div>
       )}
@@ -3611,7 +4132,7 @@ function LoomsPanel({
             : "loom",
       title: node.title,
       path: node.path,
-      badge: node.type === "loom" ? "Loom" : node.type === "response" ? "Response" : "Conversation",
+      badge: node.type === "loom" ? typeLabel.loom : node.type === "response" ? typeLabel.response : typeLabel.conversation,
     };
   }
 
@@ -3958,7 +4479,7 @@ function LoomsPanel({
                       </span>
                     )}
                     <span className="looms-log__type">
-                      {node.type === "conversation" ? "Conversation" : node.type === "loom" ? "Loom" : node.type === "quick" ? "Quick" : "Response"}
+                      {node.type === "conversation" ? typeLabel.conversation : node.type === "loom" ? typeLabel.loom : node.type === "quick" ? "Quick" : typeLabel.response}
                     </span>
                   </span>
                   <span className="looms-log__subtitle">{node.subtitle}</span>
@@ -4206,6 +4727,76 @@ function LoomsContentOverlay({
   );
 }
 
+function DestinationRow<T extends LoomLink>({
+  destination,
+  timestamp,
+  showBadge = true,
+  className = "",
+  onVisit,
+  onRemove,
+  onOpenContextMenu,
+  actions,
+}: {
+  destination: T;
+  timestamp?: string;
+  showBadge?: boolean;
+  className?: string;
+  onVisit: (destination: T) => void;
+  onRemove?: (destination: T) => void;
+  onOpenContextMenu?: (event: React.MouseEvent, destination: T) => void;
+  actions?: React.ReactNode;
+}) {
+  const Icon = iconForType[destination.type];
+  const title =
+    "editableTitle" in destination && typeof destination.editableTitle === "string"
+      ? destination.editableTitle
+      : destination.title;
+  const rowClassName = [
+    "bookmark-row",
+    className,
+    destination.badge === "Broken reference" ? "broken" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+  return (
+    <div
+      className={rowClassName}
+      draggable
+      onContextMenu={(event) => onOpenContextMenu?.(event, destination)}
+      onDragStart={(event) => {
+        setLoomDragPayload(event, destination);
+      }}
+    >
+      <span className="bookmark-type-icon">
+        <Icon size={16} />
+      </span>
+      <button className="bookmark-content" onClick={() => onVisit(destination)}>
+        <strong title={title}>{title}</strong>
+        <small title={destination.path}>{destination.path}</small>
+        <span className={showBadge ? "bookmark-meta-row" : "bookmark-meta-row no-label"}>
+          {showBadge && destination.badge ? (
+            <em>{displayObjectTypeLabel(destination.badge)}</em>
+          ) : null}
+          {timestamp ? <time>{timestamp}</time> : null}
+        </span>
+      </button>
+      <div className="bookmark-action-rail">
+        {actions ?? (onRemove ? (
+          <Tooltip label="Delete">
+            <button
+              className="bookmark-rail-button danger"
+              onClick={() => onRemove(destination)}
+              aria-label={`Delete ${title}`}
+            >
+              <X size={13} />
+            </button>
+          </Tooltip>
+        ) : null)}
+      </div>
+    </div>
+  );
+}
+
 function BookmarkRow({
   bookmark,
   onVisit,
@@ -4217,39 +4808,14 @@ function BookmarkRow({
   onRemove: (destination: BookmarkItem) => void;
   onOpenContextMenu: (event: React.MouseEvent, destination: BookmarkItem) => void;
 }) {
-  const Icon = iconForType[bookmark.type];
   return (
-    <div
-      className={bookmark.badge === "Broken reference" ? "bookmark-row broken" : "bookmark-row"}
-      draggable
-      onContextMenu={(event) => onOpenContextMenu(event, bookmark)}
-      onDragStart={(event) => {
-        setLoomDragPayload(event, bookmark);
-      }}
-    >
-      <span className="bookmark-type-icon">
-        <Icon size={16} />
-      </span>
-      <button className="bookmark-content" onClick={() => onVisit(bookmark)}>
-        <strong title={bookmark.editableTitle}>{bookmark.editableTitle}</strong>
-        <small title={bookmark.path}>{bookmark.path}</small>
-        <span className="bookmark-meta-row">
-          <em>{bookmark.badge}</em>
-          <time>{bookmark.lastUsed}</time>
-        </span>
-      </button>
-      <div className="bookmark-action-rail">
-        <Tooltip label="Delete">
-          <button
-            className="bookmark-rail-button danger"
-            onClick={() => onRemove(bookmark)}
-            aria-label={`Delete ${bookmark.editableTitle}`}
-          >
-            <X size={13} />
-          </button>
-        </Tooltip>
-      </div>
-    </div>
+    <DestinationRow
+      destination={bookmark}
+      timestamp={bookmark.lastUsed}
+      onVisit={onVisit}
+      onRemove={onRemove}
+      onOpenContextMenu={onOpenContextMenu}
+    />
   );
 }
 
@@ -4264,427 +4830,6 @@ function Tooltip({
     <span className="tooltip-host" data-tooltip={label}>
       {children}
     </span>
-  );
-}
-
-function SelectionActionPopover({
-  x,
-  y,
-  onAsk,
-  onQuickQuestion,
-}: {
-  x: number;
-  y: number;
-  onAsk: () => void;
-  onQuickQuestion: () => void;
-}) {
-  return (
-    <div
-      className="selection-action-popover"
-      style={{ left: x, top: y }}
-      role="toolbar"
-      aria-label="Selection actions"
-    >
-      <button
-        type="button"
-        tabIndex={0}
-        onMouseDown={(event) => event.preventDefault()}
-        onClick={onAsk}
-      >
-        Ask to Loom
-      </button>
-      <button
-        type="button"
-        tabIndex={0}
-        onMouseDown={(event) => event.preventDefault()}
-        onClick={onQuickQuestion}
-      >
-        Quick Question
-      </button>
-    </div>
-  );
-}
-
-function AskPopover({
-  state,
-  onUpdate,
-  onClose,
-  onBookmark,
-  onLoom,
-}: {
-  state: AskState;
-  onUpdate: (state: AskState) => void;
-  onClose: () => void;
-  onBookmark: () => void;
-  onLoom: () => void;
-}) {
-  const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
-  const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null);
-  const textareaRef = useRef<HTMLTextAreaElement | null>(null);
-
-  useEffect(() => {
-    textareaRef.current?.focus();
-  }, []);
-
-  useEffect(() => {
-    function handlePointerMove(event: PointerEvent) {
-      if (!dragRef.current) return;
-      const width = 460;
-      const nextX = Math.min(
-        window.innerWidth - 24,
-        Math.max(24 - width, event.clientX - dragRef.current.offsetX)
-      );
-      const nextY = Math.min(
-        window.innerHeight - 120,
-        Math.max(48, event.clientY - dragRef.current.offsetY)
-      );
-      setPosition({ x: nextX, y: nextY });
-    }
-
-    function handlePointerUp() {
-      dragRef.current = null;
-    }
-
-    document.addEventListener("pointermove", handlePointerMove);
-    document.addEventListener("pointerup", handlePointerUp);
-    return () => {
-      document.removeEventListener("pointermove", handlePointerMove);
-      document.removeEventListener("pointerup", handlePointerUp);
-    };
-  }, []);
-
-  function startDrag(event: React.PointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    const popover = event.currentTarget.closest(".ask-popover");
-    if (!(popover instanceof HTMLElement)) return;
-    const rect = popover.getBoundingClientRect();
-    dragRef.current = {
-      offsetX: event.clientX - rect.left,
-      offsetY: event.clientY - rect.top,
-    };
-    setPosition({ x: rect.left, y: rect.top });
-  }
-
-  return (
-    <div
-      className="ask-popover"
-      style={
-        position
-          ? { left: position.x, top: position.y, right: "auto", bottom: "auto" }
-          : undefined
-      }
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="ask-title"
-    >
-      <div className="ask-header ask-drag-handle" onPointerDown={startDrag}>
-        <div>
-          <span>Ask</span>
-          <h2 id="ask-title">{state.response.title}</h2>
-        </div>
-        <button
-          className="icon-button"
-          tabIndex={0}
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={onClose}
-          aria-label="Close Ask"
-        >
-          <X size={16} />
-        </button>
-      </div>
-      <blockquote>{state.selectedText}</blockquote>
-      <textarea
-        ref={textareaRef}
-        value={state.question}
-        onChange={(event) => onUpdate({ ...state, question: event.target.value })}
-        placeholder="Ask a focused follow-up about this selection..."
-        aria-label="Ask question"
-        tabIndex={0}
-      />
-      {state.answered && (
-        <div className="ask-answer">
-          <Bot size={15} />
-          <p>
-            This selection is about orientation: the Address Bar combines navigation,
-            local search, and direct Loom addressing so the user never chooses a mode.
-          </p>
-        </div>
-      )}
-      <div className="ask-actions">
-        <button tabIndex={0} onClick={onLoom}>Convert to Loom</button>
-        <button tabIndex={0} onClick={onBookmark}>Bookmark</button>
-        <button
-          className="primary"
-          tabIndex={0}
-          onClick={() => onUpdate({ ...state, answered: true })}
-        >
-          <CornerDownLeft size={15} />
-          Ask
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function DeleteConversationDialog({
-  conversation,
-  onCancel,
-  onConfirm,
-}: {
-  conversation: Conversation;
-  onCancel: () => void;
-  onConfirm: () => void;
-}) {
-  return (
-    <div className="dialog-backdrop" role="presentation">
-      <div
-        className="delete-dialog"
-        role="alertdialog"
-        aria-modal="true"
-        aria-labelledby="delete-title"
-      >
-        <div className="danger-icon">
-          <Trash2 size={20} />
-        </div>
-        <h2 id="delete-title">Delete this conversation permanently?</h2>
-        <p>
-          Deleting <strong>{conversation.title}</strong> removes the conversation and
-          can break Loom references, bookmarks, and bookmarked links that point to it.
-          Archive keeps the destination recoverable; delete does not.
-        </p>
-        <div className="dialog-actions">
-          <button onClick={onCancel}>Cancel</button>
-          <button className="delete-button" onClick={onConfirm}>
-            Delete permanently
-          </button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function GraphView({
-  conversations,
-  responses,
-  onVisit,
-}: {
-  conversations: Conversation[];
-  responses: ResponseItem[];
-  onVisit: (destination: LoomLink) => void;
-}) {
-  return (
-    <section className="graph-view" aria-label="Graph View">
-      <div className="graph-header">
-        <span>Graph View</span>
-        <h1>Site map for the active AI conversation web</h1>
-        <p>
-          Conversations, Looms, Q+A items, suggested references, and bookmarked
-          links appear as navigable nodes. Browser mode remains the primary workspace.
-        </p>
-      </div>
-      <div className="graph-canvas">
-        {conversations.slice(0, 4).map((conversation, index) => (
-          <button
-            key={conversation.id}
-            className={`graph-node conversation node-${index + 1}`}
-            onClick={() =>
-              onVisit({
-                id: conversation.id,
-                type: "conversation",
-                title: conversation.title,
-                path: conversation.path,
-              })
-            }
-          >
-            <Globe2 size={18} />
-            <strong>{conversation.title}</strong>
-            <small>Conversation</small>
-          </button>
-        ))}
-        {responses.map((response, index) => (
-          <button
-            key={response.id}
-            className={`graph-node response response-${index + 1}`}
-            onClick={() =>
-              onVisit({
-                id: response.id,
-                type: "response",
-                title: response.title,
-                path: response.address,
-              })
-            }
-          >
-            <FileText size={16} />
-            <strong>{response.title}</strong>
-            <small>Q+A item</small>
-          </button>
-        ))}
-        <svg className="graph-lines" aria-hidden="true">
-          <path d="M170 120 C310 40 420 170 560 110" />
-          <path d="M210 290 C340 210 470 250 600 210" />
-          <path d="M450 130 C520 220 610 260 730 300" />
-          <path d="M300 420 C420 350 560 420 690 360" />
-        </svg>
-      </div>
-    </section>
-  );
-}
-
-function ContextMenu({
-  state,
-  onAction,
-  onClose,
-}: {
-  state: ContextMenuState;
-  onAction: (item: ContextMenuItem, index: number) => void;
-  onClose: () => void;
-}) {
-  return (
-    <div
-      className="context-menu-backdrop"
-      role="presentation"
-      onContextMenu={(event) => event.preventDefault()}
-      onClick={onClose}
-    >
-      <div
-        className="context-menu"
-        role="menu"
-        style={{ left: state.x, top: state.y }}
-        onClick={(event) => event.stopPropagation()}
-        onPointerDown={(event) => event.stopPropagation()}
-      >
-        {state.items.map((item, index) => (
-          <button
-            key={`${item.id}-${index}-${item.label}`}
-            className={[
-              "context-menu-item",
-              item.danger ? "danger" : "",
-              item.separatorBefore ? "separated" : "",
-            ]
-              .filter(Boolean)
-              .join(" ")}
-            disabled={item.disabled}
-            onClick={() => onAction(item, index)}
-            role="menuitem"
-          >
-            <span>{item.label}</span>
-            {item.detail && <small>{item.detail}</small>}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-function ConversationIconPicker({
-  conversation,
-  options,
-  onSave,
-  onCancel,
-}: {
-  conversation: Conversation;
-  options: ConversationIconOption[];
-  onSave: (conversation: Conversation, iconKey: string) => void;
-  onCancel: () => void;
-}) {
-  const inputRef = useRef<HTMLInputElement | null>(null);
-  const [query, setQuery] = useState("");
-  const [selectedIconKey, setSelectedIconKey] = useState(
-    conversation.iconKey ?? options[0].key
-  );
-
-  const filteredOptions = useMemo(() => {
-    const value = query.trim().toLowerCase();
-    if (!value) return options;
-    return options.filter((option) =>
-      [option.label, option.key, ...option.tags].some((item) =>
-        item.toLowerCase().includes(value)
-      )
-    );
-  }, [options, query]);
-
-  const selectedOption = getConversationIconOption(selectedIconKey);
-  const SelectedIcon = selectedOption.Icon;
-
-  useEffect(() => {
-    inputRef.current?.focus();
-
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") onCancel();
-      if (event.key === "Enter") onSave(conversation, selectedIconKey);
-    }
-
-    document.addEventListener("keydown", handleKeyDown);
-    return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [conversation, onCancel, onSave, selectedIconKey]);
-
-  return (
-    <div className="icon-picker-backdrop" role="presentation" onClick={onCancel}>
-      <section
-        className="icon-picker"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="icon-picker-title"
-        onClick={(event) => event.stopPropagation()}
-      >
-        <div className="icon-picker-header">
-          <div className="icon-picker-preview">
-            <SelectedIcon size={20} />
-          </div>
-          <div>
-            <span>Conversation icon</span>
-            <h2 id="icon-picker-title">{conversation.title}</h2>
-          </div>
-        </div>
-
-        <label className="icon-search">
-          <Search size={14} />
-          <input
-            ref={inputRef}
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Search icons"
-            aria-label="Search icons"
-          />
-        </label>
-
-        <div className="icon-grid" role="listbox" aria-label="Conversation icons">
-          {filteredOptions.map((option) => {
-            const selected = option.key === selectedIconKey;
-            return (
-              <button
-                key={option.key}
-                className={selected ? "icon-choice selected" : "icon-choice"}
-                onClick={() => setSelectedIconKey(option.key)}
-                role="option"
-                aria-selected={selected}
-                title={option.label}
-              >
-                <option.Icon size={18} />
-                {selected && <Check size={12} className="icon-choice-check" />}
-              </button>
-            );
-          })}
-        </div>
-
-        {filteredOptions.length === 0 && (
-          <div className="empty-state">No matching icons.</div>
-        )}
-
-        <div className="icon-picker-footer">
-          <span>{selectedOption.label}</span>
-          <div>
-            <button onClick={onCancel}>Cancel</button>
-            <button
-              className="primary"
-              onClick={() => onSave(conversation, selectedIconKey)}
-            >
-              Done
-            </button>
-          </div>
-        </div>
-      </section>
-    </div>
   );
 }
 
