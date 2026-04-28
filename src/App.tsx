@@ -2368,8 +2368,8 @@ function TopBrowserBar({
         <button
           className={activePanel === "looms" ? "chrome-button active" : "chrome-button"}
           onClick={() => onTogglePanel("looms")}
-          aria-label="Open Looms"
-          title="Looms"
+          aria-label="Open Weft"
+          title="Weft"
         >
           <GitBranch size={16} />
         </button>
@@ -2553,7 +2553,7 @@ function ChatTranscript({
                   onClick={() => onLoom(displayResponse)}
                 >
                   <GitFork size={13} />
-                  <strong>Loom</strong>
+                  <strong>Weft</strong>
                 </button>
               </div>
             </div>
@@ -3451,7 +3451,7 @@ function RightPanel({
       : activePanel === "history"
         ? "Loom History"
         : activePanel === "looms"
-          ? "Looms"
+          ? "Weft"
           : "Archive";
 
   return (
