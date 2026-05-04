@@ -264,4 +264,4 @@ Rules:
 - The target Loom, Response, Bookmark, or Fragment is not cloned.
 - Selection-derived reference chips may promote to Fragment objects when bookmarked or otherwise accepted.
 - Removing a reference removes the use-instance from the active draft state and should emit a runtime ledger event when the change is durable.
-- Address serialization should use the resolver contract from `loom_addressing_and_resolution_model.md`.
+- Address serialization should use the resolver contract from `docs/loom_addressing_and_resolution_model.md`.

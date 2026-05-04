@@ -175,11 +175,15 @@ Archive and Delete must never feel ambiguous.
 
 ## 9. Grouping Interaction
 
-Dragging one Loom over another and holding for >1 second may create a group.
+Dragging one Loom onto another may create or update a group.
 
 Rules:
-- drag into group joins group
-- drag out removes from group
+- ungrouped Loom dropped on ungrouped Loom creates a group
+- ungrouped Loom dropped on grouped Loom joins that group
+- grouped Loom dropped on ungrouped Loom does not create a group
+- grouped Loom dropped outside any group leaves its group
+- pinned Looms cannot be grouped until unpinned
+- dragging a Loom into the composer creates a Link / Reference and never triggers grouping
 - default group names like Group #1
 - group rename from context menu
 - grouping should feel browser-like, not kanban-like
@@ -240,7 +244,7 @@ Examples:
 
 - Bookmark action: `bookmark_created`, `address_created`
 - Alias changes: `alias_created`, `alias_updated`, `alias_retired`
-- Loom/fork action: `fork_created`
+- Weft action: `fork_created`
 - Drag-to-link or `#` reference insertion: `reference_mention_created`
 - Selection promotion: `fragment_created`
 - Archive/delete: `object_archived`, `object_deleted`, and possibly `broken_reference_detected`

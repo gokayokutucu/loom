@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import {
   CheckCircle2,
   Download,
@@ -9,23 +9,31 @@ import {
   X,
 } from "lucide-react";
 import {
+  canUseMockResponseMode,
   defaultAIProviderSettings,
   getProfileModel,
+  isMockResponseModeEnabled,
   mergeOllamaModels,
   OllamaProvider,
   type AIProviderSettings,
   type ModelDescriptor,
   type ModelProfileId,
+  type RuntimeHealthState,
 } from "../services/modelProviders";
 
 const provider = new OllamaProvider();
 
 export function AIProviderSettingsModal({
   settings,
+  runtimeHealth,
   onSave,
   onClose,
 }: {
   settings: AIProviderSettings;
+  runtimeHealth: RuntimeHealthState & {
+    checking: boolean;
+    testRuntime: () => Promise<RuntimeHealthState>;
+  };
   onSave: (settings: AIProviderSettings) => void;
   onClose: () => void;
 }) {
@@ -33,6 +41,10 @@ export function AIProviderSettingsModal({
   const [query, setQuery] = useState("");
   const [working, setWorking] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDraft(settings);
+  }, [settings]);
 
   const filteredModels = useMemo(() => {
     const value = query.trim().toLowerCase();
@@ -55,25 +67,9 @@ export function AIProviderSettingsModal({
     setWorking("test");
     setMessage(null);
     try {
-      await provider.testConnection(draft);
-      update({
-        ...draft,
-        ollama: {
-          ...draft.ollama,
-          lastConnectionStatus: "connected",
-          lastCheckedAt: new Date().toISOString(),
-        },
-      });
-      setMessage("Connected to local Ollama.");
+      const health = await runtimeHealth.testRuntime();
+      setMessage(health.message);
     } catch (error) {
-      update({
-        ...draft,
-        ollama: {
-          ...draft.ollama,
-          lastConnectionStatus: "offline",
-          lastCheckedAt: new Date().toISOString(),
-        },
-      });
       setMessage(error instanceof Error ? error.message : "Ollama connection failed.");
     } finally {
       setWorking(null);
@@ -107,10 +103,15 @@ export function AIProviderSettingsModal({
     setMessage(null);
     try {
       await provider.pullModel(draft, model.id);
-      const models = mergeOllamaModels([
+      let models = mergeOllamaModels([
         ...draft.ollama.models,
         { ...model, installed: true, location: draft.ollama.modelLocation },
       ]);
+      try {
+        models = await provider.refreshModels(draft);
+      } catch {
+        // Keep the optimistic installed state if refresh fails after a successful pull.
+      }
       update({ ...draft, ollama: { ...draft.ollama, models } });
       setMessage(`${model.name} is installed.`);
     } catch (error) {
@@ -137,6 +138,12 @@ export function AIProviderSettingsModal({
 
   const quickModel = getProfileModel(draft, "quick");
   const mainModel = getProfileModel(draft, "main");
+  const selectedModelsReady = quickModel.installed && mainModel.installed;
+  const demoResponsesAvailable = canUseMockResponseMode();
+  const demoResponsesForced = import.meta.env.VITE_ENABLE_MOCK_RESPONSES === "true";
+  const demoResponsesEnabled = isMockResponseModeEnabled(draft);
+  const quickModelOptions = demoResponsesEnabled ? [quickModel] : draft.ollama.models;
+  const mainModelOptions = demoResponsesEnabled ? [mainModel] : draft.ollama.models;
 
   return (
     <div className="settings-backdrop" role="presentation" onClick={onClose}>
@@ -203,9 +210,12 @@ export function AIProviderSettingsModal({
               </label>
 
               <div className="settings-actions">
-                <button onClick={testConnection} disabled={working === "test"}>
+                <button
+                  onClick={testConnection}
+                  disabled={working === "test" || runtimeHealth.checking}
+                >
                   <CheckCircle2 size={14} />
-                  Test Connection
+                  Test Runtime
                 </button>
                 <button onClick={refreshModels} disabled={working === "refresh"}>
                   <RefreshCw size={14} />
@@ -217,17 +227,65 @@ export function AIProviderSettingsModal({
                 </button>
               </div>
 
+              <div className={`runtime-health-card ${runtimeHealth.status}`}>
+                <strong>
+                  {demoResponsesEnabled
+                    ? "Demo responses enabled"
+                    : !runtimeHealth.ollama_installed
+                    ? "Install Ollama"
+                    : !runtimeHealth.models_available
+                      ? "Pull Model"
+                      : selectedModelsReady
+                        ? "Runtime ready"
+                        : "Download selected model"}
+                </strong>
+                <span>{runtimeHealth.message}</span>
+                {!demoResponsesEnabled && !runtimeHealth.ollama_installed && (
+                  <a
+                    href="https://ollama.com/download"
+                    target="_blank"
+                    rel="noreferrer"
+                  >
+                    Install Ollama
+                  </a>
+                )}
+              </div>
+
               {message && <p className="settings-status">{message}</p>}
             </section>
+
+            {demoResponsesAvailable && (
+              <section className="provider-section">
+                <label className="settings-toggle">
+                  <input
+                    type="checkbox"
+                    checked={demoResponsesEnabled}
+                    disabled={demoResponsesForced}
+                    onChange={(event) =>
+                      update({
+                        ...draft,
+                        demo: {
+                          ...draft.demo,
+                          mockResponsesEnabled: event.target.checked,
+                        },
+                      })
+                    }
+                  />
+                  <span>Demo Responses</span>
+                </label>
+                <small>Use mock model responses for UI testing.</small>
+              </section>
+            )}
 
             <section className="provider-section model-profile-grid">
               <label className="settings-field">
                 <span>Quick Model</span>
                 <select
-                  value={draft.profiles.quickModelId}
+                  value={quickModel.id}
                   onChange={(event) => setProfile("quick", event.target.value)}
+                  disabled={demoResponsesEnabled}
                 >
-                  {draft.ollama.models.map((model) => (
+                  {quickModelOptions.map((model) => (
                     <option key={model.id} value={model.id}>
                       {model.name}
                     </option>
@@ -238,10 +296,11 @@ export function AIProviderSettingsModal({
               <label className="settings-field">
                 <span>Main Model</span>
                 <select
-                  value={draft.profiles.mainModelId}
+                  value={mainModel.id}
                   onChange={(event) => setProfile("main", event.target.value)}
+                  disabled={demoResponsesEnabled}
                 >
-                  {draft.ollama.models.map((model) => (
+                  {mainModelOptions.map((model) => (
                     <option key={model.id} value={model.id}>
                       {model.name}
                     </option>
@@ -282,7 +341,8 @@ export function AIProviderSettingsModal({
                         className="download-model-button"
                         onClick={() => pullModel(model)}
                         disabled={working === model.id}
-                        aria-label={`Pull ${model.name}`}
+                        aria-label={`Download ${model.name}`}
+                        title="Download"
                       >
                         <Download size={14} />
                       </button>

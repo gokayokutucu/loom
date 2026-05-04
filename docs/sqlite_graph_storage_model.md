@@ -12,10 +12,10 @@ SQLite is Loom's local graph persistence layer. It stores canonical objects, typ
 
 SQLite is not the product semantics. Product semantics remain defined by:
 
-- `loom_graph_model.md`
-- `loom_addressing_and_resolution_model.md`
-- `loom_tree_and_navigation_model.md`
-- `composer_and_reference_model.md`
+- `docs/loom_graph_model.md`
+- `docs/loom_addressing_and_resolution_model.md`
+- `docs/loom_navigation_model.md`
+- `docs/composer_and_reference_model.md`
 
 The web prototype uses a repository adapter seam. Electron can later provide a SQLite-backed implementation of the same repository interface.
 

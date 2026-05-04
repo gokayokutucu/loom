@@ -23,7 +23,7 @@ It is **not** the canonical place for every detailed interaction, graph, node, w
 Detailed semantics and interaction rules should live in companion documents, such as:
 
 - **Loom Graph Model** — canonical objects, edges, promotion rules, fork rules, bookmark rules, and addressability
-- **Loom Tree & Navigation Model** — sidebar tree, node types, commit-flow style lineage, Back/Forward behavior, and history semantics
+- **Loom Navigation Model** — session history, resolved destinations, Weft split/full behavior, Back/Forward behavior, and history semantics
 - **Composer & Reference Model** — inline references, selection-derived reference chips, `#` trigger behavior, drag-to-link, undo/redo, and linked-reference synchronization
 - **Interaction Patterns** — context menus, tooltips, hover actions, selection popovers, Ask flow, archive/delete behavior, and bookmark card behavior
 
@@ -213,7 +213,7 @@ Instead of leaving this information trapped in a transcript, Loom AI exposes it 
 | Search suggestions | Looms, Wefts, titled Q+A, bookmarks, semantic matches   |
 | Site map           | Optional Graph View                                             |
 | Tabs               | Looms                                                   |
-| Commit graph / branch line | Loom tree / lineage view                        |
+| Commit graph / branch line | Weft view / origin projection                   |
 
 This metaphor is not cosmetic. It is the functional core of the UX.
 
@@ -314,24 +314,25 @@ The acceptance model is:
 
 This keeps the system trustworthy.
 
-### 7.4 Loom Tree and Lineage Model
+### 7.4 Weft Model
 
-Loom AI should also support a **Loom tree** / **lineage view** in the sidebar.
-This view should feel closer to a **commit flow** than to a generic folder tree.
+Loom AI supports Wefts as anchored exploration paths.
 
 Key ideas:
 
-- a **Loom** may start from scratch or be forked from an existing response / Loom lineage point
+- a **Loom** may start from scratch
+- a **Weft** is a Loom created from a specific Response
+- a **Weft** stores `originLoomId` and `originResponseId`
+- a **Weft** may open in split view or full view depending on available space
 - a **Loom** may link to other Looms
 - a **Response** may be bookmarked and become Loom-addressable
 - a **Response** may be re-linked elsewhere, creating a new reference node in another flow
-- a **Quick Question** may remain ephemeral or become a durable node if promoted into a Loom/fork
-- a **Weft** should be treated as a lineage/fork path rather than only a visual comment chain
+- a **Quick Question** may remain ephemeral or become a durable node if promoted into a Weft or Bookmark
 
-The sidebar should ultimately be able to render:
+The Weft view should be able to render:
 
 - object type distinctions
-- lineage / fork structure
+- Weft / origin structure
 - commit-like progression
 - easy node-to-node traversal via **Back** and **Forward**
 
@@ -343,12 +344,12 @@ The exact node/edge/window semantics belong in a dedicated graph-model document,
 
 ### 8.1 Browser-First, Not Tree-First
 
-Earlier exploration considered a multi-level lineage sidebar.
+Earlier exploration considered a multi-level Weft sidebar.
 
 The current direction is different:
 
 - the main UX should behave like a browser
-- not like a permanent visible lineage tree
+- not like a permanent visible Weft tree
 - not like a mind map by default
 - not like a visual canvas by default
 
@@ -583,7 +584,7 @@ The following should not define V1:
 - full OpenClaw-like runtime identity
 - plugin marketplace as a launch requirement
 - automatic hard-link generation without user approval
-- complex permanent visible Weft trees as the primary navigation model
+- complex permanent visible Weft graphs as the primary navigation model
 - replacing the underlying AI model layer
 - trying to be an all-in-one productivity suite
 
@@ -599,13 +600,12 @@ The current agreed direction is ChatGPT-like but browser-enhanced.
 
 From left to right:
 
-1. **Sidebar / Loom Tree**
+1. **Sidebar / Loom List**
 
    - chat list and grouped Looms
    - archived items access
    - browser-like navigation surface
-   - long-term support for a **Loom tree / lineage view** with object types
-   - should feel closer to a **commit-flow sidebar** than to a plain file tree
+   - optional support for a **Weft view** with object types and origin structure
 
 2. **Chat Window**
 
@@ -636,7 +636,7 @@ Right side:
 - **Share** button
 - optionally bookmark or graph-view access depending on final placement
 
-Back and Forward are not cosmetic controls. They are expected to support navigation across the Loom tree / lineage graph in a browser-like way.
+Back and Forward are not cosmetic controls. They follow session history across resolved Loom destinations.
 
 ### 11.3 Input Area
 
@@ -663,7 +663,7 @@ V1 must support real addressability.
 At minimum:
 
 - Loom
-- Weft / fork lineage
+- Weft Looms with origin linkage
 - Q+A / Response item
 - Bookmark set / response set
 
@@ -856,6 +856,6 @@ Loom AI should begin with one sharp promise:
 
 > **AI Looms should be navigable like the web.**
 
-This document should remain the **north-star positioning and V1 scope document**. Detailed object semantics, loom-tree rules, lineage behavior, and interaction contracts should be split into dedicated companion documents instead of being continuously appended here.
+This document should remain the **north-star positioning and V1 scope document**. Detailed object semantics, Weft behavior, navigation rules, and interaction contracts should be split into dedicated companion documents instead of being continuously appended here.
 
 If this is executed cleanly, Loom AI can later grow into something much larger. But that larger vision must be earned through a strong V1, not assumed before it exists.

@@ -1,5 +1,6 @@
 export type ModelProviderKind =
   | "ollama"
+  | "mock"
   | "openai"
   | "anthropic"
   | "gemini"
@@ -28,16 +29,32 @@ export interface OllamaSettings {
   lastCheckedAt?: string;
 }
 
+export type RuntimeHealthStatus = "unknown" | "ready" | "not_running" | "degraded";
+
+export interface RuntimeHealthState {
+  ollama_installed: boolean;
+  ollama_running: boolean;
+  models_available: boolean;
+  selected_model_ready: boolean;
+  status: RuntimeHealthStatus;
+  message: string;
+  checkedAt?: string;
+}
+
 export interface ModelProfileSettings {
   quickModelId: string;
   mainModelId: string;
-  activeComposerProfile: ModelProfileId;
+}
+
+export interface DemoProviderSettings {
+  mockResponsesEnabled: boolean;
 }
 
 export interface AIProviderSettings {
   activeProvider: ModelProviderKind;
   ollama: OllamaSettings;
   profiles: ModelProfileSettings;
+  demo: DemoProviderSettings;
 }
 
 export interface ModelProvider {
@@ -98,6 +115,21 @@ const suggestedOllamaModels: ModelDescriptor[] = [
   { id: "nomic-embed-text", name: "Nomic Embed Text", provider: "ollama", installed: false },
 ];
 
+const mockModels: Record<ModelProfileId, ModelDescriptor> = {
+  quick: {
+    id: "mock-quick",
+    name: "Demo Quick Response",
+    provider: "mock",
+    installed: true,
+  },
+  main: {
+    id: "mock-main",
+    name: "Demo Main Response",
+    provider: "mock",
+    installed: true,
+  },
+};
+
 export const defaultAIProviderSettings: AIProviderSettings = {
   activeProvider: "ollama",
   ollama: {
@@ -112,9 +144,30 @@ export const defaultAIProviderSettings: AIProviderSettings = {
   profiles: {
     quickModelId: "llama3.2:3b",
     mainModelId: "llama3.1:8b",
-    activeComposerProfile: "main",
+  },
+  demo: {
+    mockResponsesEnabled: false,
   },
 };
+
+export function canUseMockResponseMode() {
+  const hostname = globalThis.location?.hostname;
+  return (
+    import.meta.env.DEV ||
+    import.meta.env.VITE_ENABLE_MOCK_RESPONSES === "true" ||
+    hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1"
+  );
+}
+
+export function isMockResponseModeEnabled(settings?: Pick<AIProviderSettings, "demo">) {
+  return (
+    canUseMockResponseMode() &&
+    (import.meta.env.VITE_ENABLE_MOCK_RESPONSES === "true" ||
+      Boolean(settings?.demo.mockResponsesEnabled))
+  );
+}
 
 function mergeSettings(value: Partial<AIProviderSettings>): AIProviderSettings {
   return {
@@ -130,6 +183,10 @@ function mergeSettings(value: Partial<AIProviderSettings>): AIProviderSettings {
     profiles: {
       ...defaultAIProviderSettings.profiles,
       ...value.profiles,
+    },
+    demo: {
+      ...defaultAIProviderSettings.demo,
+      ...value.demo,
     },
   };
 }
@@ -165,6 +222,7 @@ export function getInstalledModels(settings: AIProviderSettings) {
 }
 
 export function getProfileModel(settings: AIProviderSettings, profile: ModelProfileId) {
+  if (isMockResponseModeEnabled(settings)) return mockModels[profile];
   const modelId =
     profile === "quick"
       ? settings.profiles.quickModelId
@@ -177,12 +235,6 @@ export function getProfileModel(settings: AIProviderSettings, profile: ModelProf
       installed: false,
     }
   );
-}
-
-export function getComposerModelLabel(settings: AIProviderSettings) {
-  const profile = settings.profiles.activeComposerProfile;
-  const model = getProfileModel(settings, profile);
-  return `${profile === "quick" ? "Quick" : "Main"} · ${model.name}`;
 }
 
 function normalizeBaseUrl(value: string) {
@@ -199,18 +251,50 @@ function providerUnavailableMessage(baseUrl: string) {
   return `Ollama is not reachable at ${baseUrl}. Start Ollama locally or update the base URL in AI Providers.`;
 }
 
+export function mapOllamaError(error: unknown): RuntimeHealthStatus {
+  if (error instanceof DOMException && error.name === "AbortError") return "degraded";
+  if (error instanceof TypeError) return "not_running";
+  if (error instanceof Error && /ECONNREFUSED|Failed to fetch|NetworkError/i.test(error.message)) {
+    return "not_running";
+  }
+  return "degraded";
+}
+
+export function runtimeHealthMessage(status: RuntimeHealthStatus, baseUrl: string) {
+  if (status === "ready") return "Ollama runtime is ready.";
+  if (status === "not_running") {
+    return `Ollama is not reachable at ${baseUrl}. Install or start Ollama, then test the runtime.`;
+  }
+  if (status === "degraded") return "Ollama responded slowly or unexpectedly. Runtime is degraded.";
+  return "Runtime has not been tested yet.";
+}
+
+export async function fetchWithTimeout(
+  input: RequestInfo | URL,
+  init: RequestInit = {},
+  timeoutMs = 8000
+) {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
 export class OllamaProvider implements ModelProvider {
   kind: ModelProviderKind = "ollama";
   label = "Ollama";
 
   async testConnection(settings: AIProviderSettings) {
-    const response = await fetch(`${normalizeBaseUrl(settings.ollama.baseUrl)}/api/version`);
+    const response = await fetchWithTimeout(`${normalizeBaseUrl(settings.ollama.baseUrl)}/api/version`);
     if (!response.ok) throw new Error(`Ollama returned ${response.status}`);
     return true;
   }
 
   async refreshModels(settings: AIProviderSettings) {
-    const response = await fetch(`${normalizeBaseUrl(settings.ollama.baseUrl)}/api/tags`);
+    const response = await fetchWithTimeout(`${normalizeBaseUrl(settings.ollama.baseUrl)}/api/tags`);
     if (!response.ok) throw new Error(`Ollama returned ${response.status}`);
     const data = (await response.json()) as {
       models?: Array<{
@@ -233,11 +317,11 @@ export class OllamaProvider implements ModelProvider {
   }
 
   async pullModel(settings: AIProviderSettings, modelId: string) {
-    const response = await fetch(`${normalizeBaseUrl(settings.ollama.baseUrl)}/api/pull`, {
+    const response = await fetchWithTimeout(`${normalizeBaseUrl(settings.ollama.baseUrl)}/api/pull`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model: modelId, stream: false }),
-    });
+    }, 120000);
     if (!response.ok) throw new Error(`Ollama returned ${response.status}`);
   }
 
@@ -258,7 +342,7 @@ export class OllamaProvider implements ModelProvider {
     };
 
     try {
-      const chatResponse = await fetch(`${baseUrl}/api/chat`, {
+      const chatResponse = await fetchWithTimeout(`${baseUrl}/api/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -282,7 +366,15 @@ export class OllamaProvider implements ModelProvider {
         };
       }
 
-      const generateResponse = await fetch(`${baseUrl}/api/generate`, {
+      if (chatResponse.status === 404) {
+        throw new ModelProviderError(
+          "ollama",
+          "model_missing",
+          `${request.modelId} is not installed. Pull it from AI Providers, then try again.`
+        );
+      }
+
+      const generateResponse = await fetchWithTimeout(`${baseUrl}/api/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -294,6 +386,14 @@ export class OllamaProvider implements ModelProvider {
           options,
         }),
       });
+
+      if (generateResponse.status === 404) {
+        throw new ModelProviderError(
+          "ollama",
+          "model_missing",
+          `${request.modelId} is not installed. Pull it from AI Providers, then try again.`
+        );
+      }
 
       if (!generateResponse.ok) {
         throw new ModelProviderError(
@@ -311,18 +411,75 @@ export class OllamaProvider implements ModelProvider {
       };
     } catch (error) {
       if (error instanceof ModelProviderError) throw error;
+      const mapped = mapOllamaError(error);
       throw new ModelProviderError(
         "ollama",
-        "provider_unavailable",
-        providerUnavailableMessage(baseUrl)
+        mapped === "degraded" ? "request_failed" : "provider_unavailable",
+        mapped === "degraded"
+          ? "Ollama runtime timed out or returned an unexpected response."
+          : providerUnavailableMessage(baseUrl)
       );
     }
   }
 }
 
+export class MockModelProvider implements ModelProvider {
+  kind: ModelProviderKind = "mock";
+  label = "Demo Response";
+
+  async testConnection() {
+    return true;
+  }
+
+  async refreshModels() {
+    return Object.values(mockModels);
+  }
+
+  async pullModel() {
+    return undefined;
+  }
+
+  async execute(_settings: AIProviderSettings, request: ModelExecutionRequest) {
+    const text =
+      request.profile === "quick"
+        ? this.quickResponse(request)
+        : this.mainResponse(request);
+    return {
+      provider: this.kind,
+      modelId: request.modelId,
+      text,
+    };
+  }
+
+  private quickResponse(request: ModelExecutionRequest) {
+    const anchor = request.context?.find((item) => item.startsWith("Response title:"));
+    return [
+      "Demo quick answer:",
+      anchor ? `This stays anchored to ${anchor.replace("Response title:", "").trim()}.` : "This stays anchored to the selected Loom context.",
+      "Use this to validate the Quick Question flow without a live model.",
+    ].join(" ");
+  }
+
+  private mainResponse(request: ModelExecutionRequest) {
+    const prompt = request.prompt.trim();
+    const referenceCount = request.context?.length ?? 0;
+    return [
+      "Demo response generated by the mock provider.",
+      "",
+      prompt
+        ? `It received the prompt: \"${prompt.slice(0, 140)}${prompt.length > 140 ? "..." : ""}\".`
+        : "It received an empty prompt and continued from the attached Loom references.",
+      "",
+      "- This deterministic response exercises the same append-message path as a real provider.",
+      `- Attached Loom references visible to the provider: ${referenceCount}.`,
+      "- Replace this by disabling demo responses and using a configured runtime.",
+    ].join("\n");
+  }
+}
+
 class FutureProvider implements ModelProvider {
   constructor(
-    readonly kind: Exclude<ModelProviderKind, "ollama">,
+    readonly kind: Exclude<ModelProviderKind, "ollama" | "mock">,
     readonly label: string
   ) {}
 
@@ -357,6 +514,7 @@ class FutureProvider implements ModelProvider {
 
 export function getModelProvider(kind: ModelProviderKind): ModelProvider {
   if (kind === "ollama") return new OllamaProvider();
+  if (kind === "mock") return new MockModelProvider();
   if (kind === "openai") return new FutureProvider("openai", "OpenAI");
   if (kind === "anthropic") return new FutureProvider("anthropic", "Anthropic Claude");
   if (kind === "gemini") return new FutureProvider("gemini", "Google Gemini");

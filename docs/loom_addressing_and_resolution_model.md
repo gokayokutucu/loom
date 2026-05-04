@@ -21,10 +21,10 @@ It answers these questions:
 This document is the addressing truth layer.
 It complements, but does not replace:
 
-- `loom_graph_model.md`
-- `loom_tree_and_navigation_model.md`
-- `composer_and_reference_model.md`
-- `interaction_patterns.md`
+- `docs/loom_graph_model.md`
+- `docs/loom_navigation_model.md`
+- `docs/composer_and_reference_model.md`
+- `docs/interaction_patterns.md`
 
 ---
 
@@ -289,34 +289,39 @@ It is a derived canonical object pointing back to its source.
 
 ---
 
-## 5.5 Weft / Lineage Path
+## 5.5 Weft
 
-User-facing term: **Weft**
+A Weft is addressable as a Loom.
 
-But in Loom’s deeper model, a Weft is usually better treated as a **lineage/fork projection** rather than a simple owner object.
+A Weft is:
 
-This creates an important rule:
-
-### Rule
-
-A Weft/lineage path is not automatically a canonical stable object by default.
+- an anchored exploration path
+- a new Loom created from a specific Response
+- a Loom with `originLoomId` and `originResponseId`
 
 ### Rule
 
-A Weft becomes durable/user-addressable only when explicitly promoted/bookmarked or otherwise materialized into a stable object.
+The stable object identity is the Weft Loom ID.
 
-That means:
+### Rule
 
-- internal projection view may exist without a first-class public address
-- promoted Weft lineage may get a Bookmark-backed or object-backed address
+Origin linkage is metadata, not the address path.
 
-Example promoted lineage address:
+That means a Weft address should resolve the Loom object first, then apply any requested window/view projection.
+
+Canonical Weft address:
 
 ```text
-loom://o/bookmark/BMK_01J_WEFT...
+loom://o/loom/LOM_01J_WEFT...
 ```
 
-or
+Human-readable Weft alias:
+
+```text
+loom://research-synthesis/evidence-map-weft?id=LOM_01J_WEFT...
+```
+
+Bookmark-backed Weft promotion:
 
 ```text
 loom://wefts/citation-reuse-and-provenance?id=BMK_01J_WEFT...
@@ -468,7 +473,7 @@ Object identity and view selection must be separate concepts.
 Examples:
 
 ```text
-loom://o/response/RSP_01J...?view=lineage
+loom://o/response/RSP_01J...?view=weft
 loom://o/response/RSP_01J...?panel=wefts
 loom://o/response/RSP_01J...?window=reference
 ```
@@ -604,7 +609,7 @@ Do **not** use content hash as the only canonical identity for Looms or Response
 
 Because Loom objects carry more than raw content:
 
-- lineage
+- Weft origin linkage
 - reuse relationships
 - promotion state
 - bookmark titles
@@ -664,7 +669,7 @@ loom://o/response/RSP_01J8DEF...?snapshot=sha256:abcd1234...
 ## 14.7 Object with View Hint
 
 ```text
-loom://o/response/RSP_01J8DEF...?view=lineage
+loom://o/response/RSP_01J8DEF...?view=weft
 ```
 
 ---
@@ -754,6 +759,6 @@ The React app must not call SQLite directly. It should call a repository/resolve
 
 ### 18.3 Window-aware Resolution
 
-Window selectors such as `?view=lineage` or `?window=reference` never replace object identity.
+Window selectors such as `?view=weft` or `?window=reference` never replace object identity.
 
 Resolution always targets an object first. The requested window is applied second. If the object exists but the requested projection is invalid, the result is `window_invalid`, not `not_found`.

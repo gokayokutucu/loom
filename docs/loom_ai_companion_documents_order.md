@@ -2,7 +2,7 @@
 
 ## Purpose
 
-This index defines the recommended reading and authoring order for the companion documents that sit next to `loom_ai_product_positioning_and_v_1_scope.md`.
+This index defines the recommended reading and authoring order for the companion documents that sit next to `docs/loom_ai_product_positioning_and_v_1_scope.md`.
 
 The positioning document remains the **north-star** document.
 The documents below define the deeper product semantics and interaction rules.
@@ -32,8 +32,8 @@ The documents below define the deeper product semantics and interaction rules.
    - Runtime ledger events
    - Recursive CTE query patterns
 
-4. **Loom Tree and Navigation Model**
-   - Sidebar tree
+4. **Loom Navigation Model**
+   - Browser navigation surface
    - Commit-flow / lineage view
    - Node rendering
    - Back / Forward semantics
@@ -65,11 +65,11 @@ The documents below define the deeper product semantics and interaction rules.
 
 ## Recommended Writing Rule
 
-- Keep `loom_ai_product_positioning_and_v_1_scope.md` high-level.
+- Keep `docs/loom_ai_product_positioning_and_v_1_scope.md` high-level.
 - Put structural truth in **Graph Model**.
 - Put identity and URL truth in **Loom Addressing and Resolution Model**.
 - Put database persistence truth in **SQLite Graph Storage Model**.
-- Put navigation truth in **Loom Tree and Navigation Model**.
+- Put navigation truth in **Loom Navigation Model**.
 - Put editor/composer truth in **Composer and Reference Model**.
 - Put reusable UX behavior in **Interaction Patterns**.
 - Put durable architecture decisions in **Loom Architecture Ledger**.

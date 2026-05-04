@@ -20,6 +20,25 @@ Do NOT reintroduce obsolete container, lineage, composer, or promotion labels.
 
 ---
 
+## Documentation Source of Truth
+
+All architectural and product decisions are defined under:
+
+`docs/`
+
+Agents MUST consult relevant documents before implementing:
+
+- Loom model
+- Resolver behavior
+- Graph persistence
+- Composer behavior
+- Navigation rules
+
+If implementation conflicts with docs:
+→ docs are the source of truth
+
+---
+
 ## 2) Architecture Boundaries (Mandatory)
 
 - Resolver, graph model, and addressing logic live in services layer

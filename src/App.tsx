@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+  type RefObject,
+} from "react";
 import {
   Archive,
   ArrowUp,
@@ -8,8 +17,10 @@ import {
   BookOpen,
   Boxes,
   Brain,
+  Check,
   Clock3,
   Compass,
+  Copy,
   Code2,
   Cpu,
   Database,
@@ -26,12 +37,14 @@ import {
   Link2,
   Lock,
   Map,
+  Maximize2,
   MessageSquare,
   Mic,
   MoreHorizontal,
   Network,
   PanelLeft,
   Palette,
+  Paperclip,
   Plus,
   Puzzle,
   Rocket,
@@ -64,7 +77,12 @@ import {
 import { browserHostShell } from "./services/hostShell";
 import {
   createHistoryEntry,
+  getBackTraversal,
+  getForwardTraversal,
+  historyEntryMatchesDestination,
+  jumpToTraversalIndex,
   markHistoryOlder,
+  type NavigationTraversalEntry,
   type NavigationDirection,
 } from "./services/navigation";
 import {
@@ -80,15 +98,18 @@ import {
   writeRuntimeBookmarks,
 } from "./services/loomRuntimeGraph";
 import {
-  getComposerModelLabel,
   getProfileModel,
+  isMockResponseModeEnabled,
   readAIProviderSettings,
   runModelProfileRequest,
   writeAIProviderSettings,
   type AIProviderSettings,
   type ModelEffort,
   type ModelProfileId,
+  type RuntimeHealthState,
 } from "./services/modelProviders";
+import { useRuntimeHealth } from "./hooks/useRuntimeHealth";
+import { useSidebarDnD } from "./hooks/useSidebarDnD";
 import { AppShell } from "./components/AppShell";
 import { AddressBar } from "./components/AddressBar";
 import { AIProviderSettingsModal } from "./components/AIProviderSettings";
@@ -110,6 +131,7 @@ import type {
   Conversation,
   HistoryEntry,
   LoomLink,
+  LoomNavigationDestination,
   LoomObjectType,
   LoomResolutionResult,
   ResponseItem,
@@ -169,6 +191,7 @@ type AskState = AskPopupState;
 
 interface SelectionAskState {
   response: ResponseItem;
+  draftKey: string;
   selectedText: string;
   x: number;
   y: number;
@@ -219,11 +242,29 @@ interface MeasuredLoomRow {
   centerY: number;
 }
 
-type ComposerReferenceGroup = "Conversations" | "Looms" | "Bookmarks";
+type ComposerReferenceGroup = "Open Looms" | "Responses" | "Bookmarks";
 
 interface ComposerReferenceOption extends LoomLink {
   group: ComposerReferenceGroup;
   subtitle: string;
+}
+
+type AttachContentTab = "all" | "bookmarks" | "history" | "openLooms" | "responses" | "files";
+
+type AttachContentSource = "bookmark" | "history" | "openLoom" | "response";
+
+interface AttachContentItem extends LoomLink {
+  source: AttachContentSource;
+  subtitle: string;
+  keywords: string[];
+}
+
+interface ComposerAttachment {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  lastModified: number;
 }
 
 interface MentionState {
@@ -237,6 +278,7 @@ interface MentionState {
 interface ComposerDraft {
   html: string;
   links: LoomLink[];
+  attachments?: ComposerAttachment[];
 }
 
 type ComposerEditIntent =
@@ -264,6 +306,29 @@ interface ComposerHistoryState {
 
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { html: "", links: [] };
 
+const attachContentTabs: Array<{
+  id: AttachContentTab;
+  label: string;
+  Icon: LucideIcon;
+}> = [
+  { id: "all", label: "All", Icon: Boxes },
+  { id: "bookmarks", label: "Bookmarks", Icon: Bookmark },
+  { id: "history", label: "History", Icon: History },
+  { id: "openLooms", label: "Open Looms", Icon: Globe2 },
+  { id: "responses", label: "Responses", Icon: FileText },
+  { id: "files", label: "Files", Icon: Paperclip },
+];
+
+function formatAttachmentSize(size: number) {
+  if (size < 1024) return `${size} B`;
+  if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
+  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+const EPHEMERAL_DRAFT_ID = "draft-new-conversation";
+
+const LOOM_LINK_MIME = "application/loom-link";
+
 const seedComposerLink: LoomLink = {
   id: "seed-link",
   type: "response",
@@ -273,11 +338,17 @@ const seedComposerLink: LoomLink = {
 };
 
 const initialNavigationDestination: LoomLink = {
-  id: "r-address-bar",
-  type: "response",
-  title: "Address Bar as local AI web navigator",
-  path: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
-  badge: "Response",
+  id: EPHEMERAL_DRAFT_ID,
+  type: "conversation",
+  title: "New conversation",
+  path: "loom://drafts/new-conversation",
+  badge: "Draft",
+};
+
+const initialResolvedNavigationDestination: LoomNavigationDestination = {
+  loomId: EPHEMERAL_DRAFT_ID,
+  mode: "full",
+  source: "userNavigation",
 };
 
 const initialForkRecords: ForkRecord[] = [
@@ -390,10 +461,6 @@ const initialForkRecords: ForkRecord[] = [
 
 const seedComposerText = `Use the linked Loom references to draft the V1 onboarding prompt for a power user. <span class="inline-loom-token" contenteditable="false" draggable="true" data-loom-id="${seedComposerLink.id}" data-loom-path="${seedComposerLink.path}" data-loom-title="${seedComposerLink.title}" data-loom-type="${seedComposerLink.type}" data-loom-badge="${seedComposerLink.badge}">[[${seedComposerLink.title}]]</span>`;
 
-const EPHEMERAL_DRAFT_ID = "draft-new-conversation";
-
-const LOOM_LINK_MIME = "application/loom-link";
-
 const typeLabel: Record<LoomObjectType, string> = {
   conversation: "Loom",
   loom: "Weft",
@@ -407,6 +474,22 @@ function displayObjectTypeLabel(label?: string) {
   if (label === "Conversation") return "Loom";
   if (label === "Loom") return "Weft";
   return label;
+}
+
+function normalizeAddressBarTitle(value?: string) {
+  return value?.replace(/\s+/g, " ").trim() ?? "";
+}
+
+function formatAddressBarTitle(activeLoom?: Pick<Conversation, "title"> | null, destinationTitle?: string) {
+  const loomTitle = normalizeAddressBarTitle(activeLoom?.title);
+  const targetTitle = normalizeAddressBarTitle(destinationTitle);
+
+  if (!loomTitle && !targetTitle) return "Archive / No active conversation";
+  if (!loomTitle) return targetTitle;
+  if (!targetTitle || loomTitle.toLocaleLowerCase() === targetTitle.toLocaleLowerCase()) {
+    return loomTitle;
+  }
+  return `${loomTitle} / ${targetTitle}`;
 }
 
 function setLoomDragPayload(event: React.DragEvent, link: LoomLink) {
@@ -440,9 +523,12 @@ function makeInitialTabGroups(conversations: Conversation[]): TabGroup[] {
 
 function App() {
   const addressBarRef = useRef<HTMLDivElement | null>(null);
+  const workspaceRef = useRef<HTMLElement | null>(null);
   const transcriptRef = useRef<HTMLElement | null>(null);
+  const originTranscriptRef = useRef<HTMLElement | null>(null);
   const composerFocusRef = useRef<(() => void) | null>(null);
   const pendingScrollPathRef = useRef<string | null>(null);
+  const pendingScrollDestinationRef = useRef<LoomNavigationDestination | null>(null);
   const [conversations, setConversations] =
     useState<Conversation[]>(seedConversations);
   const [conversationResponses, setConversationResponses] = useState<
@@ -460,29 +546,40 @@ function App() {
   const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [archived, setArchived] = useState<Conversation[]>([]);
-  const [draftConversation, setDraftConversation] = useState<Conversation | null>(null);
-  const [activeConversationId, setActiveConversationId] = useState(
-    seedConversations[0].id
-  );
-  const [activeObjectTitle, setActiveObjectTitle] = useState(
-    "Address Bar as local AI web navigator"
-  );
-  const [activePanel, setActivePanel] = useState<ActivePanel>("bookmarks");
+  const [draftConversation, setDraftConversation] = useState<Conversation | null>({
+    id: EPHEMERAL_DRAFT_ID,
+    title: "New conversation",
+    path: "loom://drafts/new-conversation",
+    folder: "Drafts",
+    summary: "Clean unsaved conversation draft.",
+    iconKey: "compass",
+  });
+  const [activeConversationId, setActiveConversationId] = useState(EPHEMERAL_DRAFT_ID);
+  const [activeObjectTitle, setActiveObjectTitle] = useState("New conversation");
+  const [activePanel, setActivePanel] = useState<ActivePanel>(null);
+  const [activeSplitPanel, setActiveSplitPanel] = useState<"origin" | "weft">("weft");
+  const [splitPanelMenu, setSplitPanelMenu] = useState<{
+    panel: "origin" | "weft";
+    x: number;
+    y: number;
+  } | null>(null);
   const [graphMode, setGraphMode] = useState(false);
   const [composerDrafts, setComposerDrafts] = useState<Record<string, ComposerDraft>>({
     [seedConversations[0].id]: {
       html: seedComposerText,
       links: [seedComposerLink],
     },
+    [EPHEMERAL_DRAFT_ID]: { html: "", links: [] },
   });
   const [bookmarks, setBookmarks] = useState<BookmarkItem[]>(() =>
     readRuntimeBookmarks(seedBookmarks)
   );
   const [history, setHistory] = useState<HistoryEntry[]>(initialHistory);
   const [navigationStack, setNavigationStack] = useState<HistoryEntry[]>([
-    createHistoryEntry(initialNavigationDestination),
+    createHistoryEntry(initialNavigationDestination, initialResolvedNavigationDestination),
   ]);
   const [navigationIndex, setNavigationIndex] = useState(0);
+  const [workspaceWidth, setWorkspaceWidth] = useState(0);
   const [addressFocused, setAddressFocused] = useState(false);
   const [addressQuery, setAddressQuery] = useState("");
   const [addressFeedback, setAddressFeedback] =
@@ -520,6 +617,35 @@ function App() {
     ? conversationResponses[activeConversation.id] ?? []
     : [];
 
+  const currentNavigationDestination =
+    navigationStack[navigationIndex]?.navigationDestination ??
+    initialResolvedNavigationDestination;
+
+  const activeWeftOrigin = getWeftOrigin(activeConversationId);
+  const originConversation = activeWeftOrigin
+    ? conversations.find((conversation) => conversation.id === activeWeftOrigin.originLoomId)
+    : undefined;
+  const originResponses = originConversation
+    ? conversationResponses[originConversation.id] ?? []
+    : [];
+  const minimumWeftPanelWidth = 520;
+  const splitPanelGap = 1;
+  const canShowWeftSplit =
+    workspaceWidth > 0 &&
+    Math.floor((workspaceWidth - splitPanelGap) / 2) >= minimumWeftPanelWidth;
+  const showWeftSplit =
+    Boolean(activeWeftOrigin && originConversation) &&
+    currentNavigationDestination.mode === "split" &&
+    canShowWeftSplit;
+  const focusedSplitConversation =
+    showWeftSplit && activeSplitPanel === "origin" && originConversation
+      ? originConversation
+      : activeConversation;
+  const focusedSplitResponses =
+    focusedSplitConversation && focusedSplitConversation.id !== draftConversation?.id
+      ? conversationResponses[focusedSplitConversation.id] ?? []
+      : [];
+
   const activeDraftKey = activeConversation?.id ?? EPHEMERAL_DRAFT_ID;
   const activeComposerDraft = composerDrafts[activeDraftKey] ?? EMPTY_COMPOSER_DRAFT;
   const isNewConversationDraft = activeConversationId === EPHEMERAL_DRAFT_ID;
@@ -534,12 +660,19 @@ function App() {
     );
   }, [addressQuery]);
 
-  const currentLocation = activeConversation
-    ? `${activeConversation.title} / ${activeObjectTitle}`
-    : "Archive / No active conversation";
+  const currentLocation = formatAddressBarTitle(focusedSplitConversation, activeObjectTitle);
 
   const currentActiveDestination = useMemo<LoomLink>(() => {
-    const activeResponse = activeResponses.find(
+    if (showWeftSplit && focusedSplitConversation) {
+      return {
+        id: focusedSplitConversation.id,
+        type: getWeftOrigin(focusedSplitConversation.id) ? "loom" : "conversation",
+        title: focusedSplitConversation.title,
+        path: focusedSplitConversation.path,
+        badge: getWeftOrigin(focusedSplitConversation.id) ? typeLabel.loom : typeLabel.conversation,
+      };
+    }
+    const activeResponse = focusedSplitResponses.find(
       (response) =>
         (responseTitleOverrides[response.id] ?? response.title) === activeObjectTitle
     );
@@ -552,13 +685,13 @@ function App() {
         badge: "Response",
       };
     }
-    if (activeConversation) {
+    if (focusedSplitConversation) {
       return {
-        id: activeConversation.id,
-        type: "conversation",
-        title: activeConversation.title,
-        path: activeConversation.path,
-        badge: typeLabel.conversation,
+        id: focusedSplitConversation.id,
+        type: getWeftOrigin(focusedSplitConversation.id) ? "loom" : "conversation",
+        title: focusedSplitConversation.title,
+        path: focusedSplitConversation.path,
+        badge: getWeftOrigin(focusedSplitConversation.id) ? typeLabel.loom : typeLabel.conversation,
       };
     }
     return {
@@ -568,7 +701,13 @@ function App() {
       path: "loom://archive",
       badge: "Recent",
     };
-  }, [activeConversation, activeObjectTitle, activeResponses, responseTitleOverrides]);
+  }, [
+    activeObjectTitle,
+    focusedSplitConversation,
+    focusedSplitResponses,
+    responseTitleOverrides,
+    showWeftSplit,
+  ]);
 
   const composerReferenceOptions = useMemo<ComposerReferenceOption[]>(() => {
     const conversationOptions = conversations.map((conversation) => ({
@@ -577,7 +716,7 @@ function App() {
       title: conversation.title,
       path: conversation.path,
       badge: typeLabel.conversation,
-      group: "Conversations" as const,
+      group: "Open Looms" as const,
       subtitle: conversation.folder,
     }));
     const loomOptions = Object.values(conversationResponses)
@@ -588,8 +727,8 @@ function App() {
         title: response.title,
         path: response.address,
         badge: typeLabel.response,
-        group: "Looms" as const,
-        subtitle: "Q+A response",
+        group: "Responses" as const,
+        subtitle: "Response",
       }));
     const bookmarkOptions = bookmarks.map((bookmark) => ({
       ...bookmark,
@@ -600,6 +739,46 @@ function App() {
 
     return [...conversationOptions, ...loomOptions, ...bookmarkOptions];
   }, [bookmarks, conversationResponses, conversations]);
+
+  const attachContentItems = useMemo<AttachContentItem[]>(() => {
+    const bookmarkItems = bookmarks.map((bookmark) => ({
+      ...bookmark,
+      title: bookmark.editableTitle,
+      source: "bookmark" as const,
+      subtitle: bookmark.path,
+      keywords: ["Bookmark", bookmark.lastUsed],
+    }));
+    const historyItems = history.map((entry) => ({
+      ...entry,
+      source: "history" as const,
+      subtitle: entry.path,
+      keywords: ["Loom History", entry.visitedAt],
+    }));
+    const openLoomItems = conversations.map((conversation) => ({
+      id: conversation.id,
+      type: getWeftOrigin(conversation.id) ? "loom" as const : "conversation" as const,
+      title: conversation.title,
+      path: conversation.path,
+      badge: getWeftOrigin(conversation.id) ? typeLabel.loom : typeLabel.conversation,
+      source: "openLoom" as const,
+      subtitle: conversation.folder,
+      keywords: ["Open Loom", conversation.summary],
+    }));
+    const responseItems = Object.values(conversationResponses)
+      .flat()
+      .map((response) => ({
+        id: response.id,
+        type: "response" as const,
+        title: response.title,
+        path: response.address,
+        badge: typeLabel.response,
+        source: "response" as const,
+        subtitle: response.question,
+        keywords: ["Response", ...response.answer],
+      }));
+
+    return [...bookmarkItems, ...historyItems, ...openLoomItems, ...responseItems];
+  }, [bookmarks, conversationResponses, conversations, forkRecords, history]);
 
   const loomGraphRepository = useMemo(
     () =>
@@ -615,10 +794,40 @@ function App() {
     writeRuntimeBookmarks(bookmarks);
   }, [bookmarks]);
 
+  useLayoutEffect(() => {
+    const workspace = workspaceRef.current;
+    if (!workspace) return;
+    const updateWorkspaceWidth = () => {
+      setWorkspaceWidth(workspace.getBoundingClientRect().width);
+    };
+    updateWorkspaceWidth();
+    const observer = new ResizeObserver(updateWorkspaceWidth);
+    observer.observe(workspace);
+    return () => observer.disconnect();
+  }, []);
+
   function saveProviderSettings(nextSettings: AIProviderSettings) {
     setProviderSettings(nextSettings);
     writeAIProviderSettings(nextSettings);
   }
+
+  const composerRuntimeHealth = useRuntimeHealth(
+    providerSettings,
+    "main",
+    saveProviderSettings
+  );
+  const mockResponsesEnabled = isMockResponseModeEnabled(providerSettings);
+  const activeComposerRuntimeHealth = mockResponsesEnabled
+    ? {
+        ...composerRuntimeHealth,
+        ollama_installed: true,
+        ollama_running: true,
+        models_available: true,
+        selected_model_ready: true,
+        status: "ready" as const,
+        message: "Demo responses are enabled for this development session.",
+      }
+    : composerRuntimeHealth;
 
   function plainTextFromDraft(draft: ComposerDraft) {
     return draft.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
@@ -645,6 +854,21 @@ function App() {
     return error instanceof Error ? error.message : "The selected model provider failed.";
   }
 
+  function modelReadinessMessage(profile: ModelProfileId) {
+    if (mockResponsesEnabled) return null;
+    const model = getProfileModel(providerSettings, profile);
+    if (providerSettings.ollama.lastConnectionStatus !== "connected") {
+      return "Ollama is not ready. Open AI Providers and test the runtime.";
+    }
+    if (!providerSettings.ollama.models.some((item) => item.installed)) {
+      return "No Ollama models are installed. Pull a model in AI Providers.";
+    }
+    if (!model.installed) {
+      return `${model.name} is not installed. Download it in AI Providers.`;
+    }
+    return null;
+  }
+
   function isDestinationBookmarked(destination: LoomLink) {
     const destinationResolution = resolveLoomAddress(destination.path, loomGraphRepository);
     const destinationObjectId =
@@ -663,6 +887,104 @@ function App() {
     });
   }
 
+  function getWeftOrigin(loomId: string) {
+    const record = forkRecords.find((item) => item.childConversationId === loomId);
+    return record
+      ? {
+          originLoomId: record.parentConversationId,
+          originResponseId: record.parentResponseId,
+        }
+      : undefined;
+  }
+
+  function findLoomByPath(path: string) {
+    return conversations.find((item) => path === item.path || path.startsWith(`${item.path}/`));
+  }
+
+  function findResponseInLoom(loomId: string, responseId?: string) {
+    if (!responseId) return undefined;
+    return (conversationResponses[loomId] ?? []).find((response) => response.id === responseId);
+  }
+
+  function findResponseByPath(loomId: string, path: string) {
+    return (conversationResponses[loomId] ?? []).find((response) => response.address === path);
+  }
+
+  function lastResponseInLoom(loomId: string) {
+    const responses = conversationResponses[loomId] ?? [];
+    return responses[responses.length - 1];
+  }
+
+  function loomLinkForId(loomId: string): LoomLink {
+    const loom =
+      loomId === draftConversation?.id
+        ? draftConversation
+        : conversations.find((item) => item.id === loomId) ?? activeConversation;
+    return {
+      id: loom?.id ?? loomId,
+      type: getWeftOrigin(loomId) ? "loom" : "conversation",
+      title: loom?.title ?? "Loom",
+      path: loom?.path ?? `loom://unknown/${loomId}`,
+      badge: getWeftOrigin(loomId) ? typeLabel.loom : typeLabel.conversation,
+    };
+  }
+
+  function responseLinkForNavigation(
+    loomId: string,
+    response: ResponseItem,
+    badge = typeLabel.response
+  ): LoomLink {
+    return {
+      id: response.id,
+      type: "response",
+      title: responseTitleOverrides[response.id] ?? response.title,
+      path: response.address,
+      badge,
+    };
+  }
+
+  function linkForNavigationDestination(destination: LoomNavigationDestination): LoomLink {
+    if (destination.scrollMode === "lastResponse") {
+      const latest = lastResponseInLoom(destination.loomId);
+      if (latest) return responseLinkForNavigation(destination.loomId, latest);
+    }
+    if (destination.scrollTargetResponseId) {
+      const target = findResponseInLoom(destination.loomId, destination.scrollTargetResponseId);
+      if (target) return responseLinkForNavigation(destination.loomId, target);
+    }
+    return loomLinkForId(destination.loomId);
+  }
+
+  function navigationDestinationForLink(
+    destination: LoomLink | AddressSuggestion | HistoryEntry,
+    source: LoomNavigationDestination["source"],
+    overrides: Partial<LoomNavigationDestination> = {}
+  ): LoomNavigationDestination {
+    const loom = findLoomByPath(destination.path);
+    const loomId = overrides.loomId ?? loom?.id ?? destination.id;
+    const response = loom ? findResponseByPath(loom.id, destination.path) : undefined;
+    const origin = getWeftOrigin(loomId);
+    const mode = overrides.mode ?? "full";
+    const scrollTargetResponseId =
+      overrides.scrollTargetResponseId ?? response?.id ?? undefined;
+    const scrollMode =
+      overrides.scrollMode ?? (response ? "exact" : undefined);
+
+    return {
+      loomId,
+      mode,
+      originLoomId: overrides.originLoomId ?? origin?.originLoomId,
+      originResponseId: overrides.originResponseId ?? origin?.originResponseId,
+      scrollTargetResponseId,
+      scrollMode,
+      source,
+    };
+  }
+
+  function withBackForwardSource(destination: LoomNavigationDestination): LoomNavigationDestination {
+    return { ...destination, source: "backForward" };
+  }
+
   useEffect(() => {
     function handlePointerDown(event: PointerEvent) {
       if (
@@ -676,6 +998,12 @@ function App() {
       }
       if (contextMenu) {
         setContextMenu(null);
+      }
+      if (splitPanelMenu) {
+        const target = event.target as HTMLElement;
+        if (!target.closest(".split-panel-menu") && !target.closest(".split-panel-control")) {
+          setSplitPanelMenu(null);
+        }
       }
       if (selectionAskState) {
         const target = event.target as HTMLElement;
@@ -692,6 +1020,7 @@ function App() {
         setAddressQuery("");
         setAddressFeedback(null);
         setContextMenu(null);
+        setSplitPanelMenu(null);
         if (selectionAskState || askState) closeSelectionAskFlow();
       }
     }
@@ -702,7 +1031,7 @@ function App() {
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [addressFocused, askState, contextMenu, selectionAskState]);
+  }, [addressFocused, askState, contextMenu, selectionAskState, splitPanelMenu]);
 
   function normalizeResolvedDestination(
     destination: LoomLink | AddressSuggestion | HistoryEntry
@@ -765,11 +1094,33 @@ function App() {
     return { ok: false, resolution };
   }
 
-  function restoreDestination(destination: LoomLink | AddressSuggestion | HistoryEntry) {
+  function restoreDestination(
+    destination: LoomLink | AddressSuggestion | HistoryEntry,
+    navigationDestination?: LoomNavigationDestination
+  ) {
     const resolvedDestination = normalizeResolvedDestination(destination);
-    setActiveObjectTitle(resolvedDestination.title);
-    const conversation = conversations.find((item) =>
-      resolvedDestination.path.startsWith(item.path)
+    const resolvedNavigationDestination =
+      navigationDestination ??
+      ("navigationDestination" in resolvedDestination
+        ? resolvedDestination.navigationDestination
+        : undefined);
+    const conversation = resolvedNavigationDestination
+      ? conversations.find((item) => item.id === resolvedNavigationDestination.loomId)
+      : conversations.find((item) => resolvedDestination.path.startsWith(item.path));
+    const scrollResponse = resolvedNavigationDestination?.scrollTargetResponseId
+      ? findResponseInLoom(
+          resolvedNavigationDestination.loomId,
+          resolvedNavigationDestination.scrollTargetResponseId
+        )
+      : resolvedNavigationDestination?.scrollMode === "lastResponse"
+        ? lastResponseInLoom(resolvedNavigationDestination.loomId)
+        : undefined;
+    setActiveObjectTitle(
+      scrollResponse
+        ? responseTitleOverrides[scrollResponse.id] ?? scrollResponse.title
+        : resolvedNavigationDestination?.loomId
+          ? loomLinkForId(resolvedNavigationDestination.loomId).title
+          : resolvedDestination.title
     );
     if (conversation) setActiveConversationId(conversation.id);
     if (resolvedDestination.path === "loom://drafts/new-conversation") {
@@ -790,6 +1141,7 @@ function App() {
       }));
       setActiveConversationId(EPHEMERAL_DRAFT_ID);
     }
+    pendingScrollDestinationRef.current = resolvedNavigationDestination ?? null;
     pendingScrollPathRef.current = resolvedDestination.path;
     setAddressFocused(false);
     setAddressQuery("");
@@ -798,37 +1150,68 @@ function App() {
     setGraphMode(false);
   }
 
-  function pushNavigationEntry(destination: LoomLink | AddressSuggestion | HistoryEntry) {
+  function pushNavigationEntry(
+    destination: LoomLink | AddressSuggestion | HistoryEntry,
+    navigationDestination = navigationDestinationForLink(destination, "userNavigation")
+  ) {
     const resolvedDestination = normalizeResolvedDestination(destination);
     setNavigationStack((current) => {
       const base = current.slice(0, navigationIndex + 1);
       const last = base[base.length - 1];
-      if (
-        last?.path === resolvedDestination.path &&
-        last.title === resolvedDestination.title
-      ) {
+      if (historyEntryMatchesDestination(last, resolvedDestination, navigationDestination)) {
         setNavigationIndex(base.length - 1);
         return base;
       }
-      const next = [...base, createHistoryEntry(resolvedDestination)];
+      const next = [...base, createHistoryEntry(resolvedDestination, navigationDestination)];
       setNavigationIndex(next.length - 1);
       return next;
     });
   }
 
-  function replaceNavigationEntry(destination: LoomLink | AddressSuggestion | HistoryEntry) {
+  function replaceNavigationEntry(
+    destination: LoomLink | AddressSuggestion | HistoryEntry,
+    navigationDestination = navigationDestinationForLink(destination, "userNavigation")
+  ) {
     const resolvedDestination = normalizeResolvedDestination(destination);
     setNavigationStack((current) => {
-      if (!current[navigationIndex]) return [createHistoryEntry(resolvedDestination)];
+      if (!current[navigationIndex]) {
+        return [createHistoryEntry(resolvedDestination, navigationDestination)];
+      }
       return current.map((entry, index) =>
-        index === navigationIndex ? createHistoryEntry(resolvedDestination) : entry
+        index === navigationIndex
+          ? createHistoryEntry(resolvedDestination, navigationDestination)
+          : entry
       );
+    });
+  }
+
+  function pushNavigationSequence(
+    entries: Array<{
+      link: LoomLink | AddressSuggestion | HistoryEntry;
+      destination: LoomNavigationDestination;
+    }>
+  ) {
+    if (entries.length === 0) return;
+    setNavigationStack((current) => {
+      let next = current.slice(0, navigationIndex + 1);
+      entries.forEach((entry) => {
+        const resolvedLink = normalizeResolvedDestination(entry.link);
+        const last = next[next.length - 1];
+        if (historyEntryMatchesDestination(last, resolvedLink, entry.destination)) return;
+        next = [...next, createHistoryEntry(resolvedLink, entry.destination)];
+      });
+      setNavigationIndex(next.length - 1);
+      return next;
     });
   }
 
   function visitDestination(
     destination: LoomLink | AddressSuggestion | HistoryEntry,
-    options: { allowUnresolved?: boolean } = {}
+    options: {
+      allowUnresolved?: boolean;
+      source?: LoomNavigationDestination["source"];
+      navigationDestination?: LoomNavigationDestination;
+    } = {}
   ) {
     const resolution = resolveNavigationDestination(destination, options);
     if (!resolution.ok) {
@@ -837,31 +1220,134 @@ function App() {
       return;
     }
     const resolvedDestination = resolution.destination;
-    restoreDestination(resolvedDestination);
-    pushNavigationEntry(resolvedDestination);
+    const source = options.source ?? "userNavigation";
+    const navigationDestination =
+      options.navigationDestination ??
+      ("navigationDestination" in destination && destination.navigationDestination
+        ? { ...destination.navigationDestination, source }
+        : undefined) ??
+      navigationDestinationForLink(resolvedDestination, source);
+    restoreDestination(resolvedDestination, navigationDestination);
+    if (
+      navigationDestination.mode === "full" &&
+      navigationDestination.originLoomId &&
+      navigationDestination.originResponseId &&
+      source !== "returnToOrigin" &&
+      source !== "backForward"
+    ) {
+      const originResponse = findResponseInLoom(
+        navigationDestination.originLoomId,
+        navigationDestination.originResponseId
+      );
+      const originLastResponse = lastResponseInLoom(navigationDestination.originLoomId);
+      const originAtLastDestination: LoomNavigationDestination = {
+        loomId: navigationDestination.originLoomId,
+        mode: "full",
+        scrollTargetResponseId: originLastResponse?.id,
+        scrollMode: "lastResponse",
+        source,
+      };
+      const originAtResponseDestination: LoomNavigationDestination = {
+        loomId: navigationDestination.originLoomId,
+        mode: "full",
+        scrollTargetResponseId: navigationDestination.originResponseId,
+        scrollMode: "origin",
+        source,
+      };
+      const splitWeftDestination: LoomNavigationDestination = {
+        ...navigationDestination,
+        mode: "split",
+      };
+      pushNavigationSequence([
+        {
+          link: originLastResponse
+            ? responseLinkForNavigation(navigationDestination.originLoomId, originLastResponse)
+            : loomLinkForId(navigationDestination.originLoomId),
+          destination: originAtLastDestination,
+        },
+        {
+          link: originResponse
+            ? responseLinkForNavigation(navigationDestination.originLoomId, originResponse)
+            : loomLinkForId(navigationDestination.originLoomId),
+          destination: originAtResponseDestination,
+        },
+        { link: linkForNavigationDestination(splitWeftDestination), destination: splitWeftDestination },
+        { link: resolvedDestination, destination: navigationDestination },
+      ]);
+    } else {
+      pushNavigationEntry(resolvedDestination, navigationDestination);
+    }
     setHistory((current) => [
-      createHistoryEntry(resolvedDestination),
+      createHistoryEntry(resolvedDestination, navigationDestination),
       ...markHistoryOlder(current),
     ]);
   }
 
   useEffect(() => {
+    const pendingDestination = pendingScrollDestinationRef.current;
     const pendingPath = pendingScrollPathRef.current;
-    if (!pendingPath || graphMode) return;
+    if ((!pendingDestination && !pendingPath) || graphMode) return;
+    pendingScrollDestinationRef.current = null;
     pendingScrollPathRef.current = null;
     window.requestAnimationFrame(() => {
-      const transcript = transcriptRef.current;
-      if (!transcript) return;
-      const target = transcript.querySelector<HTMLElement>(
-        `[data-response-address="${CSS.escape(pendingPath)}"]`
-      );
-      if (target) {
+      const scrollToResponse = (
+        transcript: HTMLElement | null,
+        responseId?: string,
+        path?: string
+      ) => {
+        if (!transcript) return false;
+        const target = responseId
+          ? transcript.querySelector<HTMLElement>(
+              `[data-response-id="${CSS.escape(responseId)}"]`
+            )
+          : path
+            ? transcript.querySelector<HTMLElement>(
+                `[data-response-address="${CSS.escape(path)}"]`
+              )
+            : null;
+        if (!target) return false;
         target.scrollIntoView({ behavior: "smooth", block: "start" });
-      } else if (activeConversation?.path === pendingPath) {
-        transcript.scrollTo({ top: 0, behavior: "smooth" });
+        return true;
+      };
+
+      if (pendingDestination?.mode === "split" && pendingDestination.originResponseId) {
+        scrollToResponse(
+          originTranscriptRef.current,
+          pendingDestination.originResponseId
+        );
+      }
+
+      if (pendingDestination?.scrollMode === "lastResponse") {
+        const latest = lastResponseInLoom(pendingDestination.loomId);
+        if (scrollToResponse(transcriptRef.current, latest?.id)) return;
+      }
+
+      if (
+        pendingDestination?.scrollTargetResponseId &&
+        scrollToResponse(
+          transcriptRef.current,
+          pendingDestination.scrollTargetResponseId
+        )
+      ) {
+        return;
+      }
+
+      if (pendingPath && scrollToResponse(transcriptRef.current, undefined, pendingPath)) {
+        return;
+      }
+
+      if (activeConversation?.path === pendingPath) {
+        transcriptRef.current?.scrollTo({ top: 0, behavior: "smooth" });
       }
     });
-  }, [activeConversation?.path, activeConversationId, activeObjectTitle, graphMode]);
+  }, [
+    activeConversation?.path,
+    activeConversationId,
+    activeObjectTitle,
+    currentNavigationDestination,
+    graphMode,
+    workspaceWidth,
+  ]);
 
   function archiveConversation(conversation: Conversation) {
     const nextConversations = conversations.filter(
@@ -880,7 +1366,7 @@ function App() {
 
   function restoreConversation(conversation: Conversation) {
     setArchived((current) => current.filter((item) => item.id !== conversation.id));
-    setConversations((current) => [conversation, ...current]);
+    setConversations((current) => [...current, conversation]);
     setActiveConversationId(conversation.id);
     setActiveObjectTitle(conversation.title);
     setActivePanel(null);
@@ -919,7 +1405,21 @@ function App() {
     }));
   }
 
-  function resolveReferenceLink(link: LoomLink): LoomLink {
+  function setComposerDraftForKey(key: string, draft: ComposerDraft) {
+    setComposerDrafts((current) => ({
+      ...current,
+      [key]: draft,
+    }));
+  }
+
+  function removeComposerLink(key: string, link: LoomLink) {
+    updateComposerDraft(key, (draft) => ({
+      ...draft,
+      links: draft.links.filter((item) => item.path !== link.path),
+    }));
+  }
+
+  function resolveReferenceLink(link: LoomLink, sourceLoomId = activeConversationId): LoomLink {
     if (link.referenceMentionId || link.resolutionStatus) return link;
     const resolution = resolveLoomAddress(link.path, loomGraphRepository);
     if (resolution.status !== "resolved") {
@@ -936,10 +1436,14 @@ function App() {
       };
     }
     const targetObject = resolution.targetObject ?? resolution.object;
+    const sourceConversation =
+      sourceLoomId === draftConversation?.id
+        ? draftConversation
+        : conversations.find((conversation) => conversation.id === sourceLoomId);
     const mention = targetObject
       ? loomGraphRepository.createReferenceMention({
-          sourceConversationId: activeConversationId,
-          sourcePath: activeConversation?.path ?? currentActiveDestination.path,
+          sourceConversationId: sourceLoomId,
+          sourcePath: sourceConversation?.path ?? currentActiveDestination.path,
           target: link,
         })
       : undefined;
@@ -956,9 +1460,10 @@ function App() {
       : link;
   }
 
-  function linkObject(link: LoomLink) {
+  function linkObjectForDraft(link: LoomLink, draftKey: string) {
+    const draft = composerDrafts[draftKey] ?? EMPTY_COMPOSER_DRAFT;
     if (
-      activeComposerDraft.links.some(
+      draft.links.some(
         (item) =>
           item.path === link.path ||
           (link.targetObjectId && item.targetObjectId === link.targetObjectId)
@@ -966,22 +1471,26 @@ function App() {
     ) {
       return;
     }
-    const stableLink = resolveReferenceLink(link);
+    const stableLink = resolveReferenceLink(link, draftKey);
     if (
       stableLink.targetObjectId &&
-      activeComposerDraft.links.some(
+      draft.links.some(
         (item) =>
           item.targetObjectId === stableLink.targetObjectId || item.path === stableLink.path
       )
     ) {
       return;
     }
-    updateComposerDraft(activeDraftKey, (draft) => ({
+    updateComposerDraft(draftKey, (draft) => ({
       ...draft,
       links: draft.links.some((item) => item.path === stableLink.path)
         ? draft.links
         : [...draft.links, stableLink],
     }));
+  }
+
+  function linkObject(link: LoomLink) {
+    linkObjectForDraft(link, activeDraftKey);
   }
 
   function bookmarkResponse(response: ResponseItem) {
@@ -1007,7 +1516,7 @@ function App() {
     }
     if (event.key === "Enter" && filteredSuggestions[selectedSuggestion]) {
       event.preventDefault();
-      visitDestination(filteredSuggestions[selectedSuggestion]);
+      visitDestination(filteredSuggestions[selectedSuggestion], { source: "addressBar" });
     }
     if (
       event.key === "Enter" &&
@@ -1015,13 +1524,16 @@ function App() {
       isLoomAddress(addressQuery)
     ) {
       event.preventDefault();
-      visitDestination({
-        id: `address-${Date.now()}`,
-        type: "recent",
-        title: addressQuery,
-        path: addressQuery,
-        badge: "Address",
-      });
+      visitDestination(
+        {
+          id: `address-${Date.now()}`,
+          type: "recent",
+          title: addressQuery,
+          path: addressQuery,
+          badge: "Address",
+        },
+        { source: "addressBar" }
+      );
     }
     if (event.key === "Escape") {
       setAddressFocused(false);
@@ -1035,7 +1547,12 @@ function App() {
     const entry = navigationStack[nextIndex];
     if (!entry) return;
     setNavigationIndex(nextIndex);
-    restoreDestination(entry);
+    restoreDestination(
+      entry,
+      entry.navigationDestination
+        ? withBackForwardSource(entry.navigationDestination)
+        : undefined
+    );
   }
 
   function openContextMenu(
@@ -1070,17 +1587,52 @@ function App() {
     void browserHostShell.copyText(destination.canonicalUri ?? destination.path);
   }
 
+  function openComposerReference(link: LoomLink) {
+    const resolution = resolveLoomAddress(link.path, loomGraphRepository);
+    if (resolution.status === "resolved") {
+      visitDestination(link, { source: "userNavigation" });
+      return null;
+    }
+    if (resolution.status === "alias_stale" && resolution.object) {
+      const nextLink = {
+        ...link,
+        ...linkFromResolvedObject(resolution.object),
+        path: resolution.staleAliasReplacement ?? resolution.object.aliasUri ?? link.path,
+        targetObjectId: resolution.object.objectId,
+        canonicalUri: resolution.object.canonicalUri,
+      };
+      visitDestination(nextLink, { source: "userNavigation" });
+      return null;
+    }
+    if (resolution.status === "broken_reference") {
+      loomGraphRepository.emitBrokenReference(
+        link,
+        resolution.reason ?? "Reference target did not resolve"
+      );
+    }
+    return resolution.reason ?? "This Reference target cannot be opened.";
+  }
+
   function nextGroupName(groups: TabGroup[]) {
     let index = 1;
     while (groups.some((group) => group.name === `Group #${index}`)) index += 1;
     return `Group #${index}`;
   }
 
+  function groupIdForConversation(conversationId: string, groups = tabGroups) {
+    return groups.find((group) => group.conversationIds.includes(conversationId))?.id;
+  }
+
   function createGroupFromConversations(sourceId: string, targetId: string) {
     if (sourceId === targetId) return;
-    setPinnedConversationIds((current) =>
-      current.filter((id) => id !== sourceId && id !== targetId)
-    );
+    if (
+      pinnedConversationIds.includes(sourceId) ||
+      pinnedConversationIds.includes(targetId) ||
+      groupIdForConversation(sourceId) ||
+      groupIdForConversation(targetId)
+    ) {
+      return;
+    }
     setTabGroups((current) => {
       if (
         current.some(
@@ -1112,7 +1664,7 @@ function App() {
   }
 
   function addConversationToGroup(conversationId: string, groupId: string) {
-    setPinnedConversationIds((current) => current.filter((id) => id !== conversationId));
+    if (pinnedConversationIds.includes(conversationId)) return;
     setTabGroups((current) =>
       current
         .map((group) => ({
@@ -1181,7 +1733,7 @@ function App() {
       summary: "New grouped conversation tab.",
       iconKey: "compass",
     };
-    setConversations((current) => [conversation, ...current]);
+    setConversations((current) => [...current, conversation]);
     setTabGroups((current) =>
       current.map((group) =>
         group.id === groupId
@@ -1277,23 +1829,34 @@ function App() {
 
   async function sendComposerToModel(
     draft: ComposerDraft,
-    options: { effort: ModelEffort }
+    options: { effort: ModelEffort; loomId?: string; preserveNavigation?: boolean }
   ) {
     const prompt = plainTextFromDraft(draft);
     const meaningful = prompt.length > 0 || draft.links.length > 0;
     if (!meaningful || composerRuntimeState.running) return false;
+
+    const readinessMessage = modelReadinessMessage("main");
+    if (readinessMessage) {
+      setComposerRuntimeState({ running: false, message: readinessMessage });
+      return false;
+    }
 
     setComposerRuntimeState({
       running: true,
       message: `Sending to ${getProfileModel(providerSettings, "main").name}...`,
     });
     const linkContext = draft.links.map((link) => `${link.title}: ${link.path}`);
+    const targetLoomId = options.loomId ?? activeConversationId;
+    const existingTargetConversation =
+      targetLoomId === draftConversation?.id
+        ? draftConversation
+        : conversations.find((conversation) => conversation.id === targetLoomId);
     const targetConversationId =
-      activeConversationId === EPHEMERAL_DRAFT_ID || !activeConversation
+      targetLoomId === EPHEMERAL_DRAFT_ID || !existingTargetConversation
         ? `c-${Date.now()}`
-        : activeConversation.id;
+        : existingTargetConversation.id;
     const targetConversation =
-      activeConversationId === EPHEMERAL_DRAFT_ID || !activeConversation
+      targetLoomId === EPHEMERAL_DRAFT_ID || !existingTargetConversation
         ? {
             ...(draftConversation ?? {
               id: targetConversationId,
@@ -1308,7 +1871,7 @@ function App() {
             path: `loom://drafts/${targetConversationId}`,
             summary: "New conversation created from a prompt draft.",
           }
-        : activeConversation;
+        : existingTargetConversation;
 
     try {
       const result = await runModelProfileRequest(providerSettings, {
@@ -1331,8 +1894,8 @@ function App() {
         bookmarkedLinks: [],
       };
 
-      if (activeConversationId === EPHEMERAL_DRAFT_ID || !activeConversation) {
-        setConversations((current) => [targetConversation, ...current]);
+      if (targetLoomId === EPHEMERAL_DRAFT_ID || !existingTargetConversation) {
+        setConversations((current) => [...current, targetConversation]);
         setDraftConversation(null);
         setActiveConversationId(targetConversation.id);
       }
@@ -1342,13 +1905,13 @@ function App() {
         [targetConversation.id]: [...(current[targetConversation.id] ?? []), response],
       }));
       setComposerDrafts((current) => {
-        const { [EPHEMERAL_DRAFT_ID]: _discard, ...rest } = current;
+        const { [targetLoomId]: _discardTarget, [EPHEMERAL_DRAFT_ID]: _discardDraft, ...rest } = current;
         return {
           ...rest,
           [targetConversation.id]: { html: "", links: [] },
         };
       });
-      setActiveObjectTitle(response.title);
+      if (!options.preserveNavigation) setActiveObjectTitle(response.title);
       const destination: LoomLink = {
         id: response.id,
         type: "response",
@@ -1356,13 +1919,15 @@ function App() {
         path: response.address,
         badge: typeLabel.response,
       };
-      if (activeConversationId === EPHEMERAL_DRAFT_ID) replaceNavigationEntry(destination);
-      else pushNavigationEntry(destination);
-      setHistory((current) => [
-        createHistoryEntry(destination),
-        ...markHistoryOlder(current),
-      ]);
-      pendingScrollPathRef.current = response.address;
+      if (!options.preserveNavigation) {
+        if (targetLoomId === EPHEMERAL_DRAFT_ID) replaceNavigationEntry(destination);
+        else pushNavigationEntry(destination);
+        setHistory((current) => [
+          createHistoryEntry(destination),
+          ...markHistoryOlder(current),
+        ]);
+        pendingScrollPathRef.current = response.address;
+      }
       setComposerRuntimeState({
         running: false,
         message: `Main model responded with ${result.modelId}.`,
@@ -1377,14 +1942,16 @@ function App() {
     }
   }
 
-  function openHistoryMenu(event: React.MouseEvent, direction: NavigationDirection) {
-    const entries =
-      direction === "back"
-        ? navigationStack.slice(0, navigationIndex).reverse().slice(0, 6)
-        : navigationStack.slice(navigationIndex + 1, navigationIndex + 7);
-    openContextMenu(
-      event,
-      { kind: direction === "back" ? "history-back" : "history-forward", entries }
+  function jumpNavigationTraversal(targetIndex: number) {
+    const resolvedIndex = jumpToTraversalIndex(navigationStack, targetIndex);
+    if (resolvedIndex === undefined) return;
+    const entry = navigationStack[resolvedIndex];
+    setNavigationIndex(resolvedIndex);
+    restoreDestination(
+      entry,
+      entry.navigationDestination
+        ? withBackForwardSource(entry.navigationDestination)
+        : undefined
     );
   }
 
@@ -1396,14 +1963,19 @@ function App() {
     const entry = navigationStack[targetIndex];
     if (!entry) return;
     setNavigationIndex(targetIndex);
-    restoreDestination(entry);
+    restoreDestination(
+      entry,
+      entry.navigationDestination
+        ? withBackForwardSource(entry.navigationDestination)
+        : undefined
+    );
   }
 
   function togglePinnedConversation(conversation: Conversation) {
     setPinnedConversationIds((current) =>
       current.includes(conversation.id)
         ? current.filter((id) => id !== conversation.id)
-        : [conversation.id, ...current]
+        : [...current, conversation.id]
     );
   }
 
@@ -1552,20 +2124,94 @@ function App() {
     [activeConversation, conversationResponses, conversations, forkRecords]
   );
 
-  function forkResponseLoom(response: ResponseItem) {
-    if (!activeConversation) return;
-    const sourceResponses = conversationResponses[activeConversation.id] ?? [];
+  function forkResponseLoom(response: ResponseItem, sourceLoomId = activeConversationId) {
+    const sourceConversation =
+      sourceLoomId === draftConversation?.id
+        ? draftConversation
+        : conversations.find((conversation) => conversation.id === sourceLoomId);
+    if (!sourceConversation) return;
+    const sourceResponses = conversationResponses[sourceConversation.id] ?? [];
     const responseIndex = sourceResponses.findIndex((item) => item.id === response.id);
     if (responseIndex < 0) return;
+    const existingFork = forkRecords.find(
+      (record) =>
+        record.parentConversationId === sourceConversation.id &&
+        record.parentResponseId === response.id
+    );
+    const existingWeft = existingFork
+      ? conversations.find((conversation) => conversation.id === existingFork.childConversationId)
+      : undefined;
+    const openWeftDestination = (weftConversation: Conversation) => {
+      setActiveConversationId(weftConversation.id);
+      setActiveSplitPanel("weft");
+      setActiveObjectTitle(response.title);
+      setActivePanel(null);
+      setGraphMode(false);
+      const destination: LoomLink = {
+        id: weftConversation.id,
+        type: "loom",
+        title: weftConversation.title,
+        path: weftConversation.path,
+        badge: typeLabel.loom,
+      };
+      const originLastResponse = lastResponseInLoom(sourceConversation.id);
+      const originAtResponseLink = responseLinkForNavigation(sourceConversation.id, response);
+      const originAtLastLink = originLastResponse
+        ? responseLinkForNavigation(sourceConversation.id, originLastResponse)
+        : loomLinkForId(sourceConversation.id);
+      const originAtLastDestination: LoomNavigationDestination = {
+        loomId: sourceConversation.id,
+        mode: "full",
+        scrollTargetResponseId: originLastResponse?.id,
+        scrollMode: "lastResponse",
+        source: "weftCreate",
+      };
+      const originAtResponseDestination: LoomNavigationDestination = {
+        loomId: sourceConversation.id,
+        mode: "full",
+        scrollTargetResponseId: response.id,
+        scrollMode: "origin",
+        source: "weftCreate",
+      };
+      const splitWeftDestination: LoomNavigationDestination = {
+        loomId: weftConversation.id,
+        mode: "split",
+        originLoomId: sourceConversation.id,
+        originResponseId: response.id,
+        source: "weftCreate",
+      };
+      if (
+        !historyEntryMatchesDestination(
+          navigationStack[navigationIndex],
+          destination,
+          splitWeftDestination
+        )
+      ) {
+        pushNavigationSequence([
+          { link: originAtLastLink, destination: originAtLastDestination },
+          { link: originAtResponseLink, destination: originAtResponseDestination },
+          { link: destination, destination: splitWeftDestination },
+        ]);
+        setHistory((current) => [
+          createHistoryEntry(destination, splitWeftDestination),
+          ...markHistoryOlder(current),
+        ]);
+      }
+      pendingScrollDestinationRef.current = splitWeftDestination;
+    };
+    if (existingWeft) {
+      openWeftDestination(existingWeft);
+      return;
+    }
     const id = `c-loom-${Date.now()}`;
-    const path = `${activeConversation.path}/loom/${id}`;
+    const path = `${sourceConversation.path}/loom/${id}`;
     const title = normalizeLoomTitle(`Loom: ${response.title}`);
     const conversation: Conversation = {
       id,
       title,
       path,
-      folder: activeConversation.folder,
-      summary: `Branched from ${activeConversation.title}.`,
+      folder: sourceConversation.folder,
+      summary: `Branched from ${sourceConversation.title}.`,
       iconKey: "workflow",
     };
     const lineage = sourceResponses.slice(0, responseIndex + 1).map((item, index) => ({
@@ -1573,7 +2219,29 @@ function App() {
       id: `${item.id}-${id}`,
       address: `${path}/r-${index + 1}`,
     }));
-    setConversations((current) => [conversation, ...current]);
+    setConversations((current) => {
+      const sourceIndex = current.findIndex((item) => item.id === sourceConversation.id);
+      if (sourceIndex < 0) return [conversation, ...current];
+      return [
+        ...current.slice(0, sourceIndex),
+        conversation,
+        ...current.slice(sourceIndex),
+      ];
+    });
+    setTabGroups((current) =>
+      current.map((group) => {
+        const sourceIndex = group.conversationIds.indexOf(sourceConversation.id);
+        if (sourceIndex < 0) return group;
+        return {
+          ...group,
+          conversationIds: [
+            ...group.conversationIds.slice(0, sourceIndex),
+            id,
+            ...group.conversationIds.slice(sourceIndex),
+          ],
+        };
+      })
+    );
     setConversationResponses((current) => ({
       ...current,
       [id]: lineage,
@@ -1581,8 +2249,8 @@ function App() {
     setForkRecords((current) => [
       ...current,
       {
-        id: `fork-${activeConversation.id}-${response.id}-${id}`,
-        parentConversationId: activeConversation.id,
+        id: `fork-${sourceConversation.id}-${response.id}-${id}`,
+        parentConversationId: sourceConversation.id,
         parentResponseId: response.id,
         childConversationId: id,
         title: `Loom from ${response.title}`,
@@ -1592,20 +2260,27 @@ function App() {
       ...current,
       [id]: { html: "", links: [] },
     }));
-    setActiveConversationId(id);
-    setActiveObjectTitle(response.title);
-    setActivePanel(null);
-    setGraphMode(false);
-    const destination: LoomLink = {
-      id,
-      type: "conversation",
-      title,
-      path,
-      badge: typeLabel.loom,
+    openWeftDestination(conversation);
+  }
+
+  function returnToOrigin() {
+    const origin = getWeftOrigin(activeConversationId);
+    if (!origin) return;
+    const originResponse = findResponseInLoom(origin.originLoomId, origin.originResponseId);
+    const destination: LoomNavigationDestination = {
+      loomId: origin.originLoomId,
+      mode: "full",
+      scrollTargetResponseId: origin.originResponseId,
+      scrollMode: "origin",
+      source: "returnToOrigin",
     };
-    pushNavigationEntry(destination);
+    const link = originResponse
+      ? responseLinkForNavigation(origin.originLoomId, originResponse)
+      : loomLinkForId(origin.originLoomId);
+    restoreDestination(link, destination);
+    pushNavigationEntry(link, destination);
     setHistory((current) => [
-      createHistoryEntry(destination),
+      createHistoryEntry(link, destination),
       ...markHistoryOlder(current),
     ]);
   }
@@ -1731,6 +2406,11 @@ function App() {
       setAskState({ ...askState, error: "Write a quick question first." });
       return;
     }
+    const readinessMessage = modelReadinessMessage("quick");
+    if (readinessMessage) {
+      setAskState({ ...askState, error: readinessMessage });
+      return;
+    }
     setAskState({ ...askState, running: true, error: undefined });
     try {
       const result = await runModelProfileRequest(providerSettings, {
@@ -1801,7 +2481,7 @@ function App() {
     clearSelectionHighlight();
   }
 
-  function onSelectionAsk(response: ResponseItem) {
+  function onSelectionAsk(response: ResponseItem, draftKey = activeDraftKey) {
     const selection = window.getSelection();
     const selected = selection?.toString().trim();
     if (!selection || selection.rangeCount === 0 || !selected || selected.length <= 4) {
@@ -1822,6 +2502,7 @@ function App() {
     if (!createSelectionHighlight(range.cloneRange())) return;
     setSelectionAskState({
       response,
+      draftKey,
       selectedText: selected,
       x: Math.min(window.innerWidth - 260, Math.max(12, rect.left + rect.width / 2)),
       y: Math.max(52, rect.top - 12),
@@ -1832,7 +2513,7 @@ function App() {
     if (!selectionAskState) return;
     if (kind === "ask") {
       setSelectionReference({
-        draftKey: activeDraftKey,
+        draftKey: selectionAskState.draftKey,
         link: {
           id: `selection-${selectionAskState.response.id}-${Date.now()}`,
           type: "response",
@@ -1862,6 +2543,157 @@ function App() {
     });
   }
 
+  function renderPanelComposer(loomId: string, panel: "origin" | "weft") {
+    const panelActive = activeSplitPanel === panel;
+    return (
+      <PromptComposer
+        variant="bottom"
+        draftKey={loomId}
+        draft={composerDrafts[loomId] ?? EMPTY_COMPOSER_DRAFT}
+        attachedReferences={
+          selectionReference?.draftKey === loomId ? [selectionReference.link] : []
+        }
+        referenceOptions={composerReferenceOptions}
+        attachContentItems={attachContentItems}
+        providerSettings={providerSettings}
+        runtimeState={composerRuntimeState}
+        runtimeHealth={activeComposerRuntimeHealth}
+        active={panelActive}
+        onActivate={() => setActiveSplitPanel(panel)}
+        onProviderSettingsChange={saveProviderSettings}
+        onOpenProviderSettings={() => setProviderSettingsOpen(true)}
+        onDraftChange={(draft) => setComposerDraftForKey(loomId, draft)}
+        onRemoveLink={(link) => removeComposerLink(loomId, link)}
+        onDropLink={(link) => linkObjectForDraft(link, loomId)}
+        onResolveReference={(link) => resolveReferenceLink(link, loomId)}
+        onOpenReference={openComposerReference}
+        onCopyReferenceAddress={copyLoomAddress}
+        onRemoveAttachedReference={() => {
+          setSelectionReference(null);
+          clearSelectionHighlight();
+        }}
+        onReadyToFocus={(focus) => {
+          if (panelActive) composerFocusRef.current = focus;
+        }}
+        onSend={(draft, options) =>
+          sendComposerToModel(draft, {
+            ...options,
+            loomId,
+            preserveNavigation: showWeftSplit,
+          })
+        }
+        onUserTyping={() => {
+          const transcript =
+            panel === "origin" ? originTranscriptRef.current : transcriptRef.current;
+          transcript?.scrollTo({
+            top: transcript.scrollHeight,
+            behavior: "smooth",
+          });
+        }}
+      />
+    );
+  }
+
+  function focusSplitPanel(panel: "origin" | "weft", options: { graph?: boolean; latest?: boolean } = {}) {
+    const conversation = panel === "origin" ? originConversation : activeConversation;
+    if (!conversation) return;
+    const origin = panel === "weft" ? activeWeftOrigin : undefined;
+    const originResponse =
+      panel === "origin" && activeWeftOrigin
+        ? findResponseInLoom(conversation.id, activeWeftOrigin.originResponseId)
+        : undefined;
+    const latestResponse = options.latest ? lastResponseInLoom(conversation.id) : undefined;
+    const navigationDestination: LoomNavigationDestination = {
+      loomId: conversation.id,
+      mode: "full",
+      originLoomId: origin?.originLoomId,
+      originResponseId: origin?.originResponseId,
+      scrollTargetResponseId:
+        latestResponse?.id ??
+        (panel === "origin" ? activeWeftOrigin?.originResponseId : undefined),
+      scrollMode: latestResponse ? "lastResponse" : panel === "origin" ? "origin" : undefined,
+      source: "userNavigation",
+    };
+    const link =
+      latestResponse
+        ? responseLinkForNavigation(conversation.id, latestResponse)
+        : originResponse
+          ? responseLinkForNavigation(conversation.id, originResponse)
+          : loomLinkForId(conversation.id);
+    restoreDestination(link, navigationDestination);
+    pushNavigationEntry(link, navigationDestination);
+    setHistory((current) => [
+      createHistoryEntry(link, navigationDestination),
+      ...markHistoryOlder(current),
+    ]);
+    setSplitPanelMenu(null);
+    setActiveSplitPanel(panel);
+    if (options.graph) {
+      setGraphMode(true);
+      setActivePanel(null);
+    }
+  }
+
+  function copySplitPanelAddress(panel: "origin" | "weft") {
+    const conversation = panel === "origin" ? originConversation : activeConversation;
+    if (!conversation) return;
+    copyLoomAddress(loomLinkForId(conversation.id));
+    setSplitPanelMenu(null);
+  }
+
+  function renderSplitPanelControls(panel: "origin" | "weft") {
+    const label = panel === "origin" ? "Origin" : "Weft";
+    return (
+      <div className="split-panel-controls" aria-label={`${label} panel controls`}>
+        {panel === "weft" && (
+          <>
+            <button
+              className="split-panel-control"
+              type="button"
+              title="Maximize Weft"
+              aria-label="Maximize Weft"
+              onClick={(event) => {
+                event.stopPropagation();
+                focusSplitPanel("weft");
+              }}
+            >
+              <Maximize2 size={13} />
+            </button>
+            <button
+              className="split-panel-control"
+              type="button"
+              title="Close Weft Panel"
+              aria-label="Close Weft Panel"
+              onClick={(event) => {
+                event.stopPropagation();
+                focusSplitPanel("origin");
+              }}
+            >
+              <X size={13} />
+            </button>
+          </>
+        )}
+        <button
+          className="split-panel-control"
+          type="button"
+          title="More"
+          aria-label="More"
+          onClick={(event) => {
+            event.stopPropagation();
+            const rect = event.currentTarget.getBoundingClientRect();
+            setSplitPanelMenu({
+              panel,
+              x: rect.right - 176,
+              y: rect.bottom + 6,
+            });
+          }}
+        >
+          <MoreHorizontal size={14} />
+        </button>
+      </div>
+    );
+  }
+
   return (
     <AppShell sidebarCollapsed={sidebarCollapsed}>
       <TopBrowserBar
@@ -1875,6 +2707,8 @@ function App() {
         selectedSuggestion={selectedSuggestion}
         canBack={navigationIndex > 0}
         canForward={navigationIndex < navigationStack.length - 1}
+        backTraversal={getBackTraversal(navigationStack, navigationIndex)}
+        forwardTraversal={getForwardTraversal(navigationStack, navigationIndex)}
         graphMode={graphMode}
         activePanel={activePanel}
         sidebarCollapsed={sidebarCollapsed}
@@ -1887,10 +2721,10 @@ function App() {
           setSelectedSuggestion(0);
         }}
         onAddressKeyDown={handleAddressKeyDown}
-        onVisit={visitDestination}
+        onVisit={(destination) => visitDestination(destination, { source: "addressBar" })}
         onBack={() => handleBackForward("back")}
         onForward={() => handleBackForward("forward")}
-        onContextNav={openHistoryMenu}
+        onJumpTraversal={jumpNavigationTraversal}
         onBookmarkCurrent={() => {
           bookmarkLoomLink(currentActiveDestination);
         }}
@@ -1918,7 +2752,11 @@ function App() {
           renamingGroupId={renamingGroupId}
           collapsed={sidebarCollapsed}
           archivedCount={archived.length}
-          activeConversationId={activeConversationId}
+          activeConversationId={
+            showWeftSplit && focusedSplitConversation
+              ? focusedSplitConversation.id
+              : activeConversationId
+          }
           activePanel={activePanel}
           onDropBookmark={bookmarkLoomLink}
           onCreateGroup={createGroupFromConversations}
@@ -1945,7 +2783,7 @@ function App() {
           onDeleteRequest={setDeleteTarget}
         />
 
-        <main className="workspace">
+        <main className="workspace" ref={workspaceRef}>
 
         <ConversationView emptyDraft={isNewConversationDraft}>
           {isNewConversationDraft ? (
@@ -1964,19 +2802,23 @@ function App() {
                     : []
                 }
                 referenceOptions={composerReferenceOptions}
+                attachContentItems={attachContentItems}
                 providerSettings={providerSettings}
                 runtimeState={composerRuntimeState}
+                runtimeHealth={activeComposerRuntimeHealth}
                 onProviderSettingsChange={saveProviderSettings}
                 onOpenProviderSettings={() => setProviderSettingsOpen(true)}
                 onDraftChange={setActiveComposerDraft}
                 onRemoveLink={(link) =>
                   updateComposerDraft(activeDraftKey, (draft) => ({
-                    html: draft.html,
+                    ...draft,
                     links: draft.links.filter((item) => item.path !== link.path),
                   }))
                 }
                 onDropLink={linkObject}
                 onResolveReference={resolveReferenceLink}
+                onOpenReference={openComposerReference}
+                onCopyReferenceAddress={copyLoomAddress}
                 onRemoveAttachedReference={() => {
                   setSelectionReference(null);
                   clearSelectionHighlight();
@@ -1990,65 +2832,178 @@ function App() {
             </section>
           ) : (
             <>
-              {graphMode ? (
-                <GraphView
-                  conversations={conversations}
-                  responses={activeResponses}
-                  onVisit={visitDestination}
-                />
-              ) : (
-                <ChatTranscript
-                  transcriptRef={(node) => {
-                    transcriptRef.current = node;
-                  }}
-                  conversation={activeConversation}
-                  responses={activeResponses}
-                  onLink={linkObject}
-                  onAsk={openAsk}
-                  onLoom={forkResponseLoom}
-                  onToggleSuggestedBookmark={toggleSuggestedBookmark}
-                  bookmarkedPaths={new Set(bookmarks.map((bookmark) => bookmark.path))}
-                  onSelectionAsk={onSelectionAsk}
-                  responseTitleOverrides={responseTitleOverrides}
-                  onOpenContextMenu={(event, response) =>
-                    openContextMenu(event, { kind: "response", response })
+              {showWeftSplit ? (
+                  <WeftView>
+                    <div className="weft-split-view">
+                      {originConversation && (
+                        <div
+                          className="weft-panel origin-split-panel"
+                          onPointerDownCapture={() => setActiveSplitPanel("origin")}
+                          onFocusCapture={() => setActiveSplitPanel("origin")}
+                        >
+                          {renderSplitPanelControls("origin")}
+                          <ChatTranscript
+                            transcriptRef={(node) => {
+                              originTranscriptRef.current = node;
+                            }}
+                            conversation={originConversation}
+                            responses={originResponses}
+                            onLink={(link) => {
+                              setActiveSplitPanel("origin");
+                              linkObjectForDraft(link, originConversation.id);
+                            }}
+                            onAsk={openAsk}
+                            onLoom={(response) => forkResponseLoom(response, originConversation.id)}
+                            onToggleSuggestedBookmark={toggleSuggestedBookmark}
+                            bookmarkedPaths={new Set(bookmarks.map((bookmark) => bookmark.path))}
+                            onSelectionAsk={(response) => {
+                              setActiveSplitPanel("origin");
+                              onSelectionAsk(response, originConversation.id);
+                            }}
+                            responseTitleOverrides={responseTitleOverrides}
+                            onOpenContextMenu={(event, response) =>
+                              openContextMenu(event, { kind: "response", response })
+                            }
+                          />
+                          {renderPanelComposer(originConversation.id, "origin")}
+                        </div>
+                      )}
+                      {activeConversation && (
+                        <div
+                          className="weft-panel weft-split-panel"
+                          onPointerDownCapture={() => setActiveSplitPanel("weft")}
+                          onFocusCapture={() => setActiveSplitPanel("weft")}
+                        >
+                          {renderSplitPanelControls("weft")}
+                          <ChatTranscript
+                            transcriptRef={(node) => {
+                              transcriptRef.current = node;
+                            }}
+                            conversation={activeConversation}
+                            responses={activeResponses}
+                            onLink={(link) => {
+                              setActiveSplitPanel("weft");
+                              linkObjectForDraft(link, activeConversation.id);
+                            }}
+                            onAsk={openAsk}
+                            onLoom={(response) => forkResponseLoom(response, activeConversation.id)}
+                            onToggleSuggestedBookmark={toggleSuggestedBookmark}
+                            bookmarkedPaths={new Set(bookmarks.map((bookmark) => bookmark.path))}
+                            onSelectionAsk={(response) => {
+                              setActiveSplitPanel("weft");
+                              onSelectionAsk(response, activeConversation.id);
+                            }}
+                            responseTitleOverrides={responseTitleOverrides}
+                            onOpenContextMenu={(event, response) =>
+                              openContextMenu(event, { kind: "response", response })
+                            }
+                            onReturnToOrigin={returnToOrigin}
+                          />
+                          {renderPanelComposer(activeConversation.id, "weft")}
+                        </div>
+                      )}
+                      {splitPanelMenu && (
+                        <div
+                          className="split-panel-menu"
+                          role="menu"
+                          style={{ left: splitPanelMenu.x, top: splitPanelMenu.y }}
+                          onClick={(event) => event.stopPropagation()}
+                          onPointerDown={(event) => event.stopPropagation()}
+                        >
+                          {splitPanelMenu.panel === "origin" ? (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => focusSplitPanel("origin", { latest: true })}
+                            >
+                              Return to Latest Response
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => {
+                                setSplitPanelMenu(null);
+                                returnToOrigin();
+                              }}
+                            >
+                              Return to Origin
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => copySplitPanelAddress(splitPanelMenu.panel)}
+                          >
+                            Copy Loom Address
+                          </button>
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => focusSplitPanel(splitPanelMenu.panel, { graph: true })}
+                          >
+                            Open in Graph View
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  </WeftView>
+                ) : (
+                  <ChatTranscript
+                    transcriptRef={(node) => {
+                      transcriptRef.current = node;
+                      originTranscriptRef.current = null;
+                    }}
+                    conversation={activeConversation}
+                    responses={activeResponses}
+                    onLink={linkObject}
+                    onAsk={openAsk}
+                    onLoom={forkResponseLoom}
+                    onToggleSuggestedBookmark={toggleSuggestedBookmark}
+                    bookmarkedPaths={new Set(bookmarks.map((bookmark) => bookmark.path))}
+                    onSelectionAsk={onSelectionAsk}
+                    responseTitleOverrides={responseTitleOverrides}
+                    onOpenContextMenu={(event, response) =>
+                      openContextMenu(event, { kind: "response", response })
+                    }
+                    onReturnToOrigin={activeWeftOrigin ? returnToOrigin : undefined}
+                  />
+                )}
+
+              {!showWeftSplit && (
+                <PromptComposer
+                  variant="bottom"
+                  draftKey={activeDraftKey}
+                  draft={activeComposerDraft}
+                  attachedReferences={
+                    selectionReference?.draftKey === activeDraftKey
+                      ? [selectionReference.link]
+                      : []
                   }
+                  referenceOptions={composerReferenceOptions}
+                  attachContentItems={attachContentItems}
+                  providerSettings={providerSettings}
+                  runtimeState={composerRuntimeState}
+                  runtimeHealth={activeComposerRuntimeHealth}
+                  onProviderSettingsChange={saveProviderSettings}
+                  onOpenProviderSettings={() => setProviderSettingsOpen(true)}
+                  onDraftChange={setActiveComposerDraft}
+                  onRemoveLink={(link) => removeComposerLink(activeDraftKey, link)}
+                  onDropLink={linkObject}
+                  onResolveReference={resolveReferenceLink}
+                  onOpenReference={openComposerReference}
+                  onCopyReferenceAddress={copyLoomAddress}
+                  onRemoveAttachedReference={() => {
+                    setSelectionReference(null);
+                    clearSelectionHighlight();
+                  }}
+                  onReadyToFocus={(focus) => {
+                    composerFocusRef.current = focus;
+                  }}
+                  onSend={sendComposerToModel}
+                  onUserTyping={scrollTranscriptToBottom}
                 />
               )}
-
-              <PromptComposer
-                variant="bottom"
-                draftKey={activeDraftKey}
-                draft={activeComposerDraft}
-                attachedReferences={
-                  selectionReference?.draftKey === activeDraftKey
-                    ? [selectionReference.link]
-                    : []
-                }
-                referenceOptions={composerReferenceOptions}
-                providerSettings={providerSettings}
-                runtimeState={composerRuntimeState}
-                onProviderSettingsChange={saveProviderSettings}
-                onOpenProviderSettings={() => setProviderSettingsOpen(true)}
-                onDraftChange={setActiveComposerDraft}
-                onRemoveLink={(link) =>
-                  updateComposerDraft(activeDraftKey, (draft) => ({
-                    html: draft.html,
-                    links: draft.links.filter((item) => item.path !== link.path),
-                  }))
-                }
-                onDropLink={linkObject}
-                onResolveReference={resolveReferenceLink}
-                onRemoveAttachedReference={() => {
-                  setSelectionReference(null);
-                  clearSelectionHighlight();
-                }}
-                onReadyToFocus={(focus) => {
-                  composerFocusRef.current = focus;
-                }}
-                onSend={sendComposerToModel}
-                onUserTyping={scrollTranscriptToBottom}
-              />
             </>
           )}
         </ConversationView>
@@ -2081,7 +3036,25 @@ function App() {
           onDropBookmark={bookmarkLoomLink}
           onRestore={restoreConversation}
           onDeleteRequest={setDeleteTarget}
-        />
+	        />
+        {graphMode && (
+          <div className="graph-overlay-panel" aria-label="Graph View overlay">
+            <button
+              className="graph-overlay-close"
+              type="button"
+              aria-label="Close Graph View"
+              title="Close Graph View"
+              onClick={() => setGraphMode(false)}
+            >
+              <X size={14} />
+            </button>
+            <GraphView
+              conversations={conversations}
+              responses={focusedSplitResponses}
+              onVisit={visitDestination}
+            />
+          </div>
+        )}
       </div>
 
       {contextMenu && (
@@ -2139,6 +3112,7 @@ function App() {
       {providerSettingsOpen && (
         <AIProviderSettingsModal
           settings={providerSettings}
+          runtimeHealth={activeComposerRuntimeHealth}
           onSave={saveProviderSettings}
           onClose={() => setProviderSettingsOpen(false)}
         />
@@ -2204,11 +3178,7 @@ function Sidebar({
   onOpenGroupContextMenu,
   onDeleteRequest,
 }: SidebarProps) {
-  const hoverGroupTimerRef = useRef<number | null>(null);
-  const [draggedConversationId, setDraggedConversationId] = useState<string | null>(null);
-  const [groupingPreviewId, setGroupingPreviewId] = useState<string | null>(null);
-  const [groupDropTargetId, setGroupDropTargetId] = useState<string | null>(null);
-  const [standaloneDropActive, setStandaloneDropActive] = useState(false);
+  const folderListRef = useRef<HTMLDivElement | null>(null);
   const pinnedConversations = pinnedConversationIds
     .map((id) => conversations.find((conversation) => conversation.id === id))
     .filter((conversation): conversation is Conversation => Boolean(conversation));
@@ -2219,32 +3189,23 @@ function Sidebar({
     (item) =>
       !groupedConversationIds.has(item.id) && !pinnedConversationIds.includes(item.id)
   );
+  const sidebarDnD = useSidebarDnD({
+    conversations,
+    pinnedConversationIds,
+    tabGroups,
+    operations: {
+      createGroup: onCreateGroup,
+      addToGroup: onAddToGroup,
+      removeFromGroups: onRemoveFromGroups,
+    },
+  });
 
-  function clearHoverGroupTimer() {
-    if (hoverGroupTimerRef.current) {
-      window.clearTimeout(hoverGroupTimerRef.current);
-      hoverGroupTimerRef.current = null;
-    }
-    setGroupingPreviewId(null);
-  }
-
-  function getGroupIdForConversation(conversationId: string) {
-    return tabGroups.find((group) => group.conversationIds.includes(conversationId))?.id;
-  }
-
-  function startConversationGroupHover(targetId: string) {
-    if (!draggedConversationId || draggedConversationId === targetId) return;
-    const sourceGroupId = getGroupIdForConversation(draggedConversationId);
-    const targetGroupId = getGroupIdForConversation(targetId);
-    if (sourceGroupId && sourceGroupId === targetGroupId) return;
-    clearHoverGroupTimer();
-    setGroupingPreviewId(targetId);
-    hoverGroupTimerRef.current = window.setTimeout(() => {
-      onCreateGroup(draggedConversationId, targetId);
-      setGroupingPreviewId(null);
-      hoverGroupTimerRef.current = null;
-    }, 1000);
-  }
+  useEffect(() => {
+    folderListRef.current?.scrollTo({
+      top: folderListRef.current.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [conversations.length, activeConversationId]);
 
   function conversationToLink(conversation: Conversation): LoomLink {
     return {
@@ -2257,15 +3218,12 @@ function Sidebar({
   }
 
   function handleConversationDragStart(event: React.DragEvent, conversation: Conversation) {
-    setDraggedConversationId(conversation.id);
+    sidebarDnD.startDrag(conversation.id);
     setLoomDragPayload(event, conversationToLink(conversation));
   }
 
   function handleConversationDragEnd() {
-    setDraggedConversationId(null);
-    setGroupDropTargetId(null);
-    setStandaloneDropActive(false);
-    clearHoverGroupTimer();
+    sidebarDnD.endDrag();
   }
 
   function renderConversationTab(conversation: Conversation) {
@@ -2277,23 +3235,15 @@ function Sidebar({
         className={[
           "conversation-tab",
           conversation.id === activeConversationId ? "active" : "",
-          groupingPreviewId === conversation.id ? "grouping-preview" : "",
+          sidebarDnD.groupingPreviewId === conversation.id ? "grouping-preview" : "",
         ]
           .filter(Boolean)
           .join(" ")}
         onContextMenu={(event) => onOpenContextMenu(event, conversation)}
-        onDragEnter={() => startConversationGroupHover(conversation.id)}
-        onDragOver={(event) => {
-          if (draggedConversationId && draggedConversationId !== conversation.id) {
-            event.preventDefault();
-            event.dataTransfer.dropEffect = "copy";
-          }
-        }}
-        onDragLeave={(event) => {
-          if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-            clearHoverGroupTimer();
-          }
-        }}
+        onDragEnter={() => sidebarDnD.handleConversationDragEnter(conversation.id)}
+        onDragOver={(event) => sidebarDnD.handleConversationDragOver(event, conversation.id)}
+        onDragLeave={sidebarDnD.handleConversationDragLeave}
+        onDrop={(event) => sidebarDnD.handleConversationDrop(event, conversation.id)}
       >
         <button
           className="conversation-tab-main"
@@ -2379,22 +3329,23 @@ function Sidebar({
         </button>
       </nav>
 
-      <div className="folder-list">
-        {pinnedConversations.length > 0 && (
-          <section className="pinned-tabs" aria-label="Pinned conversations">
-            {pinnedConversations.map((conversation) => (
-              <PinnedConversationTab
-                key={`pinned-${conversation.id}`}
-                conversation={conversation}
-                active={conversation.id === activeConversationId}
-                onSelect={onSelectConversation}
-                onOpenContextMenu={onOpenContextMenu}
-                onDragStart={handleConversationDragStart}
-                onDragEnd={handleConversationDragEnd}
-              />
-            ))}
-          </section>
-        )}
+      {pinnedConversations.length > 0 && (
+        <section className="pinned-tabs" aria-label="Pinned conversations">
+          {pinnedConversations.map((conversation) => (
+            <PinnedConversationTab
+              key={`pinned-${conversation.id}`}
+              conversation={conversation}
+              active={conversation.id === activeConversationId}
+              onSelect={onSelectConversation}
+              onOpenContextMenu={onOpenContextMenu}
+              onDragStart={handleConversationDragStart}
+              onDragEnd={handleConversationDragEnd}
+            />
+          ))}
+        </section>
+      )}
+
+      <div className="folder-list" ref={folderListRef}>
         {tabGroups.map((group) => {
           const groupConversations = group.conversationIds
             .map((id) => conversations.find((conversation) => conversation.id === id))
@@ -2404,31 +3355,15 @@ function Sidebar({
             <section
               className={[
                 "tab-group",
-                groupDropTargetId === group.id ? "group-drop-target" : "",
+                sidebarDnD.groupDropTargetId === group.id ? "group-drop-target" : "",
               ]
                 .filter(Boolean)
                 .join(" ")}
               key={group.id}
-              onDragEnter={() => {
-                if (draggedConversationId) setGroupDropTargetId(group.id);
-              }}
-              onDragOver={(event) => {
-                if (draggedConversationId) {
-                  event.preventDefault();
-                  event.dataTransfer.dropEffect = "copy";
-                }
-              }}
-              onDragLeave={(event) => {
-                if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-                  setGroupDropTargetId(null);
-                }
-              }}
-              onDrop={(event) => {
-                if (!draggedConversationId) return;
-                event.preventDefault();
-                onAddToGroup(draggedConversationId, group.id);
-                setGroupDropTargetId(null);
-              }}
+              onDragEnter={() => sidebarDnD.handleGroupDragEnter(group.id)}
+              onDragOver={(event) => sidebarDnD.handleGroupDragOver(event, group.id)}
+              onDragLeave={sidebarDnD.handleGroupDragLeave}
+              onDrop={(event) => sidebarDnD.handleGroupDrop(event, group.id)}
             >
               <TabGroupHeader
                 group={group}
@@ -2443,27 +3378,11 @@ function Sidebar({
           );
         })}
         <div
-          className={standaloneDropActive ? "loose-tabs standalone-drop-zone active" : "loose-tabs standalone-drop-zone"}
-          onDragEnter={() => {
-            if (draggedConversationId) setStandaloneDropActive(true);
-          }}
-          onDragOver={(event) => {
-            if (draggedConversationId) {
-              event.preventDefault();
-              event.dataTransfer.dropEffect = "copy";
-            }
-          }}
-          onDragLeave={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-              setStandaloneDropActive(false);
-            }
-          }}
-          onDrop={(event) => {
-            if (!draggedConversationId) return;
-            event.preventDefault();
-            onRemoveFromGroups(draggedConversationId);
-            setStandaloneDropActive(false);
-          }}
+          className={sidebarDnD.standaloneDropActive ? "loose-tabs standalone-drop-zone active" : "loose-tabs standalone-drop-zone"}
+          onDragEnter={sidebarDnD.handleStandaloneDragEnter}
+          onDragOver={sidebarDnD.handleStandaloneDragOver}
+          onDragLeave={sidebarDnD.handleStandaloneDragLeave}
+          onDrop={sidebarDnD.handleStandaloneDrop}
         >
           {ungroupedConversations.map(renderConversationTab)}
         </div>
@@ -2585,6 +3504,8 @@ interface TopBrowserBarProps {
   selectedSuggestion: number;
   canBack: boolean;
   canForward: boolean;
+  backTraversal: NavigationTraversalEntry[];
+  forwardTraversal: NavigationTraversalEntry[];
   graphMode: boolean;
   activePanel: ActivePanel;
   sidebarCollapsed: boolean;
@@ -2596,7 +3517,7 @@ interface TopBrowserBarProps {
   onVisit: (destination: LoomLink | AddressSuggestion) => void;
   onBack: () => void;
   onForward: () => void;
-  onContextNav: (event: React.MouseEvent, direction: NavigationDirection) => void;
+  onJumpTraversal: (index: number) => void;
   onBookmarkCurrent: () => void;
   onToggleSidebar: () => void;
   onTogglePanel: (panel: "bookmarks" | "history" | "looms") => void;
@@ -2615,6 +3536,8 @@ function TopBrowserBar({
   selectedSuggestion,
   canBack,
   canForward,
+  backTraversal,
+  forwardTraversal,
   graphMode,
   activePanel,
   sidebarCollapsed,
@@ -2626,13 +3549,144 @@ function TopBrowserBar({
   onVisit,
   onBack,
   onForward,
-  onContextNav,
+  onJumpTraversal,
   onBookmarkCurrent,
   onToggleSidebar,
   onTogglePanel,
   onToggleGraph,
   onOpenProviderSettings,
 }: TopBrowserBarProps) {
+  const backButtonRef = useRef<HTMLButtonElement | null>(null);
+  const forwardButtonRef = useRef<HTMLButtonElement | null>(null);
+  const longPressTimerRef = useRef<number | null>(null);
+  const suppressClickRef = useRef(false);
+  const [traversalMenu, setTraversalMenu] = useState<{
+    direction: NavigationDirection;
+    x: number;
+    y: number;
+    highlightedIndex: number;
+  } | null>(null);
+  const activeTraversal =
+    traversalMenu?.direction === "back" ? backTraversal : forwardTraversal;
+
+  function closeTraversalMenu() {
+    setTraversalMenu(null);
+  }
+
+  function clearLongPressTimer() {
+    if (longPressTimerRef.current === null) return;
+    window.clearTimeout(longPressTimerRef.current);
+    longPressTimerRef.current = null;
+  }
+
+  function openTraversalMenu(
+    direction: NavigationDirection,
+    anchor: { x: number; y: number }
+  ) {
+    const entries = direction === "back" ? backTraversal : forwardTraversal;
+    if (entries.length === 0) return;
+    setTraversalMenu({
+      direction,
+      x: Math.max(8, Math.min(anchor.x, window.innerWidth - 320)),
+      y: Math.max(8, Math.min(anchor.y, window.innerHeight - 360)),
+      highlightedIndex: 0,
+    });
+  }
+
+  function openTraversalMenuFromButton(direction: NavigationDirection) {
+    const button = direction === "back" ? backButtonRef.current : forwardButtonRef.current;
+    if (!button) return;
+    const rect = button.getBoundingClientRect();
+    openTraversalMenu(direction, { x: rect.left, y: rect.bottom + 6 });
+  }
+
+  function handleTraversalPointerDown(direction: NavigationDirection) {
+    clearLongPressTimer();
+    suppressClickRef.current = false;
+    longPressTimerRef.current = window.setTimeout(() => {
+      suppressClickRef.current = true;
+      openTraversalMenuFromButton(direction);
+    }, 520);
+  }
+
+  function handleTraversalPointerUp() {
+    clearLongPressTimer();
+  }
+
+  function handleTraversalClick(
+    event: React.MouseEvent<HTMLButtonElement>,
+    action: () => void
+  ) {
+    if (suppressClickRef.current) {
+      event.preventDefault();
+      suppressClickRef.current = false;
+      return;
+    }
+    action();
+  }
+
+  function selectTraversalEntry(item: NavigationTraversalEntry) {
+    onJumpTraversal(item.index);
+    closeTraversalMenu();
+  }
+
+  useEffect(() => {
+    if (!traversalMenu) return;
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Element | null;
+      if (target?.closest(".traversal-menu, .traversal-nav-button")) return;
+      closeTraversalMenu();
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeTraversalMenu();
+        return;
+      }
+      if (event.key === "ArrowDown") {
+        event.preventDefault();
+        setTraversalMenu((current) =>
+          current
+            ? {
+                ...current,
+                highlightedIndex: Math.min(
+                  current.highlightedIndex + 1,
+                  activeTraversal.length - 1
+                ),
+              }
+            : current
+        );
+        return;
+      }
+      if (event.key === "ArrowUp") {
+        event.preventDefault();
+        setTraversalMenu((current) =>
+          current
+            ? {
+                ...current,
+                highlightedIndex: Math.max(current.highlightedIndex - 1, 0),
+              }
+            : current
+        );
+        return;
+      }
+      if (event.key === "Enter") {
+        event.preventDefault();
+        if (!traversalMenu) return;
+        const item = activeTraversal[traversalMenu.highlightedIndex];
+        if (item) selectTraversalEntry(item);
+      }
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [activeTraversal, traversalMenu]);
+
+  useEffect(() => () => clearLongPressTimer(), []);
+
   return (
     <TopBar>
       <div className="nav-cluster">
@@ -2653,25 +3707,53 @@ function TopBrowserBar({
           <strong>Loom</strong>
         </div>
         <button
-          className="icon-button"
+          ref={backButtonRef}
+          className="icon-button traversal-nav-button"
           disabled={!canBack}
-          onClick={onBack}
-          onContextMenu={(event) => onContextNav(event, "back")}
+          onClick={(event) => handleTraversalClick(event, onBack)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            openTraversalMenu("back", { x: event.clientX, y: event.clientY });
+          }}
+          onPointerDown={() => handleTraversalPointerDown("back")}
+          onPointerUp={handleTraversalPointerUp}
+          onPointerLeave={handleTraversalPointerUp}
           aria-label="Back"
-          title="Back. Right-click for history."
+          title="Back. Right-click or long-press for Back Traversal."
         >
           <ArrowLeft size={17} />
         </button>
         <button
-          className="icon-button"
+          ref={forwardButtonRef}
+          className="icon-button traversal-nav-button"
           disabled={!canForward}
-          onClick={onForward}
-          onContextMenu={(event) => onContextNav(event, "forward")}
+          onClick={(event) => handleTraversalClick(event, onForward)}
+          onContextMenu={(event) => {
+            event.preventDefault();
+            openTraversalMenu("forward", { x: event.clientX, y: event.clientY });
+          }}
+          onPointerDown={() => handleTraversalPointerDown("forward")}
+          onPointerUp={handleTraversalPointerUp}
+          onPointerLeave={handleTraversalPointerUp}
           aria-label="Forward"
-          title="Forward. Right-click for history."
+          title="Forward. Right-click or long-press for Forward Traversal."
         >
           <ArrowRight size={17} />
         </button>
+        {traversalMenu && (
+          <TraversalMenu
+            direction={traversalMenu.direction}
+            entries={activeTraversal}
+            highlightedIndex={traversalMenu.highlightedIndex}
+            style={{ left: traversalMenu.x, top: traversalMenu.y }}
+            onHighlight={(highlightedIndex) =>
+              setTraversalMenu((current) =>
+                current ? { ...current, highlightedIndex } : current
+              )
+            }
+            onSelect={selectTraversalEntry}
+          />
+        )}
       </div>
 
       <AddressBar addressBarRef={addressBarRef} focused={addressFocused}>
@@ -2754,6 +3836,89 @@ function TopBrowserBar({
       </div>
     </TopBar>
   );
+}
+
+function TraversalMenu({
+  direction,
+  entries,
+  highlightedIndex,
+  style,
+  onHighlight,
+  onSelect,
+}: {
+  direction: NavigationDirection;
+  entries: NavigationTraversalEntry[];
+  highlightedIndex: number;
+  style: CSSProperties;
+  onHighlight: (index: number) => void;
+  onSelect: (entry: NavigationTraversalEntry) => void;
+}) {
+  return (
+    <div
+      className="traversal-menu"
+      style={style}
+      role="menu"
+      aria-label={direction === "back" ? "Back Traversal" : "Forward Traversal"}
+    >
+      <div className="traversal-menu-title">
+        {direction === "back" ? "Back Traversal" : "Forward Traversal"}
+      </div>
+      <div className="traversal-menu-list" role="group" aria-label="Traversal List">
+        {entries.map((item, index) => {
+          const Icon = iconForType[item.entry.type] ?? Globe2;
+          const meta = traversalEntryMeta(item.entry);
+          return (
+            <button
+              type="button"
+              key={`${item.index}-${item.entry.id}`}
+              className={
+                index === highlightedIndex
+                  ? "traversal-menu-item highlighted"
+                  : "traversal-menu-item"
+              }
+              role="menuitem"
+              onMouseEnter={() => onHighlight(index)}
+              onFocus={() => onHighlight(index)}
+              onClick={() => onSelect(item)}
+            >
+              <Icon size={14} />
+              <span>
+                <strong>{meta.title}</strong>
+                <small>{meta.subtitle}</small>
+              </span>
+              <em>{meta.badge}</em>
+            </button>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function traversalEntryMeta(entry: HistoryEntry) {
+  const destination = entry.navigationDestination;
+  const titlePrefix = entry.type === "loom" ? "Weft: " : "";
+  const mode =
+    destination?.mode === "split"
+      ? "Split"
+      : destination?.mode === "full" && entry.type === "loom"
+        ? "Full"
+        : undefined;
+  const scroll =
+    destination?.scrollMode === "origin"
+      ? "Origin"
+      : destination?.scrollMode === "lastResponse"
+        ? "Latest"
+        : destination?.scrollMode === "exact"
+          ? "Exact"
+          : undefined;
+  const badge = [mode, scroll, displayObjectTypeLabel(entry.badge)].filter(Boolean).join(" · ");
+
+  return {
+    title: `${titlePrefix}${entry.title}`,
+    subtitle: entry.path,
+    badge: badge || typeLabel[entry.type],
+  };
 }
 
 function AddressSuggestionList({
@@ -2859,6 +4024,7 @@ function ChatTranscript({
   onSelectionAsk,
   responseTitleOverrides,
   onOpenContextMenu,
+  onReturnToOrigin,
 }: {
   transcriptRef?: (node: HTMLElement | null) => void;
   conversation?: Conversation;
@@ -2871,6 +4037,7 @@ function ChatTranscript({
   onSelectionAsk: (response: ResponseItem) => void;
   responseTitleOverrides: Record<string, string>;
   onOpenContextMenu: (event: React.MouseEvent, response: ResponseItem) => void;
+  onReturnToOrigin?: () => void;
 }) {
   if (!conversation) {
     return (
@@ -2886,7 +4053,15 @@ function ChatTranscript({
     <section className="chat-transcript" ref={transcriptRef} aria-label="Conversation transcript">
       <div className="conversation-context">
         <span>{conversation.path}</span>
-        <h1>{conversation.title}</h1>
+        <div className="conversation-context-title-row">
+          <h1>{conversation.title}</h1>
+          {onReturnToOrigin && (
+            <button className="link-chip return-origin-chip" onClick={onReturnToOrigin}>
+              <ArrowLeft size={13} />
+              <strong>Return to Origin</strong>
+            </button>
+          )}
+        </div>
         <p>{conversation.summary}</p>
       </div>
 
@@ -2900,6 +4075,7 @@ function ChatTranscript({
           <article
             className="qa-item"
             key={response.id}
+            data-response-id={displayResponse.id}
             data-response-address={displayResponse.address}
             onMouseUp={() => onSelectionAsk(displayResponse)}
             onContextMenu={(event) => onOpenContextMenu(event, displayResponse)}
@@ -2994,16 +4170,22 @@ function PromptComposer({
   draft,
   attachedReferences,
   referenceOptions,
+  attachContentItems,
   providerSettings,
   runtimeState,
+  runtimeHealth,
+  active = true,
   onProviderSettingsChange,
   onOpenProviderSettings,
+  onActivate,
   onDraftChange,
   onRemoveLink,
   onRemoveAttachedReference,
   onReadyToFocus,
   onDropLink,
   onResolveReference,
+  onOpenReference,
+  onCopyReferenceAddress,
   onSend,
   onUserTyping,
 }: {
@@ -3012,22 +4194,35 @@ function PromptComposer({
   draft: ComposerDraft;
   attachedReferences: LoomLink[];
   referenceOptions: ComposerReferenceOption[];
+  attachContentItems: AttachContentItem[];
   providerSettings: AIProviderSettings;
   runtimeState: { running: boolean; message: string | null };
+  runtimeHealth: RuntimeHealthState & {
+    checking: boolean;
+    testRuntime: () => Promise<RuntimeHealthState>;
+  };
+  active?: boolean;
   onProviderSettingsChange: (settings: AIProviderSettings) => void;
   onOpenProviderSettings: () => void;
+  onActivate?: () => void;
   onDraftChange: (draft: ComposerDraft) => void;
   onRemoveLink: (link: LoomLink) => void;
   onRemoveAttachedReference: (link: LoomLink) => void;
   onReadyToFocus: (focus: () => void) => void;
   onDropLink: (link: LoomLink) => void;
   onResolveReference: (link: LoomLink) => LoomLink;
+  onOpenReference: (link: LoomLink) => string | null;
+  onCopyReferenceAddress: (link: Pick<LoomLink, "path" | "canonicalUri">) => void;
   onSend: (draft: ComposerDraft, options: { effort: ModelEffort }) => Promise<boolean>;
   onUserTyping: () => void;
 }) {
   const editorRef = useRef<HTMLDivElement | null>(null);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
-  const referenceDropdownRef = useRef<HTMLDivElement | null>(null);
+  const attachButtonRef = useRef<HTMLButtonElement>(null);
+  const attachMenuRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const referenceButtonRef = useRef<HTMLButtonElement>(null);
+  const referenceMenuRef = useRef<HTMLDivElement>(null);
   const insertedPathsRef = useRef<Set<string>>(new Set());
   const activeDraftKeyRef = useRef("");
   const historiesRef = useRef<Record<string, ComposerHistoryState>>({});
@@ -3037,35 +4232,49 @@ function PromptComposer({
     replacesSelection: boolean;
   } | null>(null);
   const [mention, setMention] = useState<MentionState | null>(null);
+  const [attachPickerOpen, setAttachPickerOpen] = useState(false);
+  const [attachSearch, setAttachSearch] = useState("");
+  const [attachTab, setAttachTab] = useState<AttachContentTab>("all");
+  const [attachFeedback, setAttachFeedback] = useState<string | null>(null);
+  const [attachPopoverStyle, setAttachPopoverStyle] = useState<{
+    left: number;
+    top: number;
+    minWidth: number;
+    placement: "top" | "bottom";
+  } | null>(null);
   const [referencePickerOpen, setReferencePickerOpen] = useState(false);
   const [referenceSearch, setReferenceSearch] = useState("");
+  const [referencePopoverStyle, setReferencePopoverStyle] = useState<{
+    left: number;
+    top: number;
+    minWidth: number;
+    placement: "top" | "bottom";
+  } | null>(null);
+  const [referenceOpenError, setReferenceOpenError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
-  const [modelEffort, setModelEffort] = useState<ModelEffort>("Medium");
-  const activeProfile = providerSettings.profiles.activeComposerProfile;
-  const activeProfileModel = getProfileModel(providerSettings, activeProfile);
+  const mainModel = getProfileModel(providerSettings, "main");
   const installedModels = providerSettings.ollama.models.filter((model) => model.installed);
-  const selectableModels = installedModels.length > 0 ? installedModels : providerSettings.ollama.models;
-  const selectedModelId =
-    activeProfile === "quick"
-      ? providerSettings.profiles.quickModelId
-      : providerSettings.profiles.mainModelId;
+  const selectableModels =
+    mainModel.provider === "mock"
+      ? [mainModel]
+      : installedModels.length > 0
+        ? installedModels
+        : providerSettings.ollama.models;
+  const selectedModelId = mainModel.id;
+  const runtimeWarning = !runtimeHealth.ollama_running
+    ? "Ollama is not running. Test Runtime in AI Providers."
+    : !runtimeHealth.models_available
+      ? "No Ollama models are installed. Pull a model before sending."
+      : !runtimeHealth.selected_model_ready
+        ? `${mainModel.name} is not installed. Download it in AI Providers.`
+        : null;
 
-  function setActiveComposerProfile(profile: ModelProfileId) {
+  function setMainModel(modelId: string) {
     onProviderSettingsChange({
       ...providerSettings,
       profiles: {
         ...providerSettings.profiles,
-        activeComposerProfile: profile,
-      },
-    });
-  }
-
-  function setComposerProfileModel(modelId: string) {
-    onProviderSettingsChange({
-      ...providerSettings,
-      profiles: {
-        ...providerSettings.profiles,
-        [activeProfile === "quick" ? "quickModelId" : "mainModelId"]: modelId,
+        mainModelId: modelId,
       },
     });
   }
@@ -3097,7 +4306,7 @@ function PromptComposer({
   }, [mention?.query, referenceOptions]);
 
   const groupedMentionOptions = useMemo(() => {
-    const groups: ComposerReferenceGroup[] = ["Conversations", "Looms", "Bookmarks"];
+    const groups: ComposerReferenceGroup[] = ["Open Looms", "Responses", "Bookmarks"];
     return groups
       .map((group) => ({
         group,
@@ -3121,19 +4330,89 @@ function PromptComposer({
     );
   }, [attachedReferences, draft.links, referenceSearch]);
 
+  const selectedReferenceKeys = useMemo(() => {
+    const keys = new Set<string>();
+    [...attachedReferences, ...draft.links].forEach((link) => {
+      keys.add(link.path);
+      if (link.targetObjectId) keys.add(link.targetObjectId);
+    });
+    return keys;
+  }, [attachedReferences, draft.links]);
+
+  const currentAttachments = draft.attachments ?? [];
+
+  const filteredAttachItems = useMemo(() => {
+    const query = attachSearch.trim().toLowerCase();
+    return attachContentItems.filter((item) => {
+      if (attachTab === "bookmarks" && item.source !== "bookmark") return false;
+      if (attachTab === "history" && item.source !== "history") return false;
+      if (attachTab === "openLooms" && item.source !== "openLoom") return false;
+      if (attachTab === "responses" && item.source !== "response") return false;
+      if (attachTab === "files") return false;
+      if (!query) return true;
+      return [item.title, item.subtitle, item.path, item.badge, item.source, ...item.keywords]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase()
+        .includes(query);
+    });
+  }, [attachContentItems, attachSearch, attachTab]);
+
+  const attachGroups = useMemo(
+    () => [
+      {
+        id: "bookmark" as const,
+        title: "Bookmarks",
+        items: filteredAttachItems.filter((item) => item.source === "bookmark"),
+      },
+      {
+        id: "history" as const,
+        title: "Loom History",
+        items: filteredAttachItems.filter((item) => item.source === "history"),
+      },
+      {
+        id: "openLoom" as const,
+        title: "Open Looms",
+        items: filteredAttachItems.filter((item) => item.source === "openLoom"),
+      },
+      {
+        id: "response" as const,
+        title: "Responses",
+        items: filteredAttachItems.filter((item) => item.source === "response"),
+      },
+    ],
+    [filteredAttachItems]
+  );
+
   useEffect(() => {
     function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Node;
+      if (
+        attachPickerOpen &&
+        attachButtonRef.current &&
+        attachMenuRef.current &&
+        !attachButtonRef.current.contains(target) &&
+        !attachMenuRef.current.contains(target)
+      ) {
+        setAttachPickerOpen(false);
+        setAttachPopoverStyle(null);
+        setAttachFeedback(null);
+      }
       if (
         referencePickerOpen &&
-        referenceDropdownRef.current &&
-        !referenceDropdownRef.current.contains(event.target as Node)
+        referenceButtonRef.current &&
+        referenceMenuRef.current &&
+        !referenceButtonRef.current.contains(target) &&
+        !referenceMenuRef.current.contains(target)
       ) {
         setReferencePickerOpen(false);
+        setReferencePopoverStyle(null);
+        setReferenceOpenError(null);
       }
       if (
         mention &&
         surfaceRef.current &&
-        !surfaceRef.current.contains(event.target as Node)
+        !surfaceRef.current.contains(target)
       ) {
         setMention(null);
       }
@@ -3142,7 +4421,10 @@ function PromptComposer({
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
         setMention(null);
+        setAttachPickerOpen(false);
+        setAttachFeedback(null);
         setReferencePickerOpen(false);
+        setReferenceOpenError(null);
       }
     }
 
@@ -3152,7 +4434,102 @@ function PromptComposer({
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
     };
-  }, [mention, referencePickerOpen]);
+  }, [attachPickerOpen, mention, referencePickerOpen]);
+
+  useLayoutEffect(() => {
+    if (!referencePickerOpen) {
+      setReferencePopoverStyle(null);
+      return;
+    }
+
+    function updateReferencePopoverPosition() {
+      const button = referenceButtonRef.current;
+      const menu = referenceMenuRef.current;
+      if (!button || !menu) return;
+
+      const buttonRect = button.getBoundingClientRect();
+      const menuRect = menu.getBoundingClientRect();
+      const viewportPadding = 12;
+      const gap = 6;
+      const minWidth = Math.max(buttonRect.width, 330);
+
+      let left = buttonRect.left;
+      let top = buttonRect.bottom + gap;
+      let placement: "top" | "bottom" = "bottom";
+
+      if (top + menuRect.height > window.innerHeight - viewportPadding) {
+        const aboveTop = buttonRect.top - gap - menuRect.height;
+        if (aboveTop >= viewportPadding) {
+          top = aboveTop;
+          placement = "top";
+        }
+      }
+
+      const width = Math.max(menuRect.width, minWidth);
+      if (left + width > window.innerWidth - viewportPadding) {
+        left = Math.max(viewportPadding, window.innerWidth - width - viewportPadding);
+      }
+
+      setReferencePopoverStyle({ left, top, minWidth: width, placement });
+    }
+
+    const raf = window.requestAnimationFrame(updateReferencePopoverPosition);
+    window.addEventListener("resize", updateReferencePopoverPosition);
+    window.addEventListener("scroll", updateReferencePopoverPosition, true);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.removeEventListener("resize", updateReferencePopoverPosition);
+      window.removeEventListener("scroll", updateReferencePopoverPosition, true);
+    };
+  }, [filteredLinkedReferences.length, referencePickerOpen]);
+
+  useLayoutEffect(() => {
+    if (!attachPickerOpen) {
+      setAttachPopoverStyle(null);
+      return;
+    }
+
+    function updateAttachPopoverPosition() {
+      const button = attachButtonRef.current;
+      const menu = attachMenuRef.current;
+      if (!button || !menu) return;
+
+      const buttonRect = button.getBoundingClientRect();
+      const menuRect = menu.getBoundingClientRect();
+      const viewportPadding = 12;
+      const gap = 6;
+      const minWidth = Math.max(buttonRect.width, 430);
+      const fixedMenuHeight = Math.min(360, window.innerHeight - viewportPadding * 2);
+
+      let left = buttonRect.left;
+      let top = buttonRect.bottom + gap;
+      let placement: "top" | "bottom" = "bottom";
+
+      if (top + fixedMenuHeight > window.innerHeight - viewportPadding) {
+        const aboveTop = buttonRect.top - gap - fixedMenuHeight;
+        if (aboveTop >= viewportPadding) {
+          top = aboveTop;
+          placement = "top";
+        }
+      }
+
+      const width = Math.max(menuRect.width, minWidth);
+      if (left + width > window.innerWidth - viewportPadding) {
+        left = Math.max(viewportPadding, window.innerWidth - width - viewportPadding);
+      }
+
+      setAttachPopoverStyle({ left, top, minWidth: width, placement });
+    }
+
+    const raf = window.requestAnimationFrame(updateAttachPopoverPosition);
+    window.addEventListener("resize", updateAttachPopoverPosition);
+    window.addEventListener("scroll", updateAttachPopoverPosition, true);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.removeEventListener("resize", updateAttachPopoverPosition);
+      window.removeEventListener("scroll", updateAttachPopoverPosition, true);
+    };
+  }, [attachPickerOpen]);
 
   function makeToken(link: LoomLink) {
     const token = document.createElement("span");
@@ -3176,7 +4553,10 @@ function PromptComposer({
   function sameDraft(a: ComposerDraft, b: ComposerDraft) {
     if (a.html !== b.html) return false;
     if (a.links.length !== b.links.length) return false;
-    return a.links.every((link, index) => {
+    const aAttachments = a.attachments ?? [];
+    const bAttachments = b.attachments ?? [];
+    if (aAttachments.length !== bAttachments.length) return false;
+    const sameLinks = a.links.every((link, index) => {
       const other = b.links[index];
       return (
         other &&
@@ -3184,6 +4564,16 @@ function PromptComposer({
         link.title === other.title &&
         link.type === other.type &&
         link.badge === other.badge
+      );
+    });
+    if (!sameLinks) return false;
+    return aAttachments.every((attachment, index) => {
+      const other = bAttachments[index];
+      return (
+        other &&
+        attachment.id === other.id &&
+        attachment.name === other.name &&
+        attachment.size === other.size
       );
     });
   }
@@ -3320,6 +4710,7 @@ function PromptComposer({
     return {
       html: editor.innerHTML,
       links: Array.from(linksByPath.values()),
+      attachments: draft.attachments ?? [],
     };
   }
 
@@ -3366,7 +4757,7 @@ function PromptComposer({
         )
       );
     }
-  }, [draftKey, draft.links]);
+  }, [draftKey, draft.links, draft.attachments]);
 
   function placeCaretAfter(node: Node) {
     const selection = window.getSelection();
@@ -3498,13 +4889,98 @@ function PromptComposer({
     insertTokenAtRange(option, range);
   }
 
+  function isReferenceSelected(link: LoomLink) {
+    return (
+      selectedReferenceKeys.has(link.path) ||
+      Boolean(link.targetObjectId && selectedReferenceKeys.has(link.targetObjectId))
+    );
+  }
+
+  function insertReferenceFromAttachPicker(item: AttachContentItem) {
+    if (isReferenceSelected(item)) {
+      setAttachFeedback("Already referenced");
+      return;
+    }
+
+    const editor = editorRef.current;
+    const selection = window.getSelection();
+    const range =
+      editor && selection && selection.rangeCount > 0 && editor.contains(selection.getRangeAt(0).startContainer)
+        ? selection.getRangeAt(0).cloneRange()
+        : null;
+
+    if (range) {
+      insertTokenAtRange(item, range);
+    } else {
+      const resolvedLink = insertTokenAtEnd(item);
+      onDropLink(resolvedLink);
+      window.requestAnimationFrame(() => commitDraftChange("reference-insert"));
+    }
+    setAttachFeedback(null);
+  }
+
+  function toggleAttachReference(item: AttachContentItem) {
+    if (isReferenceSelected(item)) {
+      removeLinkedReference(item);
+      setAttachFeedback(null);
+      return;
+    }
+    insertReferenceFromAttachPicker(item);
+  }
+
+  function updateDraftAttachments(nextAttachments: ComposerAttachment[]) {
+    const nextDraft = {
+      ...extractDraftFromEditor(),
+      attachments: nextAttachments,
+    };
+    const history = getHistoryState();
+    const entries = history.entries.slice(0, history.index + 1);
+    history.entries = [...entries, nextDraft];
+    history.index = history.entries.length - 1;
+    history.lastMeta = {
+      intent: "external-reference",
+      at: Date.now(),
+      caret: getCaretOffset(),
+      direction: "structural",
+    };
+    onDraftChange(nextDraft);
+  }
+
+  function addAttachments(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    const existing = draft.attachments ?? [];
+    const seen = new Set(
+      existing.map((attachment) => `${attachment.name}:${attachment.size}:${attachment.lastModified}`)
+    );
+    const next = [...existing];
+    Array.from(files).forEach((file) => {
+      const key = `${file.name}:${file.size}:${file.lastModified}`;
+      if (seen.has(key)) return;
+      seen.add(key);
+      next.push({
+        id: key,
+        name: file.name,
+        size: file.size,
+        type: file.type || "File",
+        lastModified: file.lastModified,
+      });
+    });
+    updateDraftAttachments(next);
+  }
+
+  function removeAttachment(attachmentId: string) {
+    updateDraftAttachments(
+      (draft.attachments ?? []).filter((attachment) => attachment.id !== attachmentId)
+    );
+  }
+
   async function submitComposer() {
-    if (runtimeState.running) return;
+    if (runtimeState.running || runtimeWarning) return;
     const nextDraft = extractDraftFromEditor();
     onDraftChange(nextDraft);
     onUserTyping();
-    const sent = await onSend(nextDraft, { effort: modelEffort });
-    if (sent) applyDraftSnapshot({ html: "", links: [] });
+    const sent = await onSend(nextDraft, { effort: "Medium" });
+    if (sent) applyDraftSnapshot({ html: "", links: [], attachments: [] });
   }
 
   function handleEditorKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
@@ -3592,8 +5068,13 @@ function PromptComposer({
 
   return (
     <section
-      className={variant === "centered" ? "prompt-composer centered" : "prompt-composer"}
+      className={[
+        variant === "centered" ? "prompt-composer centered" : "prompt-composer",
+        active ? "active" : "passive",
+      ].join(" ")}
       aria-label="Prompt composer"
+      onPointerDownCapture={onActivate}
+      onFocusCapture={onActivate}
     >
       <div
         ref={surfaceRef}
@@ -3664,6 +5145,28 @@ function PromptComposer({
             ))}
           </div>
         )}
+        {currentAttachments.length > 0 && (
+          <div className="attached-file-row" aria-label="File attachments">
+            {currentAttachments.map((attachment) => (
+              <span
+                className="file-attachment-chip"
+                key={attachment.id}
+                title={`${attachment.name} (${formatAttachmentSize(attachment.size)})`}
+              >
+                <Paperclip size={13} />
+                <span>{attachment.name}</span>
+                <small>{formatAttachmentSize(attachment.size)}</small>
+                <button
+                  type="button"
+                  onClick={() => removeAttachment(attachment.id)}
+                  aria-label={`Remove ${attachment.name}`}
+                >
+                  <X size={12} />
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
         <div
           ref={editorRef}
           className="prompt-editor"
@@ -3672,7 +5175,7 @@ function PromptComposer({
           role="textbox"
           tabIndex={0}
           aria-label="Prompt"
-          data-placeholder="Ask anything, or reference a Loom conversation with #..."
+          data-placeholder="Ask anything, or reference a Loom with #..."
           onBeforeInput={(event) => {
             const selection = window.getSelection();
             pendingInputRef.current = {
@@ -3715,19 +5218,77 @@ function PromptComposer({
 
         <div className="composer-footer">
           <button
+            ref={attachButtonRef}
             className="composer-icon-action"
             aria-label="Attach"
             title="Attach"
-            onClick={() => undefined}
+            aria-haspopup="dialog"
+            aria-expanded={attachPickerOpen}
+            onClick={() => {
+              setAttachPickerOpen((current) => {
+                const next = !current;
+                if (!next) {
+                  setAttachPopoverStyle(null);
+                  setAttachFeedback(null);
+                }
+                return next;
+              });
+            }}
           >
             <Plus size={16} />
           </button>
-          <div className="linked-reference-anchor" ref={referenceDropdownRef}>
+          {attachPickerOpen && (
+            <AttachContentDropdown
+              menuRef={attachMenuRef}
+              style={
+                attachPopoverStyle
+                  ? {
+                      left: attachPopoverStyle.left,
+                      top: attachPopoverStyle.top,
+                      minWidth: attachPopoverStyle.minWidth,
+                      visibility: "visible",
+                    }
+                  : {
+                      left: 0,
+                      top: 0,
+                      minWidth: 430,
+                      visibility: "hidden",
+                    }
+              }
+              tab={attachTab}
+              query={attachSearch}
+              groups={attachGroups}
+              filteredItems={filteredAttachItems}
+              selectedKeys={selectedReferenceKeys}
+              attachments={currentAttachments}
+              feedback={attachFeedback}
+              fileInputRef={fileInputRef}
+              onTabChange={(nextTab) => {
+                setAttachTab(nextTab);
+                setAttachFeedback(null);
+              }}
+              onQueryChange={setAttachSearch}
+              onToggleReference={toggleAttachReference}
+              onAddFiles={addAttachments}
+              onRemoveAttachment={removeAttachment}
+            />
+          )}
+          <div className="linked-reference-anchor">
             <button
+              ref={referenceButtonRef}
               className={referencePickerOpen ? "reference-globe active" : "reference-globe"}
-              onClick={() => setReferencePickerOpen((current) => !current)}
+              onClick={() => {
+                setReferencePickerOpen((current) => {
+                  const next = !current;
+                  if (!next) setReferencePopoverStyle(null);
+                  if (!next) setReferenceOpenError(null);
+                  return next;
+                });
+              }}
               aria-label="References"
               title="References"
+              aria-haspopup="listbox"
+              aria-expanded={referencePickerOpen}
             >
               <Globe2 size={15} />
               <span>References</span>
@@ -3737,41 +5298,49 @@ function PromptComposer({
             </button>
             {referencePickerOpen && (
               <LinkedReferenceDropdown
+                menuRef={referenceMenuRef}
+                style={
+                  referencePopoverStyle
+                    ? {
+                        left: referencePopoverStyle.left,
+                        top: referencePopoverStyle.top,
+                        minWidth: referencePopoverStyle.minWidth,
+                        visibility: "visible",
+                      }
+                    : {
+                        left: 0,
+                        top: 0,
+                        minWidth: 330,
+                        visibility: "hidden",
+                      }
+                }
                 links={filteredLinkedReferences}
                 query={referenceSearch}
+                error={referenceOpenError}
                 onQueryChange={setReferenceSearch}
+                onOpen={(link) => {
+                  const error = onOpenReference(link);
+                  setReferenceOpenError(error);
+                  if (!error) {
+                    setReferencePickerOpen(false);
+                    setReferencePopoverStyle(null);
+                  }
+                }}
+                onCopy={(link) => {
+                  onCopyReferenceAddress(link);
+                  setReferenceOpenError(null);
+                }}
                 onRemove={removeLinkedReference}
               />
             )}
           </div>
           <span>Type # to insert Loom references inline.</span>
           <select
-            className="model-effort-select"
-            value={modelEffort}
-            onChange={(event) => setModelEffort(event.target.value as ModelEffort)}
-            aria-label="Select model working power"
-            title="Model working power"
-          >
-            <option>Low</option>
-            <option>Medium</option>
-            <option>High</option>
-          </select>
-          <select
-            className="model-select"
-            value={activeProfile}
-            onChange={(event) => setActiveComposerProfile(event.target.value as ModelProfileId)}
-            aria-label="Select model profile"
-            title={getComposerModelLabel(providerSettings)}
-          >
-            <option value="quick">Quick · {getProfileModel(providerSettings, "quick").name}</option>
-            <option value="main">Main · {getProfileModel(providerSettings, "main").name}</option>
-          </select>
-          <select
             className="model-picker-select"
             value={selectedModelId}
-            onChange={(event) => setComposerProfileModel(event.target.value)}
+            onChange={(event) => setMainModel(event.target.value)}
             aria-label="Select model"
-            title={`${activeProfile === "quick" ? "Quick" : "Main"} model: ${activeProfileModel.name}`}
+            title={`Main model: ${mainModel.name}`}
           >
             {selectableModels.map((model) => (
               <option key={model.id} value={model.id}>
@@ -3794,22 +5363,25 @@ function PromptComposer({
             className="send-button"
             aria-label="Send"
             onClick={submitComposer}
-            disabled={runtimeState.running}
+            disabled={runtimeState.running || Boolean(runtimeWarning)}
+            title={runtimeWarning ?? "Send"}
           >
             <ArrowUp size={16} />
           </button>
         </div>
-        {runtimeState.message && (
+        {(runtimeWarning || runtimeState.message) && (
           <p
             className={
-              runtimeState.running
+              runtimeWarning
+                ? "composer-runtime-status error"
+                : runtimeState.running
                 ? "composer-runtime-status"
-                : runtimeState.message.includes("responded")
+                : runtimeState.message?.includes("responded")
                   ? "composer-runtime-status"
                   : "composer-runtime-status error"
             }
           >
-            {runtimeState.message}
+            {runtimeWarning ?? runtimeState.message}
           </p>
         )}
       </div>
@@ -3869,18 +5441,39 @@ function ComposerMentionMenu({
 }
 
 function LinkedReferenceDropdown({
+  menuRef,
+  style,
   links,
   query,
+  error,
   onQueryChange,
+  onOpen,
+  onCopy,
   onRemove,
 }: {
+  menuRef: RefObject<HTMLDivElement>;
+  style?: CSSProperties;
   links: LoomLink[];
   query: string;
+  error: string | null;
   onQueryChange: (query: string) => void;
+  onOpen: (link: LoomLink) => void;
+  onCopy: (link: LoomLink) => void;
   onRemove: (link: LoomLink) => void;
 }) {
+  const [contextMenu, setContextMenu] = useState<{
+    link: LoomLink;
+    x: number;
+    y: number;
+  } | null>(null);
+
+  function openReference(link: LoomLink) {
+    setContextMenu(null);
+    onOpen(link);
+  }
+
   return (
-    <div className="linked-reference-dropdown">
+    <div ref={menuRef} className="linked-reference-dropdown" style={style}>
       <label className="linked-reference-search">
         <Search size={13} />
         <input
@@ -3897,13 +5490,38 @@ function LinkedReferenceDropdown({
           links.map((link) => {
             const Icon = iconForType[link.type];
             return (
-              <div className="linked-reference-row" key={`${link.id}-${link.path}`}>
+              <div
+                className="linked-reference-row"
+                key={`${link.id}-${link.path}`}
+                role="button"
+                tabIndex={0}
+                title="Open Reference"
+                onClick={() => openReference(link)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  setContextMenu({ link, x: event.clientX, y: event.clientY });
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  openReference(link);
+                }}
+              >
                 <Icon size={14} />
                 <span>
                   <strong>{link.title}</strong>
                   <small>{link.path}</small>
                 </span>
-                <button onClick={() => onRemove(link)} aria-label={`Remove ${link.title}`}>
+                <button
+                  className="linked-reference-remove"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setContextMenu(null);
+                    onRemove(link);
+                  }}
+                  title="Remove Reference"
+                  aria-label="Remove Reference"
+                >
                   <X size={13} />
                 </button>
               </div>
@@ -3911,8 +5529,216 @@ function LinkedReferenceDropdown({
           })
         )}
       </ReferencesListBox>
+      {contextMenu && (
+        <div
+          className="linked-reference-context-menu"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button
+            onClick={() => {
+              onCopy(contextMenu.link);
+              setContextMenu(null);
+            }}
+          >
+            <Copy size={13} />
+            <span>Copy Loom Address</span>
+          </button>
+        </div>
+      )}
+      {error && <div className="linked-reference-error">{error}</div>}
     </div>
   );
+}
+
+function AttachContentDropdown({
+  menuRef,
+  style,
+  tab,
+  query,
+  groups,
+  filteredItems,
+  selectedKeys,
+  attachments,
+  feedback,
+  fileInputRef,
+  onTabChange,
+  onQueryChange,
+  onToggleReference,
+  onAddFiles,
+  onRemoveAttachment,
+}: {
+  menuRef: RefObject<HTMLDivElement>;
+  style?: CSSProperties;
+  tab: AttachContentTab;
+  query: string;
+  groups: Array<{ id: AttachContentSource; title: string; items: AttachContentItem[] }>;
+  filteredItems: AttachContentItem[];
+  selectedKeys: Set<string>;
+  attachments: ComposerAttachment[];
+  feedback: string | null;
+  fileInputRef: RefObject<HTMLInputElement>;
+  onTabChange: (tab: AttachContentTab) => void;
+  onQueryChange: (query: string) => void;
+  onToggleReference: (item: AttachContentItem) => void;
+  onAddFiles: (files: FileList | null) => void;
+  onRemoveAttachment: (attachmentId: string) => void;
+}) {
+  function itemSelected(item: AttachContentItem) {
+    return (
+      selectedKeys.has(item.path) ||
+      Boolean(item.targetObjectId && selectedKeys.has(item.targetObjectId))
+    );
+  }
+
+  function renderItem(item: AttachContentItem) {
+    const Icon = iconForType[item.type];
+    const selected = itemSelected(item);
+    return (
+      <button
+        type="button"
+        key={`${item.source}-${item.id}-${item.path}`}
+        className={selected ? "attach-content-row selected" : "attach-content-row"}
+        onClick={() => onToggleReference(item)}
+      >
+        <Icon size={15} />
+        <span>
+          <strong>{item.title}</strong>
+          <small>{item.subtitle || item.path}</small>
+        </span>
+        <em>{displayObjectTypeLabel(item.badge ?? attachSourceLabel(item.source))}</em>
+        <i aria-hidden="true">{selected ? <Check size={13} /> : null}</i>
+      </button>
+    );
+  }
+
+  return (
+    <div ref={menuRef} className="attach-content-dropdown" style={style} role="dialog">
+      <div className="attach-content-header">
+        <strong>Attach content</strong>
+        <span>Add Loom references or files to your prompt.</span>
+      </div>
+      <label className="linked-reference-search attach-content-search">
+        <Search size={13} />
+        <input
+          value={query}
+          onChange={(event) => onQueryChange(event.target.value)}
+          placeholder="Search Looms, Bookmarks, History, Responses..."
+          aria-label="Search attach content"
+        />
+      </label>
+      <div className="attach-content-tabs" role="tablist" aria-label="Attach content sources">
+        {attachContentTabs.map(({ id, label, Icon }) => (
+          <button
+            type="button"
+            key={id}
+            className={tab === id ? "active" : ""}
+            title={label}
+            aria-label={label}
+            aria-selected={tab === id}
+            role="tab"
+            onClick={() => onTabChange(id)}
+          >
+            <Icon size={15} />
+          </button>
+        ))}
+      </div>
+      <div className="attach-content-results">
+        {tab === "all" ? (
+          <>
+            {groups.filter((group) => group.items.length > 0).map((group) => (
+              <div className="attach-content-section" key={group.id}>
+                <h3>{group.title}</h3>
+                {group.items.slice(0, 5).map(renderItem)}
+              </div>
+            ))}
+            <AttachFilesSection
+              attachments={attachments}
+              fileInputRef={fileInputRef}
+              onAddFiles={onAddFiles}
+              onRemoveAttachment={onRemoveAttachment}
+            />
+          </>
+        ) : tab === "files" ? (
+          <AttachFilesSection
+            attachments={attachments}
+            fileInputRef={fileInputRef}
+            onAddFiles={onAddFiles}
+            onRemoveAttachment={onRemoveAttachment}
+          />
+        ) : filteredItems.length > 0 ? (
+          filteredItems.map(renderItem)
+        ) : (
+          <div className="empty-state">No matching Loom references.</div>
+        )}
+      </div>
+      {feedback && <div className="linked-reference-error">{feedback}</div>}
+    </div>
+  );
+}
+
+function AttachFilesSection({
+  attachments,
+  fileInputRef,
+  onAddFiles,
+  onRemoveAttachment,
+}: {
+  attachments: ComposerAttachment[];
+  fileInputRef: RefObject<HTMLInputElement>;
+  onAddFiles: (files: FileList | null) => void;
+  onRemoveAttachment: (attachmentId: string) => void;
+}) {
+  return (
+    <div className="attach-content-section">
+      <h3>Files</h3>
+      <button
+        type="button"
+        className="attach-file-action"
+        onClick={() => fileInputRef.current?.click()}
+      >
+        <Paperclip size={14} />
+        <span>Add file</span>
+      </button>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        className="visually-hidden-file-input"
+        onChange={(event) => {
+          onAddFiles(event.currentTarget.files);
+          event.currentTarget.value = "";
+        }}
+      />
+      {attachments.length === 0 ? (
+        <div className="attach-file-empty">No files attached.</div>
+      ) : (
+        attachments.map((attachment) => (
+          <div className="attach-file-row" key={attachment.id}>
+            <Paperclip size={14} />
+            <span>
+              <strong>{attachment.name}</strong>
+              <small>{formatAttachmentSize(attachment.size)}</small>
+            </span>
+            <button
+              type="button"
+              onClick={() => onRemoveAttachment(attachment.id)}
+              aria-label={`Remove ${attachment.name}`}
+              title="Remove file"
+            >
+              <X size={13} />
+            </button>
+          </div>
+        ))
+      )}
+    </div>
+  );
+}
+
+function attachSourceLabel(source: AttachContentSource) {
+  if (source === "bookmark") return "Bookmark";
+  if (source === "history") return "History";
+  if (source === "openLoom") return "Loom";
+  return "Response";
 }
 
 function RightPanel({

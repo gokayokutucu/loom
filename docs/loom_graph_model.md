@@ -47,7 +47,7 @@ A **Loom** is the top-level narrative container.
 A Loom may be:
 
 - created from scratch
-- created from a fork / Weft action
+- created from a Weft action
 - created from a derived composition flow
 
 Suggested fields:
@@ -55,6 +55,8 @@ Suggested fields:
 - `loomId`
 - `title`
 - `originType: root | fork | derived`
+- `originLoomId?`
+- `originResponseId?`
 - `forkedFromLoomId?`
 - `forkedFromResponseId?`
 - `createdAt`
@@ -65,6 +67,16 @@ Suggested fields:
 ### Rule
 A Loom is an owner container.
 It is not just a visual tab.
+
+### Weft Rule
+A Weft is a Loom with origin linkage.
+
+It stores:
+
+- `originLoomId`
+- `originResponseId`
+
+The Weft object is a real Loom object. Its Weft behavior comes from origin metadata and graph edges, not from being a separate owner type.
 
 ---
 
@@ -123,7 +135,7 @@ A Bookmark may point to:
 - a Loom
 - a Response
 - a selected passage
-- a Weft/fork lineage
+- a Weft
 - a response set
 
 Suggested fields:
@@ -167,25 +179,36 @@ This distinction is critical.
 
 ---
 
-## 4. Non-Canonical Objects
+## Weft (Authoritative Definition)
 
-## 4.1 Weft
+Weft is NOT a thread.
 
-User-facing term: **Weft**
+Weft is:
+- an anchored exploration path
+- a new Loom created from a specific Response
+- preserving a context snapshot
+- allowing return to its origin
 
-Internal meaning:
-A Weft is better modeled as a **lineage/fork projection** rather than a standalone owner object.
+Weft supports:
+- split view (origin Loom + Weft Loom)
+- full view
+- session-based navigation
+- return-to-origin behavior
 
-That means:
-- the UI can call it Weft
-- but the deeper model should treat it as a **projection or fork lineage scope**
+Each Weft has:
+- originLoomId
+- originResponseId
 
-### Rule
-Weft is primarily a graph-derived path, not necessarily a new owner container unless it becomes a new Loom.
+A Weft is always a Loom.
+The difference is:
+- Loom = independent container
+- Weft = Loom with origin linkage
 
 ---
 
-## 4.2 Window
+## 4. Non-Canonical Objects
+
+## 4.1 Window
 
 A **Window** is not an owner object.
 A Window is a **bounded projection over the Loom graph**.
@@ -220,6 +243,8 @@ Suggested relationship types:
 - Loom `contains` Response
 - ReferenceMention `references` Response
 - Loom `forked_from` Response
+- Weft Loom `forked_from` origin Response
+- Weft Loom `derived_from` origin Loom
 - Bookmark `bookmarked_as` Response
 - QuickQuestion `anchored_to` Response
 
@@ -253,13 +278,18 @@ It should depend on:
 
 ## 7.1 Fork from Response
 
-If the user chooses Weft/Fork on a Response:
-- the selected Response and its ancestry define the lineage seed
+If the user chooses Weft on a Response:
+- the selected Response and its ancestry define the Weft seed
 - a new Loom may be created from that point
 - the new Loom should store:
   - `originType = fork`
+  - `originResponseId`
+  - `originLoomId`
   - `forkedFromResponseId`
   - `forkedFromLoomId`
+- the graph should store:
+  - Weft Loom `forked_from` origin Response
+  - Weft Loom `derived_from` origin Loom
 
 ## 7.2 Weft vs Loom
 
@@ -267,7 +297,7 @@ User-facing:
 - Weft button may say “Weft”
 
 System-facing:
-- operation is closer to `Fork Loom from Response`
+- operation creates a Loom with Weft origin linkage
 
 ---
 
@@ -295,7 +325,7 @@ A QuickQuestion can stay temporary.
 It becomes durable only if the user explicitly promotes it.
 
 Possible promotions:
-- convert to Weft/fork
+- convert to Weft
 - bookmark
 - preserve as a durable QuickQuestion node
 
@@ -308,7 +338,7 @@ These must remain true:
 1. A canonical object keeps a stable internal identity.
 2. Bookmarking is the promotion step for addressability.
 3. Reference reuse creates mentions, not clones.
-4. A Weft is a lineage/fork concept, not only a visual comment chain.
+4. A Weft is a Loom with origin linkage.
 5. A Window is a projection, not an owner.
 
 ---
@@ -350,14 +380,14 @@ The graph truth of Loom AI is:
 - **Bookmark** is the promotion and addressability layer
 - **ReferenceMention** is the reuse layer
 - **QuickQuestion** may begin ephemeral and later promote
-- **Weft** is best treated as a lineage/fork path rather than a simple visual comment chain
+- **Weft** is a Loom with origin linkage from a specific Response
 - **Window** is a projection over the graph, not an owning structure
 
 ---
 
 ## 13. SQLite Persistence Alignment
 
-The graph model maps to SQLite through `sqlite_graph_storage_model.md` and `schema/001_loom_graph.sql`.
+The graph model maps to SQLite through `docs/sqlite_graph_storage_model.md` and `schema/001_loom_graph.sql`.
 
 Persistence rules:
 

@@ -90,6 +90,21 @@ export interface LoomResolutionResult {
   reason?: string;
 }
 
+export interface LoomNavigationDestination {
+  loomId: string;
+  mode: "full" | "split";
+  originLoomId?: string;
+  originResponseId?: string;
+  scrollTargetResponseId?: string;
+  scrollMode?: "origin" | "lastResponse" | "exact";
+  source:
+    | "userNavigation"
+    | "addressBar"
+    | "weftCreate"
+    | "returnToOrigin"
+    | "backForward";
+}
+
 export interface LoomGraphEdge {
   edgeId: string;
   fromObjectId: string;
@@ -213,6 +228,7 @@ export interface BookmarkItem extends LoomLink {
 
 export interface HistoryEntry extends LoomLink {
   visitedAt: string;
+  navigationDestination?: LoomNavigationDestination;
 }
 
 export interface TabGroup {

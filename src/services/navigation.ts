@@ -1,15 +1,52 @@
-import type { HistoryEntry, LoomLink } from "../types";
+import type { HistoryEntry, LoomLink, LoomNavigationDestination } from "../types";
 
 export type NavigationDirection = "back" | "forward";
 
-export function createHistoryEntry(destination: LoomLink): HistoryEntry {
+export interface NavigationTraversalEntry {
+  entry: HistoryEntry;
+  index: number;
+}
+
+export function createHistoryEntry(
+  destination: LoomLink,
+  navigationDestination?: LoomNavigationDestination
+): HistoryEntry {
   return {
-    id: `h-${Date.now()}`,
+    id: `h-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     type: destination.type,
     title: destination.title,
     path: destination.path,
     visitedAt: "Now",
+    navigationDestination,
   };
+}
+
+export function destinationsEqual(
+  left?: LoomNavigationDestination,
+  right?: LoomNavigationDestination
+) {
+  if (!left || !right) return false;
+  return (
+    left.loomId === right.loomId &&
+    left.mode === right.mode &&
+    left.originLoomId === right.originLoomId &&
+    left.originResponseId === right.originResponseId &&
+    left.scrollTargetResponseId === right.scrollTargetResponseId &&
+    left.scrollMode === right.scrollMode
+  );
+}
+
+export function historyEntryMatchesDestination(
+  entry: HistoryEntry | undefined,
+  link: Pick<LoomLink, "path" | "title">,
+  destination: LoomNavigationDestination
+) {
+  if (!entry) return false;
+  return (
+    entry.path === link.path &&
+    entry.title === link.title &&
+    destinationsEqual(entry.navigationDestination, destination)
+  );
 }
 
 export function markHistoryOlder(history: HistoryEntry[]) {
@@ -35,4 +72,30 @@ export function historyMenuEntries(
 ) {
   if (direction === "back") return history.slice(cursor + 1, cursor + 6);
   return history.slice(0, cursor).slice(-5).reverse();
+}
+
+export function getBackTraversal(
+  stack: HistoryEntry[],
+  cursor: number
+): NavigationTraversalEntry[] {
+  return stack
+    .slice(0, cursor)
+    .map((entry, index) => ({ entry, index }))
+    .reverse();
+}
+
+export function getForwardTraversal(
+  stack: HistoryEntry[],
+  cursor: number
+): NavigationTraversalEntry[] {
+  return stack
+    .slice(cursor + 1)
+    .map((entry, offset) => ({ entry, index: cursor + 1 + offset }));
+}
+
+export function jumpToTraversalIndex(
+  stack: HistoryEntry[],
+  targetIndex: number
+) {
+  return stack[targetIndex] ? targetIndex : undefined;
 }
