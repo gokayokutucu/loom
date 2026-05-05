@@ -116,6 +116,19 @@ function uniqueId(prefix: string) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function resolverAliasUris(aliasUri: string) {
+  const aliases = new Set([aliasUri]);
+  try {
+    const url = new URL(aliasUri);
+    if (url.protocol === "loom:") {
+      aliases.add(`${url.protocol}//${url.host}${url.pathname}`);
+    }
+  } catch {
+    aliases.add(aliasUri.split(/[?#]/)[0] ?? aliasUri);
+  }
+  return Array.from(aliases).filter(Boolean);
+}
+
 function makeObject({
   kind,
   id,
@@ -157,15 +170,37 @@ function baseGraphFromApp({
   const edges: LoomGraphEdge[] = [];
   const conversationObjectIds = new Map<string, string>();
 
+  function addAliasRecord(
+    aliasUri: string | undefined,
+    targetObjectId: string,
+    isActive = true,
+    replacementAliasUri?: string
+  ) {
+    if (!aliasUri) return;
+    resolverAliasUris(aliasUri).forEach((lookupUri) => {
+      if (
+        aliases.some(
+          (alias) =>
+            alias.aliasUri === lookupUri &&
+            alias.targetObjectId === targetObjectId &&
+            alias.isActive === isActive &&
+            alias.replacementAliasUri === replacementAliasUri
+        )
+      ) {
+        return;
+      }
+      aliases.push({
+        aliasUri: lookupUri,
+        targetObjectId,
+        isActive,
+        replacementAliasUri,
+      });
+    });
+  }
+
   function addObject(object: LoomResolvedObject) {
     objects.push(object);
-    if (object.aliasUri) {
-      aliases.push({
-        aliasUri: object.aliasUri,
-        targetObjectId: object.objectId,
-        isActive: true,
-      });
-    }
+    addAliasRecord(object.aliasUri, object.objectId);
   }
 
   function addEdge(fromObjectId: string, toObjectId: string, edgeType: LoomGraphEdge["edgeType"]) {
@@ -185,6 +220,7 @@ function baseGraphFromApp({
       aliasUri: conversation.path,
     });
     addObject(object);
+    addAliasRecord(conversation.meta?.canonicalUri, object.objectId);
     conversationObjectIds.set(conversation.id, object.objectId);
   });
 
@@ -200,6 +236,7 @@ function baseGraphFromApp({
           : "active",
       });
       addObject(object);
+      addAliasRecord(response.meta?.canonicalUri, object.objectId);
       const conversationObjectId = conversationObjectIds.get(conversationId);
       if (conversationObjectId) addEdge(conversationObjectId, object.objectId, "contains");
     });
@@ -303,11 +340,15 @@ export function createRuntimeLoomGraphRepository({
   [...base.aliases, ...runtime.aliases].forEach((alias) => {
     const targetObject = objects.get(alias.targetObjectId);
     if (!targetObject) return;
-    aliases.set(alias.aliasUri, {
-      aliasUri: alias.aliasUri,
-      targetObject,
-      isActive: alias.isActive,
-      replacementAliasUri: alias.replacementAliasUri,
+    resolverAliasUris(alias.aliasUri).forEach((lookupUri) => {
+      aliases.set(lookupUri, {
+        aliasUri: lookupUri,
+        targetObject,
+        isActive: alias.isActive,
+        replacementAliasUri: alias.replacementAliasUri
+          ? resolverAliasUris(alias.replacementAliasUri)[0]
+          : undefined,
+      });
     });
   });
 
@@ -344,6 +385,53 @@ export function createRuntimeLoomGraphRepository({
       return Array.from(objects.values()).find(
         (object) => object.kind === "bookmark" && object.aliasUri === uri
       );
+    },
+    registerAliasUri({ aliasUri, targetObjectId, replacementAliasUri }) {
+      const targetObject = objects.get(targetObjectId);
+      const aliasUris = resolverAliasUris(aliasUri);
+      const replacementLookupUri = replacementAliasUri
+        ? resolverAliasUris(replacementAliasUri)[0]
+        : undefined;
+      const existing = runtime.aliases.find((item) => aliasUris.includes(item.aliasUri));
+      const isActive = replacementAliasUri === undefined;
+      if (targetObject) {
+        aliasUris.forEach((lookupUri) => {
+          aliases.set(lookupUri, {
+            aliasUri: lookupUri,
+            targetObject,
+            isActive,
+            replacementAliasUri: replacementLookupUri,
+          });
+        });
+      }
+      const nextAliases = runtime.aliases.filter(
+        (item) => !aliasUris.includes(item.aliasUri)
+      );
+      aliasUris.forEach((lookupUri) => {
+        nextAliases.push({
+          aliasUri: lookupUri,
+          targetObjectId,
+          isActive,
+          replacementAliasUri: replacementLookupUri,
+        });
+      });
+      persistRuntime({
+        ...runtime,
+        aliases: nextAliases,
+      });
+      const event: LoomLedgerEvent = {
+        ledgerEventId: uniqueId("led"),
+        eventType: existing ? "alias_updated" : "alias_created",
+        objectId: targetObjectId,
+        payload: {
+          aliasUri,
+          replacementAliasUri: replacementLookupUri,
+          isActive,
+        },
+        createdAt: nowIso(),
+      };
+      appendLedgerEvents([event]);
+      return event;
     },
     findRevision(objectId, revision) {
       if (revision === 1 && objects.has(objectId)) return true;

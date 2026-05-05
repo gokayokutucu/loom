@@ -8,6 +8,7 @@ import {
   type CSSProperties,
   type RefObject,
 } from "react";
+import { createPortal } from "react-dom";
 import {
   Archive,
   ArrowUp,
@@ -101,6 +102,39 @@ import {
   writeRuntimeBookmarks,
 } from "./services/loomRuntimeGraph";
 import {
+  readAppSettings,
+  writeAppSettings,
+  type AppSettings,
+} from "./services/appSettings";
+import {
+  applyMetadataRefinement,
+  buildRuntimeMetadataRecord,
+  createAddressableLoomMetadata,
+  createDraftResponseMetadata,
+  generateMetadataWithQuickModel,
+  hydrateAddressableLoomMetadata,
+  hydrateResponseMetadata,
+  metadataKeyForLoom,
+  metadataKeyForResponse,
+  metadataTextForLoom,
+  metadataTextForResponse,
+  readRuntimeMetadata,
+  promoteResponseMetadata,
+  writeRuntimeMetadata,
+} from "./services/metadataService";
+import { createMetadataUuid } from "./services/codeService";
+import {
+  referenceCodeForLink,
+  referenceDisplayModeForLink,
+  referenceLabelForMode,
+  referenceTokenText,
+  withReferenceDisplayDefaults,
+} from "./services/referenceDisplay";
+import {
+  filterAndRankReferenceSuggestions,
+  readableReferenceCode,
+} from "./services/referenceSuggestions";
+import {
   getProfileModel,
   isMockResponseModeEnabled,
   readAIProviderSettings,
@@ -116,6 +150,8 @@ import { useSidebarDnD } from "./hooks/useSidebarDnD";
 import { AppShell } from "./components/AppShell";
 import { AddressBar } from "./components/AddressBar";
 import { AIProviderSettingsModal } from "./components/AIProviderSettings";
+import { AddressHintPopover } from "./components/AddressHintPopover";
+import { AppSettingsModal } from "./components/AppSettings";
 import { AskPopup, type AskPopupState } from "./components/AskPopup";
 import { BookmarkView } from "./components/BookmarkView";
 import { ChangeIconPopover } from "./components/ChangeIconPopover";
@@ -134,9 +170,11 @@ import type {
   Conversation,
   HistoryEntry,
   LoomLink,
+  LoomMetadata,
   LoomNavigationDestination,
   LoomObjectKind,
   LoomObjectType,
+  ReferenceDisplayMode,
   LoomResolutionResult,
   ResponseItem,
   TabGroup,
@@ -248,11 +286,14 @@ interface MeasuredLoomRow {
   centerY: number;
 }
 
-type ComposerReferenceGroup = "Open Looms" | "Responses" | "Bookmarks";
+type ComposerReferenceGroup = "Open Looms" | "Responses" | "Bookmarks" | "History";
 
 interface ComposerReferenceOption extends LoomLink {
   group: ComposerReferenceGroup;
   subtitle: string;
+  keywords: string[];
+  searchText: string[];
+  suggestionMatchReason?: string;
 }
 
 type AttachContentTab = "all" | "bookmarks" | "history" | "openLooms" | "responses" | "files";
@@ -278,6 +319,9 @@ interface MentionState {
   query: string;
   x: number;
   y: number;
+  width: number;
+  maxHeight: number;
+  placement: "top" | "bottom";
   selectedIndex: number;
   range: Range;
 }
@@ -612,20 +656,80 @@ function makeInitialTabGroups(conversations: Conversation[]): TabGroup[] {
   ].filter((group) => group.conversationIds.length > 0);
 }
 
+function withHydratedLoomMetadata(
+  conversation: Conversation,
+  metadata: Record<string, LoomMetadata>
+) {
+  return {
+    ...conversation,
+    meta: hydrateAddressableLoomMetadata(
+      {
+        id: conversation.meta?.id ?? metadata[metadataKeyForLoom(conversation.id)]?.id ?? createMetadataUuid(),
+        title: conversation.title,
+        text: metadataTextForLoom(conversation),
+      },
+      conversation.meta ?? metadata[metadataKeyForLoom(conversation.id)]
+    ),
+  };
+}
+
+function withHydratedResponseMetadata(
+  loomId: string,
+  response: ResponseItem,
+  metadata: Record<string, LoomMetadata>
+) {
+  const meta = hydrateResponseMetadata(
+    {
+      id:
+        response.meta?.id ??
+        metadata[metadataKeyForResponse(loomId, response.id)]?.id ??
+        createMetadataUuid(),
+      title: response.title,
+      text: metadataTextForResponse(response),
+    },
+    response.meta ?? metadata[metadataKeyForResponse(loomId, response.id)]
+  );
+  return {
+    ...response,
+    address:
+      meta.status === "addressable" && meta.canonicalUri
+        ? meta.canonicalUri
+        : response.address,
+    meta,
+  };
+}
+
 function App() {
   const addressBarRef = useRef<HTMLDivElement | null>(null);
   const workspaceRef = useRef<HTMLElement | null>(null);
   const transcriptRef = useRef<HTMLElement | null>(null);
   const originTranscriptRef = useRef<HTMLElement | null>(null);
   const wasWeftSplitVisibleRef = useRef(false);
+  const metadataGenerationRef = useRef(new Set<string>());
   const composerFocusRef = useRef<(() => void) | null>(null);
   const pendingScrollPathRef = useRef<string | null>(null);
   const pendingScrollDestinationRef = useRef<LoomNavigationDestination | null>(null);
+  const [metadataSeed] = useState<Record<string, LoomMetadata>>(() =>
+    readRuntimeMetadata()
+  );
   const [conversations, setConversations] =
-    useState<Conversation[]>(seedConversations);
+    useState<Conversation[]>(() =>
+      seedConversations.map((conversation) =>
+        withHydratedLoomMetadata(conversation, metadataSeed)
+      )
+    );
   const [conversationResponses, setConversationResponses] = useState<
     Record<string, ResponseItem[]>
-  >(seedResponsesByConversation);
+  >(() =>
+    Object.fromEntries(
+      Object.entries(seedResponsesByConversation).map(([loomId, responses]) => [
+        loomId,
+        responses.map((response) =>
+          withHydratedResponseMetadata(loomId, response, metadataSeed)
+        ),
+      ])
+    )
+  );
   const [forkRecords, setForkRecords] = useState<ForkRecord[]>(initialForkRecords);
   const [pinnedConversationIds, setPinnedConversationIds] = useState<string[]>(
     seedConversations
@@ -693,6 +797,8 @@ function App() {
     readAIProviderSettings()
   );
   const [providerSettingsOpen, setProviderSettingsOpen] = useState(false);
+  const [appSettings, setAppSettings] = useState<AppSettings>(() => readAppSettings());
+  const [appSettingsOpen, setAppSettingsOpen] = useState(false);
   const [composerRuntimeState, setComposerRuntimeState] = useState<{
     running: boolean;
     message: string | null;
@@ -769,6 +875,8 @@ function App() {
         title: focusedSplitConversation.title,
         path: focusedSplitConversation.path,
         badge: getWeftOrigin(focusedSplitConversation.id) ? typeLabel.loom : typeLabel.conversation,
+        canonicalUri: focusedSplitConversation.meta?.canonicalUri,
+        meta: focusedSplitConversation.meta,
       };
     }
     const activeResponse = focusedSplitResponses.find(
@@ -782,6 +890,8 @@ function App() {
         title: responseTitleOverrides[activeResponse.id] ?? activeResponse.title,
         path: activeResponse.address,
         badge: "Response",
+        canonicalUri: activeResponse.meta?.canonicalUri,
+        meta: activeResponse.meta,
       };
     }
     if (focusedSplitConversation) {
@@ -791,6 +901,8 @@ function App() {
         title: focusedSplitConversation.title,
         path: focusedSplitConversation.path,
         badge: getWeftOrigin(focusedSplitConversation.id) ? typeLabel.loom : typeLabel.conversation,
+        canonicalUri: focusedSplitConversation.meta?.canonicalUri,
+        meta: focusedSplitConversation.meta,
       };
     }
     return {
@@ -818,12 +930,22 @@ function App() {
   const composerReferenceOptions = useMemo<ComposerReferenceOption[]>(() => {
     const conversationOptions = conversations.map((conversation) => ({
       id: conversation.id,
-      type: "conversation" as const,
+      type: getWeftOrigin(conversation.id) ? "loom" as const : "conversation" as const,
       title: conversation.title,
       path: conversation.path,
-      badge: typeLabel.conversation,
+      badge: getWeftOrigin(conversation.id) ? typeLabel.loom : typeLabel.conversation,
+      canonicalUri: conversation.meta?.canonicalUri,
+      meta: conversation.meta,
+      referenceCode: conversation.meta?.code,
       group: "Open Looms" as const,
       subtitle: conversation.folder,
+      keywords: [
+        "Open Loom",
+        conversation.folder,
+        conversation.summary,
+        ...(conversation.meta?.keywords ?? []),
+      ],
+      searchText: [conversation.summary, conversation.meta?.summary ?? ""],
     }));
     const loomOptions = Object.values(conversationResponses)
       .flat()
@@ -833,18 +955,40 @@ function App() {
         title: response.title,
         path: response.address,
         badge: typeLabel.response,
+        canonicalUri: response.meta?.canonicalUri,
+        meta: response.meta,
+        referenceCode: response.meta?.code,
         group: "Responses" as const,
-        subtitle: "Response",
+        subtitle: response.meta?.summary || response.question || "Response",
+        keywords: ["Response", ...(response.meta?.keywords ?? [])],
+        searchText: [response.question, response.meta?.summary ?? "", ...response.answer],
       }));
     const bookmarkOptions = bookmarks.map((bookmark) => ({
       ...bookmark,
       title: bookmark.editableTitle,
+      referenceCode: bookmark.referenceCode ?? bookmark.meta?.code,
       group: "Bookmarks" as const,
       subtitle: bookmark.lastUsed,
+      keywords: [
+        "Bookmark",
+        bookmark.lastUsed,
+        bookmark.title,
+        bookmark.editableTitle,
+        ...(bookmark.meta?.keywords ?? []),
+      ],
+      searchText: [bookmark.title, bookmark.meta?.summary ?? ""],
+    }));
+    const historyOptions = history.map((entry) => ({
+      ...entry,
+      referenceCode: entry.referenceCode ?? entry.meta?.code,
+      group: "History" as const,
+      subtitle: entry.path,
+      keywords: ["Loom History", entry.visitedAt, ...(entry.meta?.keywords ?? [])],
+      searchText: [entry.visitedAt, entry.meta?.summary ?? ""],
     }));
 
-    return [...conversationOptions, ...loomOptions, ...bookmarkOptions];
-  }, [bookmarks, conversationResponses, conversations]);
+    return [...conversationOptions, ...loomOptions, ...bookmarkOptions, ...historyOptions];
+  }, [bookmarks, conversationResponses, conversations, forkRecords, history]);
 
   const attachContentItems = useMemo<AttachContentItem[]>(() => {
     const bookmarkItems = bookmarks.map((bookmark) => ({
@@ -869,10 +1013,15 @@ function App() {
         path: conversation.path,
         badge: getWeftOrigin(conversation.id) ? typeLabel.loom : typeLabel.conversation,
         targetObjectId,
-        canonicalUri: canonicalLoomUri("conversation", targetObjectId),
+        canonicalUri: conversation.meta?.canonicalUri ?? canonicalLoomUri("conversation", targetObjectId),
+        meta: conversation.meta,
         source: "openLoom" as const,
         subtitle: conversation.folder,
-        keywords: ["Open Loom", conversation.summary],
+        keywords: [
+          "Open Loom",
+          conversation.summary,
+          ...(conversation.meta?.keywords ?? []),
+        ],
       };
     });
     const responseItems = Object.entries(conversationResponses).flatMap(([conversationId, responses]) =>
@@ -888,10 +1037,15 @@ function App() {
         path: response.address,
         badge: typeLabel.response,
         targetObjectId,
-        canonicalUri: canonicalLoomUri("response", targetObjectId),
+        canonicalUri: response.meta?.canonicalUri ?? canonicalLoomUri("response", targetObjectId),
+        meta: response.meta,
         source: "response" as const,
         subtitle: response.question,
-        keywords: ["Response", ...response.answer],
+        keywords: [
+          "Response",
+          ...(response.meta?.keywords ?? []),
+          ...response.answer,
+        ],
         };
       })
     );
@@ -913,6 +1067,12 @@ function App() {
     writeRuntimeBookmarks(bookmarks);
   }, [bookmarks]);
 
+  useEffect(() => {
+    writeRuntimeMetadata(
+      buildRuntimeMetadataRecord(conversations, conversationResponses)
+    );
+  }, [conversationResponses, conversations]);
+
   useLayoutEffect(() => {
     const workspace = workspaceRef.current;
     if (!workspace) return;
@@ -928,6 +1088,11 @@ function App() {
   function saveProviderSettings(nextSettings: AIProviderSettings) {
     setProviderSettings(nextSettings);
     writeAIProviderSettings(nextSettings);
+  }
+
+  function saveAppSettings(nextSettings: AppSettings) {
+    setAppSettings(nextSettings);
+    writeAppSettings(nextSettings);
   }
 
   const composerRuntimeHealth = useRuntimeHealth(
@@ -947,6 +1112,84 @@ function App() {
         message: "Demo responses are enabled for this development session.",
       }
     : composerRuntimeHealth;
+
+  function canAttemptMetadataGeneration() {
+    return (
+      mockResponsesEnabled ||
+      providerSettings.ollama.lastConnectionStatus === "connected"
+    );
+  }
+
+  function queueLoomMetadataGeneration(conversation: Conversation) {
+    const meta = conversation.meta;
+    if (!meta || metadataGenerationRef.current.has(metadataKeyForLoom(conversation.id))) {
+      return;
+    }
+    if (!canAttemptMetadataGeneration()) return;
+    const metadataKey = metadataKeyForLoom(conversation.id);
+    metadataGenerationRef.current.add(metadataKey);
+    void generateMetadataWithQuickModel(providerSettings, {
+      title: conversation.title,
+      text: metadataTextForLoom(conversation),
+    })
+      .then((refinement) => {
+        if (!refinement) return;
+        setConversations((current) =>
+          current.map((item) =>
+            item.id === conversation.id && item.meta?.id === meta.id
+              ? { ...item, meta: applyMetadataRefinement(item.meta, refinement) }
+              : item
+          )
+        );
+      })
+      .catch(() => {
+        // Metadata fallback already exists; model refinement is best effort only.
+      })
+      .finally(() => {
+        metadataGenerationRef.current.delete(metadataKey);
+      });
+  }
+
+  function queueResponseMetadataGeneration(loomId: string, response: ResponseItem) {
+    const meta = response.meta;
+    if (
+      !meta ||
+      meta.status !== "draft" ||
+      metadataGenerationRef.current.has(metadataKeyForResponse(loomId, response.id))
+    ) {
+      return;
+    }
+    if (!canAttemptMetadataGeneration()) return;
+    const metadataKey = metadataKeyForResponse(loomId, response.id);
+    metadataGenerationRef.current.add(metadataKey);
+    void generateMetadataWithQuickModel(providerSettings, {
+      title: response.title,
+      text: metadataTextForResponse(response),
+    })
+      .then((refinement) => {
+        if (!refinement) return;
+        setConversationResponses((current) => {
+          const nextResponses = current[loomId]?.map((item) =>
+            item.id === response.id &&
+            item.meta?.id === meta.id &&
+            item.meta.status === "draft"
+              ? { ...item, meta: applyMetadataRefinement(item.meta, refinement) }
+              : item
+          );
+          if (!nextResponses) return current;
+          return {
+            ...current,
+            [loomId]: nextResponses,
+          };
+        });
+      })
+      .catch(() => {
+        // Metadata fallback already exists; model refinement is best effort only.
+      })
+      .finally(() => {
+        metadataGenerationRef.current.delete(metadataKey);
+      });
+  }
 
   function plainTextFromDraft(draft: ComposerDraft) {
     return draft.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
@@ -986,6 +1229,84 @@ function App() {
       return `${model.name} is not installed. Download it in AI Providers.`;
     }
     return null;
+  }
+
+  function findResponseRecord(link: Pick<LoomLink, "id" | "path">) {
+    for (const [loomId, responses] of Object.entries(conversationResponses)) {
+      const response =
+        responses.find((item) => item.address === link.path) ??
+        responses.find((item) => item.id === link.id);
+      if (!response) continue;
+      const conversation =
+        conversations.find((item) => item.id === loomId) ??
+        (draftConversation?.id === loomId ? draftConversation : undefined);
+      if (!conversation) continue;
+      return {
+        loomId,
+        conversation,
+        response,
+      };
+    }
+    return undefined;
+  }
+
+  function promoteResponseLink(link: LoomLink) {
+    if (link.type !== "response") return link;
+    const located = findResponseRecord(link);
+    if (!located) return link;
+
+    const responseObjectId = runtimeGraphObjectIdFor(
+      "response",
+      `${located.loomId}_${located.response.id}`
+    );
+    const promotedMeta = promoteResponseMetadata({
+      response: {
+        ...located.response,
+        title:
+          responseTitleOverrides[located.response.id] ?? located.response.title,
+      },
+      loom: located.conversation,
+    });
+    const nextAddress = promotedMeta.canonicalUri ?? located.response.address;
+    if (located.response.address !== nextAddress) {
+      loomGraphRepository.registerAliasUri({
+        aliasUri: located.response.address,
+        targetObjectId: responseObjectId,
+        replacementAliasUri: nextAddress,
+      });
+      loomGraphRepository.registerAliasUri({
+        aliasUri: nextAddress,
+        targetObjectId: responseObjectId,
+      });
+    }
+    setConversationResponses((current) => ({
+      ...current,
+      [located.loomId]: (current[located.loomId] ?? []).map((item) =>
+        item.id === located.response.id
+          ? {
+              ...item,
+              address: nextAddress,
+              meta: promotedMeta,
+            }
+          : item
+      ),
+    }));
+    setBookmarks((current) =>
+      current.map((bookmark) =>
+        bookmark.targetObjectId === responseObjectId
+          ? { ...bookmark, meta: promotedMeta }
+          : bookmark
+      )
+    );
+    return {
+      ...link,
+      title: responseTitleOverrides[located.response.id] ?? located.response.title,
+      path: nextAddress,
+      targetObjectId: responseObjectId,
+      canonicalUri: promotedMeta.canonicalUri,
+      meta: promotedMeta,
+      referenceCode: promotedMeta.code,
+    };
   }
 
   function isDestinationBookmarked(destination: LoomLink) {
@@ -1045,6 +1366,8 @@ function App() {
       title: loom?.title ?? "Loom",
       path: loom?.path ?? `loom://unknown/${loomId}`,
       badge: getWeftOrigin(loomId) ? typeLabel.loom : typeLabel.conversation,
+      canonicalUri: loom?.meta?.canonicalUri,
+      meta: loom?.meta,
     };
   }
 
@@ -1059,6 +1382,8 @@ function App() {
       title: responseTitleOverrides[response.id] ?? response.title,
       path: response.address,
       badge,
+      canonicalUri: response.meta?.canonicalUri,
+      meta: response.meta,
     };
   }
 
@@ -1200,7 +1525,14 @@ function App() {
     if (resolution.status === "resolved") {
       const resolvedObject = resolution.targetObject ?? resolution.object;
       return resolvedObject
-        ? { ...destination, ...linkFromResolvedObject(resolvedObject) }
+        ? {
+            ...destination,
+            ...linkFromResolvedObject(resolvedObject),
+            canonicalUri:
+              destination.canonicalUri ??
+              destination.meta?.canonicalUri ??
+              resolvedObject.canonicalUri,
+          }
         : destination;
     }
     if (resolution.status === "alias_stale" && resolution.object) {
@@ -1208,6 +1540,10 @@ function App() {
         ...destination,
         ...linkFromResolvedObject(resolution.object),
         path: resolution.staleAliasReplacement ?? destination.path,
+        canonicalUri:
+          destination.canonicalUri ??
+          destination.meta?.canonicalUri ??
+          resolution.object.canonicalUri,
       };
     }
     if (resolution.status === "not_found") return destination;
@@ -1230,7 +1566,10 @@ function App() {
     | { ok: false; resolution: LoomResolutionResult } {
     if (!isLoomAddress(destination.path)) return { ok: true, destination };
     const resolution = resolveLoomAddress(destination.path, loomGraphRepository);
-    if (resolution.status === "resolved") {
+    if (
+      resolution.status === "resolved" ||
+      (resolution.status === "alias_stale" && resolution.object)
+    ) {
       const resolvedObject = resolution.targetObject ?? resolution.object;
       return {
         ok: true,
@@ -1238,9 +1577,19 @@ function App() {
           ? {
               ...destination,
               ...linkFromResolvedObject(resolvedObject),
+              path:
+                resolution.status === "alias_stale"
+                  ? resolution.staleAliasReplacement ??
+                    resolvedObject.aliasUri ??
+                    destination.path
+                  : destination.path,
               targetObjectId: resolvedObject.objectId,
-              canonicalUri: resolvedObject.canonicalUri,
-              resolutionStatus: resolution.status,
+              canonicalUri:
+                destination.canonicalUri ??
+                destination.meta?.canonicalUri ??
+                resolvedObject.canonicalUri,
+              resolutionStatus:
+                resolution.status === "alias_stale" ? "alias_stale" : "resolved",
             }
           : destination,
       };
@@ -1587,7 +1936,10 @@ function App() {
   function resolveReferenceLink(link: LoomLink, sourceLoomId = activeConversationId): LoomLink {
     if (link.referenceMentionId || link.resolutionStatus) return link;
     const resolution = resolveLoomAddress(link.path, loomGraphRepository);
-    if (resolution.status !== "resolved") {
+    if (
+      resolution.status !== "resolved" &&
+      !(resolution.status === "alias_stale" && resolution.object)
+    ) {
       loomGraphRepository.emitBrokenReference(link, resolution.reason ?? "Reference target did not resolve");
       return {
         ...link,
@@ -1616,11 +1968,19 @@ function App() {
       ? {
           ...link,
           id: targetObject.objectId,
-          path: targetObject.aliasUri ?? targetObject.canonicalUri,
+          path:
+            resolution.status === "alias_stale"
+              ? resolution.staleAliasReplacement ??
+                targetObject.aliasUri ??
+                targetObject.canonicalUri
+              : targetObject.aliasUri ?? targetObject.canonicalUri,
           targetObjectId: targetObject.objectId,
-          canonicalUri: targetObject.canonicalUri,
+          canonicalUri:
+            link.canonicalUri ?? link.meta?.canonicalUri ?? targetObject.canonicalUri,
+          referenceCode: referenceCodeForLink(link),
           referenceMentionId: mention?.mentionId,
-          resolutionStatus: "resolved",
+          resolutionStatus:
+            resolution.status === "alias_stale" ? "alias_stale" : "resolved",
         }
       : link;
   }
@@ -1636,7 +1996,7 @@ function App() {
     ) {
       return;
     }
-    const stableLink = resolveReferenceLink(link, draftKey);
+    const stableLink = resolveReferenceLink(promoteResponseLink(link), draftKey);
     const selectedLink = {
       ...stableLink,
       selectedAt: stableLink.selectedAt ?? Date.now(),
@@ -1669,6 +2029,8 @@ function App() {
       title: response.title,
       path: response.address,
       badge: "Response",
+      canonicalUri: response.meta?.canonicalUri,
+      meta: response.meta,
     });
   }
 
@@ -1756,10 +2118,97 @@ function App() {
     void browserHostShell.copyText(destination.canonicalUri ?? destination.path);
   }
 
+  function findConversationByObjectId(objectId?: string) {
+    if (!objectId) return undefined;
+    return conversations.find(
+      (conversation) =>
+        runtimeGraphObjectIdFor("conversation", conversation.id) === objectId
+    );
+  }
+
+  function findResponseRecordByObjectId(objectId?: string) {
+    if (!objectId) return undefined;
+    for (const [loomId, responses] of Object.entries(conversationResponses)) {
+      const response = responses.find(
+        (item) => runtimeGraphObjectIdFor("response", `${loomId}_${item.id}`) === objectId
+      );
+      if (!response) continue;
+      const conversation = conversations.find((item) => item.id === loomId);
+      if (!conversation) continue;
+      return { loomId, conversation, response };
+    }
+    return undefined;
+  }
+
+  function visitResolvedReference(link: LoomLink, resolution: LoomResolutionResult) {
+    const resolvedObject = resolution.targetObject ?? resolution.object;
+    if (!resolvedObject) {
+      visitDestination(link, { source: "userNavigation" });
+      return;
+    }
+
+    if (resolvedObject.kind === "response") {
+      const located =
+        findResponseRecordByObjectId(resolvedObject.objectId) ??
+        findResponseRecord(link);
+      if (located) {
+        const destination = responseLinkForNavigation(
+          located.loomId,
+          located.response
+        );
+        visitDestination(destination, {
+          source: "userNavigation",
+          navigationDestination: {
+            loomId: located.loomId,
+            mode: "full",
+            scrollTargetResponseId: located.response.id,
+            scrollMode: "exact",
+            source: "userNavigation",
+          },
+        });
+        return;
+      }
+    }
+
+    if (resolvedObject.kind === "conversation") {
+      const conversation = findConversationByObjectId(resolvedObject.objectId);
+      if (conversation) {
+        visitDestination(loomLinkForId(conversation.id), {
+          source: "userNavigation",
+          navigationDestination: {
+            loomId: conversation.id,
+            mode: "full",
+            source: "userNavigation",
+          },
+        });
+        return;
+      }
+    }
+
+    visitDestination(
+      {
+        ...link,
+        ...linkFromResolvedObject(resolvedObject),
+        path:
+          resolution.status === "alias_stale"
+            ? resolution.staleAliasReplacement ??
+              resolvedObject.aliasUri ??
+              link.path
+            : link.path,
+        targetObjectId: resolvedObject.objectId,
+        canonicalUri:
+          link.canonicalUri ??
+          link.meta?.canonicalUri ??
+          resolvedObject.canonicalUri,
+      },
+      { source: "userNavigation" }
+    );
+  }
+
   function openComposerReference(link: LoomLink) {
     const resolution = resolveLoomAddress(link.path, loomGraphRepository);
     if (resolution.status === "resolved") {
-      visitDestination(link, { source: "userNavigation" });
+      visitResolvedReference(link, resolution);
       return null;
     }
     if (resolution.status === "alias_stale" && resolution.object) {
@@ -1768,9 +2217,12 @@ function App() {
         ...linkFromResolvedObject(resolution.object),
         path: resolution.staleAliasReplacement ?? resolution.object.aliasUri ?? link.path,
         targetObjectId: resolution.object.objectId,
-        canonicalUri: resolution.object.canonicalUri,
+        canonicalUri:
+          link.canonicalUri ??
+          link.meta?.canonicalUri ??
+          resolution.object.canonicalUri,
       };
-      visitDestination(nextLink, { source: "userNavigation" });
+      visitResolvedReference(nextLink, resolution);
       return null;
     }
     if (resolution.status === "broken_reference") {
@@ -1968,6 +2420,14 @@ function App() {
       title,
       path: `loom://drafts/${id}`,
       summary: "New conversation created from a prompt draft.",
+      meta: createAddressableLoomMetadata({
+        id: createMetadataUuid(),
+        title,
+        text: metadataTextForLoom({
+          title,
+          summary: "New conversation created from a prompt draft.",
+        }),
+      }),
     };
     setConversations((current) => [conversation, ...current]);
     setComposerDrafts((current) => {
@@ -1986,12 +2446,15 @@ function App() {
       title,
       path: conversation.path,
       badge: typeLabel.conversation,
+      canonicalUri: conversation.meta?.canonicalUri,
+      meta: conversation.meta,
     };
     replaceNavigationEntry(destination);
     setHistory((current) => [
       createHistoryEntry(destination),
       ...markHistoryOlder(current),
     ]);
+    queueLoomMetadataGeneration(conversation);
   }
 
   async function sendComposerToModel(
@@ -2022,7 +2485,7 @@ function App() {
       targetLoomId === EPHEMERAL_DRAFT_ID || !existingTargetConversation
         ? `c-${Date.now()}`
         : existingTargetConversation.id;
-    const targetConversation =
+    const targetConversationSeed =
       targetLoomId === EPHEMERAL_DRAFT_ID || !existingTargetConversation
         ? {
             ...(draftConversation ?? {
@@ -2032,13 +2495,24 @@ function App() {
               summary: "New conversation created from a prompt draft.",
             }),
             id: targetConversationId,
-            title: normalizeLoomTitle(
-              prompt ? prompt.slice(0, 54) : "New Loom conversation"
-            ),
+            title: normalizeLoomTitle(prompt ? prompt.slice(0, 54) : "New Loom conversation"),
             path: `loom://drafts/${targetConversationId}`,
             summary: "New conversation created from a prompt draft.",
           }
         : existingTargetConversation;
+    const targetConversation: Conversation = {
+      ...targetConversationSeed,
+      meta: hydrateAddressableLoomMetadata(
+        {
+          id:
+            targetConversationSeed.meta?.id ??
+            createMetadataUuid(),
+          title: targetConversationSeed.title,
+          text: metadataTextForLoom(targetConversationSeed),
+        },
+        targetConversationSeed.meta
+      ),
+    };
 
     try {
       const result = await runModelProfileRequest(providerSettings, {
@@ -2051,20 +2525,43 @@ function App() {
       });
       const responseId = `r-${Date.now()}`;
       const title = normalizeLoomTitle(prompt ? prompt.slice(0, 64) : "Model response");
+      const answer = answerParagraphs(result.text);
       const response: ResponseItem = {
         id: responseId,
         title,
         address: `${targetConversation.path}/r-${responseSlug(title)}`,
         question: prompt || "Use the linked Loom references.",
-        answer: answerParagraphs(result.text),
+        answer,
         suggestedLinks: [],
         bookmarkedLinks: [],
+        meta: createDraftResponseMetadata({
+          id: createMetadataUuid(),
+          title,
+          text: metadataTextForResponse({
+            title,
+            question: prompt || "Use the linked Loom references.",
+            answer,
+          }),
+        }),
       };
 
       if (targetLoomId === EPHEMERAL_DRAFT_ID || !existingTargetConversation) {
         setConversations((current) => [...current, targetConversation]);
         setDraftConversation(null);
         setActiveConversationId(targetConversation.id);
+        queueLoomMetadataGeneration(targetConversation);
+      } else if (
+        existingTargetConversation.meta?.id !== targetConversation.meta?.id ||
+        existingTargetConversation.meta?.canonicalUri !== targetConversation.meta?.canonicalUri
+      ) {
+        setConversations((current) =>
+          current.map((item) =>
+            item.id === targetConversation.id
+              ? { ...item, meta: targetConversation.meta }
+              : item
+          )
+        );
+        queueLoomMetadataGeneration(targetConversation);
       }
 
       setConversationResponses((current) => ({
@@ -2085,6 +2582,8 @@ function App() {
         title: response.title,
         path: response.address,
         badge: typeLabel.response,
+        canonicalUri: response.meta?.canonicalUri,
+        meta: response.meta,
       };
       if (!options.preserveNavigation) {
         if (targetLoomId === EPHEMERAL_DRAFT_ID) replaceNavigationEntry(destination);
@@ -2099,6 +2598,7 @@ function App() {
         running: false,
         message: `Main model responded with ${result.modelId}.`,
       });
+      queueResponseMetadataGeneration(targetConversation.id, response);
       return true;
     } catch (error) {
       setComposerRuntimeState({
@@ -2174,22 +2674,35 @@ function App() {
       title: conversation.title,
       path: conversation.path,
       badge: typeLabel.conversation,
+      canonicalUri: conversation.meta?.canonicalUri,
+      meta: conversation.meta,
     });
   }
 
   function bookmarkLoomLink(link: LoomLink) {
-    const promotion = loomGraphRepository.promoteBookmark(link);
+    const promotedLink = promoteResponseLink(link);
+    const promotion = loomGraphRepository.promoteBookmark(promotedLink);
+    const bookmarkWithMetadata: BookmarkItem = {
+      ...promotion.bookmark,
+      meta: promotedLink.meta ?? promotion.bookmark.meta,
+    };
     setBookmarks((current) => {
-      if (
-        current.some(
-          (item) =>
-            item.path === promotion.bookmark.path ||
-            item.targetObjectId === promotion.targetObject.objectId
-        )
-      ) {
-        return current;
+      const existingIndex = current.findIndex(
+        (item) =>
+          item.path === bookmarkWithMetadata.path ||
+          item.targetObjectId === promotion.targetObject.objectId
+      );
+      if (existingIndex >= 0) {
+        return current.map((item, index) =>
+          index === existingIndex
+            ? {
+                ...item,
+                meta: bookmarkWithMetadata.meta ?? item.meta,
+              }
+            : item
+        );
       }
-      return [promotion.bookmark, ...current];
+      return [bookmarkWithMetadata, ...current];
     });
     openUtilityPanel("bookmarks");
   }
@@ -2319,6 +2832,8 @@ function App() {
         title: weftConversation.title,
         path: weftConversation.path,
         badge: typeLabel.loom,
+        canonicalUri: weftConversation.meta?.canonicalUri,
+        meta: weftConversation.meta,
       };
       const originLastResponse = lastResponseInLoom(sourceConversation.id);
       const originAtResponseLink = responseLinkForNavigation(sourceConversation.id, response);
@@ -2379,12 +2894,30 @@ function App() {
       folder: sourceConversation.folder,
       summary: `Branched from ${sourceConversation.title}.`,
       iconKey: "workflow",
+      meta: createAddressableLoomMetadata({
+        id: createMetadataUuid(),
+        title,
+        text: metadataTextForLoom({
+          title,
+          summary: `Branched from ${sourceConversation.title}.`,
+        }),
+      }),
     };
-    const lineage = sourceResponses.slice(0, responseIndex + 1).map((item, index) => ({
-      ...item,
-      id: `${item.id}-${id}`,
-      address: `${path}/r-${index + 1}`,
-    }));
+    const lineage = sourceResponses.slice(0, responseIndex + 1).map((item, index) => {
+      const clonedResponse: ResponseItem = {
+        ...item,
+        id: `${item.id}-${id}`,
+        address: `${path}/r-${index + 1}`,
+      };
+      return {
+        ...clonedResponse,
+        meta: createDraftResponseMetadata({
+          id: createMetadataUuid(),
+          title: clonedResponse.title,
+          text: metadataTextForResponse(clonedResponse),
+        }),
+      };
+    });
     setConversations((current) => {
       const sourceIndex = current.findIndex((item) => item.id === sourceConversation.id);
       if (sourceIndex < 0) return [conversation, ...current];
@@ -2426,6 +2959,7 @@ function App() {
       ...current,
       [id]: { html: "", links: [] },
     }));
+    queueLoomMetadataGeneration(conversation);
     openWeftDestination(conversation);
   }
 
@@ -2721,6 +3255,7 @@ function App() {
         }
         referenceOptions={composerReferenceOptions}
         attachContentItems={attachContentItems}
+        referenceDisplayMode={appSettings.referenceDisplayMode}
         providerSettings={providerSettings}
         runtimeState={composerRuntimeState}
         runtimeHealth={activeComposerRuntimeHealth}
@@ -2909,7 +3444,7 @@ function App() {
           setAddressFeedback(null);
           toggleGraphOverlay();
         }}
-        onOpenProviderSettings={() => setProviderSettingsOpen(true)}
+        onOpenAppSettings={() => setAppSettingsOpen(true)}
       />
 
       <div
@@ -2997,6 +3532,7 @@ function App() {
                 }
                 referenceOptions={composerReferenceOptions}
                 attachContentItems={attachContentItems}
+                referenceDisplayMode={appSettings.referenceDisplayMode}
                 providerSettings={providerSettings}
                 runtimeState={composerRuntimeState}
                 runtimeHealth={activeComposerRuntimeHealth}
@@ -3171,6 +3707,7 @@ function App() {
                   }
                   referenceOptions={composerReferenceOptions}
                   attachContentItems={attachContentItems}
+                  referenceDisplayMode={appSettings.referenceDisplayMode}
                   providerSettings={providerSettings}
                   runtimeState={composerRuntimeState}
                   runtimeHealth={activeComposerRuntimeHealth}
@@ -3342,6 +3879,14 @@ function App() {
         />
       )}
 
+      {appSettingsOpen && (
+        <AppSettingsModal
+          settings={appSettings}
+          onSave={saveAppSettings}
+          onClose={() => setAppSettingsOpen(false)}
+        />
+      )}
+
       {deleteTarget && (
         <DeleteConversationDialog
           conversation={deleteTarget}
@@ -3449,6 +3994,9 @@ function Sidebar({
       title: conversation.title,
       path: conversation.path,
       badge: typeLabel.conversation,
+      canonicalUri: conversation.meta?.canonicalUri,
+      meta: conversation.meta,
+      referenceCode: conversation.meta?.code,
     };
   }
 
@@ -3817,7 +4365,7 @@ interface TopBrowserBarProps {
   onToggleSidebar: () => void;
   onTogglePanel: (panel: "bookmarks" | "history" | "looms") => void;
   onToggleGraph: () => void;
-  onOpenProviderSettings: () => void;
+  onOpenAppSettings: () => void;
 }
 
 function TopBrowserBar({
@@ -3849,7 +4397,7 @@ function TopBrowserBar({
   onToggleSidebar,
   onTogglePanel,
   onToggleGraph,
-  onOpenProviderSettings,
+  onOpenAppSettings,
 }: TopBrowserBarProps) {
   const backButtonRef = useRef<HTMLButtonElement | null>(null);
   const forwardButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -4098,9 +4646,9 @@ function TopBrowserBar({
       <div className="top-actions">
         <button
           className="chrome-button"
-          onClick={onOpenProviderSettings}
-          aria-label="Open AI Provider Settings"
-          title="AI Providers"
+          onClick={onOpenAppSettings}
+          aria-label="Open App Settings"
+          title="Settings"
         >
           <Settings size={16} />
         </button>
@@ -4467,6 +5015,7 @@ function PromptComposer({
   attachedReferences,
   referenceOptions,
   attachContentItems,
+  referenceDisplayMode,
   providerSettings,
   runtimeState,
   runtimeHealth,
@@ -4491,6 +5040,7 @@ function PromptComposer({
   attachedReferences: LoomLink[];
   referenceOptions: ComposerReferenceOption[];
   attachContentItems: AttachContentItem[];
+  referenceDisplayMode: ReferenceDisplayMode;
   providerSettings: AIProviderSettings;
   runtimeState: { running: boolean; message: string | null };
   runtimeHealth: RuntimeHealthState & {
@@ -4519,6 +5069,7 @@ function PromptComposer({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const referenceButtonRef = useRef<HTMLButtonElement>(null);
   const referenceMenuRef = useRef<HTMLDivElement>(null);
+  const mentionMenuRef = useRef<HTMLDivElement>(null);
   const insertedPathsRef = useRef<Set<string>>(new Set());
   const activeDraftKeyRef = useRef("");
   const historiesRef = useRef<Record<string, ComposerHistoryState>>({});
@@ -4548,6 +5099,26 @@ function PromptComposer({
   } | null>(null);
   const [referenceOpenError, setReferenceOpenError] = useState<string | null>(null);
   const [dragActive, setDragActive] = useState(false);
+  const [tokenContextMenu, setTokenContextMenu] = useState<{
+    link: LoomLink;
+    x: number;
+    y: number;
+  } | null>(null);
+  const [tokenRenamePopover, setTokenRenamePopover] = useState<{
+    link: LoomLink;
+    x: number;
+    y: number;
+    value: string;
+    error: string | null;
+  } | null>(null);
+  const [addressHint, setAddressHint] = useState<{
+    link: LoomLink;
+    x: number;
+    y: number;
+  } | null>(null);
+  const addressHintTimerRef = useRef<number | null>(null);
+  const addressHintTargetRef = useRef<string | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
   const mainModel = getProfileModel(providerSettings, "main");
   const installedModels = providerSettings.ollama.models.filter((model) => model.installed);
   const selectableModels =
@@ -4590,19 +5161,12 @@ function PromptComposer({
   }, [onReadyToFocus]);
 
   const filteredMentionOptions = useMemo(() => {
-    const query = mention?.query.trim().toLowerCase() ?? "";
-    return referenceOptions.filter((option) =>
-      query
-        ? [option.title, option.subtitle, option.path, option.group]
-            .join(" ")
-            .toLowerCase()
-            .includes(query)
-        : true
-    );
+    const query = mention?.query.trim() ?? "";
+    return filterAndRankReferenceSuggestions(referenceOptions, query);
   }, [mention?.query, referenceOptions]);
 
   const groupedMentionOptions = useMemo(() => {
-    const groups: ComposerReferenceGroup[] = ["Open Looms", "Responses", "Bookmarks"];
+    const groups: ComposerReferenceGroup[] = ["Open Looms", "Responses", "Bookmarks", "History"];
     return groups
       .map((group) => ({
         group,
@@ -4721,10 +5285,23 @@ function PromptComposer({
       }
       if (
         mention &&
-        surfaceRef.current &&
-        !surfaceRef.current.contains(target)
+        editorRef.current &&
+        !editorRef.current.contains(target) &&
+        !mentionMenuRef.current?.contains(target)
       ) {
         setMention(null);
+      }
+      if (
+        tokenContextMenu &&
+        !((target as Element | null)?.closest(".reference-token-context-menu"))
+      ) {
+        setTokenContextMenu(null);
+      }
+      if (
+        tokenRenamePopover &&
+        !((target as Element | null)?.closest(".reference-token-rename-popover"))
+      ) {
+        setTokenRenamePopover(null);
       }
     }
 
@@ -4735,16 +5312,57 @@ function PromptComposer({
         setAttachFeedback(null);
         setReferencePickerOpen(false);
         setReferenceOpenError(null);
+        setTokenContextMenu(null);
+        setTokenRenamePopover(null);
+        closeAddressHint();
       }
+    }
+
+    function handleFocusIn(event: FocusEvent) {
+      const target = event.target as Node | null;
+      if (
+        mention &&
+        target &&
+        editorRef.current &&
+        !editorRef.current.contains(target) &&
+        !mentionMenuRef.current?.contains(target)
+      ) {
+        setMention(null);
+      }
+    }
+
+    function handleScroll() {
+      if (addressHint) closeAddressHint();
     }
 
     document.addEventListener("pointerdown", handlePointerDown);
     document.addEventListener("keydown", handleKeyDown);
+    document.addEventListener("focusin", handleFocusIn);
+    window.addEventListener("scroll", handleScroll, true);
     return () => {
       document.removeEventListener("pointerdown", handlePointerDown);
       document.removeEventListener("keydown", handleKeyDown);
+      document.removeEventListener("focusin", handleFocusIn);
+      window.removeEventListener("scroll", handleScroll, true);
     };
-  }, [attachPickerOpen, mention, referencePickerOpen]);
+  }, [
+    addressHint,
+    attachPickerOpen,
+    mention,
+    referencePickerOpen,
+    tokenContextMenu,
+    tokenRenamePopover,
+  ]);
+
+  useEffect(() => () => clearAddressHintTimer(), []);
+
+  useEffect(() => {
+    if (!tokenRenamePopover) return;
+    window.requestAnimationFrame(() => {
+      renameInputRef.current?.focus();
+      renameInputRef.current?.select();
+    });
+  }, [tokenRenamePopover?.link.path, tokenRenamePopover?.x, tokenRenamePopover?.y]);
 
   useLayoutEffect(() => {
     if (!referencePickerOpen) {
@@ -4841,23 +5459,421 @@ function PromptComposer({
     };
   }, [attachPickerOpen]);
 
+  useLayoutEffect(() => {
+    if (!mention) return;
+
+    function updateMentionPopoverPosition() {
+      setMention((current) => {
+        if (!current) return current;
+        const position = measureMentionPosition(current.range);
+        const selectedIndex = Math.min(
+          current.selectedIndex,
+          Math.max(flattenedMentionOptions.length - 1, 0)
+        );
+        if (
+          current.x === position.x &&
+          current.y === position.y &&
+          current.width === position.width &&
+          current.maxHeight === position.maxHeight &&
+          current.placement === position.placement &&
+          current.selectedIndex === selectedIndex
+        ) {
+          return current;
+        }
+        return {
+          ...current,
+          ...position,
+          selectedIndex,
+        };
+      });
+    }
+
+    const raf = window.requestAnimationFrame(updateMentionPopoverPosition);
+    window.addEventListener("resize", updateMentionPopoverPosition);
+    window.addEventListener("scroll", updateMentionPopoverPosition, true);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.removeEventListener("resize", updateMentionPopoverPosition);
+      window.removeEventListener("scroll", updateMentionPopoverPosition, true);
+    };
+  }, [flattenedMentionOptions.length, mention?.query, mention?.range]);
+
+  function clearAddressHintTimer() {
+    if (addressHintTimerRef.current === null) return;
+    window.clearTimeout(addressHintTimerRef.current);
+    addressHintTimerRef.current = null;
+  }
+
+  function closeAddressHint() {
+    clearAddressHintTimer();
+    addressHintTargetRef.current = null;
+    setAddressHint(null);
+  }
+
+  function getTokenFromEventTarget(target: EventTarget | null) {
+    if (target instanceof HTMLElement) {
+      return target.closest<HTMLElement>(".inline-loom-token, .selection-reference-chip");
+    }
+    if (target instanceof Text) {
+      return target.parentElement?.closest<HTMLElement>(
+        ".inline-loom-token, .selection-reference-chip"
+      ) ?? null;
+    }
+    return null;
+  }
+
+  function anchorRectForMentionRange(range: Range) {
+    const rect = range.getBoundingClientRect();
+    if (rect.width > 0 || rect.height > 0) return rect;
+    const selection = window.getSelection();
+    if (selection && selection.rangeCount > 0) {
+      const selectionRect = selection.getRangeAt(0).getBoundingClientRect();
+      if (selectionRect.width > 0 || selectionRect.height > 0) return selectionRect;
+    }
+    return editorRef.current?.getBoundingClientRect() ?? surfaceRef.current?.getBoundingClientRect() ?? rect;
+  }
+
+  function measureMentionPosition(range: Range) {
+    const anchorRect = anchorRectForMentionRange(range);
+    const viewportPadding = 12;
+    const gap = 8;
+    const width = Math.min(340, Math.max(260, window.innerWidth - viewportPadding * 2));
+    const availableBelow = window.innerHeight - anchorRect.bottom - gap - viewportPadding;
+    const availableAbove = anchorRect.top - gap - viewportPadding;
+    const placement: MentionState["placement"] =
+      availableBelow >= 220 || availableBelow >= availableAbove ? "bottom" : "top";
+    const availableSpace = placement === "bottom" ? availableBelow : availableAbove;
+    const maxHeight = Math.max(48, Math.min(320, availableSpace));
+    const left = Math.max(
+      viewportPadding,
+      Math.min(anchorRect.left, window.innerWidth - width - viewportPadding)
+    );
+    const y =
+      placement === "bottom"
+        ? Math.max(
+            viewportPadding,
+            Math.min(anchorRect.bottom + gap, window.innerHeight - viewportPadding - maxHeight)
+          )
+        : Math.max(
+            viewportPadding + maxHeight,
+            Math.min(anchorRect.top - gap, window.innerHeight - viewportPadding)
+          );
+
+    return {
+      x: left,
+      y,
+      width,
+      maxHeight,
+      placement,
+    };
+  }
+
+  function openReferenceFromComposerToken(link: LoomLink) {
+    const error = onOpenReference(link);
+    setReferenceOpenError(error);
+    return error;
+  }
+
+  function scheduleAddressHintForToken(token: HTMLElement) {
+    const link =
+      token.classList.contains("inline-loom-token")
+        ? linkFromInlineToken(token)
+        : attachedReferences.find((item) => item.path === token.dataset.loomPath);
+    if (!link) return;
+    const targetKey = selectedReferenceKeysForLink(link)[0] ?? link.path;
+    if (addressHintTimerRef.current !== null && addressHintTargetRef.current === targetKey) {
+      return;
+    }
+    clearAddressHintTimer();
+    addressHintTargetRef.current = targetKey;
+    addressHintTimerRef.current = window.setTimeout(() => {
+      const rect = token.getBoundingClientRect();
+      setAddressHint({
+        link,
+        x: Math.max(8, Math.min(rect.left, window.innerWidth - 360)),
+        y: Math.max(8, rect.top - 12),
+      });
+    }, 3000);
+  }
+
+  function updateInlineTokenDisplayMode(
+    token: HTMLElement,
+    displayMode: ReferenceDisplayMode
+  ) {
+    const link = linkFromInlineToken(token);
+    if (!link) return;
+    const nextLink: LoomLink = {
+      ...link,
+      referenceDisplayMode: displayMode,
+      referenceCode: referenceCodeForLink(link),
+      referenceCustomLabel: undefined,
+    };
+    token.dataset.loomDisplayMode = displayMode;
+    if (nextLink.referenceCode) token.dataset.loomCode = nextLink.referenceCode;
+    delete token.dataset.loomCustomLabel;
+    token.textContent = referenceTokenText(nextLink, referenceDisplayMode);
+    window.requestAnimationFrame(() => commitDraftChange("external-reference"));
+  }
+
+  function switchInlineReferenceDisplayMode(
+    link: LoomLink,
+    displayMode: ReferenceDisplayMode
+  ) {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const token = Array.from(
+      editor.querySelectorAll<HTMLElement>(".inline-loom-token")
+    ).find((item) => {
+      const itemLink = linkFromInlineToken(item);
+      return Boolean(itemLink && referencesShareIdentity(itemLink, link));
+    });
+    if (!token) return;
+    updateInlineTokenDisplayMode(token, displayMode);
+    setTokenContextMenu(null);
+  }
+
+  function visibleReferenceLabel(link: LoomLink) {
+    return referenceLabelForMode(
+      link,
+      referenceDisplayModeForLink(link, referenceDisplayMode)
+    );
+  }
+
+  function openInlineReferenceRename(link: LoomLink) {
+    const editor = editorRef.current;
+    if (!editor) return;
+    const token = Array.from(
+      editor.querySelectorAll<HTMLElement>(".inline-loom-token")
+    ).find((item) => {
+      const itemLink = linkFromInlineToken(item);
+      return Boolean(itemLink && referencesShareIdentity(itemLink, link));
+    });
+    if (!token) return;
+    const rect = token.getBoundingClientRect();
+    const popoverWidth = 260;
+    setTokenRenamePopover({
+      link,
+      x: Math.max(8, Math.min(rect.left, window.innerWidth - popoverWidth - 8)),
+      y: Math.max(8, Math.min(rect.bottom + 8, window.innerHeight - 170)),
+      value: visibleReferenceLabel(link),
+      error: null,
+    });
+    setTokenContextMenu(null);
+    closeAddressHint();
+  }
+
+  function applyInlineReferenceRename() {
+    if (!tokenRenamePopover) return;
+    const customLabel = tokenRenamePopover.value.trim();
+    if (!customLabel) {
+      setTokenRenamePopover((current) =>
+        current ? { ...current, error: "Enter a label." } : current
+      );
+      return;
+    }
+
+    const editor = editorRef.current;
+    if (!editor) return;
+    const token = Array.from(
+      editor.querySelectorAll<HTMLElement>(".inline-loom-token")
+    ).find((item) => {
+      const itemLink = linkFromInlineToken(item);
+      return Boolean(
+        itemLink && referencesShareIdentity(itemLink, tokenRenamePopover.link)
+      );
+    });
+    if (!token) {
+      setTokenRenamePopover(null);
+      return;
+    }
+
+    const nextLink = {
+      ...tokenRenamePopover.link,
+      referenceCustomLabel: customLabel,
+      referenceCode: referenceCodeForLink(tokenRenamePopover.link),
+    };
+    token.dataset.loomCustomLabel = customLabel;
+    if (nextLink.referenceCode) token.dataset.loomCode = nextLink.referenceCode;
+    token.textContent = referenceTokenText(nextLink, referenceDisplayMode);
+    setTokenRenamePopover(null);
+    window.requestAnimationFrame(() => commitDraftChange("external-reference"));
+  }
+
+  function removeInlineToken(link: LoomLink) {
+    removeLinkedReference(link);
+    setTokenContextMenu(null);
+    setTokenRenamePopover(null);
+    closeAddressHint();
+  }
+
+  function handleTokenContextMenu(event: React.MouseEvent<HTMLDivElement>) {
+    const token = getTokenFromEventTarget(event.target);
+    if (!token || !token.classList.contains("inline-loom-token")) return;
+    const link = linkFromInlineToken(token);
+    if (!link) return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeAddressHint();
+    setTokenContextMenu({
+      link,
+      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 220)),
+      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 210)),
+    });
+  }
+
+  function handleEditorClick(event: React.MouseEvent<HTMLDivElement>) {
+    const token = getTokenFromEventTarget(event.target);
+    if (token?.classList.contains("inline-loom-token") && (event.metaKey || event.ctrlKey)) {
+      const link = linkFromInlineToken(token);
+      if (link) {
+        event.preventDefault();
+        event.stopPropagation();
+        openReferenceFromComposerToken(link);
+      }
+      return;
+    }
+    updateMention();
+  }
+
+  function handleReferenceClickCapture(event: React.MouseEvent<HTMLDivElement>) {
+    const token = getTokenFromEventTarget(event.target);
+    if (!token?.classList.contains("inline-loom-token")) return;
+    if (!event.metaKey && !event.ctrlKey) return;
+    const link = linkFromInlineToken(token);
+    if (!link) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openReferenceFromComposerToken(link);
+  }
+
+  function handleReferencePointerDownCapture(event: React.PointerEvent<HTMLDivElement>) {
+    const token = getTokenFromEventTarget(event.target);
+    if (!token?.classList.contains("inline-loom-token")) return;
+    if (!event.metaKey && !event.ctrlKey) return;
+    const link = linkFromInlineToken(token);
+    if (!link) return;
+    event.preventDefault();
+    event.stopPropagation();
+    openReferenceFromComposerToken(link);
+  }
+
+  function handleReferenceMouseMoveCapture(event: React.MouseEvent<HTMLDivElement>) {
+    const token = getTokenFromEventTarget(event.target);
+    if (!token) return;
+    scheduleAddressHintForToken(token);
+  }
+
+  function handleReferencePointerOver(event: React.PointerEvent<HTMLDivElement>) {
+    const token = getTokenFromEventTarget(event.target);
+    if (!token) return;
+    scheduleAddressHintForToken(token);
+  }
+
+  function handleReferencePointerOut(event: React.PointerEvent<HTMLDivElement>) {
+    const token = getTokenFromEventTarget(event.target);
+    if (!token) return;
+    if (token.contains(event.relatedTarget as Node | null)) return;
+    if (
+      event.relatedTarget instanceof HTMLElement &&
+      event.relatedTarget.closest(".address-hint-popover")
+    ) {
+      return;
+    }
+    closeAddressHint();
+  }
+
+  useEffect(() => {
+    const surface = surfaceRef.current;
+    if (!surface) return;
+
+    function handleNativeReferenceOver(event: MouseEvent) {
+      const token = getTokenFromEventTarget(event.target);
+      if (!token) return;
+      scheduleAddressHintForToken(token);
+    }
+
+    function handleNativeReferenceOut(event: MouseEvent) {
+      const token = getTokenFromEventTarget(event.target);
+      if (!token) return;
+      if (token.contains(event.relatedTarget as Node | null)) return;
+      if (
+        event.relatedTarget instanceof HTMLElement &&
+        event.relatedTarget.closest(".address-hint-popover")
+      ) {
+        return;
+      }
+      closeAddressHint();
+    }
+
+    function handleNativeReferenceDown(event: MouseEvent) {
+      const token = getTokenFromEventTarget(event.target);
+      if (!token?.classList.contains("inline-loom-token")) return;
+      if (!event.metaKey && !event.ctrlKey) return;
+      const link = linkFromInlineToken(token);
+      if (!link) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openReferenceFromComposerToken(link);
+    }
+
+    surface.addEventListener("mouseover", handleNativeReferenceOver, true);
+    surface.addEventListener("mousemove", handleNativeReferenceOver, true);
+    surface.addEventListener("mouseout", handleNativeReferenceOut, true);
+    surface.addEventListener("mousedown", handleNativeReferenceDown, true);
+    return () => {
+      surface.removeEventListener("mouseover", handleNativeReferenceOver, true);
+      surface.removeEventListener("mousemove", handleNativeReferenceOver, true);
+      surface.removeEventListener("mouseout", handleNativeReferenceOut, true);
+      surface.removeEventListener("mousedown", handleNativeReferenceDown, true);
+    };
+  });
+
   function makeToken(link: LoomLink) {
+    const displayLink = withReferenceDisplayDefaults(link, referenceDisplayMode);
+    const code = referenceCodeForLink(displayLink);
+    const displayMode = referenceDisplayModeForLink(displayLink, referenceDisplayMode);
     const token = document.createElement("span");
     token.className = "inline-loom-token";
     token.contentEditable = "false";
     token.draggable = true;
-    token.dataset.loomId = link.id;
-    token.dataset.loomPath = link.path;
-    token.dataset.loomTitle = link.title;
-    token.dataset.loomType = link.type;
-    if (link.badge) token.dataset.loomBadge = link.badge;
-    if (link.selectedAt) token.dataset.loomSelectedAt = String(link.selectedAt);
-    if (link.targetObjectId) token.dataset.loomTargetObjectId = link.targetObjectId;
-    if (link.canonicalUri) token.dataset.loomCanonicalUri = link.canonicalUri;
-    if (link.referenceMentionId) token.dataset.loomReferenceMentionId = link.referenceMentionId;
-    if (link.resolutionStatus) token.dataset.loomResolutionStatus = link.resolutionStatus;
-    token.title = toLoomMarkdown(link);
-    token.textContent = `[[${link.title}]]`;
+    token.setAttribute("data-testid", "inline-loom-token");
+    token.dataset.loomId = displayLink.id;
+    token.dataset.loomPath = displayLink.path;
+    token.dataset.loomTitle = displayLink.title;
+    token.dataset.loomType = displayLink.type;
+    token.dataset.loomDisplayMode = displayMode;
+    if (code) token.dataset.loomCode = code;
+    if (displayLink.badge) token.dataset.loomBadge = displayLink.badge;
+    if (displayLink.selectedAt) token.dataset.loomSelectedAt = String(displayLink.selectedAt);
+    if (displayLink.targetObjectId) token.dataset.loomTargetObjectId = displayLink.targetObjectId;
+    if (displayLink.canonicalUri) token.dataset.loomCanonicalUri = displayLink.canonicalUri;
+    if (displayLink.referenceCustomLabel) {
+      token.dataset.loomCustomLabel = displayLink.referenceCustomLabel;
+    }
+    if (displayLink.referenceMentionId) token.dataset.loomReferenceMentionId = displayLink.referenceMentionId;
+    if (displayLink.resolutionStatus) token.dataset.loomResolutionStatus = displayLink.resolutionStatus;
+    token.title = toLoomMarkdown(displayLink);
+    token.textContent = referenceTokenText(displayLink, referenceDisplayMode);
+    token.addEventListener("mouseenter", () => scheduleAddressHintForToken(token));
+    token.addEventListener("mouseover", () => scheduleAddressHintForToken(token));
+    token.addEventListener("mousemove", () => scheduleAddressHintForToken(token));
+    token.addEventListener("mouseleave", (event) => {
+      if (
+        event.relatedTarget instanceof HTMLElement &&
+        event.relatedTarget.closest(".address-hint-popover")
+      ) {
+        return;
+      }
+      closeAddressHint();
+    });
+    token.addEventListener("click", (event) => {
+      if (!event.metaKey && !event.ctrlKey) return;
+      const tokenLink = linkFromInlineToken(token);
+      if (!tokenLink) return;
+      event.preventDefault();
+      event.stopPropagation();
+      openReferenceFromComposerToken(tokenLink);
+    });
     return token;
   }
 
@@ -4877,6 +5893,10 @@ function PromptComposer({
         : undefined,
       targetObjectId: token.dataset.loomTargetObjectId,
       canonicalUri: token.dataset.loomCanonicalUri,
+      referenceCode: token.dataset.loomCode,
+      referenceDisplayMode:
+        token.dataset.loomDisplayMode === "code" ? "code" : "title",
+      referenceCustomLabel: token.dataset.loomCustomLabel?.trim() || undefined,
       referenceMentionId: token.dataset.loomReferenceMentionId,
       resolutionStatus: token.dataset.loomResolutionStatus as LoomLink["resolutionStatus"],
     };
@@ -4896,7 +5916,12 @@ function PromptComposer({
         link.title === other.title &&
         link.type === other.type &&
         link.badge === other.badge &&
-        link.selectedAt === other.selectedAt
+        link.selectedAt === other.selectedAt &&
+        link.targetObjectId === other.targetObjectId &&
+        link.canonicalUri === other.canonicalUri &&
+        link.referenceCode === other.referenceCode &&
+        link.referenceDisplayMode === other.referenceDisplayMode &&
+        link.referenceCustomLabel === other.referenceCustomLabel
       );
     });
     if (!sameLinks) return false;
@@ -5195,18 +6220,16 @@ function PromptComposer({
 
   function updateMention() {
     const match = getMentionRange();
-    if (!match || !surfaceRef.current) {
+    if (!match) {
       setMention(null);
       return;
     }
-    const rect = match.range.getBoundingClientRect();
-    const surfaceRect = surfaceRef.current.getBoundingClientRect();
+    const position = measureMentionPosition(match.range);
     setMention((current) => ({
       query: match.query,
       range: match.range.cloneRange(),
       selectedIndex: current?.query === match.query ? current.selectedIndex : 0,
-      x: Math.max(10, rect.left - surfaceRect.left),
-      y: Math.max(42, rect.bottom - surfaceRect.top + 8),
+      ...position,
     }));
   }
 
@@ -5335,7 +6358,7 @@ function PromptComposer({
               ...current,
               selectedIndex: Math.min(
                 current.selectedIndex + 1,
-                flattenedMentionOptions.length - 1
+                Math.max(flattenedMentionOptions.length - 1, 0)
               ),
             }
           : current
@@ -5442,6 +6465,12 @@ function PromptComposer({
             );
           }
         }}
+        onClickCapture={handleReferenceClickCapture}
+        onPointerDownCapture={handleReferencePointerDownCapture}
+        onMouseOverCapture={handleReferenceMouseMoveCapture}
+        onMouseMoveCapture={handleReferenceMouseMoveCapture}
+        onPointerOver={handleReferencePointerOver}
+        onPointerOut={handleReferencePointerOut}
       >
         {attachedReferences.length > 0 && (
           <div className="attached-reference-row" aria-label="Attached references">
@@ -5450,6 +6479,7 @@ function PromptComposer({
                 className="selection-reference-chip"
                 key={`${link.id}-${link.path}`}
                 title={link.title}
+                data-loom-path={link.path}
               >
                 <FileText size={13} />
                 <span>{link.title}</span>
@@ -5520,19 +6550,147 @@ function PromptComposer({
             pendingInputRef.current = null;
           }}
           onKeyUp={updateMention}
-          onClick={updateMention}
+          onFocus={updateMention}
+          onClick={handleEditorClick}
+          onContextMenu={handleTokenContextMenu}
           onKeyDown={handleEditorKeyDown}
           onDragStart={handleEditorDragStart}
         >
         </div>
 
-        {mention && (
+        {mention && createPortal(
           <ComposerMentionMenu
+            menuRef={mentionMenuRef}
             mention={mention}
             groups={groupedMentionOptions}
             selectedOption={flattenedMentionOptions[mention.selectedIndex]}
             onSelect={selectMentionOption}
+          />,
+          document.body
+        )}
+
+        {addressHint && (
+          <AddressHintPopover
+            link={addressHint.link}
+            style={{
+              left: addressHint.x,
+              top: addressHint.y,
+              transform: "translateY(-100%)",
+            }}
+            onCopy={onCopyReferenceAddress}
+            onClose={closeAddressHint}
           />
+        )}
+
+        {tokenContextMenu && (
+          <div
+            className="reference-token-context-menu"
+            style={{ left: tokenContextMenu.x, top: tokenContextMenu.y }}
+            onClick={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <button
+              type="button"
+              onClick={() => openInlineReferenceRename(tokenContextMenu.link)}
+            >
+              Rename
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                switchInlineReferenceDisplayMode(tokenContextMenu.link, "title")
+              }
+            >
+              Show Title
+            </button>
+            <button
+              type="button"
+              onClick={() =>
+                switchInlineReferenceDisplayMode(tokenContextMenu.link, "code")
+              }
+            >
+              Show Code
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                openReferenceFromComposerToken(tokenContextMenu.link);
+                setTokenContextMenu(null);
+              }}
+            >
+              Open Reference
+            </button>
+            <button
+              type="button"
+              onClick={() => {
+                onCopyReferenceAddress(tokenContextMenu.link);
+                setTokenContextMenu(null);
+              }}
+            >
+              Copy Loom Address
+            </button>
+            <button
+              type="button"
+              onClick={() => removeInlineToken(tokenContextMenu.link)}
+            >
+              Remove Reference
+            </button>
+          </div>
+        )}
+
+        {tokenRenamePopover && (
+          <div
+            className="reference-token-rename-popover"
+            style={{ left: tokenRenamePopover.x, top: tokenRenamePopover.y }}
+            role="dialog"
+            aria-label="Rename Reference"
+            onClick={(event) => event.stopPropagation()}
+            onPointerDown={(event) => event.stopPropagation()}
+          >
+            <strong>Rename Reference</strong>
+            <input
+              ref={renameInputRef}
+              value={tokenRenamePopover.value}
+              maxLength={80}
+              aria-label="Reference name"
+              onChange={(event) => {
+                const value = event.target.value.slice(0, 80);
+                setTokenRenamePopover((current) =>
+                  current ? { ...current, value, error: null } : current
+                );
+              }}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  applyInlineReferenceRename();
+                }
+                if (event.key === "Escape") {
+                  event.preventDefault();
+                  setTokenRenamePopover(null);
+                }
+              }}
+            />
+            {tokenRenamePopover.error && (
+              <em>{tokenRenamePopover.error}</em>
+            )}
+            <div className="reference-token-rename-actions">
+              <button
+                type="button"
+                onClick={applyInlineReferenceRename}
+                disabled={!tokenRenamePopover.value.trim()}
+                aria-label="Confirm rename"
+              >
+                OK
+              </button>
+              <button
+                type="button"
+                onClick={() => setTokenRenamePopover(null)}
+                aria-label="Cancel rename"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
         )}
 
         <div className="composer-footer">
@@ -5709,22 +6867,34 @@ function PromptComposer({
 }
 
 function ComposerMentionMenu({
+  menuRef,
   mention,
   groups,
   selectedOption,
   onSelect,
 }: {
+  menuRef: RefObject<HTMLDivElement>;
   mention: MentionState;
   groups: Array<{ group: ComposerReferenceGroup; options: ComposerReferenceOption[] }>;
   selectedOption?: ComposerReferenceOption;
   onSelect: (option: ComposerReferenceOption) => void;
 }) {
+  const style: CSSProperties = {
+    left: mention.x,
+    top: mention.y,
+    width: mention.width,
+    maxHeight: mention.maxHeight,
+    transform: mention.placement === "top" ? "translateY(-100%)" : undefined,
+  };
   return (
     <div
+      ref={menuRef}
       className="composer-mention-menu"
-      style={{ left: mention.x, top: mention.y }}
+      style={style}
       role="listbox"
       aria-label="Loom reference suggestions"
+      data-testid="reference-suggestion-dropdown"
+      data-placement={mention.placement}
     >
       {groups.length === 0 ? (
         <div className="composer-mention-empty">No Loom references found.</div>
@@ -5735,6 +6905,11 @@ function ComposerMentionMenu({
             {group.options.map((option) => {
               const Icon = iconForType[option.type];
               const selected = selectedOption?.path === option.path;
+              const code = readableReferenceCode(option);
+              const showMatchReason =
+                option.suggestionMatchReason &&
+                !option.suggestionMatchReason.startsWith("code:") &&
+                !option.suggestionMatchReason.startsWith("id:");
               return (
                 <button
                   key={`${group.group}-${option.path}`}
@@ -5745,9 +6920,23 @@ function ComposerMentionMenu({
                   aria-selected={selected}
                 >
                   <Icon size={14} />
-                  <span>
+                  <span className="mention-option-copy">
                     <strong>{option.title}</strong>
-                    <small>{option.subtitle}</small>
+                    <small className="mention-option-detail">
+                      {code && (
+                        <HighlightedReferenceCode code={code} query={mention.query} />
+                      )}
+                      {code && option.subtitle && <span aria-hidden="true">·</span>}
+                      {option.subtitle && (
+                        <span className="mention-option-subtitle">{option.subtitle}</span>
+                      )}
+                    </small>
+                    {showMatchReason && (
+                      <em>{option.suggestionMatchReason}</em>
+                    )}
+                  </span>
+                  <span className="mention-option-badge">
+                    {option.badge ?? option.type}
                   </span>
                 </button>
               );
@@ -5756,6 +6945,38 @@ function ComposerMentionMenu({
         ))
       )}
     </div>
+  );
+}
+
+function HighlightedReferenceCode({
+  code,
+  query,
+}: {
+  code: string;
+  query: string;
+}) {
+  const normalizedCode = code.toLowerCase();
+  const normalizedQuery = query.trim().toLowerCase();
+  const matchIndex = normalizedQuery
+    ? normalizedCode.indexOf(normalizedQuery)
+    : -1;
+
+  if (matchIndex < 0) {
+    return <span className="mention-code">{code}</span>;
+  }
+
+  const before = code.slice(0, matchIndex);
+  const match = code.slice(matchIndex, matchIndex + normalizedQuery.length);
+  const after = code.slice(matchIndex + normalizedQuery.length);
+
+  return (
+    <span className="mention-code">
+      {before}
+      <mark className="mention-code-match" data-testid="mention-code-match">
+        {match}
+      </mark>
+      {after}
+    </span>
   );
 }
 
@@ -5808,6 +7029,11 @@ function LinkedReferenceDropdown({
         ) : (
           links.map((link) => {
             const Icon = iconForType[link.type];
+            const primaryLabel = visibleLinkedReferenceLabel(link);
+            const secondaryLabel =
+              link.referenceCustomLabel?.trim() && link.referenceCustomLabel.trim() !== link.title
+                ? `${link.title} · ${link.path}`
+                : link.path;
             return (
               <div
                 className="linked-reference-row"
@@ -5828,8 +7054,8 @@ function LinkedReferenceDropdown({
               >
                 <Icon size={14} />
                 <span>
-                  <strong>{link.title}</strong>
-                  <small>{link.path}</small>
+                  <strong>{primaryLabel}</strong>
+                  <small>{secondaryLabel}</small>
                 </span>
                 <button
                   className="linked-reference-remove"
@@ -5868,6 +7094,11 @@ function LinkedReferenceDropdown({
       {error && <div className="linked-reference-error">{error}</div>}
     </div>
   );
+}
+
+function visibleLinkedReferenceLabel(link: LoomLink) {
+  const customLabel = link.referenceCustomLabel?.trim();
+  return customLabel || link.title;
 }
 
 function AttachContentDropdown({

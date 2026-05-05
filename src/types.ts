@@ -177,6 +177,11 @@ export interface LoomGraphRepository {
 
 export interface LoomGraphMutationRepository extends LoomGraphRepository {
   promoteBookmark(link: LoomLink): LoomBookmarkPromotionResult;
+  registerAliasUri(input: {
+    aliasUri: string;
+    targetObjectId: string;
+    replacementAliasUri?: string;
+  }): LoomLedgerEvent;
   createReferenceMention(input: {
     sourceConversationId: string;
     sourcePath: string;
@@ -186,12 +191,26 @@ export interface LoomGraphMutationRepository extends LoomGraphRepository {
   getLedgerEvents(): LoomLedgerEvent[];
 }
 
+export interface LoomMetadata {
+  id: string;
+  code?: string;
+  title: string;
+  canonicalUri?: string;
+  keywords: string[];
+  summary: string;
+  usageCount: number;
+  status: "draft" | "addressable";
+}
+
+export type ReferenceDisplayMode = "title" | "code";
+
 export interface Conversation {
   id: string;
   title: string;
   path: string;
   folder: string;
   summary: string;
+  meta?: LoomMetadata;
   iconKey?: string;
   iconColor?: string;
   pinned?: boolean;
@@ -207,6 +226,10 @@ export interface LoomLink {
   selectedAt?: number;
   targetObjectId?: string;
   canonicalUri?: string;
+  meta?: LoomMetadata;
+  referenceCode?: string;
+  referenceDisplayMode?: ReferenceDisplayMode;
+  referenceCustomLabel?: string;
   referenceMentionId?: string;
   resolutionStatus?: LoomResolutionStatus;
 }
@@ -220,11 +243,13 @@ export interface ResponseItem {
   suggestedLinks: LoomLink[];
   bookmarkedLinks: LoomLink[];
   bookmarked?: boolean;
+  meta?: LoomMetadata;
 }
 
 export interface BookmarkItem extends LoomLink {
   lastUsed: string;
   editableTitle: string;
+  meta?: LoomMetadata;
 }
 
 export interface HistoryEntry extends LoomLink {

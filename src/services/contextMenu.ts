@@ -134,5 +134,8 @@ export function toLinkFromResponse(response: ResponseItem): LoomLink {
     title: response.title,
     path: response.address,
     badge: "Linked",
+    canonicalUri: response.meta?.canonicalUri,
+    meta: response.meta,
+    referenceCode: response.meta?.code,
   };
 }
