@@ -355,6 +355,7 @@ type NewLoomStarterCategoryId =
 interface NewLoomStarterCategory {
   id: NewLoomStarterCategoryId;
   label: string;
+  Icon: LucideIcon;
   prompts: string[];
 }
 
@@ -387,64 +388,89 @@ const newLoomStarterCategories: NewLoomStarterCategory[] = [
   {
     id: "research",
     label: "Research",
+    Icon: Search,
     prompts: [
       "Research a topic and build a reusable summary",
       "Map the strongest arguments around a topic",
-      "Collect sources and extract the key takeaways",
+      "Find recent context and organize it into Loom notes",
     ],
   },
   {
     id: "explain",
     label: "Explain",
+    Icon: Lightbulb,
     prompts: [
       "Explain a complex idea in plain language",
       "Create a study guide from a topic",
       "Break down this concept with examples",
+      "Turn a dense document into a clear explanation",
+      "Explain the tradeoffs behind this decision",
+      "Create an analogy that makes this easier to remember",
     ],
   },
   {
     id: "compare",
     label: "Compare",
+    Icon: Layers,
     prompts: [
       "Compare two tools or frameworks",
       "Build a tradeoff matrix for these options",
       "Find the practical differences between two approaches",
+      "Compare these products for a specific workflow",
+      "Rank options by risk, cost, and speed",
+      "Summarize where each option wins",
     ],
   },
   {
     id: "plan",
     label: "Plan",
+    Icon: Target,
     prompts: [
       "Plan a project from idea to execution",
       "Turn a rough goal into milestones",
       "Create a launch checklist with risks",
+      "Map dependencies and next actions",
+      "Draft a weekly execution plan",
+      "Identify blockers before starting work",
     ],
   },
   {
     id: "code",
     label: "Code",
+    Icon: Code2,
     prompts: [
       "Design an implementation plan for this feature",
       "Find edge cases before writing code",
       "Explain how this code path works",
+      "Review an API shape before implementation",
+      "Turn requirements into test cases",
+      "Outline a refactor without changing behavior",
     ],
   },
   {
     id: "review",
     label: "Review",
+    Icon: Check,
     prompts: [
       "Review this code or document",
       "Find risks and missing tests in this change",
       "Check this proposal for unclear assumptions",
+      "Audit this plan for missing constraints",
+      "Find contradictions in these notes",
+      "Summarize what still needs a decision",
     ],
   },
   {
     id: "organize",
     label: "Organize",
+    Icon: Workflow,
     prompts: [
       "Turn scattered notes into a Loom",
       "Cluster these ideas into reusable sections",
       "Extract decisions, open questions, and next steps",
+      "Create a reusable outline from rough notes",
+      "Group related threads into a coherent map",
+      "Convert meeting notes into action-oriented Looms",
     ],
   },
 ];
@@ -1593,7 +1619,41 @@ function App() {
       badge,
       canonicalUri: response.meta?.canonicalUri,
       meta: response.meta,
+      referenceCode: response.meta?.code,
     };
+  }
+
+  function enrichDestinationMetadata<T extends LoomLink | HistoryEntry>(destination: T): T {
+    if (destination.referenceCode || destination.meta?.code) return destination;
+    const responseTarget = findLocalResponseTarget(destination);
+    if (responseTarget?.response.meta) {
+      return {
+        ...destination,
+        targetObjectId:
+          destination.targetObjectId ??
+          runtimeGraphObjectIdFor(
+            "response",
+            `${responseTarget.loom.id}_${responseTarget.response.id}`
+          ),
+        canonicalUri:
+          destination.canonicalUri ?? responseTarget.response.meta.canonicalUri,
+        meta: responseTarget.response.meta,
+        referenceCode: responseTarget.response.meta.code,
+      };
+    }
+    const loomTarget = findLocalLoomTarget(destination);
+    if (loomTarget?.meta) {
+      return {
+        ...destination,
+        targetObjectId:
+          destination.targetObjectId ??
+          runtimeGraphObjectIdFor("conversation", loomTarget.id),
+        canonicalUri: destination.canonicalUri ?? loomTarget.meta.canonicalUri,
+        meta: loomTarget.meta,
+        referenceCode: loomTarget.meta.code,
+      };
+    }
+    return destination;
   }
 
   function linkForNavigationDestination(destination: LoomNavigationDestination): LoomLink {
@@ -2916,11 +2976,15 @@ function App() {
   }
 
   function togglePinnedConversation(conversation: Conversation) {
-    setPinnedConversationIds((current) =>
-      current.includes(conversation.id)
+    setPinnedConversationIds((current) => {
+      const alreadyPinned = current.includes(conversation.id);
+      if (!alreadyPinned) {
+        removeConversationFromGroups(conversation.id);
+      }
+      return alreadyPinned
         ? current.filter((id) => id !== conversation.id)
-        : [...current, conversation.id]
-    );
+        : [...current, conversation.id];
+    });
   }
 
   function renameConversation(conversation: Conversation) {
@@ -4036,7 +4100,7 @@ function App() {
         <RightPanel
           activePanel={activePanel}
           bookmarks={bookmarks}
-          history={history}
+          history={history.map(enrichDestinationMetadata)}
           lineageRoot={lineageRoot}
           activeDestination={currentActiveDestination}
           archived={archived}
@@ -5276,12 +5340,13 @@ function NewLoomStarterPanel({
             aria-selected={category.id === activeCategory.id}
             onClick={() => onCategoryChange(category.id)}
           >
+            <category.Icon size={14} aria-hidden="true" />
             {category.label}
           </button>
         ))}
       </div>
       <div className="new-loom-starter-prompts">
-        {activeCategory.prompts.map((prompt) => (
+        {activeCategory.prompts.slice(0, 3).map((prompt) => (
           <button
             key={prompt}
             type="button"
@@ -5367,14 +5432,6 @@ function ChatTranscript({
               {conversation.meta.code}
             </AddressMetadataBadge>
           )}
-          <AddressMetadataBadge
-            link={loomSurfaceLink}
-            className="conversation-readable-address"
-            testId={`loom-readable-address-${conversation.id}`}
-            onCopy={onCopyAddress}
-          >
-            {conversation.path}
-          </AddressMetadataBadge>
         </div>
         <div className="conversation-context-title-row">
           <h1>{conversation.title}</h1>
@@ -7996,6 +8053,10 @@ function RightPanel({
                 title: conversation.title,
                 path: conversation.path,
                 badge: typeLabel.conversation,
+                targetObjectId: runtimeGraphObjectIdFor("conversation", conversation.id),
+                canonicalUri: conversation.meta?.canonicalUri,
+                meta: conversation.meta,
+                referenceCode: conversation.meta?.code,
               };
               return (
                 <DestinationRow
@@ -8692,6 +8753,14 @@ function DestinationRow<T extends LoomLink>({
   ]
     .filter(Boolean)
     .join(" ");
+  const destinationCode = referenceCodeForLink(destination);
+  const metaRowClassName = [
+    "bookmark-meta-row",
+    showBadge ? "" : "no-label",
+    destinationCode ? "has-code" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
   return (
     <div
       className={rowClassName}
@@ -8714,10 +8783,11 @@ function DestinationRow<T extends LoomLink>({
       <button className="bookmark-content" onClick={() => onVisit(destination)}>
         <strong title={title}>{title}</strong>
         <small title={destination.path}>{destination.path}</small>
-        <span className={showBadge ? "bookmark-meta-row" : "bookmark-meta-row no-label"}>
+        <span className={metaRowClassName}>
           {showBadge && destination.badge ? (
             <em>{displayObjectTypeLabel(destination.badge)}</em>
           ) : null}
+          {destinationCode ? <span className="bookmark-meta-code">{destinationCode}</span> : null}
           {timestamp ? <time>{timestamp}</time> : null}
         </span>
       </button>

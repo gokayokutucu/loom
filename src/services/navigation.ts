@@ -17,6 +17,11 @@ export function createHistoryEntry(
     type: destination.type,
     title: destination.title,
     path: destination.path,
+    badge: destination.badge,
+    targetObjectId: destination.targetObjectId,
+    canonicalUri: destination.canonicalUri,
+    meta: destination.meta,
+    referenceCode: destination.referenceCode ?? destination.meta?.code,
     visitedAt: "Now",
     navigationDestination,
   };

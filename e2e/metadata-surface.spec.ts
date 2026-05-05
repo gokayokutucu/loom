@@ -16,14 +16,13 @@ async function openArchitectureLoom(page: Page) {
 }
 
 test.describe("Loom metadata surface", () => {
-  test("Loom header shows readable code and canonical address hint", async ({ page }) => {
+  test("Loom header shows readable code without duplicate address", async ({ page }) => {
     await openApp(page);
     await openArchitectureLoom(page);
 
     const code = page.getByTestId("loom-code-c-architecture");
     await expect(code).toHaveText(/^L-[0-9A-Z]{5}$/);
-    const readableAddress = page.getByTestId("loom-readable-address-c-architecture");
-    await expect(readableAddress).toHaveText("loom://loom-ai/navigation-architecture");
+    await expect(page.getByTestId("loom-readable-address-c-architecture")).toHaveCount(0);
     await expect(page.getByTestId("loom-canonical-address-c-architecture")).toHaveCount(0);
 
     await code.hover();
@@ -32,14 +31,6 @@ test.describe("Loom metadata surface", () => {
 
     await code.click({ button: "right" });
     await expect(page.getByRole("status")).toHaveText("Link is copied");
-
-    await readableAddress.hover();
-    await page.waitForTimeout(800);
-    await expect(page.getByTestId("address-hint-popover")).toBeVisible();
-    await expect(page.getByTestId("address-hint-popover")).toContainText(/L-[0-9A-Z]{5}/);
-    await expect(page.getByTestId("address-hint-popover")).toContainText(
-      /loom:\/\/loom-ai-navigation-architecture\/L-[0-9A-Z]{5}\?id=/
-    );
   });
 
   test("Responses show code and Link promotion keeps canonical address on the code", async ({ page }) => {
