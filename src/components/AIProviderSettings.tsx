@@ -20,21 +20,26 @@ import {
   type ModelProfileId,
   type RuntimeHealthState,
 } from "../services/modelProviders";
+import type { AppSettings } from "../services/appSettings";
 
 const provider = new OllamaProvider();
 
 export function AIProviderSettingsModal({
   settings,
+  appSettings,
   runtimeHealth,
   onSave,
+  onAppSettingsSave,
   onClose,
 }: {
   settings: AIProviderSettings;
+  appSettings: AppSettings;
   runtimeHealth: RuntimeHealthState & {
     checking: boolean;
     testRuntime: () => Promise<RuntimeHealthState>;
   };
   onSave: (settings: AIProviderSettings) => void;
+  onAppSettingsSave: (settings: AppSettings) => void;
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState(settings);
@@ -395,6 +400,49 @@ export function AIProviderSettingsModal({
                   <strong>{draft.ollama.modelLocation}</strong>
                 </div>
               )}
+            </section>
+
+            <section className="provider-section">
+              <div className="provider-section-heading">
+                <div>
+                  <span>References</span>
+                  <h3>Reference display</h3>
+                </div>
+              </div>
+
+              <fieldset className="settings-segment" aria-label="Reference Display Mode">
+                <legend>Reference Display Mode</legend>
+                <label>
+                  <input
+                    type="radio"
+                    name="reference-display-mode"
+                    value="title"
+                    checked={appSettings.referenceDisplayMode === "title"}
+                    onChange={() =>
+                      onAppSettingsSave({
+                        ...appSettings,
+                        referenceDisplayMode: "title",
+                      })
+                    }
+                  />
+                  <span>Title</span>
+                </label>
+                <label>
+                  <input
+                    type="radio"
+                    name="reference-display-mode"
+                    value="code"
+                    checked={appSettings.referenceDisplayMode === "code"}
+                    onChange={() =>
+                      onAppSettingsSave({
+                        ...appSettings,
+                        referenceDisplayMode: "code",
+                      })
+                    }
+                  />
+                  <span>Code</span>
+                </label>
+              </fieldset>
             </section>
           </div>
         </div>

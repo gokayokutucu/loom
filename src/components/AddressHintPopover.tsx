@@ -6,29 +6,38 @@ import { canonicalReferenceAddress, referenceCodeForLink } from "../services/ref
 export function AddressHintPopover({
   link,
   style,
+  closing = false,
+  onEnter,
   onCopy,
   onClose,
 }: {
   link: LoomLink;
   style: CSSProperties;
+  closing?: boolean;
+  onEnter?: () => void;
   onCopy?: (link: Pick<LoomLink, "path" | "canonicalUri">) => void;
   onClose?: () => void;
 }) {
   const code = referenceCodeForLink(link);
   const address = canonicalReferenceAddress(link);
+  const addressKind = link.canonicalUri ?? link.meta?.canonicalUri ? "canonical" : "temporary";
 
   return (
     <div
-      className="address-hint-popover"
+      className={closing ? "address-hint-popover closing" : "address-hint-popover"}
       data-testid="address-hint-popover"
       style={style}
       role="tooltip"
+      onMouseEnter={onEnter}
       onMouseLeave={onClose}
     >
       <span>{link.badge ?? link.type}</span>
       <strong>{link.title}</strong>
       {code && <em>{code}</em>}
-      <div className="address-hint-address">
+      <div
+        className={`address-hint-address ${addressKind}`}
+        data-address-kind={addressKind}
+      >
         <code>{address}</code>
         {onCopy && (
           <button

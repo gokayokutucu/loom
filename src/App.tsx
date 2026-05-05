@@ -22,6 +22,7 @@ import {
   Clock3,
   Compass,
   Copy,
+  CornerDownLeft,
   Code2,
   Cpu,
   Database,
@@ -32,16 +33,20 @@ import {
   GitBranch,
   GitFork,
   Globe2,
+  HelpCircle,
   History,
+  Info,
   Layers,
   Lightbulb,
   Link2,
   Lock,
+  LogOut,
   Map,
   Maximize2,
   MessageSquare,
   Mic,
   MoreHorizontal,
+  MoreVertical,
   Network,
   PanelLeft,
   Palette,
@@ -149,9 +154,9 @@ import { useRuntimeHealth } from "./hooks/useRuntimeHealth";
 import { useSidebarDnD } from "./hooks/useSidebarDnD";
 import { AppShell } from "./components/AppShell";
 import { AddressBar } from "./components/AddressBar";
+import { AddressMetadataBadge } from "./components/AddressMetadataBadge";
 import { AIProviderSettingsModal } from "./components/AIProviderSettings";
 import { AddressHintPopover } from "./components/AddressHintPopover";
-import { AppSettingsModal } from "./components/AppSettings";
 import { AskPopup, type AskPopupState } from "./components/AskPopup";
 import { BookmarkView } from "./components/BookmarkView";
 import { ChangeIconPopover } from "./components/ChangeIconPopover";
@@ -163,6 +168,7 @@ import { HistoryView } from "./components/HistoryView";
 import { ReferencesListBox } from "./components/ReferencesListBox";
 import { SelectionPopover } from "./components/SelectionPopover";
 import { TopBar } from "./components/TopBar";
+import { ToastNotification } from "./components/ToastNotification";
 import { WeftView } from "./components/WeftView";
 import type {
   AddressSuggestion,
@@ -332,6 +338,26 @@ interface ComposerDraft {
   attachments?: ComposerAttachment[];
 }
 
+interface TextInsertionRequest {
+  id: number;
+  text: string;
+}
+
+type NewLoomStarterCategoryId =
+  | "research"
+  | "explain"
+  | "compare"
+  | "plan"
+  | "code"
+  | "review"
+  | "organize";
+
+interface NewLoomStarterCategory {
+  id: NewLoomStarterCategoryId;
+  label: string;
+  prompts: string[];
+}
+
 type ComposerEditIntent =
   | "text"
   | "paste"
@@ -356,6 +382,72 @@ interface ComposerHistoryState {
 }
 
 const EMPTY_COMPOSER_DRAFT: ComposerDraft = { html: "", links: [] };
+
+const newLoomStarterCategories: NewLoomStarterCategory[] = [
+  {
+    id: "research",
+    label: "Research",
+    prompts: [
+      "Research a topic and build a reusable summary",
+      "Map the strongest arguments around a topic",
+      "Collect sources and extract the key takeaways",
+    ],
+  },
+  {
+    id: "explain",
+    label: "Explain",
+    prompts: [
+      "Explain a complex idea in plain language",
+      "Create a study guide from a topic",
+      "Break down this concept with examples",
+    ],
+  },
+  {
+    id: "compare",
+    label: "Compare",
+    prompts: [
+      "Compare two tools or frameworks",
+      "Build a tradeoff matrix for these options",
+      "Find the practical differences between two approaches",
+    ],
+  },
+  {
+    id: "plan",
+    label: "Plan",
+    prompts: [
+      "Plan a project from idea to execution",
+      "Turn a rough goal into milestones",
+      "Create a launch checklist with risks",
+    ],
+  },
+  {
+    id: "code",
+    label: "Code",
+    prompts: [
+      "Design an implementation plan for this feature",
+      "Find edge cases before writing code",
+      "Explain how this code path works",
+    ],
+  },
+  {
+    id: "review",
+    label: "Review",
+    prompts: [
+      "Review this code or document",
+      "Find risks and missing tests in this change",
+      "Check this proposal for unclear assumptions",
+    ],
+  },
+  {
+    id: "organize",
+    label: "Organize",
+    prompts: [
+      "Turn scattered notes into a Loom",
+      "Cluster these ideas into reusable sections",
+      "Extract decisions, open questions, and next steps",
+    ],
+  },
+];
 
 const attachContentTabs: Array<{
   id: AttachContentTab;
@@ -630,14 +722,24 @@ function getLoomDragPayload(event: React.DragEvent) {
   }
 }
 
-function createLoomDragPreview(event: React.DragEvent, title: string) {
+function createLoomDragPreview(event: React.DragEvent, title: string, address?: string) {
   document.querySelectorAll("[data-testid='loom-drag-preview']").forEach((node) => {
     node.remove();
   });
   const preview = document.createElement("div");
   preview.className = "loom-drag-preview";
   preview.dataset.testid = "loom-drag-preview";
-  preview.textContent = title;
+
+  if (address) {
+    const titleElement = document.createElement("strong");
+    titleElement.textContent = title;
+    const addressElement = document.createElement("small");
+    addressElement.textContent = address;
+    preview.append(titleElement, addressElement);
+  } else {
+    preview.textContent = title;
+  }
+
   document.body.appendChild(preview);
   event.dataTransfer.setDragImage(preview, 12, 14);
   return () => preview.remove();
@@ -709,6 +811,8 @@ function App() {
   const composerFocusRef = useRef<(() => void) | null>(null);
   const pendingScrollPathRef = useRef<string | null>(null);
   const pendingScrollDestinationRef = useRef<LoomNavigationDestination | null>(null);
+  const linkCopyToastTimerRef = useRef<number | null>(null);
+  const starterPromptRequestIdRef = useRef(0);
   const [metadataSeed] = useState<Record<string, LoomMetadata>>(() =>
     readRuntimeMetadata()
   );
@@ -798,7 +902,10 @@ function App() {
   );
   const [providerSettingsOpen, setProviderSettingsOpen] = useState(false);
   const [appSettings, setAppSettings] = useState<AppSettings>(() => readAppSettings());
-  const [appSettingsOpen, setAppSettingsOpen] = useState(false);
+  const [starterCategoryId, setStarterCategoryId] =
+    useState<NewLoomStarterCategoryId>("research");
+  const [starterPromptRequest, setStarterPromptRequest] =
+    useState<TextInsertionRequest | null>(null);
   const [composerRuntimeState, setComposerRuntimeState] = useState<{
     running: boolean;
     message: string | null;
@@ -806,13 +913,19 @@ function App() {
   const [responseTitleOverrides, setResponseTitleOverrides] = useState<
     Record<string, string>
   >({});
+  const [linkCopyToastVisible, setLinkCopyToastVisible] = useState(false);
+  const [copyToastMessage, setCopyToastMessage] = useState("Link is copied");
 
   const activeConversation =
     activeConversationId === draftConversation?.id
-      ? draftConversation
-      : conversations.find((conversation) => conversation.id === activeConversationId) ??
+          ? draftConversation
+          : conversations.find((conversation) => conversation.id === activeConversationId) ??
     conversations[0] ??
     archived[0];
+
+  const newLoomDraftHasText = plainTextFromDraft(
+    composerDrafts[EPHEMERAL_DRAFT_ID] ?? EMPTY_COMPOSER_DRAFT
+  ).length > 0;
 
   const activeResponses = activeConversation && activeConversation.id !== draftConversation?.id
     ? conversationResponses[activeConversation.id] ?? []
@@ -866,6 +979,13 @@ function App() {
   }, [addressQuery]);
 
   const currentLocation = formatAddressBarTitle(focusedSplitConversation, activeObjectTitle);
+
+  function visibleSplitPanelForLoomId(loomId: string) {
+    if (!showWeftSplit) return null;
+    if (originConversation?.id === loomId) return "origin" as const;
+    if (activeConversation?.id === loomId) return "weft" as const;
+    return null;
+  }
 
   const currentActiveDestination = useMemo<LoomLink>(() => {
     if (showWeftSplit && focusedSplitConversation) {
@@ -1084,6 +1204,15 @@ function App() {
     observer.observe(workspace);
     return () => observer.disconnect();
   }, []);
+
+  useEffect(
+    () => () => {
+      if (linkCopyToastTimerRef.current !== null) {
+        window.clearTimeout(linkCopyToastTimerRef.current);
+      }
+    },
+    []
+  );
 
   function saveProviderSettings(nextSettings: AIProviderSettings) {
     setProviderSettings(nextSettings);
@@ -1338,7 +1467,12 @@ function App() {
   }
 
   function findLoomByPath(path: string) {
-    return conversations.find((item) => path === item.path || path.startsWith(`${item.path}/`));
+    return conversations.find(
+      (item) =>
+        path === item.path ||
+        path.startsWith(`${item.path}/`) ||
+        path === item.meta?.canonicalUri
+    );
   }
 
   function findResponseInLoom(loomId: string, responseId?: string) {
@@ -1347,7 +1481,82 @@ function App() {
   }
 
   function findResponseByPath(loomId: string, path: string) {
-    return (conversationResponses[loomId] ?? []).find((response) => response.address === path);
+    return (conversationResponses[loomId] ?? []).find(
+      (response) =>
+        response.address === path ||
+        response.meta?.canonicalUri === path ||
+        seedResponsesByConversation[loomId]?.some(
+          (seedResponse) =>
+            seedResponse.id === response.id && seedResponse.address === path
+        )
+    );
+  }
+
+  function destinationAddressCandidates(
+    destination: LoomLink | AddressSuggestion | HistoryEntry
+  ) {
+    return new Set(
+      [
+        destination.path,
+        destination.canonicalUri,
+        destination.meta?.canonicalUri,
+      ].filter((value): value is string => Boolean(value))
+    );
+  }
+
+  function findLocalResponseTarget(
+    destination: LoomLink | AddressSuggestion | HistoryEntry
+  ) {
+    const addresses = destinationAddressCandidates(destination);
+    for (const [loomId, responses] of Object.entries(conversationResponses)) {
+      for (const response of responses) {
+        const targetObjectId = runtimeGraphObjectIdFor(
+          "response",
+          `${loomId}_${response.id}`
+        );
+        const seedResponse = seedResponsesByConversation[loomId]?.find(
+          (item) => item.id === response.id
+        );
+        const matchesIdentity =
+          destination.id === response.id ||
+          destination.id === targetObjectId ||
+          destination.targetObjectId === targetObjectId;
+        const matchesAddress =
+          addresses.has(response.address) ||
+          addresses.has(response.meta?.canonicalUri ?? "") ||
+          addresses.has(seedResponse?.address ?? "");
+
+        if (!matchesIdentity && !matchesAddress) continue;
+        const loom = conversations.find((conversation) => conversation.id === loomId);
+        if (loom) return { loom, response };
+      }
+    }
+    return undefined;
+  }
+
+  function findLocalLoomTarget(
+    destination: LoomLink | AddressSuggestion | HistoryEntry
+  ) {
+    const addresses = destinationAddressCandidates(destination);
+    return conversations.find((conversation) => {
+      const targetObjectId = runtimeGraphObjectIdFor("conversation", conversation.id);
+      return (
+        destination.id === conversation.id ||
+        destination.id === targetObjectId ||
+        destination.targetObjectId === targetObjectId ||
+        addresses.has(conversation.path) ||
+        addresses.has(conversation.meta?.canonicalUri ?? "") ||
+        Array.from(addresses).some((address) =>
+          address.startsWith(`${conversation.path}/`)
+        )
+      );
+    });
+  }
+
+  function hasLocalNavigationTarget(
+    destination: LoomLink | AddressSuggestion | HistoryEntry
+  ) {
+    return Boolean(findLocalResponseTarget(destination) ?? findLocalLoomTarget(destination));
   }
 
   function lastResponseInLoom(loomId: string) {
@@ -1404,11 +1613,18 @@ function App() {
     source: LoomNavigationDestination["source"],
     overrides: Partial<LoomNavigationDestination> = {}
   ): LoomNavigationDestination {
-    const loom = findLoomByPath(destination.path);
-    const loomId = overrides.loomId ?? loom?.id ?? destination.id;
-    const response = loom ? findResponseByPath(loom.id, destination.path) : undefined;
+    const responseTarget = findLocalResponseTarget(destination);
+    const loom =
+      responseTarget?.loom ??
+      findLocalLoomTarget(destination) ??
+      findLoomByPath(destination.path);
+    const loomId = overrides.loomId ?? responseTarget?.loom.id ?? loom?.id ?? destination.id;
+    const response =
+      responseTarget?.response ??
+      (loom ? findResponseByPath(loom.id, destination.path) : undefined);
     const origin = getWeftOrigin(loomId);
-    const mode = overrides.mode ?? "full";
+    const visibleSplitPanel = visibleSplitPanelForLoomId(loomId);
+    const mode = overrides.mode ?? (visibleSplitPanel ? "split" : "full");
     const scrollTargetResponseId =
       overrides.scrollTargetResponseId ?? response?.id ?? undefined;
     const scrollMode =
@@ -1594,7 +1810,10 @@ function App() {
           : destination,
       };
     }
-    if (resolution.status === "not_found" && options.allowUnresolved) {
+    if (
+      resolution.status === "not_found" &&
+      (options.allowUnresolved || hasLocalNavigationTarget(destination))
+    ) {
       return { ok: true, destination };
     }
     if (resolution.status === "broken_reference") {
@@ -1616,6 +1835,9 @@ function App() {
     const conversation = resolvedNavigationDestination
       ? conversations.find((item) => item.id === resolvedNavigationDestination.loomId)
       : conversations.find((item) => resolvedDestination.path.startsWith(item.path));
+    const visibleSplitPanel = resolvedNavigationDestination
+      ? visibleSplitPanelForLoomId(resolvedNavigationDestination.loomId)
+      : null;
     const scrollResponse = resolvedNavigationDestination?.scrollTargetResponseId
       ? findResponseInLoom(
           resolvedNavigationDestination.loomId,
@@ -1631,7 +1853,7 @@ function App() {
           ? loomLinkForId(resolvedNavigationDestination.loomId).title
           : resolvedDestination.title
     );
-    if (conversation) setActiveConversationId(conversation.id);
+    if (conversation && visibleSplitPanel !== "origin") setActiveConversationId(conversation.id);
     if (resolvedDestination.path === "loom://drafts/new-conversation") {
       setDraftConversation((current) =>
         current ?? {
@@ -1656,7 +1878,9 @@ function App() {
     setAddressQuery("");
     setAddressFeedback(null);
     setSelectedSuggestion(0);
-    if (resolvedNavigationDestination?.mode === "split") {
+    if (visibleSplitPanel) {
+      setActiveSplitPanel(visibleSplitPanel);
+    } else if (resolvedNavigationDestination?.mode === "split") {
       setActiveSplitPanel("weft");
     }
     if (!(rightDockPinned && graphMode)) {
@@ -1746,6 +1970,7 @@ function App() {
       navigationDestination.mode === "full" &&
       navigationDestination.originLoomId &&
       navigationDestination.originResponseId &&
+      !navigationDestination.scrollTargetResponseId &&
       source !== "returnToOrigin" &&
       source !== "backForward"
     ) {
@@ -1821,7 +2046,20 @@ function App() {
             : null;
         if (!target) return false;
         target.scrollIntoView({ behavior: "smooth", block: "start" });
+        target.classList.remove("response-scroll-highlight");
+        void target.offsetWidth;
+        target.classList.add("response-scroll-highlight");
+        window.setTimeout(() => {
+          target.classList.remove("response-scroll-highlight");
+        }, 1800);
         return true;
+      };
+
+      const transcriptForLoom = (loomId?: string) => {
+        if (showWeftSplit && loomId === originConversation?.id) {
+          return originTranscriptRef.current;
+        }
+        return transcriptRef.current;
       };
 
       if (pendingDestination?.mode === "split" && pendingDestination.originResponseId) {
@@ -1833,13 +2071,13 @@ function App() {
 
       if (pendingDestination?.scrollMode === "lastResponse") {
         const latest = lastResponseInLoom(pendingDestination.loomId);
-        if (scrollToResponse(transcriptRef.current, latest?.id)) return;
+        if (scrollToResponse(transcriptForLoom(pendingDestination.loomId), latest?.id)) return;
       }
 
       if (
         pendingDestination?.scrollTargetResponseId &&
         scrollToResponse(
-          transcriptRef.current,
+          transcriptForLoom(pendingDestination.loomId),
           pendingDestination.scrollTargetResponseId
         )
       ) {
@@ -1857,9 +2095,12 @@ function App() {
   }, [
     activeConversation?.path,
     activeConversationId,
+    activeSplitPanel,
     activeObjectTitle,
     currentNavigationDestination,
     graphMode,
+    originConversation?.id,
+    showWeftSplit,
     workspaceWidth,
   ]);
 
@@ -2116,6 +2357,42 @@ function App() {
 
   function copyLoomAddress(destination: Pick<LoomLink, "path" | "canonicalUri">) {
     void browserHostShell.copyText(destination.canonicalUri ?? destination.path);
+  }
+
+  function showLinkCopyToast(message = "Link is copied") {
+    if (linkCopyToastTimerRef.current !== null) {
+      window.clearTimeout(linkCopyToastTimerRef.current);
+    }
+    setCopyToastMessage(message);
+    setLinkCopyToastVisible(true);
+    linkCopyToastTimerRef.current = window.setTimeout(() => {
+      setLinkCopyToastVisible(false);
+      linkCopyToastTimerRef.current = null;
+    }, 1400);
+  }
+
+  function copyLoomAddressWithToast(destination: Pick<LoomLink, "path" | "canonicalUri">) {
+    copyLoomAddress(destination);
+    showLinkCopyToast();
+  }
+
+  function copyResponseAnswerWithToast(response: ResponseItem) {
+    void browserHostShell.copyText(response.answer.join("\n\n"));
+    showLinkCopyToast("Response is copied");
+  }
+
+  function insertStarterPrompt(text: string) {
+    starterPromptRequestIdRef.current += 1;
+    setStarterPromptRequest({
+      id: starterPromptRequestIdRef.current,
+      text,
+    });
+    window.requestAnimationFrame(() => composerFocusRef.current?.());
+  }
+
+  function chooseStarterCategory(categoryId: NewLoomStarterCategoryId) {
+    setStarterCategoryId(categoryId);
+    window.requestAnimationFrame(() => composerFocusRef.current?.());
   }
 
   function findConversationByObjectId(objectId?: string) {
@@ -2824,7 +3101,7 @@ function App() {
     const openWeftDestination = (weftConversation: Conversation) => {
       setActiveConversationId(weftConversation.id);
       setActiveSplitPanel("weft");
-      setActiveObjectTitle(response.title);
+      setActiveObjectTitle(weftConversation.title);
       closeUnpinnedUtilityOverlays();
       const destination: LoomLink = {
         id: weftConversation.id,
@@ -2854,9 +3131,10 @@ function App() {
         scrollMode: "origin",
         source: "weftCreate",
       };
-      const splitWeftDestination: LoomNavigationDestination = {
+      const canOpenSplit = canShowWeftSplit;
+      const weftDestination: LoomNavigationDestination = {
         loomId: weftConversation.id,
-        mode: "split",
+        mode: canOpenSplit ? "split" : "full",
         originLoomId: sourceConversation.id,
         originResponseId: response.id,
         source: "weftCreate",
@@ -2865,20 +3143,24 @@ function App() {
         !historyEntryMatchesDestination(
           navigationStack[navigationIndex],
           destination,
-          splitWeftDestination
+          weftDestination
         )
       ) {
-        pushNavigationSequence([
-          { link: originAtLastLink, destination: originAtLastDestination },
-          { link: originAtResponseLink, destination: originAtResponseDestination },
-          { link: destination, destination: splitWeftDestination },
-        ]);
+        if (canOpenSplit) {
+          pushNavigationSequence([
+            { link: originAtLastLink, destination: originAtLastDestination },
+            { link: originAtResponseLink, destination: originAtResponseDestination },
+            { link: destination, destination: weftDestination },
+          ]);
+        } else {
+          pushNavigationEntry(destination, weftDestination);
+        }
         setHistory((current) => [
-          createHistoryEntry(destination, splitWeftDestination),
+          createHistoryEntry(destination, weftDestination),
           ...markHistoryOlder(current),
         ]);
       }
-      pendingScrollDestinationRef.current = splitWeftDestination;
+      pendingScrollDestinationRef.current = weftDestination;
     };
     if (existingWeft) {
       openWeftDestination(existingWeft);
@@ -3388,7 +3670,7 @@ function App() {
             });
           }}
         >
-          <MoreHorizontal size={14} />
+          <MoreVertical size={14} />
         </button>
       </div>
     );
@@ -3414,6 +3696,7 @@ function App() {
         sidebarCollapsed={sidebarCollapsed}
         currentBookmarked={isDestinationBookmarked(currentActiveDestination)}
         currentDestination={currentActiveDestination}
+        canDragCurrentDestination={!isNewConversationDraft}
         onAddressFocus={() => setAddressFocused(true)}
         onAddressChange={(value) => {
           setAddressQuery(value);
@@ -3444,7 +3727,6 @@ function App() {
           setAddressFeedback(null);
           toggleGraphOverlay();
         }}
-        onOpenAppSettings={() => setAppSettingsOpen(true)}
       />
 
       <div
@@ -3495,6 +3777,7 @@ function App() {
           onOpenContextMenu={openConversationMenu}
           onOpenGroupContextMenu={openGroupMenu}
           onDeleteRequest={setDeleteTarget}
+          onOpenSettings={() => setProviderSettingsOpen(true)}
           onHoverExpandStart={() => {
             if (sidebarCollapsed) setSidebarFlyoutOpen(true);
           }}
@@ -3536,6 +3819,7 @@ function App() {
                 providerSettings={providerSettings}
                 runtimeState={composerRuntimeState}
                 runtimeHealth={activeComposerRuntimeHealth}
+                textInsertionRequest={starterPromptRequest}
                 onProviderSettingsChange={saveProviderSettings}
                 onOpenProviderSettings={() => setProviderSettingsOpen(true)}
                 onDraftChange={setActiveComposerDraft}
@@ -3554,6 +3838,14 @@ function App() {
                 onSend={sendComposerToModel}
                 onUserTyping={scrollTranscriptToBottom}
               />
+              {!newLoomDraftHasText && (
+                <NewLoomStarterPanel
+                  categories={newLoomStarterCategories}
+                  activeCategoryId={starterCategoryId}
+                  onCategoryChange={chooseStarterCategory}
+                  onPromptSelect={insertStarterPrompt}
+                />
+              )}
             </section>
           ) : (
             <>
@@ -3577,7 +3869,6 @@ function App() {
                               setActiveSplitPanel("origin");
                               linkObjectForDraft(link, originConversation.id);
                             }}
-                            onAsk={openAsk}
                             onLoom={(response) => forkResponseLoom(response, originConversation.id)}
                             onToggleSuggestedBookmark={toggleSuggestedBookmark}
                             bookmarkedPaths={new Set(bookmarks.map((bookmark) => bookmark.path))}
@@ -3589,6 +3880,9 @@ function App() {
                             onOpenContextMenu={(event, response) =>
                               openContextMenu(event, { kind: "response", response })
                             }
+                            onCopyAddress={copyLoomAddress}
+                            onCopyAddressWithToast={copyLoomAddressWithToast}
+                            onCopyResponse={copyResponseAnswerWithToast}
                           />
                           {renderPanelComposer(originConversation.id, "origin")}
                         </div>
@@ -3610,7 +3904,6 @@ function App() {
                               setActiveSplitPanel("weft");
                               linkObjectForDraft(link, activeConversation.id);
                             }}
-                            onAsk={openAsk}
                             onLoom={(response) => forkResponseLoom(response, activeConversation.id)}
                             onToggleSuggestedBookmark={toggleSuggestedBookmark}
                             bookmarkedPaths={new Set(bookmarks.map((bookmark) => bookmark.path))}
@@ -3622,6 +3915,9 @@ function App() {
                             onOpenContextMenu={(event, response) =>
                               openContextMenu(event, { kind: "response", response })
                             }
+                            onCopyAddress={copyLoomAddress}
+                            onCopyAddressWithToast={copyLoomAddressWithToast}
+                            onCopyResponse={copyResponseAnswerWithToast}
                             onReturnToOrigin={returnToOrigin}
                           />
                           {renderPanelComposer(activeConversation.id, "weft")}
@@ -3682,7 +3978,6 @@ function App() {
                     conversation={activeConversation}
                     responses={activeResponses}
                     onLink={linkObject}
-                    onAsk={openAsk}
                     onLoom={forkResponseLoom}
                     onToggleSuggestedBookmark={toggleSuggestedBookmark}
                     bookmarkedPaths={new Set(bookmarks.map((bookmark) => bookmark.path))}
@@ -3691,6 +3986,9 @@ function App() {
                     onOpenContextMenu={(event, response) =>
                       openContextMenu(event, { kind: "response", response })
                     }
+                    onCopyAddress={copyLoomAddress}
+                    onCopyAddressWithToast={copyLoomAddressWithToast}
+                    onCopyResponse={copyResponseAnswerWithToast}
                     onReturnToOrigin={activeWeftOrigin ? returnToOrigin : undefined}
                   />
                 )}
@@ -3818,6 +4116,12 @@ function App() {
         )}
       </div>
 
+      <ToastNotification
+        open={linkCopyToastVisible}
+        message={copyToastMessage}
+        color="neutral"
+      />
+
       {contextMenu && (
         <ContextMenu
           state={contextMenu}
@@ -3873,17 +4177,11 @@ function App() {
       {providerSettingsOpen && (
         <AIProviderSettingsModal
           settings={providerSettings}
+          appSettings={appSettings}
           runtimeHealth={activeComposerRuntimeHealth}
           onSave={saveProviderSettings}
+          onAppSettingsSave={saveAppSettings}
           onClose={() => setProviderSettingsOpen(false)}
-        />
-      )}
-
-      {appSettingsOpen && (
-        <AppSettingsModal
-          settings={appSettings}
-          onSave={saveAppSettings}
-          onClose={() => setAppSettingsOpen(false)}
         />
       )}
 
@@ -3922,6 +4220,7 @@ interface SidebarProps {
   onOpenContextMenu: (event: React.MouseEvent, conversation: Conversation) => void;
   onOpenGroupContextMenu: (event: React.MouseEvent, group: TabGroup) => void;
   onDeleteRequest: (conversation: Conversation) => void;
+  onOpenSettings: () => void;
   onHoverExpandStart: () => void;
   onHoverExpandEnd: () => void;
   onFlyoutDragStart: () => void;
@@ -3952,13 +4251,16 @@ function Sidebar({
   onOpenContextMenu,
   onOpenGroupContextMenu,
   onDeleteRequest,
+  onOpenSettings,
   onHoverExpandStart,
   onHoverExpandEnd,
   onFlyoutDragStart,
   onFlyoutDragEnd,
 }: SidebarProps) {
   const folderListRef = useRef<HTMLDivElement | null>(null);
+  const profileMenuRef = useRef<HTMLDivElement | null>(null);
   const dragPreviewCleanupRef = useRef<(() => void) | null>(null);
+  const [profileMenuOpen, setProfileMenuOpen] = useState(false);
   const pinnedConversations = pinnedConversationIds
     .map((id) => conversations.find((conversation) => conversation.id === id))
     .filter((conversation): conversation is Conversation => Boolean(conversation));
@@ -3986,6 +4288,32 @@ function Sidebar({
       behavior: "smooth",
     });
   }, [conversations.length, activeConversationId]);
+
+  useEffect(() => {
+    if (!profileMenuOpen) return;
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Node | null;
+      if (target && profileMenuRef.current?.contains(target)) return;
+      setProfileMenuOpen(false);
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setProfileMenuOpen(false);
+      }
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [profileMenuOpen]);
+
+  function openSettingsFromProfile() {
+    setProfileMenuOpen(false);
+    onOpenSettings();
+  }
 
   function conversationToLink(conversation: Conversation): LoomLink {
     return {
@@ -4236,12 +4564,63 @@ function Sidebar({
         </button>
       </div>
 
-      <div className="sidebar-footer">
-        <div className="profile-dot">G</div>
-        <div>
-          <div className="footer-title">Personal web</div>
-          <div className="footer-caption">Local prototype</div>
-        </div>
+      <div className="profile-menu-container" ref={profileMenuRef}>
+        <button
+          className="sidebar-footer profile-button"
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={profileMenuOpen}
+          onClick={() => setProfileMenuOpen((current) => !current)}
+        >
+          <div className="profile-dot">G</div>
+          <div>
+            <div className="footer-title">Gokay</div>
+            <div className="footer-caption">Personal Web</div>
+          </div>
+        </button>
+        {profileMenuOpen && (
+          <div className="profile-menu" role="menu" aria-label="Profile menu">
+            <div className="profile-menu-header">
+              <div className="profile-dot">G</div>
+              <div>
+                <strong>Gokay</strong>
+                <span>Personal Web</span>
+              </div>
+            </div>
+            <div className="profile-menu-section">
+              <button type="button" role="menuitem" onClick={openSettingsFromProfile}>
+                <Settings size={14} />
+                <span>Settings</span>
+              </button>
+            </div>
+            <div className="profile-menu-section">
+              <button type="button" role="menuitem" onClick={openSettingsFromProfile}>
+                <Cpu size={14} />
+                <span>AI Providers</span>
+              </button>
+              <button type="button" role="menuitem" onClick={openSettingsFromProfile}>
+                <Settings size={14} />
+                <span>Model settings</span>
+              </button>
+            </div>
+            <div className="profile-menu-section">
+              <button type="button" role="menuitem">
+                <HelpCircle size={14} />
+                <span>Help</span>
+              </button>
+              <button type="button" role="menuitem">
+                <Info size={14} />
+                <span>About Loom</span>
+              </button>
+            </div>
+            <div className="profile-menu-section profile-menu-footer">
+              <button type="button" role="menuitem">
+                <LogOut size={14} />
+                <span>Log out</span>
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </aside>
   );
@@ -4354,6 +4733,7 @@ interface TopBrowserBarProps {
   sidebarCollapsed: boolean;
   currentBookmarked: boolean;
   currentDestination: LoomLink;
+  canDragCurrentDestination: boolean;
   onAddressFocus: () => void;
   onAddressChange: (value: string) => void;
   onAddressKeyDown: (event: React.KeyboardEvent<HTMLInputElement>) => void;
@@ -4365,7 +4745,6 @@ interface TopBrowserBarProps {
   onToggleSidebar: () => void;
   onTogglePanel: (panel: "bookmarks" | "history" | "looms") => void;
   onToggleGraph: () => void;
-  onOpenAppSettings: () => void;
 }
 
 function TopBrowserBar({
@@ -4386,6 +4765,7 @@ function TopBrowserBar({
   sidebarCollapsed,
   currentBookmarked,
   currentDestination,
+  canDragCurrentDestination,
   onAddressFocus,
   onAddressChange,
   onAddressKeyDown,
@@ -4397,7 +4777,6 @@ function TopBrowserBar({
   onToggleSidebar,
   onTogglePanel,
   onToggleGraph,
-  onOpenAppSettings,
 }: TopBrowserBarProps) {
   const backButtonRef = useRef<HTMLButtonElement | null>(null);
   const forwardButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -4430,7 +4809,7 @@ function TopBrowserBar({
     if (entries.length === 0) return;
     setTraversalMenu({
       direction,
-      x: Math.max(8, Math.min(anchor.x, window.innerWidth - 320)),
+      x: Math.max(8, Math.min(anchor.x, window.innerWidth - 372)),
       y: Math.max(8, Math.min(anchor.y, window.innerHeight - 360)),
       highlightedIndex: 0,
     });
@@ -4556,7 +4935,7 @@ function TopBrowserBar({
           onClick={(event) => handleTraversalClick(event, onBack)}
           onContextMenu={(event) => {
             event.preventDefault();
-            openTraversalMenu("back", { x: event.clientX, y: event.clientY });
+            openTraversalMenuFromButton("back");
           }}
           onPointerDown={() => handleTraversalPointerDown("back")}
           onPointerUp={handleTraversalPointerUp}
@@ -4573,7 +4952,7 @@ function TopBrowserBar({
           onClick={(event) => handleTraversalClick(event, onForward)}
           onContextMenu={(event) => {
             event.preventDefault();
-            openTraversalMenu("forward", { x: event.clientX, y: event.clientY });
+            openTraversalMenuFromButton("forward");
           }}
           onPointerDown={() => handleTraversalPointerDown("forward")}
           onPointerUp={handleTraversalPointerUp}
@@ -4610,13 +4989,32 @@ function TopBrowserBar({
         </button>
         <div className="address-shell">
           <span
-            className="address-identity-drag"
-            draggable
-            onDragStart={(event) => setLoomDragPayload(event, currentDestination)}
+            className={
+              canDragCurrentDestination
+                ? "address-identity-drag"
+                : "address-identity-drag disabled"
+            }
+            draggable={canDragCurrentDestination}
+            onDragStart={(event) => {
+              if (!canDragCurrentDestination) {
+                event.preventDefault();
+                return;
+              }
+              setLoomDragPayload(event, currentDestination);
+            }}
             role="button"
-            tabIndex={0}
-            aria-label="Drag current Loom address"
-            title="Drag current Loom address"
+            tabIndex={canDragCurrentDestination ? 0 : -1}
+            aria-disabled={!canDragCurrentDestination}
+            aria-label={
+              canDragCurrentDestination
+                ? "Drag current Loom address"
+                : "Current Loom address is not available yet"
+            }
+            title={
+              canDragCurrentDestination
+                ? "Drag current Loom address"
+                : "Current Loom address is not available yet"
+            }
           >
             <Compass size={16} />
           </span>
@@ -4624,6 +5022,7 @@ function TopBrowserBar({
             value={addressFocused ? addressQuery : ""}
             onChange={(event) => onAddressChange(event.target.value)}
             onFocus={onAddressFocus}
+            onClick={onAddressFocus}
             onKeyDown={onAddressKeyDown}
             aria-label="Loom Address Bar"
             placeholder={addressFocused ? "Search, ask, or paste a Loom address" : location}
@@ -4645,14 +5044,6 @@ function TopBrowserBar({
 
       <div className="top-actions">
         <button
-          className="chrome-button"
-          onClick={onOpenAppSettings}
-          aria-label="Open App Settings"
-          title="Settings"
-        >
-          <Settings size={16} />
-        </button>
-        <button
           className={activePanel === "history" ? "chrome-button history-icon-button active" : "chrome-button history-icon-button"}
           onClick={() => onTogglePanel("history")}
           aria-label="Open Loom History"
@@ -4672,9 +5063,9 @@ function TopBrowserBar({
           className={graphMode ? "chrome-button active" : "chrome-button"}
           onClick={onToggleGraph}
           aria-label="Toggle Graph View"
+          title="Graph"
         >
           <Map size={16} />
-          Graph
         </button>
       </div>
     </TopBar>
@@ -4855,31 +5246,85 @@ function AddressSuggestionList({
   );
 }
 
+function NewLoomStarterPanel({
+  categories,
+  activeCategoryId,
+  onCategoryChange,
+  onPromptSelect,
+}: {
+  categories: NewLoomStarterCategory[];
+  activeCategoryId: NewLoomStarterCategoryId;
+  onCategoryChange: (categoryId: NewLoomStarterCategoryId) => void;
+  onPromptSelect: (prompt: string) => void;
+}) {
+  const activeCategory =
+    categories.find((category) => category.id === activeCategoryId) ?? categories[0];
+
+  return (
+    <section className="new-loom-starters" aria-label="New Loom starter suggestions">
+      <div className="new-loom-starter-tabs" role="tablist" aria-label="Starter categories">
+        {categories.map((category) => (
+          <button
+            key={category.id}
+            type="button"
+            className={
+              category.id === activeCategory.id
+                ? "new-loom-starter-chip active"
+                : "new-loom-starter-chip"
+            }
+            role="tab"
+            aria-selected={category.id === activeCategory.id}
+            onClick={() => onCategoryChange(category.id)}
+          >
+            {category.label}
+          </button>
+        ))}
+      </div>
+      <div className="new-loom-starter-prompts">
+        {activeCategory.prompts.map((prompt) => (
+          <button
+            key={prompt}
+            type="button"
+            className="new-loom-starter-prompt"
+            onClick={() => onPromptSelect(prompt)}
+          >
+            {prompt}
+          </button>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function ChatTranscript({
   transcriptRef,
   conversation,
   responses,
   onLink,
-  onAsk,
   onLoom,
   onToggleSuggestedBookmark,
   bookmarkedPaths,
   onSelectionAsk,
   responseTitleOverrides,
   onOpenContextMenu,
+  onCopyAddress,
+  onCopyAddressWithToast,
+  onCopyResponse,
   onReturnToOrigin,
 }: {
   transcriptRef?: (node: HTMLElement | null) => void;
   conversation?: Conversation;
   responses: ResponseItem[];
   onLink: (link: LoomLink) => void;
-  onAsk: (response: ResponseItem) => void;
   onLoom: (response: ResponseItem) => void;
   onToggleSuggestedBookmark: (link: LoomLink) => void;
   bookmarkedPaths: Set<string>;
   onSelectionAsk: (response: ResponseItem) => void;
   responseTitleOverrides: Record<string, string>;
   onOpenContextMenu: (event: React.MouseEvent, response: ResponseItem) => void;
+  onCopyAddress: (link: Pick<LoomLink, "path" | "canonicalUri">) => void;
+  onCopyAddressWithToast: (link: Pick<LoomLink, "path" | "canonicalUri">) => void;
+  onCopyResponse: (response: ResponseItem) => void;
   onReturnToOrigin?: () => void;
 }) {
   if (!conversation) {
@@ -4892,17 +5337,57 @@ function ChatTranscript({
     );
   }
 
+  const loomSurfaceLink: LoomLink = {
+    id: conversation.id,
+    type: "conversation",
+    title: conversation.title,
+    path: conversation.path,
+    badge: typeLabel.conversation,
+    canonicalUri: conversation.meta?.canonicalUri,
+    meta: conversation.meta,
+    referenceCode: conversation.meta?.code,
+  };
+
   return (
     <section className="chat-transcript" ref={transcriptRef} aria-label="Conversation transcript">
       <div className="conversation-context">
-        <span>{conversation.path}</span>
+        <div className="conversation-address-row">
+          {conversation.meta?.code && (
+            <AddressMetadataBadge
+              link={loomSurfaceLink}
+              className="metadata-code-badge loom-code-badge"
+              testId={`loom-code-${conversation.id}`}
+              showHint={false}
+              onContextMenu={(event, link) => {
+                event.preventDefault();
+                event.stopPropagation();
+                onCopyAddressWithToast(link);
+              }}
+            >
+              {conversation.meta.code}
+            </AddressMetadataBadge>
+          )}
+          <AddressMetadataBadge
+            link={loomSurfaceLink}
+            className="conversation-readable-address"
+            testId={`loom-readable-address-${conversation.id}`}
+            onCopy={onCopyAddress}
+          >
+            {conversation.path}
+          </AddressMetadataBadge>
+        </div>
         <div className="conversation-context-title-row">
           <h1>{conversation.title}</h1>
           {onReturnToOrigin && (
-            <button className="link-chip return-origin-chip" onClick={onReturnToOrigin}>
-              <ArrowLeft size={13} />
-              <strong>Return to Origin</strong>
-            </button>
+            <Tooltip label="Return to Origin">
+              <button
+                className="link-chip return-origin-chip"
+                onClick={onReturnToOrigin}
+                aria-label="Return to Origin"
+              >
+                <CornerDownLeft size={13} />
+              </button>
+            </Tooltip>
           )}
         </div>
         <p>{conversation.summary}</p>
@@ -4914,6 +5399,16 @@ function ChatTranscript({
           title: responseTitleOverrides[response.id] ?? response.title,
         };
         const isBookmarkedResponse = bookmarkedPaths.has(displayResponse.address);
+        const responseLink: LoomLink = {
+          id: displayResponse.id,
+          type: "response",
+          title: displayResponse.title,
+          path: displayResponse.address,
+          badge: typeLabel.response,
+          canonicalUri: displayResponse.meta?.canonicalUri,
+          meta: displayResponse.meta,
+          referenceCode: displayResponse.meta?.code,
+        };
         return (
           <article
             className="qa-item"
@@ -4928,6 +5423,23 @@ function ChatTranscript({
             </div>
 
             <div className="assistant-message">
+              {displayResponse.meta?.code && (
+                <div className="response-metadata-row">
+                  <AddressMetadataBadge
+                    link={responseLink}
+                    className="metadata-code-badge loom-code-badge response-code-badge"
+                    testId={`response-code-${displayResponse.id}`}
+                    showHint={false}
+                    onContextMenu={(event, link) => {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      onCopyAddressWithToast(link);
+                    }}
+                  >
+                    {displayResponse.meta.code}
+                  </AddressMetadataBadge>
+                </div>
+              )}
               {isBookmarkedResponse && (
                 <div className="assistant-header">
                   <div>
@@ -4944,47 +5456,47 @@ function ChatTranscript({
               </div>
 
               <div className="reference-strip">
-                <button
-                  className={isBookmarkedResponse ? "link-chip response-bookmark-chip bookmarked" : "link-chip response-bookmark-chip"}
-                  onClick={() => onToggleSuggestedBookmark(toLinkFromResponse(displayResponse))}
-                  aria-pressed={isBookmarkedResponse}
-                  aria-label={isBookmarkedResponse ? `Remove bookmark for ${displayResponse.title}` : `Bookmark suggested ${displayResponse.title}`}
-                >
-                  <Bookmark size={13} fill={isBookmarkedResponse ? "currentColor" : "none"} />
-                  {isBookmarkedResponse ? (
-                    <strong>Bookmark</strong>
-                  ) : displayResponse.suggestedLinks[0] ? (
-                    <>
-                      <em>Suggested</em>
-                      <Sparkles size={13} />
-                      <span>{displayResponse.suggestedLinks[0].title}</span>
-                    </>
-                  ) : (
-                    <strong>Bookmark</strong>
-                  )}
-                </button>
-                <button
+                <Tooltip label="Copy" placement="bottom-right">
+                  <button
+                    className="link-chip response-action-chip"
+                    onClick={() => onCopyResponse(displayResponse)}
+                    aria-label={`Copy response: ${displayResponse.title}`}
+                  >
+                    <Copy size={13} />
+                  </button>
+                </Tooltip>
+                <Tooltip label="Bookmark" placement="bottom-right">
+                  <button
+                    className={isBookmarkedResponse ? "link-chip response-bookmark-chip bookmarked" : "link-chip response-bookmark-chip"}
+                    onClick={() => onToggleSuggestedBookmark(toLinkFromResponse(displayResponse))}
+                    aria-pressed={isBookmarkedResponse}
+                    aria-label={isBookmarkedResponse ? `Remove bookmark for ${displayResponse.title}` : `Bookmark suggested ${displayResponse.title}`}
+                  >
+                    <Bookmark size={13} fill={isBookmarkedResponse ? "currentColor" : "none"} />
+                  </button>
+                </Tooltip>
+                <AddressMetadataBadge
+                  as="button"
+                  link={responseLink}
                   className="link-chip response-action-chip"
+                  title="Link"
+                  autoCloseMs={3000}
                   onClick={() => onLink(toLinkFromResponse(displayResponse))}
-                  data-testid={`response-link-${displayResponse.id}`}
+                  testId={`response-link-${displayResponse.id}`}
+                  ariaLabel={`Link ${displayResponse.title}`}
+                  onCopy={onCopyAddress}
                 >
                   <Link2 size={13} />
-                  <strong>Link</strong>
-                </button>
-                <button
-                  className="link-chip response-action-chip"
-                  onClick={() => onAsk(displayResponse)}
-                >
-                  <MessageSquare size={13} />
-                  <strong>Ask</strong>
-                </button>
-                <button
-                  className="link-chip response-action-chip"
-                  onClick={() => onLoom(displayResponse)}
-                >
-                  <GitFork size={13} />
-                  <strong>Weft</strong>
-                </button>
+                </AddressMetadataBadge>
+                <Tooltip label="Start Weft" placement="bottom-right">
+                  <button
+                    className="link-chip response-action-chip"
+                    onClick={() => onLoom(displayResponse)}
+                    aria-label={`Start Weft from ${displayResponse.title}`}
+                  >
+                    <GitFork size={13} />
+                  </button>
+                </Tooltip>
               </div>
             </div>
           </article>
@@ -5020,6 +5532,7 @@ function PromptComposer({
   runtimeState,
   runtimeHealth,
   active = true,
+  textInsertionRequest,
   onProviderSettingsChange,
   onOpenProviderSettings,
   onActivate,
@@ -5048,6 +5561,7 @@ function PromptComposer({
     testRuntime: () => Promise<RuntimeHealthState>;
   };
   active?: boolean;
+  textInsertionRequest?: TextInsertionRequest | null;
   onProviderSettingsChange: (settings: AIProviderSettings) => void;
   onOpenProviderSettings: () => void;
   onActivate?: () => void;
@@ -5119,6 +5633,7 @@ function PromptComposer({
   const addressHintTimerRef = useRef<number | null>(null);
   const addressHintTargetRef = useRef<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
+  const lastTextInsertionRequestRef = useRef(0);
   const mainModel = getProfileModel(providerSettings, "main");
   const installedModels = providerSettings.ollama.models.filter((model) => model.installed);
   const selectableModels =
@@ -5159,6 +5674,23 @@ function PromptComposer({
       selection?.addRange(range);
     });
   }, [onReadyToFocus]);
+
+  useEffect(() => {
+    const request = textInsertionRequest;
+    const editor = editorRef.current;
+    if (!request || !editor || request.id === lastTextInsertionRequestRef.current) return;
+    lastTextInsertionRequestRef.current = request.id;
+    editor.textContent = request.text;
+    insertedPathsRef.current.clear();
+    editor.focus();
+    const range = document.createRange();
+    range.selectNodeContents(editor);
+    range.collapse(false);
+    const selection = window.getSelection();
+    selection?.removeAllRanges();
+    selection?.addRange(range);
+    commitDraftChange("replace");
+  }, [textInsertionRequest?.id]);
 
   const filteredMentionOptions = useMemo(() => {
     const query = mention?.query.trim() ?? "";
@@ -8147,6 +8679,7 @@ function DestinationRow<T extends LoomLink>({
   onOpenContextMenu?: (event: React.MouseEvent, destination: T) => void;
   actions?: React.ReactNode;
 }) {
+  const dragPreviewCleanupRef = useRef<(() => void) | null>(null);
   const Icon = iconForType[destination.type];
   const title =
     "editableTitle" in destination && typeof destination.editableTitle === "string"
@@ -8163,9 +8696,16 @@ function DestinationRow<T extends LoomLink>({
     <div
       className={rowClassName}
       draggable
+      data-testid={`utility-destination-row-${destination.id}`}
       onContextMenu={(event) => onOpenContextMenu?.(event, destination)}
       onDragStart={(event) => {
         setLoomDragPayload(event, destination);
+        dragPreviewCleanupRef.current?.();
+        dragPreviewCleanupRef.current = createLoomDragPreview(event, title, destination.path);
+      }}
+      onDragEnd={() => {
+        dragPreviewCleanupRef.current?.();
+        dragPreviewCleanupRef.current = null;
       }}
     >
       <span className="bookmark-type-icon">
@@ -8222,13 +8762,19 @@ function BookmarkRow({
 
 function Tooltip({
   label,
+  placement = "top-center",
   children,
 }: {
   label: string;
+  placement?: "top-center" | "bottom-right";
   children: React.ReactElement;
 }) {
   return (
-    <span className="tooltip-host" data-tooltip={label}>
+    <span
+      className="tooltip-host"
+      data-tooltip={label}
+      data-placement={placement}
+    >
       {children}
     </span>
   );

@@ -165,13 +165,17 @@ export function createAddressableLoomMetadata(
 export function createDraftResponseMetadata(
   input: MetadataSeedInput
 ): LoomMetadata {
-  return fallbackMetadata(
-    {
-      ...input,
-      id: input.id || createMetadataUuid(),
-    },
-    "draft"
-  );
+  const id = input.id || createMetadataUuid();
+  return {
+    ...fallbackMetadata(
+      {
+        ...input,
+        id,
+      },
+      "draft"
+    ),
+    code: createResponseCode(id),
+  };
 }
 
 export function hydrateAddressableLoomMetadata(
@@ -220,7 +224,7 @@ export function hydrateResponseMetadata(
   }
   return {
     ...normalized,
-    code: undefined,
+    code: normalized.code ?? createResponseCode(id),
     canonicalUri: undefined,
   };
 }

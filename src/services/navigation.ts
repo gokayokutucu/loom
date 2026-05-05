@@ -1,6 +1,7 @@
 import type { HistoryEntry, LoomLink, LoomNavigationDestination } from "../types";
 
 export type NavigationDirection = "back" | "forward";
+const TRAVERSAL_MENU_LIMIT = 16;
 
 export interface NavigationTraversalEntry {
   entry: HistoryEntry;
@@ -81,7 +82,8 @@ export function getBackTraversal(
   return stack
     .slice(0, cursor)
     .map((entry, index) => ({ entry, index }))
-    .reverse();
+    .reverse()
+    .slice(0, TRAVERSAL_MENU_LIMIT);
 }
 
 export function getForwardTraversal(
@@ -90,7 +92,8 @@ export function getForwardTraversal(
 ): NavigationTraversalEntry[] {
   return stack
     .slice(cursor + 1)
-    .map((entry, offset) => ({ entry, index: cursor + 1 + offset }));
+    .map((entry, offset) => ({ entry, index: cursor + 1 + offset }))
+    .slice(0, TRAVERSAL_MENU_LIMIT);
 }
 
 export function jumpToTraversalIndex(

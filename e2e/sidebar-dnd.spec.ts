@@ -275,4 +275,38 @@ test.describe("Loom Sidebar DnD", () => {
     await loomDragHandle(page, "c-security").dispatchEvent("dragend", { dataTransfer });
     await dataTransfer.dispose();
   });
+
+  test("utility destination drag preview uses title and address only", async ({ page }) => {
+    await openApp(page);
+    await page.getByRole("button", { name: "Bookmarks" }).click();
+
+    const row = page.getByTestId("utility-destination-row-b-address");
+    const dataTransfer = await page.evaluateHandle(() => new DataTransfer());
+    await row.dispatchEvent("dragstart", { dataTransfer });
+
+    const preview = page.getByTestId("loom-drag-preview");
+    await expect(preview).toBeAttached();
+    await expect(preview).toContainText("Address Bar navigator rules");
+    await expect(preview).toContainText("loom://loom-ai/navigation-architecture/loom/browser/r-address-bar");
+    await expect(preview.locator("strong")).toHaveText("Address Bar navigator rules");
+    await expect(preview.locator("small")).toHaveText(
+      "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar"
+    );
+
+    const style = await preview.evaluate((node) => {
+      const computed = window.getComputedStyle(node);
+      return {
+        backgroundColor: computed.backgroundColor,
+        opacity: Number(computed.opacity),
+        textShadow: computed.textShadow,
+      };
+    });
+
+    expect(style.backgroundColor).toBe("rgba(0, 0, 0, 0)");
+    expect(style.opacity).toBeLessThan(1);
+    expect(style.textShadow).not.toBe("none");
+
+    await row.dispatchEvent("dragend", { dataTransfer });
+    await dataTransfer.dispose();
+  });
 });
