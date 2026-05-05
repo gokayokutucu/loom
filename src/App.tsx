@@ -493,7 +493,7 @@ function formatAddressBarTitle(activeLoom?: Pick<Conversation, "title"> | null, 
 }
 
 function setLoomDragPayload(event: React.DragEvent, link: LoomLink) {
-  event.dataTransfer.effectAllowed = "copy";
+  event.dataTransfer.effectAllowed = "copyMove";
   event.dataTransfer.setData(LOOM_LINK_MIME, JSON.stringify(link));
   event.dataTransfer.setData("text/plain", toLoomMarkdown(link));
 }
@@ -506,6 +506,19 @@ function getLoomDragPayload(event: React.DragEvent) {
   } catch {
     return null;
   }
+}
+
+function createLoomDragPreview(event: React.DragEvent, title: string) {
+  document.querySelectorAll("[data-testid='loom-drag-preview']").forEach((node) => {
+    node.remove();
+  });
+  const preview = document.createElement("div");
+  preview.className = "loom-drag-preview";
+  preview.dataset.testid = "loom-drag-preview";
+  preview.textContent = title;
+  document.body.appendChild(preview);
+  event.dataTransfer.setDragImage(preview, 12, 14);
+  return () => preview.remove();
 }
 
 function makeInitialTabGroups(conversations: Conversation[]): TabGroup[] {
@@ -1650,7 +1663,7 @@ function App() {
             (id) => id !== sourceId && id !== targetId
           ),
         }))
-        .filter((group) => group.conversationIds.length > 0);
+        .filter((group) => group.conversationIds.length > 1);
       return [
         ...strippedGroups,
         {
@@ -1677,7 +1690,7 @@ function App() {
                 ]
               : group.conversationIds.filter((id) => id !== conversationId),
         }))
-        .filter((group) => group.conversationIds.length > 0)
+        .filter((group) => group.conversationIds.length > 1)
     );
   }
 
@@ -1688,7 +1701,7 @@ function App() {
           ...group,
           conversationIds: group.conversationIds.filter((id) => id !== conversationId),
         }))
-        .filter((group) => group.conversationIds.length > 0)
+        .filter((group) => group.conversationIds.length > 1)
     );
   }
 
@@ -3179,6 +3192,7 @@ function Sidebar({
   onDeleteRequest,
 }: SidebarProps) {
   const folderListRef = useRef<HTMLDivElement | null>(null);
+  const dragPreviewCleanupRef = useRef<(() => void) | null>(null);
   const pinnedConversations = pinnedConversationIds
     .map((id) => conversations.find((conversation) => conversation.id === id))
     .filter((conversation): conversation is Conversation => Boolean(conversation));
@@ -3220,14 +3234,19 @@ function Sidebar({
   function handleConversationDragStart(event: React.DragEvent, conversation: Conversation) {
     sidebarDnD.startDrag(conversation.id);
     setLoomDragPayload(event, conversationToLink(conversation));
+    dragPreviewCleanupRef.current?.();
+    dragPreviewCleanupRef.current = createLoomDragPreview(event, conversation.title);
   }
 
   function handleConversationDragEnd() {
     sidebarDnD.endDrag();
+    dragPreviewCleanupRef.current?.();
+    dragPreviewCleanupRef.current = null;
   }
 
   function renderConversationTab(conversation: Conversation) {
     const pinned = pinnedConversationIds.includes(conversation.id);
+    const groupId = sidebarDnD.getGroupIdForConversation(conversation.id);
     const Icon = getConversationIconOption(conversation.iconKey).Icon;
     return (
       <div
@@ -3244,6 +3263,21 @@ function Sidebar({
         onDragOver={(event) => sidebarDnD.handleConversationDragOver(event, conversation.id)}
         onDragLeave={sidebarDnD.handleConversationDragLeave}
         onDrop={(event) => sidebarDnD.handleConversationDrop(event, conversation.id)}
+        data-testid={`sidebar-loom-${conversation.id}`}
+        data-loom-id={conversation.id}
+        data-sidebar-group-id={groupId ?? "standalone"}
+        data-sidebar-pinned={pinned ? "true" : "false"}
+        data-sidebar-dnd-armed={
+          sidebarDnD.armedIntent === "createGroup" &&
+          sidebarDnD.hoverTargetId === `conversation:${conversation.id}`
+            ? "createGroup"
+            : undefined
+        }
+        data-sidebar-dnd-feedback={
+          sidebarDnD.hoverTargetId === `conversation:${conversation.id}`
+            ? sidebarDnD.dropFeedbackIntent ?? undefined
+            : undefined
+        }
       >
         <button
           className="conversation-tab-main"
@@ -3284,6 +3318,8 @@ function Sidebar({
     <aside
       className={collapsed ? "sidebar collapsed" : "sidebar"}
       aria-label="Conversation library"
+      data-dnd-context="sidebar"
+      data-testid="loom-sidebar"
     >
       <div className="brand-row">
         <div className="brand-mark">L</div>
@@ -3330,7 +3366,7 @@ function Sidebar({
       </nav>
 
       {pinnedConversations.length > 0 && (
-        <section className="pinned-tabs" aria-label="Pinned conversations">
+        <section className="pinned-tabs" aria-label="Pinned conversations" data-testid="sidebar-pinned-zone">
           {pinnedConversations.map((conversation) => (
             <PinnedConversationTab
               key={`pinned-${conversation.id}`}
@@ -3364,6 +3400,19 @@ function Sidebar({
               onDragOver={(event) => sidebarDnD.handleGroupDragOver(event, group.id)}
               onDragLeave={sidebarDnD.handleGroupDragLeave}
               onDrop={(event) => sidebarDnD.handleGroupDrop(event, group.id)}
+              data-testid={`sidebar-group-${group.id}`}
+              data-sidebar-group-id={group.id}
+              data-sidebar-dnd-armed={
+                sidebarDnD.armedIntent === "createGroup" &&
+                sidebarDnD.groupDropTargetId === group.id
+                  ? "createGroup"
+                  : undefined
+              }
+              data-sidebar-dnd-feedback={
+                sidebarDnD.groupDropTargetId === group.id
+                  ? sidebarDnD.dropFeedbackIntent ?? undefined
+                  : undefined
+              }
             >
               <TabGroupHeader
                 group={group}
@@ -3383,6 +3432,17 @@ function Sidebar({
           onDragOver={sidebarDnD.handleStandaloneDragOver}
           onDragLeave={sidebarDnD.handleStandaloneDragLeave}
           onDrop={sidebarDnD.handleStandaloneDrop}
+          data-testid="sidebar-standalone-zone"
+          data-sidebar-dnd-armed={
+            sidebarDnD.armedIntent === "createGroup" && sidebarDnD.hoverTargetId === "standalone"
+              ? "createGroup"
+              : undefined
+          }
+          data-sidebar-dnd-feedback={
+            sidebarDnD.hoverTargetId === "standalone"
+              ? sidebarDnD.dropFeedbackIntent ?? undefined
+              : undefined
+          }
         >
           {ungroupedConversations.map(renderConversationTab)}
         </div>
@@ -3487,6 +3547,9 @@ function PinnedConversationTab({
       onContextMenu={(event) => onOpenContextMenu(event, conversation)}
       title={conversation.title}
       aria-label={`Open pinned ${conversation.title}`}
+      data-testid={`sidebar-pinned-loom-${conversation.id}`}
+      data-loom-id={conversation.id}
+      data-sidebar-pinned="true"
     >
       <Icon size={14} />
     </button>
@@ -5075,10 +5138,13 @@ function PromptComposer({
       aria-label="Prompt composer"
       onPointerDownCapture={onActivate}
       onFocusCapture={onActivate}
+      data-dnd-context="composer"
+      data-testid="prompt-composer"
     >
       <div
         ref={surfaceRef}
         className={dragActive ? "prompt-surface drag-over" : "prompt-surface"}
+        data-testid="prompt-surface"
         onDragEnter={(event) => {
           if (event.dataTransfer.types.includes(LOOM_LINK_MIME)) {
             event.preventDefault();

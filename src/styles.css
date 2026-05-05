@@ -525,6 +525,26 @@ textarea:focus-visible {
   box-shadow: inset 0 0 0 1px rgba(155, 188, 255, 0.26);
 }
 
+.conversation-tab[data-sidebar-dnd-armed],
+.tab-group[data-sidebar-dnd-armed],
+.loose-tabs.standalone-drop-zone[data-sidebar-dnd-armed] {
+  box-shadow: inset 0 0 0 1px rgba(255, 178, 117, 0.34);
+}
+
+.conversation-tab[data-sidebar-dnd-feedback="joinGroup"],
+.conversation-tab[data-sidebar-dnd-feedback="leaveGroup"],
+.conversation-tab[data-sidebar-dnd-feedback="moveGroup"],
+.tab-group[data-sidebar-dnd-feedback="joinGroup"],
+.tab-group[data-sidebar-dnd-feedback="moveGroup"],
+.loose-tabs.standalone-drop-zone[data-sidebar-dnd-feedback="leaveGroup"] {
+  background: rgba(155, 188, 255, 0.055);
+  box-shadow: inset 0 0 0 1px rgba(155, 188, 255, 0.22);
+}
+
+.conversation-tab[data-sidebar-dnd-feedback="holdToGroup"] {
+  background: rgba(155, 188, 255, 0.045);
+}
+
 .conversation-tab-main {
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr);
@@ -650,6 +670,34 @@ textarea:focus-visible {
   border-radius: 10px;
   background: var(--bg-elevated);
   box-shadow: var(--shadow-panel);
+}
+
+.loom-drag-preview {
+  position: fixed;
+  top: -1000px;
+  left: -1000px;
+  z-index: 9999;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--font-caption-size);
+  line-height: var(--font-caption-line);
+  opacity: 0.76;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-shadow:
+    0 1px 2px rgba(0, 0, 0, 0.95),
+    1px 0 1px rgba(0, 0, 0, 0.86),
+    -1px 0 1px rgba(0, 0, 0, 0.86),
+    0 -1px 1px rgba(0, 0, 0, 0.86);
+  white-space: nowrap;
+  pointer-events: none;
 }
 
 .conversation-menu {
