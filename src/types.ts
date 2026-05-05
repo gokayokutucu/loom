@@ -204,6 +204,7 @@ export interface LoomLink {
   title: string;
   path: string;
   badge?: string;
+  selectedAt?: number;
   targetObjectId?: string;
   canonicalUri?: string;
   referenceMentionId?: string;

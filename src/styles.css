@@ -32,6 +32,7 @@
   --font-title-line: 26px;
   --sidebar-width: 222px;
   --sidebar-collapsed-width: 48px;
+  --docked-utility-width: 318px;
   --composer-max-width: 840px;
   --composer-min-width: 418px;
 }
@@ -109,10 +110,31 @@ textarea:focus-visible {
   grid-template-columns: var(--sidebar-collapsed-width) minmax(0, 1fr);
 }
 
+.app-body.utility-panel-docked {
+  grid-template-columns:
+    var(--sidebar-width)
+    minmax(0, 1fr)
+    var(--docked-utility-width);
+}
+
+.app-shell.sidebar-collapsed .app-body.utility-panel-docked {
+  grid-template-columns:
+    var(--sidebar-collapsed-width)
+    minmax(0, 1fr)
+    var(--docked-utility-width);
+}
+
+.app-body.graph-panel-docked {
+  --docked-utility-width: min(640px, 40vw);
+}
+
 .sidebar {
+  grid-column: 1;
+  grid-row: 1;
   display: flex;
   flex-direction: column;
   gap: 8px;
+  width: 100%;
   padding: 8px 5px 8px 5px;
   border-right: 1px solid #56466f;
   background:
@@ -121,10 +143,25 @@ textarea:focus-visible {
   height: calc(100vh - 42px);
   min-height: 0;
   overflow-x: hidden;
+  transition:
+    box-shadow 140ms ease-out,
+    width 140ms ease-out;
 }
 
 .sidebar.collapsed {
+  width: var(--sidebar-collapsed-width);
   padding-inline: 5px;
+}
+
+.app-shell.sidebar-collapsed .sidebar.sidebar-flyout {
+  position: fixed;
+  top: 42px;
+  left: 0;
+  bottom: 0;
+  z-index: 80;
+  width: var(--sidebar-width);
+  height: calc(100vh - 42px);
+  box-shadow: 18px 0 48px rgba(0, 0, 0, 0.28);
 }
 
 .sidebar.collapsed .brand-row {
@@ -754,6 +791,8 @@ textarea:focus-visible {
 }
 
 .workspace {
+  grid-column: 2;
+  grid-row: 1;
   display: grid;
   grid-template-rows: minmax(0, 1fr);
   height: calc(100vh - 42px);
@@ -1250,14 +1289,16 @@ kbd {
   padding-inline: 28px;
 }
 
-.weft-panel:first-child {
+.origin-split-panel {
   border-right: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.012);
+  box-shadow: inset -14px 0 28px rgba(0, 0, 0, 0.12);
 }
 
 .weft-split-panel {
   border-left: 1px solid rgba(255, 255, 255, 0.08);
-  background: rgba(255, 255, 255, 0.012);
-  box-shadow: inset 14px 0 28px rgba(0, 0, 0, 0.12);
+  background: transparent;
+  box-shadow: none;
 }
 
 .weft-panel .prompt-composer {
@@ -2638,6 +2679,19 @@ kbd {
   box-shadow: -18px 0 48px rgba(0, 0, 0, 0.18);
 }
 
+.right-panel.docked {
+  position: relative;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  z-index: 1;
+  grid-column: 3;
+  grid-row: 1;
+  width: 100%;
+  height: calc(100vh - 42px);
+  box-shadow: none;
+}
+
 .graph-overlay-panel {
   position: fixed;
   top: 42px;
@@ -2652,7 +2706,21 @@ kbd {
   box-shadow: -18px 0 48px rgba(0, 0, 0, 0.24);
 }
 
-.app-shell.sidebar-collapsed .graph-overlay-panel {
+.graph-overlay-panel.docked {
+  position: relative;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  z-index: 1;
+  grid-column: 3;
+  grid-row: 1;
+  width: 100%;
+  min-width: 0;
+  height: calc(100vh - 42px);
+  box-shadow: none;
+}
+
+.app-shell.sidebar-collapsed .graph-overlay-panel:not(.docked) {
   width: min(760px, calc(100vw - var(--sidebar-collapsed-width)));
 }
 
@@ -2661,22 +2729,30 @@ kbd {
   padding-top: 42px;
 }
 
-.graph-overlay-close {
+.graph-overlay-controls {
   position: absolute;
   top: 12px;
   right: 12px;
   z-index: 2;
+  display: inline-flex;
+  gap: 6px;
+}
+
+.graph-overlay-button {
   display: grid;
   place-items: center;
   width: 30px;
   height: 30px;
+  border: 0;
   border-radius: 8px;
   background: rgba(255, 255, 255, 0.04);
   color: var(--text-muted);
 }
 
-.graph-overlay-close:hover,
-.graph-overlay-close:focus-visible {
+.graph-overlay-button:hover,
+.graph-overlay-button:focus-visible,
+.graph-overlay-button.active,
+.icon-button.active {
   background: rgba(255, 255, 255, 0.08);
   color: var(--text-primary);
 }
@@ -2687,6 +2763,12 @@ kbd {
   justify-content: space-between;
   padding: 12px;
   border-bottom: 1px solid #25272e;
+}
+
+.panel-header-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .panel-header h2 {
@@ -3872,12 +3954,36 @@ kbd {
     grid-template-columns: var(--sidebar-collapsed-width) minmax(0, 1fr);
   }
 
+  .app-body.utility-panel-docked {
+    grid-template-columns:
+      var(--sidebar-width)
+      minmax(0, 1fr)
+      var(--docked-utility-width);
+  }
+
+  .app-shell.sidebar-collapsed .app-body.utility-panel-docked {
+    grid-template-columns:
+      var(--sidebar-collapsed-width)
+      minmax(0, 1fr)
+      var(--docked-utility-width);
+  }
+
   .sidebar {
     height: calc(100vh - 56px);
     padding: 8px 5px;
   }
 
+  .app-shell.sidebar-collapsed .sidebar.sidebar-flyout {
+    top: 56px;
+    height: calc(100vh - 56px);
+  }
+
   .workspace {
+    height: calc(100vh - 56px);
+  }
+
+  .right-panel.docked,
+  .graph-overlay-panel.docked {
     height: calc(100vh - 56px);
   }
 
