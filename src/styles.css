@@ -47,9 +47,21 @@
   --loom-text-muted: rgba(180, 180, 165, 0.45);
   --loom-accent: var(--accent);
   --loom-accent-muted: rgba(255, 95, 58, 0.12);
+  --loom-link-token: #7ab7ff;
+  --loom-link-token-bg: rgba(74, 144, 226, 0.13);
+  --loom-link-token-border: rgba(74, 144, 226, 0.32);
   --loom-code-bg: rgba(255, 255, 255, 0.019);
   --loom-code-text: rgba(180, 180, 165, 0.39);
   --loom-shadow-surface: 0 16px 32px rgba(0, 0, 0, 0.24);
+  --syntax-bg: rgba(12, 13, 10, 0.62);
+  --syntax-border: rgba(229, 225, 190, 0.14);
+  --syntax-text: rgba(236, 236, 229, 0.9);
+  --syntax-comment: #7b8178;
+  --syntax-keyword: #c792ea;
+  --syntax-string: #c3e88d;
+  --syntax-number: #f78c6c;
+  --syntax-type: #82aaff;
+  --syntax-function: #ffcb6b;
 }
 
 .theme-graphite {
@@ -63,6 +75,9 @@
   --loom-text-primary: rgba(245, 245, 240, 0.92);
   --loom-text-secondary: rgba(210, 210, 200, 0.65);
   --loom-text-muted: rgba(180, 180, 165, 0.45);
+  --loom-link-token: #7ab7ff;
+  --loom-link-token-bg: rgba(74, 144, 226, 0.13);
+  --loom-link-token-border: rgba(74, 144, 226, 0.32);
 }
 
 .theme-solar-dark {
@@ -76,6 +91,124 @@
   --loom-text-primary: rgba(248, 246, 232, 0.92);
   --loom-text-secondary: rgba(224, 219, 196, 0.68);
   --loom-text-muted: rgba(192, 185, 158, 0.5);
+  --loom-link-token: #7ab7ff;
+  --loom-link-token-bg: rgba(74, 144, 226, 0.13);
+  --loom-link-token-border: rgba(74, 144, 226, 0.32);
+}
+
+.theme-light {
+  color-scheme: light;
+  --bg-app: #f6f6f2;
+  --bg-sidebar: #ecece5;
+  --bg-rail: #f0f0ea;
+  --bg-surface: #ffffff;
+  --bg-elevated: #f2f2ec;
+  --bg-hover: rgba(29, 31, 28, 0.06);
+  --border-soft: rgba(28, 30, 27, 0.08);
+  --border-strong: rgba(28, 30, 27, 0.14);
+  --text-primary: #20231f;
+  --text-secondary: #4f554e;
+  --text-muted: #7a8178;
+  --loom-bg-app: #f6f6f2;
+  --loom-bg-surface: #fbfbf6;
+  --loom-bg-surface-raised: #ffffff;
+  --loom-bg-surface-muted: #eeeee7;
+  --loom-bg-hover: rgba(29, 31, 28, 0.06);
+  --loom-border-subtle: rgba(28, 30, 27, 0.08);
+  --loom-border-strong: rgba(28, 30, 27, 0.14);
+  --loom-text-primary: rgba(28, 30, 27, 0.92);
+  --loom-text-secondary: rgba(45, 48, 43, 0.68);
+  --loom-text-muted: rgba(78, 84, 76, 0.56);
+  --loom-link-token: #2563eb;
+  --loom-link-token-bg: rgba(37, 99, 235, 0.1);
+  --loom-link-token-border: rgba(37, 99, 235, 0.26);
+  --syntax-bg: #f7f7f2;
+  --syntax-border: rgba(28, 30, 27, 0.12);
+  --syntax-text: #2d302b;
+  --syntax-comment: #7a8178;
+  --syntax-keyword: #7c3aed;
+  --syntax-string: #2f855a;
+  --syntax-number: #b45309;
+  --syntax-type: #2563eb;
+  --syntax-function: #b7791f;
+}
+
+@media (prefers-color-scheme: light) {
+  .theme-system {
+    color-scheme: light;
+    --bg-app: #f6f6f2;
+    --bg-sidebar: #ecece5;
+    --bg-rail: #f0f0ea;
+    --bg-surface: #ffffff;
+    --bg-elevated: #f2f2ec;
+    --bg-hover: rgba(29, 31, 28, 0.06);
+    --border-soft: rgba(28, 30, 27, 0.08);
+    --border-strong: rgba(28, 30, 27, 0.14);
+    --text-primary: #20231f;
+    --text-secondary: #4f554e;
+    --text-muted: #7a8178;
+    --loom-bg-app: #f6f6f2;
+    --loom-bg-surface: #fbfbf6;
+    --loom-bg-surface-raised: #ffffff;
+    --loom-bg-surface-muted: #eeeee7;
+    --loom-bg-hover: rgba(29, 31, 28, 0.06);
+    --loom-border-subtle: rgba(28, 30, 27, 0.08);
+    --loom-border-strong: rgba(28, 30, 27, 0.14);
+    --loom-text-primary: rgba(28, 30, 27, 0.92);
+    --loom-text-secondary: rgba(45, 48, 43, 0.68);
+    --loom-text-muted: rgba(78, 84, 76, 0.56);
+    --syntax-bg: #f7f7f2;
+    --syntax-border: rgba(28, 30, 27, 0.12);
+    --syntax-text: #2d302b;
+    --syntax-comment: #7a8178;
+    --syntax-keyword: #7c3aed;
+    --syntax-string: #2f855a;
+    --syntax-number: #b45309;
+    --syntax-type: #2563eb;
+    --syntax-function: #b7791f;
+  }
+}
+
+.theme-solarized-light {
+  color-scheme: light;
+  --bg-app: #fdf6e3;
+  --bg-sidebar: #eee8d5;
+  --bg-rail: #f5efdc;
+  --bg-surface: #fdf6e3;
+  --bg-elevated: #eee8d5;
+  --bg-hover: rgba(101, 123, 131, 0.12);
+  --border-soft: rgba(101, 123, 131, 0.18);
+  --border-strong: rgba(101, 123, 131, 0.28);
+  --text-primary: #073642;
+  --text-secondary: #586e75;
+  --text-muted: #839496;
+  --focus: #268bd2;
+  --accent: #cb4b16;
+  --accent-soft: rgba(203, 75, 22, 0.14);
+  --loom-bg-app: #fdf6e3;
+  --loom-bg-surface: #fbf1d3;
+  --loom-bg-surface-raised: #fff9e8;
+  --loom-bg-surface-muted: #eee8d5;
+  --loom-bg-hover: rgba(101, 123, 131, 0.12);
+  --loom-border-subtle: rgba(101, 123, 131, 0.18);
+  --loom-border-strong: rgba(101, 123, 131, 0.28);
+  --loom-text-primary: rgba(7, 54, 66, 0.94);
+  --loom-text-secondary: rgba(88, 110, 117, 0.78);
+  --loom-text-muted: rgba(101, 123, 131, 0.62);
+  --loom-accent: #cb4b16;
+  --loom-accent-muted: rgba(203, 75, 22, 0.12);
+  --loom-link-token: #268bd2;
+  --loom-link-token-bg: rgba(38, 139, 210, 0.12);
+  --loom-link-token-border: rgba(38, 139, 210, 0.3);
+  --syntax-bg: #fdf6e3;
+  --syntax-border: rgba(101, 123, 131, 0.24);
+  --syntax-text: #073642;
+  --syntax-comment: #93a1a1;
+  --syntax-keyword: #859900;
+  --syntax-string: #2aa198;
+  --syntax-number: #d33682;
+  --syntax-type: #268bd2;
+  --syntax-function: #b58900;
 }
 
 * {
@@ -137,7 +270,7 @@ textarea:focus-visible {
   min-width: 640px;
   height: 100vh;
   overflow: hidden;
-  background: rgba(15, 15, 16, 0.96);
+  background: var(--bg-app);
 }
 
 .app-body {
@@ -1969,7 +2102,97 @@ kbd {
   gap: 11px;
 }
 
+.assistant-code-block {
+  overflow: hidden;
+  margin: 2px 0;
+  border: 1px solid var(--syntax-border);
+  border-radius: 8px;
+  background: var(--syntax-bg);
+}
+
+.assistant-code-block figcaption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 34px;
+  padding: 0 10px 0 12px;
+  color: var(--loom-text-muted);
+  font-size: 11px;
+}
+
+.assistant-code-block figcaption span {
+  text-transform: lowercase;
+}
+
+.assistant-code-block button {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--loom-text-secondary);
+}
+
+.assistant-code-block button:hover:not(:disabled),
+.assistant-code-block button:focus-visible:not(:disabled) {
+  background: var(--loom-bg-hover);
+  color: var(--loom-text-primary);
+}
+
+.assistant-code-block button:disabled {
+  cursor: default;
+  opacity: 0.36;
+}
+
+.assistant-code-block pre {
+  overflow: auto;
+  margin: 0;
+  padding: 0 12px 13px;
+}
+
+.assistant-code-block code {
+  color: var(--syntax-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre;
+}
+
+.assistant-code-line {
+  display: block;
+  min-height: 1.55em;
+}
+
+.syntax-comment {
+  color: var(--syntax-comment);
+}
+
+.syntax-keyword {
+  color: var(--syntax-keyword);
+}
+
+.syntax-string {
+  color: var(--syntax-string);
+}
+
+.syntax-number {
+  color: var(--syntax-number);
+}
+
+.syntax-type {
+  color: var(--syntax-type);
+}
+
+.syntax-function {
+  color: var(--syntax-function);
+}
+
 .response-actions {
+  position: absolute;
+  top: 14px;
+  right: 14px;
   display: flex;
   gap: 5px;
   opacity: 0;
@@ -2038,8 +2261,9 @@ kbd {
 }
 
 .link-chip.response-bookmark-chip.bookmarked {
-  color: #ffbf9f;
-  background: var(--loom-accent-muted);
+  color: #7dd3a8;
+  background: rgba(125, 211, 168, 0.12);
+  box-shadow: inset 0 -1px 0 rgba(125, 211, 168, 0.42);
 }
 
 .link-chip.response-action-chip {
@@ -2061,6 +2285,12 @@ kbd {
   box-shadow: inset 0 -1px 0 rgba(255, 95, 31, 0.52);
 }
 
+.link-chip.response-weft-chip.is-wefted {
+  background: var(--loom-accent-muted);
+  color: var(--accent, #ff7043);
+  box-shadow: inset 0 -1px 0 rgba(255, 95, 31, 0.52);
+}
+
 .link-chip.response-link-chip {
   box-shadow: inset 0 -1px 0 rgba(155, 188, 255, 0.56);
 }
@@ -2068,6 +2298,11 @@ kbd {
 .link-chip.response-action-chip:hover {
   color: var(--loom-text-primary);
   background: var(--loom-bg-hover);
+}
+
+.link-chip.response-weft-chip.is-wefted:hover {
+  color: var(--accent, #ff7043);
+  background: var(--loom-accent-muted);
 }
 
 .link-chip em {
@@ -2289,10 +2524,10 @@ kbd {
   display: inline-block;
   padding: 1px 4px 2px;
   border-radius: 5px;
-  background: var(--loom-bg-hover);
-  color: var(--loom-text-primary);
+  background: var(--loom-link-token-bg);
+  color: var(--loom-link-token);
   cursor: grab;
-  box-shadow: inset 0 0 0 1px var(--loom-border-strong);
+  box-shadow: inset 0 0 0 1px var(--loom-link-token-border);
   line-height: 1.5;
   vertical-align: baseline;
   white-space: normal;
@@ -2303,7 +2538,7 @@ kbd {
 }
 
 .inline-loom-token:hover {
-  background: var(--loom-bg-surface-muted);
+  background: color-mix(in srgb, var(--loom-link-token-bg) 78%, var(--loom-link-token));
 }
 
 .address-hint-popover {
@@ -2471,7 +2706,7 @@ kbd {
 .composer-footer {
   position: relative;
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto auto auto auto;
+  grid-template-columns: auto auto minmax(0, 1fr) auto auto auto;
   align-items: center;
   gap: 7px;
   width: 100%;
@@ -2547,7 +2782,7 @@ kbd {
 
 .composer-icon-action:focus-visible,
 .reference-globe:focus-visible,
-.model-picker-select:focus-visible {
+.model-picker-button:focus-visible {
   outline: 0;
   box-shadow: inset 0 0 0 1px rgba(245, 245, 240, 0.16);
 }
@@ -2568,8 +2803,13 @@ kbd {
   font-style: normal;
 }
 
-.model-picker-select {
+.model-picker-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
   height: 30px;
+  min-width: 154px;
+  max-width: 190px;
   padding: 0 24px 0 10px;
   border: 0;
   border-radius: 7px;
@@ -2578,21 +2818,71 @@ kbd {
   color: var(--loom-text-secondary);
   font-size: 14px;
   font-weight: 500;
+  text-align: left;
   transition:
     background 120ms ease,
     color 120ms ease,
     box-shadow 120ms ease;
 }
 
-.model-picker-select {
-  min-width: 154px;
-  max-width: 190px;
+.model-picker-button span {
+  min-width: 0;
+  overflow: hidden;
+  padding-right: 8px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
-.model-picker-select:hover,
-.model-picker-select:focus {
+.model-picker-button:hover,
+.model-picker-button:focus-visible,
+.model-picker-button[aria-expanded="true"] {
   background: rgba(255, 255, 255, 0.055);
   color: var(--loom-text-primary);
+}
+
+.model-picker-menu {
+  position: fixed;
+  z-index: 170;
+  display: grid;
+  gap: 4px;
+  max-width: calc(100vw - 24px);
+  padding: 5px;
+  border: 1px solid var(--loom-border-subtle);
+  border-radius: 10px;
+  background: var(--loom-bg-surface-muted);
+  box-shadow:
+    0 24px 64px rgba(0, 0, 0, 0.46),
+    inset 0 1px 0 var(--loom-border-subtle);
+}
+
+.model-picker-menu button {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  width: 100%;
+  min-height: 34px;
+  padding: 0 9px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--loom-text-secondary);
+  font: inherit;
+  text-align: left;
+}
+
+.model-picker-menu button span:last-child {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-picker-menu button:hover,
+.model-picker-menu button:focus-visible,
+.model-picker-menu button.selected {
+  background: var(--loom-bg-hover);
+  color: var(--loom-text-primary);
+  outline: 0;
 }
 
 .settings-backdrop {
@@ -4590,12 +4880,23 @@ kbd {
   font-size: 13px;
 }
 
-.ask-popover {
+.ask-modal-backdrop {
   position: fixed;
-  right: 370px;
-  bottom: 178px;
-  z-index: 60;
-  width: min(460px, calc(100vw - 420px));
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.42);
+}
+
+.ask-popover {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(520px, calc(100vw - 32px));
+  max-height: min(70vh, calc(100vh - 32px));
   padding: 14px;
   border: 0;
   border-radius: 10px;
@@ -4661,15 +4962,6 @@ kbd {
   gap: 14px;
 }
 
-.ask-drag-handle {
-  cursor: grab;
-  user-select: none;
-}
-
-.ask-drag-handle:active {
-  cursor: grabbing;
-}
-
 .ask-header span {
   color: var(--accent);
   font-size: 12px;
@@ -4682,8 +4974,21 @@ kbd {
   font-weight: 400;
 }
 
+.ask-context {
+  display: grid;
+  min-height: 0;
+  gap: 6px;
+}
+
+.ask-context > span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
 .ask-popover blockquote {
-  margin: 12px 0;
+  max-height: min(240px, 28vh);
+  overflow: auto;
+  margin: 0;
   padding: 10px 12px;
   border-left: 2px solid var(--accent);
   border-radius: 8px;
@@ -4691,11 +4996,14 @@ kbd {
   color: var(--text-secondary);
   font-size: 13px;
   line-height: 1.45;
+  white-space: pre-wrap;
 }
 
 .ask-popover textarea {
+  flex: 0 0 auto;
   width: 100%;
   min-height: 72px;
+  box-sizing: border-box;
   resize: none;
   padding: 11px;
   border: 0;
@@ -4705,17 +5013,74 @@ kbd {
   outline: 0;
 }
 
-.ask-answer {
+.ask-popover textarea:disabled {
+  color: var(--text-muted);
+  opacity: 0.72;
+}
+
+.ask-answer-list {
+  display: grid;
+  flex: 1 1 auto;
+  gap: 12px;
+  min-height: 0;
+  max-height: min(220px, 24vh);
+  overflow: auto;
+  padding-right: 2px;
+  scrollbar-color: var(--loom-border-strong) transparent;
+  scrollbar-width: thin;
+}
+
+.ask-answer-list::-webkit-scrollbar {
+  width: 10px;
+}
+
+.ask-answer-list::-webkit-scrollbar-track,
+.ask-answer-list::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+.ask-answer-list::-webkit-scrollbar-thumb {
+  border: 3px solid transparent;
+  border-radius: 999px;
+  background: var(--loom-border-strong);
+  background-clip: content-box;
+}
+
+.ask-answer-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(229, 225, 190, 0.22);
+  background-clip: content-box;
+}
+
+.ask-exchange {
+  display: grid;
   gap: 8px;
-  margin-top: 10px;
-  padding: 10px;
-  border: 0;
-  border-radius: 10px;
-  background: rgba(125, 211, 168, 0.07);
+}
+
+.ask-exchange-question {
+  justify-self: end;
+  max-width: 76%;
+  padding: 8px 10px;
+  border-radius: 10px 10px 4px 10px;
+  background: var(--loom-bg-surface-muted);
+  color: var(--text-primary);
+}
+
+.ask-exchange-answer {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 8px 2px 2px;
   color: var(--text-secondary);
 }
 
-.ask-answer p {
+.ask-exchange-answer svg {
+  flex: 0 0 auto;
+  margin-top: 2px;
+  color: var(--text-muted);
+}
+
+.ask-exchange-question p,
+.ask-exchange-answer p {
   margin: 0;
   font-size: 13px;
   line-height: 1.45;
@@ -4728,10 +5093,20 @@ kbd {
 }
 
 .ask-actions {
+  flex: 0 0 auto;
   display: flex;
+  flex-wrap: wrap;
   justify-content: flex-end;
   gap: 8px;
-  margin-top: 12px;
+}
+
+.ask-actions button {
+  max-width: 100%;
+}
+
+.ask-actions button:disabled {
+  cursor: default;
+  opacity: 0.45;
 }
 
 .dialog-backdrop {
@@ -4847,6 +5222,7 @@ kbd {
 }
 
 .loom-graph-node {
+  position: relative;
   display: grid;
   gap: 9px;
   width: 292px;
@@ -4877,7 +5253,8 @@ kbd {
 .loom-graph-node-header,
 .loom-graph-node-kind,
 .loom-graph-node-flags,
-.loom-graph-node-actions {
+.loom-graph-node-actions,
+.loom-graph-node-open {
   display: flex;
   align-items: center;
 }
@@ -4896,12 +5273,22 @@ kbd {
 }
 
 .loom-graph-code {
-  padding: 1px 5px;
+  padding: 2px 6px;
   border: 1px solid rgba(229, 225, 190, 0.1);
   border-radius: 999px;
   color: rgba(210, 210, 200, 0.48);
   font-size: 11px;
   line-height: 1.3;
+}
+
+.loom-graph-node-open {
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
 }
 
 .loom-graph-node h3 {
@@ -4957,7 +5344,8 @@ kbd {
 }
 
 .loom-graph-node-actions button,
-.loom-graph-node-composer button,
+.loom-graph-node-open,
+.loom-graph-node-composer,
 .loom-graph-controls button {
   border: 0;
   border-radius: 7px;
@@ -4973,18 +5361,44 @@ kbd {
   font-size: 11px;
 }
 
+.loom-graph-node-actions .loom-graph-node-bookmark.is-bookmarked {
+  background: rgba(125, 211, 168, 0.12);
+  color: #7dd3a8;
+}
+
+.loom-graph-node-actions .loom-graph-node-weft.is-wefted {
+  background: var(--loom-accent-muted);
+  color: var(--accent, #ff7043);
+}
+
 .loom-graph-node-actions button:hover,
 .loom-graph-node-actions button:focus-visible,
+.loom-graph-node-open:hover,
+.loom-graph-node-open:focus-visible,
 .loom-graph-controls button:hover,
 .loom-graph-controls button:focus-visible {
   background: var(--loom-bg-hover, rgba(229, 225, 190, 0.05));
   color: var(--text-primary);
 }
 
+.loom-graph-node-actions .loom-graph-node-bookmark.is-bookmarked:hover,
+.loom-graph-node-actions .loom-graph-node-bookmark.is-bookmarked:focus-visible {
+  background: rgba(125, 211, 168, 0.12);
+  color: #7dd3a8;
+}
+
+.loom-graph-node-actions .loom-graph-node-weft.is-wefted:hover,
+.loom-graph-node-actions .loom-graph-node-weft.is-wefted:focus-visible {
+  background: var(--loom-accent-muted);
+  color: var(--accent, #ff7043);
+}
+
 .loom-graph-node-composer {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
+  width: 100%;
+  min-height: 36px;
   gap: 8px;
   padding: 7px 8px;
   border: 1px solid var(--loom-border-subtle, rgba(255, 255, 255, 0.06));
@@ -4992,12 +5406,13 @@ kbd {
   background: var(--loom-bg-surface, #151610);
   color: var(--text-muted);
   font-size: 12px;
+  text-align: left;
 }
 
-.loom-graph-node-composer button {
-  padding: 4px 8px;
-  color: var(--text-muted);
-  opacity: 0.72;
+.loom-graph-node-composer:hover,
+.loom-graph-node-composer:focus-visible {
+  background: var(--loom-bg-hover, rgba(229, 225, 190, 0.05));
+  color: var(--text-primary);
 }
 
 .loom-graph-handle {
@@ -5005,6 +5420,39 @@ kbd {
   height: 8px;
   border-color: rgba(229, 225, 190, 0.18);
   background: rgba(255, 112, 67, 0.75);
+  pointer-events: none;
+}
+
+.loom-graph-handle--hidden {
+  opacity: 0;
+}
+
+.loom-graph-terminal-continue {
+  position: absolute;
+  left: 50%;
+  bottom: -15px;
+  z-index: 2;
+  display: grid;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: var(--accent, #ff7043);
+  box-shadow:
+    0 10px 24px rgba(255, 112, 67, 0.24),
+    0 0 0 3px color-mix(in srgb, var(--loom-workspace-bg, #12130f) 82%, transparent);
+  color: #1a0f0b;
+  place-items: center;
+  transform: translateX(-50%) scale(var(--loom-graph-control-scale, 1));
+  transform-origin: center;
+}
+
+.loom-graph-terminal-continue:hover,
+.loom-graph-terminal-continue:focus-visible {
+  background: #ff8a5c;
+  color: #120b08;
+  outline: 0;
 }
 
 .react-flow__edge-path.loom-graph-edge {
@@ -5017,23 +5465,15 @@ kbd {
   stroke-width: 1.6;
 }
 
-.react-flow__edge-path.loom-graph-edge.is-weft-path {
-  stroke: rgba(255, 112, 67, 0.52);
-  stroke-width: 1.6;
-}
-
 .react-flow__edge-path.loom-graph-edge--reference,
 .react-flow__edge-path.loom-graph-edge--bookmark {
   stroke-dasharray: 5 6;
   opacity: 0.65;
 }
 
-.react-flow__edge-path.loom-graph-edge.is-active-path {
-  stroke: rgba(255, 145, 96, 0.56);
-}
-
 .loom-graph-edge-label {
   position: absolute;
+  z-index: 2;
   max-width: 250px;
   padding: 6px 9px;
   border: 1px solid rgba(229, 225, 190, 0.1);
@@ -5049,11 +5489,24 @@ kbd {
   overflow-wrap: anywhere;
 }
 
+.loom-graph-edge-label--weft {
+  z-index: 1;
+}
+
+.loom-graph-edge-label--question,
+.loom-graph-edge-label--derived {
+  z-index: 3;
+}
+
 .loom-graph-controls {
   position: absolute;
   right: 12px;
   top: 50%;
   z-index: 6;
+  transform: translateY(-50%);
+}
+
+.loom-graph-control-group {
   display: grid;
   gap: 4px;
   padding: 5px;
@@ -5061,14 +5514,113 @@ kbd {
   border-radius: 9px;
   background: rgba(18, 19, 15, 0.72);
   backdrop-filter: blur(10px);
-  transform: translateY(-50%);
 }
 
-.loom-graph-controls button {
+.loom-graph-control-group button {
   display: grid;
   width: 30px;
   height: 30px;
   place-items: center;
+}
+
+.loom-graph-control-separator {
+  width: 20px;
+  height: 1px;
+  margin: 4px auto;
+  background: var(--loom-border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.loom-graph-continue-button {
+  display: grid !important;
+  width: 30px !important;
+  height: 30px !important;
+  justify-content: center;
+  padding: 0 !important;
+  border-radius: 8px !important;
+  background: var(--accent, #ff7043) !important;
+  box-shadow: 0 10px 24px rgba(255, 112, 67, 0.2);
+  color: #1a0f0b !important;
+}
+
+.loom-graph-continue-button span {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.loom-graph-continue-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.loom-graph-composer-node {
+  position: relative;
+  width: 620px;
+  border: 1px solid rgba(255, 112, 67, 0.62);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--loom-bg-surface, #151610) 94%, black);
+  box-shadow:
+    0 22px 54px rgba(0, 0, 0, 0.34),
+    0 0 0 1px rgba(255, 112, 67, 0.22);
+  overflow: hidden;
+}
+
+.loom-graph-composer-node .prompt-composer {
+  width: 100%;
+  padding: 0;
+  background: transparent;
+}
+
+.loom-graph-composer-node .prompt-surface {
+  min-width: 0;
+  min-height: 124px;
+  border: 0;
+  border-radius: 11px;
+  box-shadow: none;
+}
+
+.loom-graph-composer-node .prompt-editor {
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.loom-graph-composer-node .reference-globe,
+.loom-graph-composer-node .model-picker-button {
+  font-size: 13px;
+}
+
+.react-flow__edge-path.loom-graph-edge--continuation {
+  stroke: rgba(255, 112, 67, 0.56);
+  stroke-width: 1.6;
+}
+
+.loom-graph-continuation-close {
+  position: absolute;
+  top: 10px;
+  right: 16px;
+  z-index: 80;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-secondary);
+  place-items: center;
+}
+
+.loom-graph-continuation-close:hover,
+.loom-graph-continuation-close:focus-visible {
+  background: transparent;
+  color: var(--text-primary);
+}
+
+.loom-graph-continuation-close:active {
+  background: transparent;
+  color: var(--text-muted);
 }
 
 .loom-graph-status,
@@ -5085,7 +5637,7 @@ kbd {
 
 .loom-graph-status {
   left: 12px;
-  bottom: 12px;
+  top: 12px;
   max-width: calc(100% - 140px);
   overflow: hidden;
   padding: 6px 8px;
@@ -5098,7 +5650,7 @@ kbd {
 
 .loom-graph-legend {
   right: 14px;
-  bottom: 13px;
+  top: 13px;
 }
 
 .loom-graph-legend span {
@@ -5486,8 +6038,7 @@ kbd {
   }
 
   .ask-popover {
-    right: 24px;
-    width: min(460px, calc(100vw - 220px));
+    width: min(460px, calc(100vw - 32px));
   }
 }
 

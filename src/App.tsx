@@ -19,6 +19,7 @@ import {
   Boxes,
   Brain,
   Check,
+  ChevronDown,
   Clock3,
   Compass,
   Copy,
@@ -62,6 +63,7 @@ import {
   Share2,
   Shield,
   Sparkles,
+  Square,
   Target,
   Terminal,
   WandSparkles,
@@ -593,15 +595,15 @@ const seedComposerLink: LoomLink = {
 };
 
 const initialNavigationDestination: LoomLink = {
-  id: EPHEMERAL_DRAFT_ID,
+  id: "c-graph-map",
   type: "conversation",
-  title: "New conversation",
-  path: "loom://drafts/new-conversation",
-  badge: "Draft",
+  title: "Weft-aware Loom graph",
+  path: "loom://product/graph-view-site-map",
+  badge: "Loom",
 };
 
 const initialResolvedNavigationDestination: LoomNavigationDestination = {
-  loomId: EPHEMERAL_DRAFT_ID,
+  loomId: "c-graph-map",
   mode: "full",
   source: "userNavigation",
 };
@@ -704,6 +706,27 @@ const initialForkRecords: ForkRecord[] = [
     parentResponseId: "r-provenance",
     childConversationId: "c-graph-map",
     title: "Evidence map branch",
+  },
+  {
+    id: "fork-graph-spacing",
+    parentConversationId: "c-graph-map",
+    parentResponseId: "r-site-map",
+    childConversationId: "c-graph-spacing",
+    title: "Graph spacing Weft",
+  },
+  {
+    id: "fork-graph-continuation",
+    parentConversationId: "c-graph-map",
+    parentResponseId: "r-graph-continuation",
+    childConversationId: "c-graph-continuation",
+    title: "Graph continuation Weft",
+  },
+  {
+    id: "fork-graph-continuation-errors",
+    parentConversationId: "c-graph-continuation",
+    parentResponseId: "r-continuation-main-route",
+    childConversationId: "c-graph-continuation-errors",
+    title: "Continuation error-state Weft",
   },
   {
     id: "fork-bookmarks-launch",
@@ -887,7 +910,7 @@ function App() {
   );
   const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
   const [groupColorTarget, setGroupColorTarget] = useState<TabGroup | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(true);
   const [sidebarFlyoutOpen, setSidebarFlyoutOpen] = useState(false);
   const [sidebarFlyoutDragActive, setSidebarFlyoutDragActive] = useState(false);
   const [archived, setArchived] = useState<Conversation[]>([]);
@@ -899,8 +922,8 @@ function App() {
     summary: "Clean unsaved conversation draft.",
     iconKey: "compass",
   });
-  const [activeConversationId, setActiveConversationId] = useState(EPHEMERAL_DRAFT_ID);
-  const [activeObjectTitle, setActiveObjectTitle] = useState("New conversation");
+  const [activeConversationId, setActiveConversationId] = useState("c-graph-map");
+  const [activeObjectTitle, setActiveObjectTitle] = useState("Weft-aware Loom graph");
   const [activePanel, setActivePanel] = useState<ActivePanel>(null);
   const [activeSplitPanel, setActiveSplitPanel] = useState<"origin" | "weft">("weft");
   const [splitPanelMenu, setSplitPanelMenu] = useState<{
@@ -908,7 +931,7 @@ function App() {
     x: number;
     y: number;
   } | null>(null);
-  const [graphMode, setGraphMode] = useState(false);
+  const [graphMode, setGraphMode] = useState(true);
   const [rightDockPinned, setRightDockPinned] = useState(false);
   const [composerDrafts, setComposerDrafts] = useState<Record<string, ComposerDraft>>({
     [seedConversations[0].id]: {
@@ -953,6 +976,12 @@ function App() {
     running: boolean;
     message: string | null;
   }>({ running: false, message: null });
+  const mainGenerationRef = useRef(0);
+  const mainAbortRef = useRef<AbortController | null>(null);
+  const mainRevealTargetRef = useRef<{ loomId: string; responseId: string } | null>(null);
+  const quickGenerationRef = useRef(0);
+  const quickAbortRef = useRef<AbortController | null>(null);
+  const quickRevealQuestionRef = useRef<string | null>(null);
   const [responseTitleOverrides, setResponseTitleOverrides] = useState<
     Record<string, string>
   >({});
@@ -1308,6 +1337,7 @@ function App() {
     saveProviderSettings
   );
   const mockResponsesEnabled = isMockResponseModeEnabled(providerSettings);
+  const appThemeClass = `theme-${appSettings.theme}`;
   const activeComposerRuntimeHealth = mockResponsesEnabled
     ? {
         ...composerRuntimeHealth,
@@ -1398,6 +1428,83 @@ function App() {
       });
   }
 
+  function updateResponseAnswer(
+    loomId: string,
+    responseId: string,
+    answer: string[]
+  ) {
+    setConversationResponses((current) => ({
+      ...current,
+      [loomId]: (current[loomId] ?? []).map((response) =>
+        response.id === responseId ? { ...response, answer } : response
+      ),
+    }));
+  }
+
+  function delay(ms: number) {
+    return new Promise<void>((resolve) => {
+      window.setTimeout(resolve, ms);
+    });
+  }
+
+  async function revealResponseAnswer(
+    loomId: string,
+    responseId: string,
+    answer: string[],
+    generationId: number
+  ) {
+    const fullText = answer.join("\n\n");
+    const parts = fullText.match(/\S+\s*/g) ?? [fullText];
+    let visible = "";
+    for (const part of parts) {
+      if (mainGenerationRef.current !== generationId) {
+        updateResponseAnswer(
+          loomId,
+          responseId,
+          answerParagraphs(completeOpenMarkdownCodeFence(visible))
+        );
+        return false;
+      }
+      visible += part;
+      updateResponseAnswer(loomId, responseId, answerParagraphs(visible));
+      await delay(18);
+    }
+    if (mainGenerationRef.current !== generationId) {
+      updateResponseAnswer(
+        loomId,
+        responseId,
+        answerParagraphs(completeOpenMarkdownCodeFence(visible))
+      );
+      return false;
+    }
+    updateResponseAnswer(loomId, responseId, answer);
+    return true;
+  }
+
+  function stopMainResponse() {
+    mainGenerationRef.current += 1;
+    mainAbortRef.current?.abort();
+    mainAbortRef.current = null;
+    const revealTarget = mainRevealTargetRef.current;
+    if (revealTarget) {
+      setConversationResponses((current) => ({
+        ...current,
+        [revealTarget.loomId]: (current[revealTarget.loomId] ?? []).map((response) =>
+          response.id === revealTarget.responseId
+            ? {
+                ...response,
+                answer: answerParagraphs(
+                  completeOpenMarkdownCodeFence(response.answer.join("\n\n"))
+                ),
+              }
+            : response
+        ),
+      }));
+    }
+    mainRevealTargetRef.current = null;
+    setComposerRuntimeState({ running: false, message: "Response stopped." });
+  }
+
   function plainTextFromDraft(draft: ComposerDraft) {
     return draft.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
   }
@@ -1419,8 +1526,23 @@ function App() {
       .filter(Boolean);
   }
 
+  function completeOpenMarkdownCodeFence(value: string) {
+    const fenceCount = value
+      .split("\n")
+      .filter((line) => line.trimStart().startsWith("```")).length;
+    if (fenceCount % 2 === 0) return value;
+    return `${value.replace(/\s*$/, "")}\n\`\`\``;
+  }
+
   function providerErrorMessage(error: unknown) {
     return error instanceof Error ? error.message : "The selected model provider failed.";
+  }
+
+  function splitAnswerParagraphs(answer: string) {
+    return answer
+      .split(/\n{2,}/)
+      .map((part) => part.trim())
+      .filter(Boolean);
   }
 
   function modelReadinessMessage(profile: ModelProfileId) {
@@ -2680,6 +2802,11 @@ function App() {
     showLinkCopyToast("Response is copied");
   }
 
+  function copyCodeBlockWithToast(code: string) {
+    void browserHostShell.copyText(code);
+    showLinkCopyToast("Code is copied");
+  }
+
   function insertStarterPrompt(text: string) {
     starterPromptRequestIdRef.current += 1;
     setStarterPromptRequest({
@@ -3048,7 +3175,13 @@ function App() {
 
   async function sendComposerToModel(
     draft: ComposerDraft,
-    options: { effort: ModelEffort; loomId?: string; preserveNavigation?: boolean }
+    options: {
+      effort: ModelEffort;
+      loomId?: string;
+      preserveNavigation?: boolean;
+      revealResponse?: boolean;
+      onResponseCreated?: (loomId: string, response: ResponseItem) => void;
+    }
   ) {
     const prompt = plainTextFromDraft(draft);
     const meaningful = prompt.length > 0 || draft.links.length > 0;
@@ -3059,6 +3192,12 @@ function App() {
       setComposerRuntimeState({ running: false, message: readinessMessage });
       return false;
     }
+
+    const generationId = mainGenerationRef.current + 1;
+    mainGenerationRef.current = generationId;
+    const controller = new AbortController();
+    mainAbortRef.current = controller;
+    mainRevealTargetRef.current = null;
 
     setComposerRuntimeState({
       running: true,
@@ -3107,6 +3246,7 @@ function App() {
       const result = await runModelProfileRequest(providerSettings, {
         profile: "main",
         effort: options.effort,
+        signal: controller.signal,
         prompt: prompt || "Use the attached Loom references to continue this conversation.",
         context: linkContext,
         system:
@@ -3115,12 +3255,13 @@ function App() {
       const responseId = `r-${Date.now()}`;
       const title = normalizeLoomTitle(prompt ? prompt.slice(0, 64) : "Model response");
       const answer = answerParagraphs(result.text);
+      const visibleAnswer = options.revealResponse ? [""] : answer;
       const response: ResponseItem = {
         id: responseId,
         title,
         address: `${targetConversation.path}/r-${responseSlug(title)}`,
         question: prompt || "Use the linked Loom references.",
-        answer,
+        answer: visibleAnswer,
         suggestedLinks: [],
         bookmarkedLinks: [],
         meta: createDraftResponseMetadata({
@@ -3157,6 +3298,21 @@ function App() {
         ...current,
         [targetConversation.id]: [...(current[targetConversation.id] ?? []), response],
       }));
+      options.onResponseCreated?.(targetConversation.id, response);
+      mainRevealTargetRef.current = { loomId: targetConversation.id, responseId: response.id };
+      if (options.revealResponse) {
+        const completedReveal = await revealResponseAnswer(
+          targetConversation.id,
+          response.id,
+          answer,
+          generationId
+        );
+        if (!completedReveal) return true;
+      }
+      if (mainGenerationRef.current !== generationId) return true;
+      const completedResponse = options.revealResponse
+        ? { ...response, answer }
+        : response;
       setComposerDrafts((current) => {
         const { [targetLoomId]: _discardTarget, [EPHEMERAL_DRAFT_ID]: _discardDraft, ...rest } = current;
         return {
@@ -3166,13 +3322,13 @@ function App() {
       });
       if (!options.preserveNavigation) setActiveObjectTitle(response.title);
       const destination: LoomLink = {
-        id: response.id,
+        id: completedResponse.id,
         type: "response",
-        title: response.title,
-        path: response.address,
+        title: completedResponse.title,
+        path: completedResponse.address,
         badge: typeLabel.response,
-        canonicalUri: response.meta?.canonicalUri,
-        meta: response.meta,
+        canonicalUri: completedResponse.meta?.canonicalUri,
+        meta: completedResponse.meta,
       };
       if (!options.preserveNavigation) {
         if (targetLoomId === EPHEMERAL_DRAFT_ID) replaceNavigationEntry(destination);
@@ -3188,13 +3344,23 @@ function App() {
         running: false,
         message: `Main model responded with ${result.modelId}.`,
       });
-      queueResponseMetadataGeneration(targetConversation.id, response);
+      if (mainAbortRef.current === controller) mainAbortRef.current = null;
+      mainRevealTargetRef.current = null;
+      queueResponseMetadataGeneration(targetConversation.id, completedResponse);
       return true;
     } catch (error) {
+      if (controller.signal.aborted) {
+        if (mainAbortRef.current === controller) mainAbortRef.current = null;
+        mainRevealTargetRef.current = null;
+        setComposerRuntimeState({ running: false, message: "Response stopped." });
+        return false;
+      }
       setComposerRuntimeState({
         running: false,
         message: providerErrorMessage(error),
       });
+      if (mainAbortRef.current === controller) mainAbortRef.current = null;
+      mainRevealTargetRef.current = null;
       return false;
     }
   }
@@ -3360,15 +3526,31 @@ function App() {
       resolved.status === "resolved"
         ? (resolved.targetObject ?? resolved.object)?.objectId
         : undefined;
+    const responseTarget = findLocalResponseTarget(link);
+    const setResponseBookmarkState = (bookmarked: boolean) => {
+      if (!responseTarget) return;
+      setConversationResponses((current) => ({
+        ...current,
+        [responseTarget.loom.id]: (current[responseTarget.loom.id] ?? []).map((response) =>
+          response.id === responseTarget.response.id
+            ? { ...response, bookmarked }
+            : response
+        ),
+      }));
+    };
     const existing = bookmarks.find(
       (bookmark) =>
         bookmark.path === link.path ||
         (targetObjectId && bookmark.targetObjectId === targetObjectId)
     );
-    if (existing) {
-      removeBookmark(existing);
+    if (existing || responseTarget?.response.bookmarked) {
+      if (existing) {
+        removeBookmark(existing);
+      }
+      setResponseBookmarkState(false);
       return;
     }
+    setResponseBookmarkState(true);
     bookmarkLoomLink({ ...link, badge: link.badge ?? "Bookmark" });
   }
 
@@ -3440,7 +3622,11 @@ function App() {
     [activeConversation, conversationResponses, conversations, forkRecords]
   );
 
-  function forkResponseLoom(response: ResponseItem, sourceLoomId = activeConversationId) {
+  function forkResponseLoom(
+    response: ResponseItem,
+    sourceLoomId = activeConversationId,
+    initialExchange?: { question: string; answer: string }
+  ) {
     const sourceConversation =
       sourceLoomId === draftConversation?.id
         ? draftConversation
@@ -3458,8 +3644,10 @@ function App() {
       ? conversations.find((conversation) => conversation.id === existingFork.childConversationId)
       : undefined;
     const openWeftDestination = (weftConversation: Conversation) => {
-      setActiveConversationId(weftConversation.id);
-      setActiveSplitPanel("weft");
+      if (!graphMode) {
+        setActiveConversationId(weftConversation.id);
+        setActiveSplitPanel("weft");
+      }
       setActiveObjectTitle(weftConversation.title);
       closeUnpinnedUtilityOverlays();
       const destination: LoomLink = {
@@ -3567,6 +3755,26 @@ function App() {
         }),
       };
     });
+    const initialAskResponseId = initialExchange ? `r-ask-${id}` : undefined;
+    const weftResponses = initialExchange
+      ? [
+          ...lineage,
+          {
+            id: initialAskResponseId ?? `r-ask-${id}`,
+            title: normalizeLoomTitle(initialExchange.question),
+            address: `${path}/r-${lineage.length + 1}`,
+            question: initialExchange.question,
+            answer: splitAnswerParagraphs(initialExchange.answer),
+            suggestedLinks: [],
+            bookmarkedLinks: [],
+            meta: createDraftResponseMetadata({
+              id: createMetadataUuid(),
+              title: normalizeLoomTitle(initialExchange.question),
+              text: `${initialExchange.question}\n\n${initialExchange.answer}`,
+            }),
+          } satisfies ResponseItem,
+        ]
+      : lineage;
     setConversations((current) => {
       const sourceIndex = current.findIndex((item) => item.id === sourceConversation.id);
       if (sourceIndex < 0) return [conversation, ...current];
@@ -3592,7 +3800,7 @@ function App() {
     );
     setConversationResponses((current) => ({
       ...current,
-      [id]: lineage,
+      [id]: weftResponses,
     }));
     setForkRecords((current) => [
       ...current,
@@ -3610,7 +3818,7 @@ function App() {
     }));
     queueLoomMetadataGeneration(conversation);
     openWeftDestination(conversation);
-    pulseWeftFeedback(conversation.id, response.id);
+    pulseWeftFeedback(conversation.id, initialAskResponseId ?? response.id);
     showToast({
       title: "Weft started",
       message: `Started from “${
@@ -3750,17 +3958,89 @@ function App() {
     }
   }
 
-  function openAsk(response: ResponseItem, selectedText = "") {
+  function openAsk(response: ResponseItem, selectedText = "", sourceLoomId = activeConversationId) {
     setSelectionAskState(null);
     clearSelectionHighlight();
     setAskState({
       response,
       selectedText:
         selectedText ||
-        "The Address Bar should accept a Loom address, a natural-language query, or a remembered title.",
+        response.answer.join("\n\n"),
       question: "",
       answered: false,
+      exchanges: [],
+      sourceLoomId,
     });
+  }
+
+  function updateLatestQuickAskAnswer(question: string, answer: string) {
+    setAskState((current) => {
+      if (!current) return current;
+      const exchanges = current.exchanges ?? [];
+      return {
+        ...current,
+        answer,
+        exchanges: exchanges.map((exchange, index) =>
+          index === exchanges.length - 1 && exchange.question === question
+            ? { ...exchange, answer }
+            : exchange
+        ),
+      };
+    });
+  }
+
+  async function revealQuickAskAnswer(
+    question: string,
+    answer: string,
+    generationId: number
+  ) {
+    const parts = answer.match(/\S+\s*/g) ?? [answer];
+    let visible = "";
+    for (const part of parts) {
+      if (quickGenerationRef.current !== generationId) {
+        updateLatestQuickAskAnswer(question, completeOpenMarkdownCodeFence(visible));
+        return false;
+      }
+      visible += part;
+      updateLatestQuickAskAnswer(question, visible);
+      await delay(18);
+    }
+    if (quickGenerationRef.current !== generationId) {
+      updateLatestQuickAskAnswer(question, completeOpenMarkdownCodeFence(visible));
+      return false;
+    }
+    updateLatestQuickAskAnswer(question, answer);
+    return true;
+  }
+
+  function stopQuickAskResponse() {
+    quickGenerationRef.current += 1;
+    quickAbortRef.current?.abort();
+    quickAbortRef.current = null;
+    const question = quickRevealQuestionRef.current;
+    if (question) {
+      setAskState((current) => {
+        if (!current) return current;
+        const exchanges = current.exchanges ?? [];
+        const nextExchanges = exchanges.map((exchange, index) =>
+          index === exchanges.length - 1 && exchange.question === question
+            ? {
+                ...exchange,
+                answer: completeOpenMarkdownCodeFence(exchange.answer),
+              }
+            : exchange
+        );
+        return {
+          ...current,
+          running: false,
+          answer: nextExchanges[nextExchanges.length - 1]?.answer ?? current.answer,
+          exchanges: nextExchanges,
+        };
+      });
+    } else {
+      setAskState((current) => current ? { ...current, running: false } : current);
+    }
+    quickRevealQuestionRef.current = null;
   }
 
   async function submitQuickQuestion() {
@@ -3775,34 +4055,76 @@ function App() {
       setAskState({ ...askState, error: readinessMessage });
       return;
     }
+    const generationId = quickGenerationRef.current + 1;
+    quickGenerationRef.current = generationId;
+    const controller = new AbortController();
+    quickAbortRef.current = controller;
+    quickRevealQuestionRef.current = null;
     setAskState({ ...askState, running: true, error: undefined });
     try {
       const result = await runModelProfileRequest(providerSettings, {
         profile: "quick",
         effort: "Low",
+        signal: controller.signal,
         prompt,
         context: [
-          `Selected text: ${askState.selectedText}`,
+          `Context response content: ${askState.selectedText}`,
           `Response title: ${askState.response.title}`,
           `Response address: ${askState.response.address}`,
         ],
         system:
           "Answer this as a short Loom quick question. Be concise and stay anchored to the selected text.",
       });
-      setAskState({
-        ...askState,
-        running: false,
-        answered: true,
-        answer: result.text,
-        error: undefined,
+      setAskState((current) => {
+        if (!current) return current;
+        return {
+          ...current,
+          question: "",
+          running: true,
+          answered: true,
+          answer: "",
+          exchanges: [
+            ...(current.exchanges ?? []),
+            { question: prompt, answer: "" },
+          ],
+          error: undefined,
+        };
       });
+      quickRevealQuestionRef.current = prompt;
+      const completedReveal = await revealQuickAskAnswer(prompt, result.text, generationId);
+      if (!completedReveal) return;
+      setAskState((current) => {
+        if (!current) return current;
+        const exchanges = current.exchanges ?? [];
+        return {
+          ...current,
+          running: false,
+          answered: true,
+          answer: result.text,
+          exchanges: exchanges.map((exchange, index) =>
+            index === exchanges.length - 1 && exchange.question === prompt
+              ? { ...exchange, answer: result.text }
+              : exchange
+          ),
+          error: undefined,
+        };
+      });
+      if (quickAbortRef.current === controller) quickAbortRef.current = null;
+      quickRevealQuestionRef.current = null;
     } catch (error) {
+      if (controller.signal.aborted) {
+        if (quickAbortRef.current === controller) quickAbortRef.current = null;
+        quickRevealQuestionRef.current = null;
+        setAskState((current) => current ? { ...current, running: false } : current);
+        return;
+      }
       setAskState({
         ...askState,
         running: false,
-        answered: false,
         error: providerErrorMessage(error),
       });
+      if (quickAbortRef.current === controller) quickAbortRef.current = null;
+      quickRevealQuestionRef.current = null;
     }
   }
 
@@ -3896,6 +4218,8 @@ function App() {
       selectedText: selectionAskState.selectedText,
       question: "",
       answered: false,
+      exchanges: [],
+      sourceLoomId: selectionAskState.draftKey,
     });
     setSelectionAskState(null);
   }
@@ -3947,6 +4271,7 @@ function App() {
             preserveNavigation: showWeftSplit,
           })
         }
+        onStop={stopMainResponse}
         onUserTyping={() => {
           const transcript =
             panel === "origin" ? originTranscriptRef.current : transcriptRef.current;
@@ -4059,7 +4384,7 @@ function App() {
   }
 
   return (
-    <AppShell sidebarCollapsed={sidebarCollapsed}>
+    <AppShell sidebarCollapsed={sidebarCollapsed} theme={appThemeClass}>
       <TopBrowserBar
         addressBarRef={addressBarRef}
         location={currentLocation}
@@ -4220,6 +4545,7 @@ function App() {
                   composerFocusRef.current = focus;
                 }}
                 onSend={sendComposerToModel}
+                onStop={stopMainResponse}
                 onUserTyping={scrollTranscriptToBottom}
               />
               {!newLoomDraftHasText && (
@@ -4243,6 +4569,12 @@ function App() {
                     currentNavigationDestination?.scrollTargetResponseId ??
                     recentResponseFeedbackId ??
                     focusedSplitResponses[focusedSplitResponses.length - 1]?.id
+                  }
+                  focusedWeftLoomId={
+                    recentWeftFeedbackLoomId ??
+                    (currentNavigationDestination?.source === "weftCreate"
+                      ? currentNavigationDestination.loomId
+                      : null)
                   }
                   bookmarkedResponseAddresses={bookmarkedResponseAddresses}
                   onOpenLoom={(loomId) => {
@@ -4270,14 +4602,93 @@ function App() {
                     setGraphMode(false);
                   }}
                   onBookmarkResponse={(loomId, response) => {
-                    bookmarkLoomLink(responseLinkForNavigation(loomId, response));
+                    toggleSuggestedBookmark(responseLinkForNavigation(loomId, response));
                   }}
                   onLinkResponse={(loomId, response) => {
-                    linkObjectForDraft(responseLinkForNavigation(loomId, response), loomId);
+                    linkObjectForDraft(
+                      responseLinkForNavigation(loomId, response),
+                      activeDraftKey
+                    );
+                    showToast({
+                      title: "Link added",
+                      message: "Added to the active composer.",
+                      icon: "copy",
+                    });
                   }}
                   onWeftResponse={(loomId, response) => {
                     forkResponseLoom(response, loomId);
                   }}
+                  onAskResponse={(loomId, response) => {
+                    openAsk(
+                      response,
+                      response.answer.join("\n\n"),
+                      loomId
+                    );
+                  }}
+                  renderContinuationComposer={({
+                    loomId,
+                    onSubmitStart,
+                    onResponseCreated,
+                    onResponseCompleted,
+                  }) => (
+                    <PromptComposer
+                      variant="bottom"
+                      draftKey={loomId}
+                      draft={composerDrafts[loomId] ?? EMPTY_COMPOSER_DRAFT}
+                      attachedReferences={
+                        selectionReference?.draftKey === loomId ? [selectionReference.link] : []
+                      }
+                      referenceOptions={composerReferenceOptions}
+                      attachContentItems={attachContentItems}
+                      referenceDisplayMode={appSettings.referenceDisplayMode}
+                      providerSettings={providerSettings}
+                      runtimeState={composerRuntimeState}
+                      runtimeHealth={activeComposerRuntimeHealth}
+                      onProviderSettingsChange={saveProviderSettings}
+                      onDraftChange={(draft) => setComposerDraftForKey(loomId, draft)}
+                      onRemoveLink={(link) => removeComposerLink(loomId, link)}
+                      onDropLink={(link) => linkObjectForDraft(link, loomId)}
+                      onResolveReference={(link) => resolveReferenceLink(link, loomId)}
+                      onOpenReference={openComposerReference}
+                      onCopyReferenceAddress={copyLoomAddress}
+                      onRemoveAttachedReference={() => {
+                        setSelectionReference(null);
+                        clearSelectionHighlight();
+                      }}
+                      onReadyToFocus={(focus) => {
+                        composerFocusRef.current = focus;
+                      }}
+                      onSend={async (draft, options) => {
+                        const prompt = plainTextFromDraft(draft);
+                        const meaningful = prompt.length > 0 || draft.links.length > 0;
+                        if (!meaningful) return false;
+                        if (composerRuntimeState.running) {
+                          stopMainResponse();
+                          return false;
+                        }
+                        onSubmitStart();
+                        let createdResponse: ResponseItem | undefined;
+                        const sent = await sendComposerToModel(draft, {
+                          ...options,
+                          loomId,
+                          preserveNavigation: true,
+                          revealResponse: true,
+                          onResponseCreated: (_targetLoomId, response) => {
+                            createdResponse = response;
+                            setRecentResponseFeedbackId(response.id);
+                            setActiveObjectTitle(response.title);
+                            onResponseCreated(response);
+                          },
+                        });
+                        if (sent && createdResponse) {
+                          onResponseCompleted(createdResponse);
+                        }
+                        return sent;
+                      }}
+                      onStop={stopMainResponse}
+                      onUserTyping={() => undefined}
+                    />
+                  )}
                 />
               ) : showWeftSplit ? (
                   <WeftView>
@@ -4302,6 +4713,7 @@ function App() {
                             onLoom={(response) => forkResponseLoom(response, originConversation.id)}
                             onToggleSuggestedBookmark={toggleSuggestedBookmark}
                             bookmarkedPaths={new Set(bookmarks.map((bookmark) => bookmark.path))}
+                            forkRecords={forkRecords}
                             onSelectionAsk={(response) => {
                               setActiveSplitPanel("origin");
                               onSelectionAsk(response, originConversation.id);
@@ -4313,6 +4725,7 @@ function App() {
                             onCopyAddress={copyLoomAddress}
                             onCopyAddressWithToast={copyLoomAddressWithToast}
                             onCopyResponse={copyResponseAnswerWithToast}
+                            onCopyCode={copyCodeBlockWithToast}
                             highlightedResponseId={recentResponseFeedbackId}
                           />
                           {renderPanelComposer(originConversation.id, "origin")}
@@ -4338,6 +4751,7 @@ function App() {
                             onLoom={(response) => forkResponseLoom(response, activeConversation.id)}
                             onToggleSuggestedBookmark={toggleSuggestedBookmark}
                             bookmarkedPaths={new Set(bookmarks.map((bookmark) => bookmark.path))}
+                            forkRecords={forkRecords}
                             onSelectionAsk={(response) => {
                               setActiveSplitPanel("weft");
                               onSelectionAsk(response, activeConversation.id);
@@ -4349,6 +4763,7 @@ function App() {
                             onCopyAddress={copyLoomAddress}
                             onCopyAddressWithToast={copyLoomAddressWithToast}
                             onCopyResponse={copyResponseAnswerWithToast}
+                            onCopyCode={copyCodeBlockWithToast}
                             onReturnToOrigin={returnToOrigin}
                             highlightedResponseId={recentResponseFeedbackId}
                           />
@@ -4413,6 +4828,7 @@ function App() {
                     onLoom={forkResponseLoom}
                     onToggleSuggestedBookmark={toggleSuggestedBookmark}
                     bookmarkedPaths={new Set(bookmarks.map((bookmark) => bookmark.path))}
+                    forkRecords={forkRecords}
                     onSelectionAsk={onSelectionAsk}
                     responseTitleOverrides={responseTitleOverrides}
                     onOpenContextMenu={(event, response) =>
@@ -4421,6 +4837,7 @@ function App() {
                     onCopyAddress={copyLoomAddress}
                     onCopyAddressWithToast={copyLoomAddressWithToast}
                     onCopyResponse={copyResponseAnswerWithToast}
+                    onCopyCode={copyCodeBlockWithToast}
                     onReturnToOrigin={activeWeftOrigin ? returnToOrigin : undefined}
                     highlightedResponseId={recentResponseFeedbackId}
                   />
@@ -4457,6 +4874,7 @@ function App() {
                     composerFocusRef.current = focus;
                   }}
                   onSend={sendComposerToModel}
+                  onStop={stopMainResponse}
                   onUserTyping={scrollTranscriptToBottom}
                 />
               )}
@@ -4554,21 +4972,25 @@ function App() {
           state={askState}
           onUpdate={setAskState}
           onClose={closeSelectionAskFlow}
-          onBookmark={() => {
-            bookmarkResponse(askState.response);
-            closeSelectionAskFlow();
-          }}
           onLoom={() => {
-            visitDestination({
-              id: `loom-${askState.response.id}`,
-              type: "loom",
-              title: `Ask follow-up: ${askState.response.title}`,
-              path: askState.response.address.replace("/r-", "/loom/ask/r-"),
-              badge: typeLabel.loom,
-            });
+            const latestExchange =
+              askState.exchanges?.[askState.exchanges.length - 1] ??
+              (askState.answer
+                ? { question: askState.question, answer: askState.answer }
+                : undefined);
+            if (!latestExchange) return;
+            forkResponseLoom(
+              askState.response,
+              askState.sourceLoomId ?? activeConversationId,
+              {
+                question: latestExchange.question,
+                answer: latestExchange.answer,
+              }
+            );
             closeSelectionAskFlow();
           }}
           onSubmit={submitQuickQuestion}
+          onStop={stopQuickAskResponse}
         />
       )}
 
@@ -5858,6 +6280,198 @@ function NewLoomStarterPanel({
   );
 }
 
+type ResponseContentBlock =
+  | { kind: "paragraph"; text: string }
+  | { kind: "code"; language: string; code: string; closed: boolean };
+
+const codeKeywords = new Set([
+  "as",
+  "async",
+  "await",
+  "boolean",
+  "break",
+  "case",
+  "class",
+  "const",
+  "continue",
+  "default",
+  "else",
+  "export",
+  "extends",
+  "false",
+  "for",
+  "from",
+  "function",
+  "if",
+  "import",
+  "interface",
+  "let",
+  "new",
+  "null",
+  "private",
+  "public",
+  "return",
+  "string",
+  "switch",
+  "true",
+  "type",
+  "undefined",
+  "void",
+]);
+
+function parseResponseContent(answer: string[]): ResponseContentBlock[] {
+  const blocks: ResponseContentBlock[] = [];
+  let paragraphLines: string[] = [];
+  let codeLines: string[] = [];
+  let codeLanguage = "";
+  let inCodeBlock = false;
+
+  const flushParagraph = () => {
+    const text = paragraphLines.join("\n").trim();
+    if (text) blocks.push({ kind: "paragraph", text });
+    paragraphLines = [];
+  };
+
+  const flushCode = (closed: boolean) => {
+    blocks.push({
+      kind: "code",
+      language: codeLanguage || "text",
+      code: codeLines.join("\n"),
+      closed,
+    });
+    codeLines = [];
+    codeLanguage = "";
+  };
+
+  answer.flatMap((item) => item.split("\n")).forEach((line) => {
+    const fenceMatch = line.match(/^```([A-Za-z0-9_+.-]*)\s*$/);
+    if (fenceMatch) {
+      if (inCodeBlock) {
+        flushCode(true);
+        inCodeBlock = false;
+        return;
+      }
+      flushParagraph();
+      inCodeBlock = true;
+      codeLanguage = fenceMatch[1] || "text";
+      return;
+    }
+
+    if (inCodeBlock) {
+      codeLines.push(line);
+      return;
+    }
+    paragraphLines.push(line);
+  });
+
+  if (inCodeBlock) {
+    flushCode(false);
+  } else {
+    flushParagraph();
+  }
+
+  return blocks;
+}
+
+function syntaxClassForToken(token: string) {
+  if (/^\/\/.*/.test(token)) return "comment";
+  if (/^(['"`]).*\1$/.test(token)) return "string";
+  if (/^\d+(\.\d+)?$/.test(token)) return "number";
+  if (/^[A-Z][A-Za-z0-9_]*$/.test(token)) return "type";
+  if (codeKeywords.has(token)) return "keyword";
+  if (/^[A-Za-z_$][\w$]*(?=\()/.test(token)) return "function";
+  return undefined;
+}
+
+function renderCodeLine(line: string, lineIndex: number) {
+  const tokenPattern =
+    /(\/\/.*|(['"`])(?:\\.|(?!\2).)*\2|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*(?=\()|\b[A-Za-z_$][\w$]*\b)/g;
+  const parts: JSX.Element[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = tokenPattern.exec(line)) !== null) {
+    if (match.index > cursor) {
+      parts.push(
+        <span key={`${lineIndex}-plain-${cursor}`}>
+          {line.slice(cursor, match.index)}
+        </span>
+      );
+    }
+    const token = match[0];
+    const tokenClass = syntaxClassForToken(token);
+    parts.push(
+      <span
+        className={tokenClass ? `syntax-token syntax-${tokenClass}` : undefined}
+        key={`${lineIndex}-token-${match.index}`}
+      >
+        {token}
+      </span>
+    );
+    cursor = match.index + token.length;
+    if (token.startsWith("//")) break;
+  }
+
+  if (cursor < line.length) {
+    parts.push(<span key={`${lineIndex}-tail`}>{line.slice(cursor)}</span>);
+  }
+  return parts.length > 0 ? parts : "\u00a0";
+}
+
+function SyntaxHighlightedCode({ code }: { code: string }) {
+  return (
+    <>
+      {code.split("\n").map((line, index) => (
+        <span className="assistant-code-line" key={`${index}-${line}`}>
+          {renderCodeLine(line, index)}
+        </span>
+      ))}
+    </>
+  );
+}
+
+function ResponseContent({
+  answer,
+  onCopyCode,
+}: {
+  answer: string[];
+  onCopyCode: (code: string) => void;
+}) {
+  return (
+    <>
+      {parseResponseContent(answer).map((block, index) => {
+        if (block.kind === "paragraph") {
+          return <p key={`paragraph-${index}`}>{block.text}</p>;
+        }
+        const canCopy = block.closed && block.code.trim().length > 0;
+        return (
+          <figure className="assistant-code-block" key={`code-${index}`}>
+            <figcaption>
+              <span>{block.language}</span>
+              <button
+                type="button"
+                disabled={!canCopy}
+                onClick={() => {
+                  if (canCopy) onCopyCode(block.code);
+                }}
+                aria-label={`Copy ${block.language} code`}
+                title={canCopy ? "Copy" : "Copy unavailable until code block completes"}
+              >
+                <Copy size={13} />
+              </button>
+            </figcaption>
+            <pre>
+              <code>
+                <SyntaxHighlightedCode code={block.code} />
+              </code>
+            </pre>
+          </figure>
+        );
+      })}
+    </>
+  );
+}
+
 function ChatTranscript({
   transcriptRef,
   conversation,
@@ -5866,12 +6480,14 @@ function ChatTranscript({
   onLoom,
   onToggleSuggestedBookmark,
   bookmarkedPaths,
+  forkRecords,
   onSelectionAsk,
   responseTitleOverrides,
   onOpenContextMenu,
   onCopyAddress,
   onCopyAddressWithToast,
   onCopyResponse,
+  onCopyCode,
   onReturnToOrigin,
   highlightedResponseId,
 }: {
@@ -5882,12 +6498,14 @@ function ChatTranscript({
   onLoom: (response: ResponseItem) => void;
   onToggleSuggestedBookmark: (link: LoomLink) => void;
   bookmarkedPaths: Set<string>;
+  forkRecords: ForkRecord[];
   onSelectionAsk: (response: ResponseItem) => void;
   responseTitleOverrides: Record<string, string>;
   onOpenContextMenu: (event: React.MouseEvent, response: ResponseItem) => void;
   onCopyAddress: (link: Pick<LoomLink, "path" | "canonicalUri">) => void;
   onCopyAddressWithToast: (link: Pick<LoomLink, "path" | "canonicalUri">) => void;
   onCopyResponse: (response: ResponseItem) => void;
+  onCopyCode: (code: string) => void;
   onReturnToOrigin?: () => void;
   highlightedResponseId?: string | null;
 }) {
@@ -5954,7 +6572,17 @@ function ChatTranscript({
           ...response,
           title: responseTitleOverrides[response.id] ?? response.title,
         };
-        const isBookmarkedResponse = bookmarkedPaths.has(displayResponse.address);
+        const isBookmarkedResponse =
+          displayResponse.bookmarked ||
+          bookmarkedPaths.has(displayResponse.address) ||
+          (displayResponse.meta?.canonicalUri
+            ? bookmarkedPaths.has(displayResponse.meta.canonicalUri)
+            : false);
+        const hasExistingWeft = forkRecords.some(
+          (record) =>
+            record.parentConversationId === conversation.id &&
+            record.parentResponseId === displayResponse.id
+        );
         const responseLink: LoomLink = {
           id: displayResponse.id,
           type: "response",
@@ -6009,13 +6637,17 @@ function ChatTranscript({
                     <div className="semantic-title">{displayResponse.title}</div>
                     <div className="loom-address">{displayResponse.address}</div>
                   </div>
-                  <ResponseActions response={displayResponse} />
                 </div>
               )}
+              <ResponseActions
+                response={displayResponse}
+                onOpenContextMenu={onOpenContextMenu}
+              />
               <div className="assistant-body">
-                {displayResponse.answer.map((paragraph) => (
-                  <p key={paragraph}>{paragraph}</p>
-                ))}
+                <ResponseContent
+                  answer={displayResponse.answer}
+                  onCopyCode={onCopyCode}
+                />
               </div>
 
               <div className="reference-strip">
@@ -6050,11 +6682,20 @@ function ChatTranscript({
                 >
                   <Link2 size={13} />
                 </AddressMetadataBadge>
-                <Tooltip label="Start Weft" placement="bottom-right">
+                <Tooltip label={hasExistingWeft ? "Open Weft" : "Start Weft"} placement="bottom-right">
                   <button
-                    className="link-chip response-action-chip response-weft-chip"
+                    className={
+                      hasExistingWeft
+                        ? "link-chip response-action-chip response-weft-chip is-wefted"
+                        : "link-chip response-action-chip response-weft-chip"
+                    }
                     onClick={() => onLoom(displayResponse)}
-                    aria-label={`Start Weft from ${displayResponse.title}`}
+                    aria-pressed={hasExistingWeft}
+                    aria-label={
+                      hasExistingWeft
+                        ? `Open Weft from ${displayResponse.title}`
+                        : `Start Weft from ${displayResponse.title}`
+                    }
                   >
                     <GitFork size={13} />
                   </button>
@@ -6070,12 +6711,18 @@ function ChatTranscript({
 
 function ResponseActions({
   response,
+  onOpenContextMenu,
 }: {
   response: ResponseItem;
+  onOpenContextMenu: (event: React.MouseEvent, response: ResponseItem) => void;
 }) {
   return (
     <div className="response-actions" aria-label={`Actions for ${response.title}`}>
-      <button aria-label="More response actions">
+      <button
+        type="button"
+        aria-label="More response actions"
+        onClick={(event) => onOpenContextMenu(event, response)}
+      >
         <MoreHorizontal size={14} />
       </button>
     </div>
@@ -6106,6 +6753,7 @@ function PromptComposer({
   onOpenReference,
   onCopyReferenceAddress,
   onSend,
+  onStop,
   onUserTyping,
 }: {
   variant?: "bottom" | "centered";
@@ -6134,6 +6782,7 @@ function PromptComposer({
   onOpenReference: (link: LoomLink) => string | null;
   onCopyReferenceAddress: (link: Pick<LoomLink, "path" | "canonicalUri">) => void;
   onSend: (draft: ComposerDraft, options: { effort: ModelEffort }) => Promise<boolean>;
+  onStop: () => void;
   onUserTyping: () => void;
 }) {
   const editorRef = useRef<HTMLDivElement | null>(null);
@@ -6143,6 +6792,8 @@ function PromptComposer({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const referenceButtonRef = useRef<HTMLButtonElement>(null);
   const referenceMenuRef = useRef<HTMLDivElement>(null);
+  const modelButtonRef = useRef<HTMLButtonElement>(null);
+  const modelMenuRef = useRef<HTMLDivElement>(null);
   const mentionMenuRef = useRef<HTMLDivElement>(null);
   const insertedPathsRef = useRef<Set<string>>(new Set());
   const activeDraftKeyRef = useRef("");
@@ -6172,6 +6823,12 @@ function PromptComposer({
     placement: "top" | "bottom";
   } | null>(null);
   const [referenceOpenError, setReferenceOpenError] = useState<string | null>(null);
+  const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [modelPopoverStyle, setModelPopoverStyle] = useState<{
+    left: number;
+    top: number;
+    minWidth: number;
+  } | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [tokenContextMenu, setTokenContextMenu] = useState<{
     link: LoomLink;
@@ -6377,6 +7034,16 @@ function PromptComposer({
         setReferenceOpenError(null);
       }
       if (
+        modelPickerOpen &&
+        modelButtonRef.current &&
+        modelMenuRef.current &&
+        !modelButtonRef.current.contains(target) &&
+        !modelMenuRef.current.contains(target)
+      ) {
+        setModelPickerOpen(false);
+        setModelPopoverStyle(null);
+      }
+      if (
         mention &&
         editorRef.current &&
         !editorRef.current.contains(target) &&
@@ -6405,6 +7072,8 @@ function PromptComposer({
         setAttachFeedback(null);
         setReferencePickerOpen(false);
         setReferenceOpenError(null);
+        setModelPickerOpen(false);
+        setModelPopoverStyle(null);
         setTokenContextMenu(null);
         setTokenRenamePopover(null);
         closeAddressHint();
@@ -6442,6 +7111,7 @@ function PromptComposer({
     addressHint,
     attachPickerOpen,
     mention,
+    modelPickerOpen,
     referencePickerOpen,
     tokenContextMenu,
     tokenRenamePopover,
@@ -6565,6 +7235,48 @@ function PromptComposer({
       window.removeEventListener("scroll", updateAttachPopoverPosition, true);
     };
   }, [attachPickerOpen]);
+
+  useLayoutEffect(() => {
+    if (!modelPickerOpen) {
+      setModelPopoverStyle(null);
+      return;
+    }
+
+    function updateModelPopoverPosition() {
+      const button = modelButtonRef.current;
+      const menu = modelMenuRef.current;
+      if (!button || !menu) return;
+
+      const buttonRect = button.getBoundingClientRect();
+      const menuRect = menu.getBoundingClientRect();
+      const viewportPadding = 12;
+      const gap = 6;
+      const minWidth = Math.max(buttonRect.width, 220);
+      let left = buttonRect.left;
+      let top = buttonRect.bottom + gap;
+      const menuHeight = menuRect.height || 44 * selectableModels.length;
+
+      if (top + menuHeight > window.innerHeight - viewportPadding) {
+        top = Math.max(viewportPadding, buttonRect.top - gap - menuHeight);
+      }
+
+      const width = Math.max(menuRect.width, minWidth);
+      if (left + width > window.innerWidth - viewportPadding) {
+        left = Math.max(viewportPadding, window.innerWidth - width - viewportPadding);
+      }
+
+      setModelPopoverStyle({ left, top, minWidth: width });
+    }
+
+    const raf = window.requestAnimationFrame(updateModelPopoverPosition);
+    window.addEventListener("resize", updateModelPopoverPosition);
+    window.addEventListener("scroll", updateModelPopoverPosition, true);
+    return () => {
+      window.cancelAnimationFrame(raf);
+      window.removeEventListener("resize", updateModelPopoverPosition);
+      window.removeEventListener("scroll", updateModelPopoverPosition, true);
+    };
+  }, [modelPickerOpen, selectableModels.length]);
 
   useLayoutEffect(() => {
     if (!mention) return;
@@ -7438,7 +8150,11 @@ function PromptComposer({
   }
 
   async function submitComposer() {
-    if (runtimeState.running || runtimeWarning) return;
+    if (runtimeState.running) {
+      onStop();
+      return;
+    }
+    if (runtimeWarning) return;
     const nextDraft = extractDraftFromEditor();
     onDraftChange(nextDraft);
     onUserTyping();
@@ -7459,6 +8175,7 @@ function PromptComposer({
       return;
     }
     if (!mention && event.key === "Enter" && !event.shiftKey) {
+      if (runtimeState.running) return;
       event.preventDefault();
       submitComposer();
       return;
@@ -7828,7 +8545,7 @@ function PromptComposer({
           >
             <Plus size={16} />
           </button>
-          {attachPickerOpen && (
+          {attachPickerOpen && createPortal(
             <AttachContentDropdown
               menuRef={attachMenuRef}
               style={
@@ -7862,7 +8579,8 @@ function PromptComposer({
               onToggleReference={toggleAttachReference}
               onAddFiles={addAttachments}
               onRemoveAttachment={removeAttachment}
-            />
+            />,
+            document.body
           )}
           <div className="linked-reference-anchor">
             <button
@@ -7887,7 +8605,7 @@ function PromptComposer({
                 <em>{draft.links.length + attachedReferences.length}</em>
               )}
             </button>
-            {referencePickerOpen && (
+            {referencePickerOpen && createPortal(
               <LinkedReferenceDropdown
                 menuRef={referenceMenuRef}
                 style={
@@ -7922,23 +8640,69 @@ function PromptComposer({
                   setReferenceOpenError(null);
                 }}
                 onRemove={removeLinkedReference}
-              />
+              />,
+              document.body
             )}
           </div>
           <span>Type # to insert Loom references inline.</span>
-          <select
-            className="model-picker-select"
-            value={selectedModelId}
-            onChange={(event) => setMainModel(event.target.value)}
+          <button
+            ref={modelButtonRef}
+            type="button"
+            className="model-picker-button"
+            onClick={() => setModelPickerOpen((current) => !current)}
+            aria-haspopup="listbox"
+            aria-expanded={modelPickerOpen}
             aria-label="Select model"
             title={`Main model: ${mainModel.name}`}
           >
-            {selectableModels.map((model) => (
-              <option key={model.id} value={model.id}>
-                {model.name}
-              </option>
-            ))}
-          </select>
+            <span>{mainModel.name}</span>
+            <ChevronDown size={15} />
+          </button>
+          {modelPickerOpen && createPortal(
+            <div
+              ref={modelMenuRef}
+              className="model-picker-menu"
+              role="listbox"
+              aria-label="Select model"
+              style={
+                modelPopoverStyle
+                  ? {
+                      left: modelPopoverStyle.left,
+                      top: modelPopoverStyle.top,
+                      minWidth: modelPopoverStyle.minWidth,
+                      visibility: "visible",
+                    }
+                  : {
+                      left: 0,
+                      top: 0,
+                      minWidth: 220,
+                      visibility: "hidden",
+                    }
+              }
+            >
+              {selectableModels.map((model) => {
+                const selected = model.id === selectedModelId;
+                return (
+                  <button
+                    key={model.id}
+                    type="button"
+                    role="option"
+                    aria-selected={selected}
+                    className={selected ? "selected" : ""}
+                    onClick={() => {
+                      setMainModel(model.id);
+                      setModelPickerOpen(false);
+                      setModelPopoverStyle(null);
+                    }}
+                  >
+                    {selected ? <Check size={15} /> : <span aria-hidden="true" />}
+                    <span>{model.name}</span>
+                  </button>
+                );
+              })}
+            </div>,
+            document.body
+          )}
           <button
             className="composer-icon-action"
             aria-label="Voice input"
@@ -7948,12 +8712,12 @@ function PromptComposer({
           </button>
           <button
             className="send-button"
-            aria-label="Send"
+            aria-label={runtimeState.running ? "Stop response" : "Send"}
             onClick={submitComposer}
-            disabled={runtimeState.running || Boolean(runtimeWarning)}
-            title={runtimeWarning ?? "Send"}
+            disabled={!runtimeState.running && Boolean(runtimeWarning)}
+            title={runtimeState.running ? "Stop response" : runtimeWarning ?? "Send"}
           >
-            <ArrowUp size={16} />
+            {runtimeState.running ? <Square size={13} fill="currentColor" /> : <ArrowUp size={16} />}
           </button>
         </div>
         {(runtimeWarning || runtimeState.message) && (
@@ -8272,7 +9036,13 @@ function AttachContentDropdown({
   }
 
   return (
-    <div ref={menuRef} className="attach-content-dropdown" style={style} role="dialog">
+    <div
+      ref={menuRef}
+      className="attach-content-dropdown"
+      style={style}
+      role="dialog"
+      aria-label="Attach content"
+    >
       <div className="attach-content-header">
         <strong>Attach content</strong>
         <span>Add Loom references or files to your prompt.</span>

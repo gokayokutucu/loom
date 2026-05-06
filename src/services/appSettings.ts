@@ -6,7 +6,7 @@ const APP_SETTINGS_KEY = "loom-ai-app-settings-v1";
 export type WeftOpenBehavior = "adaptive" | "split-when-possible" | "always-full";
 export type AppFontSize = "very-small" | "small" | "medium" | "large" | "very-large";
 export type AppLanguage = "system" | "en" | "tr" | "el";
-export type AppTheme = "dark" | "light" | "system";
+export type AppTheme = "dark" | "light" | "solarized-light" | "system";
 
 export interface NotificationSettings {
   responseComplete: boolean;
@@ -101,7 +101,7 @@ function normalizeLanguage(value: unknown): AppLanguage {
 }
 
 function normalizeTheme(value: unknown): AppTheme {
-  if (value === "light" || value === "system") return value;
+  if (value === "light" || value === "solarized-light" || value === "system") return value;
   return "dark";
 }
 

@@ -591,13 +591,14 @@ export function AIProviderSettingsModal({
           options: [
             { value: "dark", label: "Dark" },
             { value: "light", label: "Light" },
+            { value: "solarized-light", label: "Solarized Light" },
             { value: "system", label: "System" },
           ],
           onChange: (theme) => updateAppSettings({ ...appSettings, theme }),
         })}
         <div className="settings-placeholder">
           <strong>Theme presets</strong>
-          <span>Graphite and Solar Dark are scaffolded for future theme switching.</span>
+          <span>Theme preferences are stored locally with the current Loom profile.</span>
         </div>
       </section>
     );

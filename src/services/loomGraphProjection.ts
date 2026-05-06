@@ -129,28 +129,65 @@ export function buildLoomGraphProjection({
   const nodes: LoomGraphProjectionNode[] = [];
   const edges: LoomGraphProjectionEdge[] = [];
   const visitedLooms = new Set<string>();
-  let nextBranchLane = 1;
+  const occupiedSlots = new Set<string>();
   let firstNodeId: string | undefined;
   let lastNodeId: string | undefined;
   let focusedNodeId: string | undefined;
 
-  const allocateBranchLane = () => {
-    const lane =
-      nextBranchLane % 2 === 1
-        ? Math.ceil(nextBranchLane / 2)
-        : -nextBranchLane / 2;
-    nextBranchLane += 1;
-    return lane;
+  const branchLaneFor = (
+    parentLane: number,
+    siblingIndex: number,
+    originResponseIndex: number
+  ) => {
+    const distance = Math.floor(siblingIndex / 2) + 1;
+    const outwardDirection =
+      parentLane < 0 ? -1 : parentLane > 0 ? 1 : originResponseIndex % 2 === 0 ? -1 : 1;
+    const direction = siblingIndex % 2 === 0 ? outwardDirection : -outwardDirection;
+    return parentLane + direction * distance;
+  };
+
+  const slotKey = (lane: number, depth: number) => `${lane}:${depth}`;
+
+  const pathSlotsAreFree = (lane: number, depth: number, responseCount: number) => {
+    for (let offset = 0; offset <= responseCount; offset += 1) {
+      if (occupiedSlots.has(slotKey(lane, depth + offset))) return false;
+    }
+    return true;
+  };
+
+  const nearestOpenLane = (
+    preferredLane: number,
+    depth: number,
+    responseCount: number
+  ) => {
+    if (pathSlotsAreFree(preferredLane, depth, responseCount)) return preferredLane;
+    const outwardDirection = preferredLane < 0 ? -1 : 1;
+    for (let offset = 1; offset < 24; offset += 1) {
+      const outwardLane = preferredLane + outwardDirection * offset;
+      if (pathSlotsAreFree(outwardLane, depth, responseCount)) return outwardLane;
+      const inwardLane = preferredLane - outwardDirection * offset;
+      if (pathSlotsAreFree(inwardLane, depth, responseCount)) return inwardLane;
+    }
+    return preferredLane;
+  };
+
+  const reservePathSlots = (lane: number, depth: number, responseCount: number) => {
+    for (let offset = 0; offset <= responseCount; offset += 1) {
+      occupiedSlots.add(slotKey(lane, depth + offset));
+    }
   };
 
   const addLoomPath = (
     loom: Conversation,
-    lane: number,
+    preferredLane: number,
     depth: number,
     parentNodeId?: string
   ) => {
     if (visitedLooms.has(loom.id)) return;
     visitedLooms.add(loom.id);
+    const responses = responsesByConversation[loom.id] ?? [];
+    const lane = nearestOpenLane(preferredLane, depth, responses.length);
+    reservePathSlots(lane, depth, responses.length);
 
     const rootNodeId = loomGraphRootNodeId(loom.id);
     const x = lane === 0 ? ROOT_X : lane * LANE_WIDTH;
@@ -185,7 +222,6 @@ export function buildLoomGraphProjection({
       });
     }
 
-    const responses = responsesByConversation[loom.id] ?? [];
     let previousNodeId = rootNodeId;
     responses.forEach((response, index) => {
       const nodeId = responseGraphNodeId(loom.id, response.id);
@@ -210,7 +246,7 @@ export function buildLoomGraphProjection({
         canonicalUri: responseCanonicalUri(response),
         isAddressable: responseIsAddressable(response),
         isBookmarked:
-          Boolean(response.bookmarked) ||
+          response.bookmarked ||
           bookmarkedResponseAddresses.has(response.address) ||
           (response.meta?.canonicalUri
             ? bookmarkedResponseAddresses.has(response.meta.canonicalUri)
@@ -238,12 +274,12 @@ export function buildLoomGraphProjection({
             forkRecord.parentConversationId === loom.id &&
             forkRecord.parentResponseId === response.id
         )
-        .forEach((forkRecord) => {
+        .forEach((forkRecord, siblingIndex) => {
           const childLoom = conversations.find(
             (conversation) => conversation.id === forkRecord.childConversationId
           );
           if (!childLoom) return;
-          const childLane = allocateBranchLane();
+          const childLane = branchLaneFor(lane, siblingIndex, index);
           addLoomPath(childLoom, childLane, nodeDepth + 1, nodeId);
         });
     });

@@ -68,11 +68,35 @@ export const conversations: Conversation[] = [
   },
   {
     id: "c-graph-map",
-    title: "Graph view as secondary site map",
+    title: "Weft-aware Loom graph",
     path: "loom://product/graph-view-site-map",
     folder: "Product systems",
-    summary: "Graph mode boundaries and navigation back to browser mode.",
+    summary: "Top-down Graph View behavior, Weft branches, and continuation flow.",
     iconKey: "network",
+  },
+  {
+    id: "c-graph-spacing",
+    title: "Graph spacing and edge labels",
+    path: "loom://product/graph-view-site-map/weft/spacing",
+    folder: "Product systems",
+    summary: "Readable prompt labels, branch spacing, and node hierarchy in Graph View.",
+    iconKey: "network",
+  },
+  {
+    id: "c-graph-continuation",
+    title: "Graph continuation composer behavior",
+    path: "loom://product/graph-view-site-map/weft/continuation",
+    folder: "Product systems",
+    summary: "Continuing the active Loom from the latest Response inside Graph View.",
+    iconKey: "terminal",
+  },
+  {
+    id: "c-graph-continuation-errors",
+    title: "Graph continuation error states",
+    path: "loom://product/graph-view-site-map/weft/continuation/errors",
+    folder: "Product systems",
+    summary: "Runtime failure, draft preservation, and focused graph recovery.",
+    iconKey: "shield",
   },
   {
     id: "c-browser-shell",
@@ -322,22 +346,180 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
   "c-graph-map": [
     {
       id: "r-site-map",
-      title: "Graph view is a secondary site map",
+      title: "Graph View starts as a readable Loom map",
       address: "loom://product/graph-view-site-map/loom/site-map/r-site-map",
-      question: "What is Graph View for?",
+      question: "What should the default Graph View demonstrate?",
       answer: [
-        "Graph View should help users inspect relationships and return to browser mode. It is not the primary work surface.",
+        "The default graph should immediately explain the Loom mental model: a root Loom at the top, Responses flowing downward, and Weft branches splitting sideways without breaking hierarchy. It should feel like a browser site map for an AI object, not a decorative mind map.",
+        "The first screen should include enough real structure to test scanning: bookmarked Responses, linked answers from other Looms, at least two Weft branches, and one Weft that itself has a Weft. That gives the renderer realistic topology without changing the canonical graph model.",
+        "A useful demo graph also makes product rules visible. Continuing the Loom should append below the latest Response, Ask from a node should stay contextual, and Open should still navigate back to the normal Loom surface.",
+      ],
+      suggestedLinks: [
+        {
+          id: "s-address-bar-from-graph",
+          type: "response",
+          title: "Address Bar as local AI web navigator",
+          path: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
+          badge: "Suggested",
+        },
+      ],
+      bookmarkedLinks: [
+        {
+          id: "p-inline-reference-from-graph",
+          type: "response",
+          title: "Hypertext composer beats copy-paste",
+          path: "loom://loom-ai/navigation-architecture/loom/composer/r-inline-references",
+          badge: "Linked",
+        },
+      ],
+      bookmarked: true,
+    },
+    {
+      id: "r-evidence-map",
+      title: "Linked Responses preserve graph provenance",
+      address: "loom://product/graph-view-site-map/loom/evidence/r-evidence-map",
+      question: "How should Graph View show evidence from other Looms?",
+      answer: [
+        "Graph View should let a Response carry links to useful answers from other Looms without cloning those answers. A link to research synthesis, citation provenance, or browser navigation remains a Reference usage; the target Response keeps its own address and identity.",
+        "This matters for provenance. If the graph demo includes links from the Graph View Loom to the research and navigation Looms, users can see that composition works across Looms while the active top-down path remains uncluttered.",
+        "The Link action should still feel lightweight: it attaches a prior Response to a prompt or answer as reusable context, then the graph can project that relationship without pretending the linked Response was written in this Loom.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [
+        {
+          id: "p-research-durable-from-graph",
+          type: "response",
+          title: "Research answers need durable destinations",
+          path: "loom://research/synthesis-workflow/loom/revisitability/r-synthesis",
+          badge: "Linked",
+        },
+        {
+          id: "p-citation-provenance-from-graph",
+          type: "response",
+          title: "Selected text becomes a reusable reference",
+          path: "loom://research/citation-provenance-review/loom/selection/r-provenance",
+          badge: "Linked",
+        },
+      ],
+    },
+    {
+      id: "r-graph-continuation",
+      title: "Continue Loom appends below the latest Response",
+      address: "loom://product/graph-view-site-map/loom/continuation/r-graph-continuation",
+      question: "How should normal continuation work inside Graph View?",
+      answer: [
+        "Continue Loom is normal Loom continuation, not a Quick Ask and not a Weft. The active Loom's latest Response is focused near the top of the graph, the floating composer collects the next prompt, and the Main Model answer is appended to the same Loom.",
+        "After submit, the projection recomputes from Loom state. The new Response appears below the previous latest Response, the edge label carries the prompt, and focus moves to the newly created Response using the same top-centered positioning.",
+        "The behavior should be chainable: a second continuation starts from the new latest Response, while existing Weft branches remain visible as sideways/downward context.",
+      ],
+      suggestedLinks: [
+        {
+          id: "s-shell-shortcuts-from-graph",
+          type: "response",
+          title: "Browser shell keyboard shortcuts",
+          path: "loom://product/browser-shell-keyboard-navigation/loom/shortcuts/r-shell-shortcuts",
+          badge: "Suggested",
+        },
+      ],
+      bookmarkedLinks: [],
+      bookmarked: true,
+    },
+    {
+      id: "r-graph-focus",
+      title: "Focused graph positioning keeps work oriented",
+      address: "loom://product/graph-view-site-map/loom/focus/r-graph-focus",
+      question: "Where should Graph View focus after continuation?",
+      answer: [
+        "The focused Response should land near the top edge of the graph viewport with equal space left and right. That makes the previous path feel above the user and leaves room below for the next continuation or Weft branch.",
+        "This is a product-level projection rule. React Flow renders the graph, but Loom projection owns hierarchy, selected node identity, and the deterministic viewport target.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [
+        {
+          id: "p-history-menu-from-graph",
+          type: "response",
+          title: "Right-click history menus build confidence",
+          path: "loom://product/browser-shell-keyboard-navigation/loom/history-menu/r-history-menu",
+          badge: "Linked",
+        },
+      ],
+    },
+  ],
+  "c-graph-spacing": [
+    {
+      id: "r-spacing-rules",
+      title: "Spacing makes prompt labels readable",
+      address: "loom://product/graph-view-site-map/weft/spacing/r-spacing-rules",
+      question: "Where should prompt labels sit on graph edges?",
+      answer: [
+        "Prompt labels should sit on edges with enough distance from source and target cards. The graph needs breathing room between source Response, question label, and target Response so the user can read the path without mistaking labels for node content.",
+        "Weft branches should split sideways but continue downward. Orthogonal edges help preserve the top-down mental model because no parent-to-child connection appears to travel upward.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [
+        {
+          id: "p-bookmark-panel-from-spacing",
+          type: "response",
+          title: "Bookmark panel as saved destinations",
+          path: "loom://product/bookmark-interaction-polish/loom/panel/r-bookmark-panel",
+          badge: "Linked",
+        },
+      ],
+    },
+    {
+      id: "r-label-backgrounds",
+      title: "Question labels need their own surface",
+      address: "loom://product/graph-view-site-map/weft/spacing/r-label-backgrounds",
+      question: "How should long edge questions remain readable?",
+      answer: [
+        "Long questions should wrap inside a compact label with a readable background. The label should not overlap handles or touch Response cards, even when the branch edge runs horizontally before turning downward.",
       ],
       suggestedLinks: [],
       bookmarkedLinks: [],
     },
+  ],
+  "c-graph-continuation": [
     {
-      id: "r-evidence-map",
-      title: "Evidence map can reveal provenance clusters",
-      address: "loom://product/graph-view-site-map/loom/evidence/r-evidence-map",
-      question: "How should evidence clusters appear?",
+      id: "r-continuation-main-route",
+      title: "Graph continuation uses the Main Model route",
+      address: "loom://product/graph-view-site-map/weft/continuation/r-continuation-main-route",
+      question: "Which model route should Graph continuation use?",
       answer: [
-        "Evidence clusters should remain readable as a site map, highlighting source relationships without turning the main app into a mind map.",
+        "Graph continuation should call the same Main Model append path as the normal Loom composer. The floating graph composer is a projection-specific entry point, but it should not create a second business system for Responses.",
+        "The result is a normal Response in the active Loom. That means Address Bar navigation, Back/Forward behavior, bookmarks, links, metadata, code display, and future persistence all see the same object shape.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [
+        {
+          id: "p-composer-rules-from-continuation",
+          type: "response",
+          title: "Hypertext composer beats copy-paste",
+          path: "loom://loom-ai/navigation-architecture/loom/composer/r-inline-references",
+          badge: "Linked",
+        },
+      ],
+    },
+    {
+      id: "r-continuation-draft",
+      title: "Floating drafts should stay scoped to the Graph View",
+      address: "loom://product/graph-view-site-map/weft/continuation/r-continuation-draft",
+      question: "How should draft text behave if the popup closes?",
+      answer: [
+        "For the V1 graph composer, closing the popup should not navigate away or mutate the Loom. If a later version stores drafts, it should follow the existing Loom-scoped composer model instead of introducing a global draft bucket.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+      bookmarked: true,
+    },
+  ],
+  "c-graph-continuation-errors": [
+    {
+      id: "r-runtime-unavailable",
+      title: "Runtime errors keep the graph composer open",
+      address: "loom://product/graph-view-site-map/weft/continuation/errors/r-runtime-unavailable",
+      question: "What happens if the Main Model runtime is unavailable?",
+      answer: [
+        "The graph composer should keep the draft visible and report the existing model readiness error. The user remains in Graph View, with the focused Response still selected, so they can retry after switching provider settings or enabling Demo Responses.",
       ],
       suggestedLinks: [],
       bookmarkedLinks: [],
@@ -537,6 +719,24 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
 };
 
 export const bookmarks: BookmarkItem[] = [
+  {
+    id: "b-graph-default",
+    type: "conversation",
+    title: "Weft-aware Loom graph",
+    editableTitle: "Default Graph View demo",
+    path: "loom://product/graph-view-site-map",
+    badge: "Loom",
+    lastUsed: "Now",
+  },
+  {
+    id: "b-graph-continuation",
+    type: "response",
+    title: "Continue Loom appends below the latest Response",
+    editableTitle: "Graph continuation rule",
+    path: "loom://product/graph-view-site-map/loom/continuation/r-graph-continuation",
+    badge: "Response",
+    lastUsed: "Used today",
+  },
   {
     id: "b-address",
     type: "response",

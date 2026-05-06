@@ -4,8 +4,10 @@ import {
   GitFork,
   Link2,
   MessageSquare,
+  Plus,
   Workflow,
 } from "lucide-react";
+import type { CSSProperties } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import type { LoomGraphProjectionNode } from "../../services/loomGraphProjection";
 import type { ResponseItem } from "../../types";
@@ -17,6 +19,12 @@ export interface LoomGraphNodeData extends Record<string, unknown> {
   onBookmark: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
   onLink: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
   onWeft: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
+  onAsk: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
+  onContinue: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
+  hasExistingWeft?: boolean;
+  isTerminalResponse?: boolean;
+  continuationOpen?: boolean;
+  viewportZoom?: number;
 }
 
 export type LoomGraphFlowNode = Node<LoomGraphNodeData, "loomGraphNode">;
@@ -41,19 +49,51 @@ function nodeKindLabel(node: LoomGraphProjectionNode) {
 }
 
 export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
-  const { projectionNode, response, onOpen, onBookmark, onLink, onWeft } = data;
+  const {
+    projectionNode,
+    response,
+    onOpen,
+    onBookmark,
+    onLink,
+    onWeft,
+    onAsk,
+    onContinue,
+    hasExistingWeft,
+    isTerminalResponse,
+    continuationOpen,
+    viewportZoom = 1,
+  } = data;
   const canActOnResponse = projectionNode.kind === "response" && Boolean(response);
+  const showContinuationButton =
+    canActOnResponse && isTerminalResponse && !continuationOpen;
 
   return (
     <article className={nodeClassName(projectionNode)}>
-      <Handle type="target" position={Position.Top} className="loom-graph-handle" />
+      <Handle
+        type="target"
+        position={Position.Top}
+        className={
+          projectionNode.kind === "root"
+            ? "loom-graph-handle loom-graph-handle--hidden"
+            : "loom-graph-handle"
+        }
+        isConnectable={false}
+      />
       <div className="loom-graph-node-header">
         <span className="loom-graph-node-kind">
           {projectionNode.kind === "weft" ? <Workflow size={13} /> : <MessageSquare size={13} />}
           {nodeKindLabel(projectionNode)}
         </span>
-        {projectionNode.code && (
-          <span className="loom-graph-code">{projectionNode.code}</span>
+        {canActOnResponse && (
+          <button
+            type="button"
+            className="loom-graph-node-open"
+            title="Open"
+            aria-label={`Open ${projectionNode.title}`}
+            onClick={() => onOpen(projectionNode, response)}
+          >
+            <ExternalLink size={13} />
+          </button>
         )}
       </div>
       <h3>{projectionNode.title}</h3>
@@ -65,42 +105,85 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
       )}
       <div className="loom-graph-node-flags" aria-label="Node metadata">
         {projectionNode.isAddressable && <span>addressable</span>}
-        {projectionNode.isBookmarked && (
-          <span>
-            <Bookmark size={11} />
-            bookmarked
-          </span>
+        {projectionNode.code && (
+          <span className="loom-graph-code">{projectionNode.code}</span>
         )}
       </div>
       {canActOnResponse && (
         <div className="loom-graph-node-actions">
-          <button type="button" onClick={() => onOpen(projectionNode, response)}>
-            <ExternalLink size={13} />
-            <span>Open</span>
-          </button>
-          <button type="button" onClick={() => onBookmark(projectionNode, response)}>
-            <Bookmark size={13} />
+          <button
+            type="button"
+            className={
+              projectionNode.isBookmarked
+                ? "loom-graph-node-bookmark is-bookmarked"
+                : "loom-graph-node-bookmark"
+            }
+            aria-pressed={projectionNode.isBookmarked}
+            aria-label={
+              projectionNode.isBookmarked
+                ? `Remove bookmark for ${projectionNode.title}`
+                : `Bookmark ${projectionNode.title}`
+            }
+            onClick={() => onBookmark(projectionNode, response)}
+          >
+            <Bookmark size={13} fill={projectionNode.isBookmarked ? "currentColor" : "none"} />
             <span>Bookmark</span>
           </button>
           <button type="button" onClick={() => onLink(projectionNode, response)}>
             <Link2 size={13} />
             <span>Link</span>
           </button>
-          <button type="button" onClick={() => onWeft(projectionNode, response)}>
+          <button
+            type="button"
+            className={hasExistingWeft ? "loom-graph-node-weft is-wefted" : "loom-graph-node-weft"}
+            aria-pressed={hasExistingWeft}
+            aria-label={
+              hasExistingWeft
+                ? `Open Weft from ${projectionNode.title}`
+                : `Start Weft from ${projectionNode.title}`
+            }
+            onClick={() => onWeft(projectionNode, response)}
+          >
             <GitFork size={13} />
             <span>Weft</span>
           </button>
         </div>
       )}
       {projectionNode.kind === "response" && projectionNode.isFocused && (
-        <div className="loom-graph-node-composer" aria-label="Focused node composer">
+        <button
+          type="button"
+          className="loom-graph-node-composer"
+          aria-label="Ask from this response"
+          onClick={() => onAsk(projectionNode, response)}
+        >
           <span>Ask from this node...</span>
-          <button type="button" disabled>
-            Soon
-          </button>
-        </div>
+        </button>
       )}
-      <Handle type="source" position={Position.Bottom} className="loom-graph-handle" />
+      <Handle
+        type="source"
+        position={Position.Bottom}
+        className="loom-graph-handle"
+        isConnectable={false}
+      />
+      {showContinuationButton && (
+        <button
+          type="button"
+          className="loom-graph-terminal-continue nodrag"
+          aria-label={`Continue from ${projectionNode.title}`}
+          title="Continue from this response"
+          style={
+            {
+              "--loom-graph-control-scale": String(1 / viewportZoom),
+            } as CSSProperties
+          }
+          onClick={(event) => {
+            event.stopPropagation();
+            onContinue(projectionNode, response);
+          }}
+        >
+          <Plus size={18} />
+        </button>
+      )}
     </article>
   );
 }

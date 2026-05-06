@@ -75,6 +75,7 @@ export interface ModelExecutionRequest {
   system?: string;
   context?: string[];
   effort?: ModelEffort;
+  signal?: AbortSignal;
 }
 
 export interface ModelExecutionResult {
@@ -275,11 +276,16 @@ export async function fetchWithTimeout(
   timeoutMs = 8000
 ) {
   const controller = new AbortController();
+  const externalSignal = init.signal;
+  if (externalSignal?.aborted) controller.abort();
+  const abortFromExternalSignal = () => controller.abort();
+  externalSignal?.addEventListener("abort", abortFromExternalSignal, { once: true });
   const timeout = window.setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(input, { ...init, signal: controller.signal });
   } finally {
     window.clearTimeout(timeout);
+    externalSignal?.removeEventListener("abort", abortFromExternalSignal);
   }
 }
 
@@ -344,6 +350,7 @@ export class OllamaProvider implements ModelProvider {
     try {
       const chatResponse = await fetchWithTimeout(`${baseUrl}/api/chat`, {
         method: "POST",
+        signal: request.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: request.modelId,
@@ -376,6 +383,7 @@ export class OllamaProvider implements ModelProvider {
 
       const generateResponse = await fetchWithTimeout(`${baseUrl}/api/generate`, {
         method: "POST",
+        signal: request.signal,
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: request.modelId,

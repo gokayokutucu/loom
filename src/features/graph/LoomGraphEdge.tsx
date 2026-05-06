@@ -15,8 +15,25 @@ export interface LoomGraphEdgeData extends Record<string, unknown> {
 
 export type LoomGraphFlowEdge = Edge<LoomGraphEdgeData, "loomGraphEdge">;
 
+const EDGE_LABEL_NODE_CLEARANCE = 56;
+
+function labelYBetweenNodes(sourceY: number, targetY: number, rawLabelY: number) {
+  const verticalSpace = targetY - sourceY;
+  if (verticalSpace <= EDGE_LABEL_NODE_CLEARANCE * 2) {
+    return sourceY + verticalSpace / 2;
+  }
+  return Math.min(
+    Math.max(rawLabelY, sourceY + EDGE_LABEL_NODE_CLEARANCE),
+    targetY - EDGE_LABEL_NODE_CLEARANCE
+  );
+}
+
 function getWeftBranchPath(sourceX: number, sourceY: number, targetX: number, targetY: number) {
-  const horizontalY = Math.min(sourceY + 26, targetY - 34);
+  const horizontalY = labelYBetweenNodes(
+    sourceY,
+    targetY,
+    sourceY + EDGE_LABEL_NODE_CLEARANCE
+  );
   const direction = targetX >= sourceX ? 1 : -1;
   const radius = Math.min(10, Math.abs(targetX - sourceX) / 3, Math.max(4, (targetY - sourceY) / 4));
   const path = [
@@ -58,7 +75,7 @@ export function LoomGraphEdge({
         });
   const labelY =
     targetY > sourceY
-      ? Math.min(Math.max(rawLabelY, sourceY + 44), targetY - 44)
+      ? labelYBetweenNodes(sourceY, targetY, rawLabelY)
       : rawLabelY;
   const className = [
     "loom-graph-edge",
@@ -75,7 +92,7 @@ export function LoomGraphEdge({
       {edgeData?.label && (
         <EdgeLabelRenderer>
           <div
-            className="loom-graph-edge-label"
+            className={`loom-graph-edge-label loom-graph-edge-label--${edgeKind}`}
             style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
           >
             {edgeData.label}

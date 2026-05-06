@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from "react";
-import { Bot, CornerDownLeft, X } from "lucide-react";
+import { useEffect, useRef } from "react";
+import { Bot, CornerDownLeft, Square, X } from "lucide-react";
 import type { ResponseItem } from "../types";
 
 export interface AskPopupState {
@@ -8,127 +8,144 @@ export interface AskPopupState {
   question: string;
   answered: boolean;
   answer?: string;
+  exchanges?: Array<{ question: string; answer: string }>;
   error?: string;
   running?: boolean;
+  sourceLoomId?: string;
 }
 
 export function AskPopup({
   state,
   onUpdate,
   onClose,
-  onBookmark,
   onLoom,
   onSubmit,
+  onStop,
 }: {
   state: AskPopupState;
   onUpdate: (state: AskPopupState) => void;
   onClose: () => void;
-  onBookmark: () => void;
   onLoom: () => void;
   onSubmit: () => void;
+  onStop: () => void;
 }) {
-  const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
-  const dragRef = useRef<{ offsetX: number; offsetY: number } | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const answerListRef = useRef<HTMLDivElement | null>(null);
+  const lastExchangeAnswer = state.exchanges?.[state.exchanges.length - 1]?.answer;
 
   useEffect(() => {
     textareaRef.current?.focus();
   }, []);
 
   useEffect(() => {
-    function handlePointerMove(event: PointerEvent) {
-      if (!dragRef.current) return;
-      const width = 460;
-      const nextX = Math.min(
-        window.innerWidth - 24,
-        Math.max(24 - width, event.clientX - dragRef.current.offsetX)
-      );
-      const nextY = Math.min(
-        window.innerHeight - 120,
-        Math.max(48, event.clientY - dragRef.current.offsetY)
-      );
-      setPosition({ x: nextX, y: nextY });
+    textareaRef.current?.focus();
+  }, [state.running, state.exchanges?.length, lastExchangeAnswer]);
+
+  useEffect(() => {
+    const answerList = answerListRef.current;
+    if (!answerList) return;
+    answerList.scrollTo({
+      top: answerList.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [state.exchanges?.length, state.answer, lastExchangeAnswer]);
+
+  useEffect(() => {
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
     }
 
-    function handlePointerUp() {
-      dragRef.current = null;
-    }
-
-    document.addEventListener("pointermove", handlePointerMove);
-    document.addEventListener("pointerup", handlePointerUp);
+    document.addEventListener("keydown", handleKeyDown);
     return () => {
-      document.removeEventListener("pointermove", handlePointerMove);
-      document.removeEventListener("pointerup", handlePointerUp);
+      document.removeEventListener("keydown", handleKeyDown);
     };
-  }, []);
+  }, [onClose]);
 
-  function startDrag(event: React.PointerEvent<HTMLDivElement>) {
-    if (event.button !== 0) return;
-    const popover = event.currentTarget.closest(".ask-popover");
-    if (!(popover instanceof HTMLElement)) return;
-    const rect = popover.getBoundingClientRect();
-    dragRef.current = {
-      offsetX: event.clientX - rect.left,
-      offsetY: event.clientY - rect.top,
-    };
-    setPosition({ x: rect.left, y: rect.top });
-  }
+  const exchanges =
+    state.exchanges ??
+    (state.answered && state.answer
+      ? [{ question: state.question, answer: state.answer }]
+      : []);
+  const hasAnswer = exchanges.length > 0;
 
   return (
-    <div
-      className="ask-popover"
-      style={
-        position
-          ? { left: position.x, top: position.y, right: "auto", bottom: "auto" }
-          : undefined
-      }
-      role="dialog"
-      aria-modal="true"
-      aria-labelledby="ask-title"
-    >
-      <div className="ask-header ask-drag-handle" onPointerDown={startDrag}>
-        <div>
-          <span>Ask</span>
-          <h2 id="ask-title">{state.response.title}</h2>
+    <div className="ask-modal-backdrop">
+      <div
+        className="ask-popover"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="ask-title"
+      >
+        <div className="ask-header">
+          <div>
+            <span>Ask</span>
+            <h2 id="ask-title">{state.response.title}</h2>
+          </div>
+          <button
+            className="icon-button"
+            tabIndex={0}
+            onClick={onClose}
+            aria-label="Close Ask"
+          >
+            <X size={16} />
+          </button>
         </div>
-        <button
-          className="icon-button"
+        <div className="ask-context" data-testid="ask-context">
+          <span>Context Response</span>
+          <blockquote>{state.selectedText}</blockquote>
+        </div>
+        {hasAnswer && (
+          <div className="ask-answer-list" data-testid="ask-answer-list" ref={answerListRef}>
+            {exchanges.map((exchange, index) => (
+              <div
+                className="ask-exchange"
+                data-testid="ask-answer"
+                key={`${exchange.question}-${index}`}
+              >
+                <div className="ask-exchange-question">
+                  <p>{exchange.question}</p>
+                </div>
+                <div className="ask-exchange-answer">
+                  <Bot size={15} />
+                  <p>{exchange.answer}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <textarea
+          ref={textareaRef}
+          value={state.question}
+          onChange={(event) => onUpdate({ ...state, question: event.target.value })}
+        onKeyDown={(event) => {
+          if (event.key === "Enter" && !event.shiftKey) {
+            if (state.running) return;
+            event.preventDefault();
+            onSubmit();
+          }
+          }}
+          placeholder="Ask a focused follow-up about this selection..."
+          aria-label="Ask question"
           tabIndex={0}
-          onPointerDown={(event) => event.stopPropagation()}
-          onClick={onClose}
-          aria-label="Close Ask"
-        >
-          <X size={16} />
-        </button>
-      </div>
-      <blockquote>{state.selectedText}</blockquote>
-      <textarea
-        ref={textareaRef}
-        value={state.question}
-        onChange={(event) => onUpdate({ ...state, question: event.target.value })}
-        placeholder="Ask a focused follow-up about this selection..."
-        aria-label="Ask question"
-        tabIndex={0}
-      />
-      {state.answered && (
-        <div className="ask-answer">
-          <Bot size={15} />
-          <p>{state.answer}</p>
-        </div>
-      )}
-      {state.error && <p className="ask-error">{state.error}</p>}
-      <div className="ask-actions">
-        <button tabIndex={0} onClick={onLoom}>Convert to Loom</button>
-        <button tabIndex={0} onClick={onBookmark}>Bookmark</button>
-        <button
+        />
+        {state.error && <p className="ask-error">{state.error}</p>}
+        <div className="ask-actions">
+          <button tabIndex={0} onClick={onLoom} disabled={!hasAnswer || state.running}>
+            Convert to Weft
+          </button>
+          <button
           className="primary"
           tabIndex={0}
-          onClick={onSubmit}
-          disabled={state.running}
+          onClick={state.running ? onStop : onSubmit}
+          disabled={!state.running && !state.question.trim()}
+          aria-label={state.running ? "Stop Ask response" : "Ask"}
         >
-          <CornerDownLeft size={15} />
+          {state.running ? <Square size={13} fill="currentColor" /> : <CornerDownLeft size={15} />}
           {state.running ? "Asking..." : "Ask"}
         </button>
+        </div>
       </div>
     </div>
   );

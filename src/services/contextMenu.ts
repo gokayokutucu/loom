@@ -74,8 +74,6 @@ export function getContextMenuItems(payload: ContextMenuPayload): ContextMenuIte
     case "response":
       return [
         { id: "ask", label: "Ask" },
-        { id: "link", label: "Link" },
-        { id: "bookmark", label: "Bookmark" },
         { id: "copy-address", label: "Copy Loom Address" },
         { id: "copy-markdown", label: "Copy as Loom Markdown" },
         {

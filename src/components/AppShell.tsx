@@ -2,6 +2,7 @@ import type { ReactNode } from "react";
 
 export function AppShell({
   sidebarCollapsed,
+  theme,
   children,
   topBar,
   sidebar,
@@ -10,6 +11,7 @@ export function AppShell({
   overlays,
 }: {
   sidebarCollapsed?: boolean;
+  theme?: string;
   children?: ReactNode;
   topBar?: ReactNode;
   sidebar?: ReactNode;
@@ -17,16 +19,16 @@ export function AppShell({
   rightPanel?: ReactNode;
   overlays?: ReactNode;
 }) {
+  const className = [theme, "app-shell", sidebarCollapsed ? "sidebar-collapsed" : ""]
+    .filter(Boolean)
+    .join(" ");
+
   if (children) {
-    return (
-      <div className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
-        {children}
-      </div>
-    );
+    return <div className={className}>{children}</div>;
   }
 
   return (
-    <div className={sidebarCollapsed ? "app-shell sidebar-collapsed" : "app-shell"}>
+    <div className={className}>
       {topBar}
       <div className="app-body">
         {sidebar}

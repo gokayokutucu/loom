@@ -99,10 +99,128 @@ test.describe("Loom graph projection hierarchy", () => {
     });
   });
 
+  test("places Weft branches as a balanced downward tree around their origin", () => {
+    const forkRecords: LoomForkRecord[] = [
+      {
+        id: "fork-root-left",
+        parentConversationId: "root",
+        parentResponseId: "r1",
+        childConversationId: "left",
+        title: "Left Weft",
+      },
+      {
+        id: "fork-root-right",
+        parentConversationId: "root",
+        parentResponseId: "r2",
+        childConversationId: "right",
+        title: "Right Weft",
+      },
+      {
+        id: "fork-left-child",
+        parentConversationId: "left",
+        parentResponseId: "l1",
+        childConversationId: "left-child",
+        title: "Nested Weft",
+      },
+    ];
+    const projection = buildLoomGraphProjection({
+      conversations: [
+        loom("root", "Root Loom"),
+        loom("left", "Left Weft"),
+        loom("right", "Right Weft"),
+        loom("left-child", "Nested Weft"),
+      ],
+      responsesByConversation: {
+        root: [
+          response("r1", "First origin"),
+          response("r2", "Second origin"),
+          response("r3", "Trunk continuation"),
+        ],
+        left: [response("l1", "Left branch response")],
+        right: [response("rr1", "Right branch response")],
+        "left-child": [response("lc1", "Nested branch response")],
+      },
+      forkRecords,
+      activeLoomId: "root",
+      bookmarkedResponseAddresses: new Set<string>(),
+    });
+
+    const rootFirst = projection.nodes.find((node) => node.id === responseGraphNodeId("root", "r1"));
+    const rootSecond = projection.nodes.find((node) => node.id === responseGraphNodeId("root", "r2"));
+    const leftRoot = projection.nodes.find((node) => node.id === loomGraphRootNodeId("left"));
+    const rightRoot = projection.nodes.find((node) => node.id === loomGraphRootNodeId("right"));
+    const nestedRoot = projection.nodes.find((node) => node.id === loomGraphRootNodeId("left-child"));
+
+    expect(leftRoot?.position.x).toBeLessThan(rootFirst?.position.x ?? 0);
+    expect(rightRoot?.position.x).toBeGreaterThan(rootSecond?.position.x ?? 0);
+    expect(nestedRoot?.position.x).toBeLessThan(leftRoot?.position.x ?? 0);
+    expect(leftRoot?.position.y).toBeGreaterThan(rootFirst?.position.y ?? -1);
+    expect(rightRoot?.position.y).toBeGreaterThan(rootSecond?.position.y ?? -1);
+    expect(nestedRoot?.position.y).toBeGreaterThan(leftRoot?.position.y ?? -1);
+  });
+
+  test("moves later branches to an open lane when a lane-depth slot is occupied", () => {
+    const forkRecords: LoomForkRecord[] = [
+      {
+        id: "fork-root-first",
+        parentConversationId: "root",
+        parentResponseId: "r1",
+        childConversationId: "first-branch",
+        title: "First branch",
+      },
+      {
+        id: "fork-root-later",
+        parentConversationId: "root",
+        parentResponseId: "r3",
+        childConversationId: "later-branch",
+        title: "Later branch",
+      },
+    ];
+    const projection = buildLoomGraphProjection({
+      conversations: [
+        loom("root", "Root Loom"),
+        loom("first-branch", "First branch"),
+        loom("later-branch", "Later branch"),
+      ],
+      responsesByConversation: {
+        root: [
+          response("r1", "First origin"),
+          response("r2", "Middle continuation"),
+          response("r3", "Later origin"),
+          response("r4", "Final continuation"),
+        ],
+        "first-branch": [
+          response("fb1", "First branch response"),
+          response("fb2", "Question labels need their own surface"),
+        ],
+        "later-branch": [response("lb1", "Graph continuation composer behavior")],
+      },
+      forkRecords,
+      activeLoomId: "root",
+      bookmarkedResponseAddresses: new Set<string>(),
+    });
+
+    const firstBranchSecond = projection.nodes.find((node) =>
+      node.id === responseGraphNodeId("first-branch", "fb2")
+    );
+    const laterBranchRoot = projection.nodes.find((node) =>
+      node.id === loomGraphRootNodeId("later-branch")
+    );
+    const occupiedPositions = new Set<string>();
+
+    projection.nodes.forEach((node) => {
+      const key = `${node.position.x}:${node.position.y}`;
+      expect(occupiedPositions.has(key)).toBe(false);
+      occupiedPositions.add(key);
+    });
+    expect(laterBranchRoot?.position.y).toBe(firstBranchSecond?.position.y);
+    expect(laterBranchRoot?.position.x).not.toBe(firstBranchSecond?.position.x);
+  });
+
   test("configures readable default zoom and hides React Flow attribution by prop", () => {
     const graphViewSource = readFileSync("src/features/graph/GraphView.tsx", "utf8");
 
-    expect(graphViewSource).toContain("const GRAPH_DEFAULT_ZOOM = 0.96");
+    expect(graphViewSource).toContain("const GRAPH_DEFAULT_ZOOM = 1.08");
     expect(graphViewSource).toContain("defaultViewport={{ x: 0, y: 0, zoom: GRAPH_DEFAULT_ZOOM }}");
     expect(graphViewSource).toContain("proOptions={{ hideAttribution: true }}");
   });
