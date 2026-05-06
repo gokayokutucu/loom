@@ -217,6 +217,14 @@ export interface Conversation {
   unread?: boolean;
 }
 
+export interface LoomForkRecord {
+  id: string;
+  parentConversationId: string;
+  parentResponseId: string;
+  childConversationId: string;
+  title: string;
+}
+
 export interface LoomLink {
   id: string;
   type: LoomObjectType;
@@ -262,6 +270,7 @@ export interface TabGroup {
   name: string;
   conversationIds: string[];
   collapsed?: boolean;
+  color?: string;
 }
 
 export interface AddressSuggestion extends LoomLink {

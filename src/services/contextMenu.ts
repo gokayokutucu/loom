@@ -15,6 +15,7 @@ export type ContextMenuAction =
   | "unpin"
   | "rename"
   | "change-icon"
+  | "set-group-color"
   | "bookmark"
   | "copy-address"
   | "copy-markdown"
@@ -26,6 +27,7 @@ export type ContextMenuAction =
   | "open-graph"
   | "insert"
   | "remove"
+  | "move-to-group"
   | "new-tab-group"
   | "move-group-window"
   | "ungroup"
@@ -39,6 +41,8 @@ export interface ContextMenuItem {
   disabled?: boolean;
   separatorBefore?: boolean;
   detail?: string;
+  targetGroupId?: string;
+  children?: ContextMenuItem[];
 }
 
 export type ContextMenuPayload =
@@ -100,6 +104,7 @@ export function getContextMenuItems(payload: ContextMenuPayload): ContextMenuIte
     case "group":
       return [
         { id: "rename", label: "Edit / Rename Group" },
+        { id: "set-group-color", label: "Set Color..." },
         { id: "new-tab-group", label: "New Tab in Group" },
         {
           id: "move-group-window",

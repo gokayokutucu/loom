@@ -112,6 +112,12 @@ import {
   type AppSettings,
 } from "./services/appSettings";
 import {
+  downloadTextFile,
+  exportLoomAsCsv,
+  exportLoomAsMarkdown,
+  safeExportFilename,
+} from "./services/exportService";
+import {
   applyMetadataRefinement,
   buildRuntimeMetadataRecord,
   createAddressableLoomMetadata,
@@ -163,12 +169,17 @@ import { ChangeIconPopover } from "./components/ChangeIconPopover";
 import { ContextMenu, type ContextMenuState } from "./components/ContextMenu";
 import { ConversationView } from "./components/ConversationView";
 import { DeleteConversationDialog } from "./components/DeleteConversationDialog";
+import { GroupColorPopover } from "./components/GroupColorPopover";
 import { GraphView } from "./components/GraphView";
 import { HistoryView } from "./components/HistoryView";
 import { ReferencesListBox } from "./components/ReferencesListBox";
 import { SelectionPopover } from "./components/SelectionPopover";
 import { TopBar } from "./components/TopBar";
-import { ToastNotification } from "./components/ToastNotification";
+import {
+  ToastNotification,
+  type ToastNotificationColor,
+  type ToastNotificationIcon,
+} from "./components/ToastNotification";
 import { WeftView } from "./components/WeftView";
 import type {
   AddressSuggestion,
@@ -176,6 +187,7 @@ import type {
   Conversation,
   HistoryEntry,
   LoomLink,
+  LoomForkRecord,
   LoomMetadata,
   LoomNavigationDestination,
   LoomObjectKind,
@@ -194,6 +206,12 @@ const iconForType: Record<LoomObjectType, typeof Globe2> = {
   semantic: Sparkles,
   recent: Clock3,
 };
+
+const POPOVER_HINT_AUTO_CLOSE_MS = 2000;
+const REFERENCE_ADDRESS_HINT_DELAY_MS = 2000;
+const GROWTH_MILESTONES = [5, 10, 25] as const;
+const GROWTH_HIGHLIGHT_MS = 1800;
+const MILESTONE_TOAST_DELAY_MS = 2300;
 
 interface ConversationIconOption {
   key: string;
@@ -252,13 +270,7 @@ interface SelectionReferenceState {
   link: LoomLink;
 }
 
-interface ForkRecord {
-  id: string;
-  parentConversationId: string;
-  parentResponseId: string;
-  childConversationId: string;
-  title: string;
-}
+type ForkRecord = LoomForkRecord;
 
 type LineageNodeType = "conversation" | "loom" | "response" | "quick";
 
@@ -267,6 +279,9 @@ interface LineageNode {
   type: LineageNodeType;
   title: string;
   path: string;
+  canonicalUri?: string;
+  referenceCode?: string;
+  meta?: LoomMetadata;
   subtitle: string;
   conversationId: string;
   responseId?: string;
@@ -837,6 +852,7 @@ function App() {
   const composerFocusRef = useRef<(() => void) | null>(null);
   const pendingScrollPathRef = useRef<string | null>(null);
   const pendingScrollDestinationRef = useRef<LoomNavigationDestination | null>(null);
+  const pendingScrollHighlightRef = useRef(false);
   const linkCopyToastTimerRef = useRef<number | null>(null);
   const starterPromptRequestIdRef = useRef(0);
   const [metadataSeed] = useState<Record<string, LoomMetadata>>(() =>
@@ -870,6 +886,7 @@ function App() {
     makeInitialTabGroups(seedConversations)
   );
   const [renamingGroupId, setRenamingGroupId] = useState<string | null>(null);
+  const [groupColorTarget, setGroupColorTarget] = useState<TabGroup | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [sidebarFlyoutOpen, setSidebarFlyoutOpen] = useState(false);
   const [sidebarFlyoutDragActive, setSidebarFlyoutDragActive] = useState(false);
@@ -940,7 +957,20 @@ function App() {
     Record<string, string>
   >({});
   const [linkCopyToastVisible, setLinkCopyToastVisible] = useState(false);
+  const [toastTitle, setToastTitle] = useState<string | undefined>(undefined);
   const [copyToastMessage, setCopyToastMessage] = useState("Link is copied");
+  const [toastIcon, setToastIcon] =
+    useState<ToastNotificationIcon | undefined>(undefined);
+  const [toastColor, setToastColor] =
+    useState<ToastNotificationColor>("neutral");
+  const [recentBookmarkFeedbackId, setRecentBookmarkFeedbackId] =
+    useState<string | null>(null);
+  const [bookmarksNavPulse, setBookmarksNavPulse] = useState(false);
+  const [recentWeftFeedbackLoomId, setRecentWeftFeedbackLoomId] =
+    useState<string | null>(null);
+  const [recentResponseFeedbackId, setRecentResponseFeedbackId] =
+    useState<string | null>(null);
+  const growthMilestoneToastTimerRef = useRef<number | null>(null);
 
   const activeConversation =
     activeConversationId === draftConversation?.id
@@ -961,9 +991,8 @@ function App() {
     navigationStack[navigationIndex]?.navigationDestination ??
     initialResolvedNavigationDestination;
   const sidebarFlyoutVisible = sidebarCollapsed && sidebarFlyoutOpen;
-  const utilityPanelOpen = activePanel !== null || graphMode;
+  const utilityPanelOpen = activePanel !== null;
   const dockedUtilityOverlay = rightDockPinned && utilityPanelOpen;
-  const dockedGraphOverlay = rightDockPinned && graphMode;
 
   const activeWeftOrigin = getWeftOrigin(activeConversationId);
   const originConversation = activeWeftOrigin
@@ -989,6 +1018,15 @@ function App() {
     focusedSplitConversation && focusedSplitConversation.id !== draftConversation?.id
       ? conversationResponses[focusedSplitConversation.id] ?? []
       : [];
+  const bookmarkedResponseAddresses = useMemo(
+    () =>
+      new Set(
+        bookmarks.flatMap((bookmark) =>
+          bookmark.canonicalUri ? [bookmark.path, bookmark.canonicalUri] : [bookmark.path]
+        )
+      ),
+    [bookmarks]
+  );
 
   const activeDraftKey = activeConversation?.id ?? EPHEMERAL_DRAFT_ID;
   const activeComposerDraft = composerDrafts[activeDraftKey] ?? EMPTY_COMPOSER_DRAFT;
@@ -1065,6 +1103,17 @@ function App() {
     responseTitleOverrides,
     showWeftSplit,
   ]);
+
+  const currentLoomExportTarget = useMemo(() => {
+    if (!focusedSplitConversation) return null;
+    return {
+      loom: focusedSplitConversation,
+      responses: focusedSplitResponses.map((response) => ({
+        ...response,
+        title: responseTitleOverrides[response.id] ?? response.title,
+      })),
+    };
+  }, [focusedSplitConversation, focusedSplitResponses, responseTitleOverrides]);
 
   useEffect(() => {
     if (showWeftSplit && !wasWeftSplitVisibleRef.current) {
@@ -1235,6 +1284,9 @@ function App() {
     () => () => {
       if (linkCopyToastTimerRef.current !== null) {
         window.clearTimeout(linkCopyToastTimerRef.current);
+      }
+      if (growthMilestoneToastTimerRef.current !== null) {
+        window.clearTimeout(growthMilestoneToastTimerRef.current);
       }
     },
     []
@@ -1756,6 +1808,7 @@ function App() {
   function closeUtilityOverlay(overlay: UtilityOverlayId) {
     if (overlay === "graph") {
       setGraphMode(false);
+      return;
     } else {
       setActivePanel((current) => (current === overlay ? null : current));
     }
@@ -1763,25 +1816,20 @@ function App() {
   }
 
   function openUtilityPanel(panel: UtilityPanelId) {
-    setGraphMode(false);
     setActivePanel(panel);
   }
 
   function toggleUtilityPanel(panel: UtilityPanelId) {
     const closingActivePanel = !rightDockPinned && activePanel === panel;
-    setGraphMode(false);
     setActivePanel(closingActivePanel ? null : panel);
   }
 
   function openGraphOverlay() {
-    setActivePanel(null);
     setGraphMode(true);
   }
 
   function toggleGraphOverlay() {
-    const closingGraphOverlay = !rightDockPinned && graphMode;
-    setActivePanel(null);
-    setGraphMode(!closingGraphOverlay);
+    setGraphMode((current) => !current);
   }
 
   function toggleRightDockPin() {
@@ -1791,7 +1839,6 @@ function App() {
   function closeUnpinnedUtilityOverlays() {
     if (rightDockPinned) return;
     setActivePanel(null);
-    setGraphMode(false);
   }
 
   function normalizeResolvedDestination(
@@ -1832,6 +1879,20 @@ function App() {
             ? "Invalid window"
             : "Broken reference",
     };
+  }
+
+  function shouldHighlightResponseFocus(
+    destination: LoomLink | AddressSuggestion | HistoryEntry,
+    navigationDestination?: LoomNavigationDestination
+  ) {
+    if (navigationDestination) {
+      return (
+        Boolean(navigationDestination.scrollTargetResponseId) &&
+        (navigationDestination.scrollMode === "exact" ||
+          navigationDestination.scrollMode === "origin")
+      );
+    }
+    return destination.type === "response";
   }
 
   function resolveNavigationDestination(
@@ -1934,6 +1995,10 @@ function App() {
     }
     pendingScrollDestinationRef.current = resolvedNavigationDestination ?? null;
     pendingScrollPathRef.current = resolvedDestination.path;
+    pendingScrollHighlightRef.current = shouldHighlightResponseFocus(
+      resolvedDestination,
+      resolvedNavigationDestination
+    );
     setAddressFocused(false);
     setAddressQuery("");
     setAddressFeedback(null);
@@ -1942,9 +2007,6 @@ function App() {
       setActiveSplitPanel(visibleSplitPanel);
     } else if (resolvedNavigationDestination?.mode === "split") {
       setActiveSplitPanel("weft");
-    }
-    if (!(rightDockPinned && graphMode)) {
-      setGraphMode(false);
     }
   }
 
@@ -2085,14 +2147,17 @@ function App() {
   useEffect(() => {
     const pendingDestination = pendingScrollDestinationRef.current;
     const pendingPath = pendingScrollPathRef.current;
+    const shouldHighlightPendingScroll = pendingScrollHighlightRef.current;
     if ((!pendingDestination && !pendingPath) || graphMode) return;
     pendingScrollDestinationRef.current = null;
     pendingScrollPathRef.current = null;
+    pendingScrollHighlightRef.current = false;
     window.requestAnimationFrame(() => {
       const scrollToResponse = (
         transcript: HTMLElement | null,
         responseId?: string,
-        path?: string
+        path?: string,
+        highlight = false
       ) => {
         if (!transcript) return false;
         const target = responseId
@@ -2106,12 +2171,14 @@ function App() {
             : null;
         if (!target) return false;
         target.scrollIntoView({ behavior: "smooth", block: "start" });
-        target.classList.remove("response-scroll-highlight");
-        void target.offsetWidth;
-        target.classList.add("response-scroll-highlight");
-        window.setTimeout(() => {
+        if (highlight) {
           target.classList.remove("response-scroll-highlight");
-        }, 1800);
+          void target.offsetWidth;
+          target.classList.add("response-scroll-highlight");
+          window.setTimeout(() => {
+            target.classList.remove("response-scroll-highlight");
+          }, 1800);
+        }
         return true;
       };
 
@@ -2138,13 +2205,23 @@ function App() {
         pendingDestination?.scrollTargetResponseId &&
         scrollToResponse(
           transcriptForLoom(pendingDestination.loomId),
-          pendingDestination.scrollTargetResponseId
+          pendingDestination.scrollTargetResponseId,
+          undefined,
+          shouldHighlightPendingScroll
         )
       ) {
         return;
       }
 
-      if (pendingPath && scrollToResponse(transcriptRef.current, undefined, pendingPath)) {
+      if (
+        pendingPath &&
+        scrollToResponse(
+          transcriptRef.current,
+          undefined,
+          pendingPath,
+          shouldHighlightPendingScroll
+        )
+      ) {
         return;
       }
 
@@ -2399,8 +2476,40 @@ function App() {
       x: Math.max(8, Math.min(event.clientX, window.innerWidth - 320)),
       y: Math.max(8, Math.min(event.clientY, window.innerHeight - 360)),
       payload,
-      items: getContextMenuItems(payload),
+      items: getContextMenuItemsForPayload(payload),
     });
+  }
+
+  function getContextMenuItemsForPayload(payload: ContextMenuPayload) {
+    const items = getContextMenuItems(payload);
+    if (payload.kind !== "conversation") return items;
+
+    const { conversation, pinned } = payload;
+    const currentGroupId = groupIdForConversation(conversation.id);
+    const targetGroups = tabGroups.filter((group) => group.id !== currentGroupId);
+    const moveItems: ContextMenuItem[] = [
+      {
+        id: "move-to-group",
+        label: "Move to Groups",
+        detail: pinned ? "Unpin first" : targetGroups.length === 0 ? "No other groups" : undefined,
+        disabled: pinned || targetGroups.length === 0,
+        separatorBefore: true,
+        children: targetGroups.map((group) => ({
+          id: "move-to-group",
+          label: group.name,
+          detail: "Tab group",
+          targetGroupId: group.id,
+        })),
+      },
+    ];
+
+    const insertIndex = items.findIndex((item) => item.id === "bookmark");
+    if (insertIndex < 0) return [...items, ...moveItems];
+    return [
+      ...items.slice(0, insertIndex),
+      ...moveItems,
+      ...items.slice(insertIndex),
+    ];
   }
 
   function openConversationMenu(event: React.MouseEvent, conversation: Conversation) {
@@ -2419,11 +2528,24 @@ function App() {
     void browserHostShell.copyText(destination.canonicalUri ?? destination.path);
   }
 
-  function showLinkCopyToast(message = "Link is copied") {
+  function showToast({
+    title,
+    message,
+    color = "neutral",
+    icon,
+  }: {
+    title?: string;
+    message: string;
+    color?: ToastNotificationColor;
+    icon?: ToastNotificationIcon;
+  }) {
     if (linkCopyToastTimerRef.current !== null) {
       window.clearTimeout(linkCopyToastTimerRef.current);
     }
+    setToastTitle(title);
     setCopyToastMessage(message);
+    setToastIcon(icon);
+    setToastColor(color);
     setLinkCopyToastVisible(true);
     linkCopyToastTimerRef.current = window.setTimeout(() => {
       setLinkCopyToastVisible(false);
@@ -2431,9 +2553,126 @@ function App() {
     }, 1400);
   }
 
+  function showLinkCopyToast(message = "Link is copied") {
+    showToast({ message, icon: "copy" });
+  }
+
+  function pulseBookmarkFeedback(bookmarkId?: string) {
+    setBookmarksNavPulse(true);
+    if (bookmarkId) setRecentBookmarkFeedbackId(bookmarkId);
+    window.setTimeout(() => {
+      setBookmarksNavPulse(false);
+      if (bookmarkId) {
+        setRecentBookmarkFeedbackId((current) => (current === bookmarkId ? null : current));
+      }
+    }, GROWTH_HIGHLIGHT_MS);
+  }
+
+  function pulseWeftFeedback(weftLoomId: string, originResponseId: string) {
+    setRecentWeftFeedbackLoomId(weftLoomId);
+    setRecentResponseFeedbackId(originResponseId);
+    window.setTimeout(() => {
+      setRecentWeftFeedbackLoomId((current) => (current === weftLoomId ? null : current));
+      setRecentResponseFeedbackId((current) =>
+        current === originResponseId ? null : current
+      );
+    }, GROWTH_HIGHLIGHT_MS);
+  }
+
+  function recordGrowthEvent(settingsPatch: Partial<AppSettings> = {}) {
+    const settingsBase = { ...appSettings, ...settingsPatch };
+    const nextCount = settingsBase.growthEventCount + 1;
+    const milestone = GROWTH_MILESTONES.find(
+      (value) =>
+        value === nextCount && !settingsBase.shownGrowthMilestones.includes(value)
+    );
+    saveAppSettings({
+      ...settingsBase,
+      growthEventCount: nextCount,
+      shownGrowthMilestones: milestone
+        ? [...settingsBase.shownGrowthMilestones, milestone]
+        : settingsBase.shownGrowthMilestones,
+    });
+    if (!milestone) return;
+    if (growthMilestoneToastTimerRef.current !== null) {
+      window.clearTimeout(growthMilestoneToastTimerRef.current);
+    }
+    growthMilestoneToastTimerRef.current = window.setTimeout(() => {
+      growthMilestoneToastTimerRef.current = null;
+      showToast({
+        title: "Your Loom is growing",
+        message: `You now have ${milestone} addressable pieces to search, reuse, and branch from.`,
+        color: "sunset",
+        icon: "sparkles",
+      });
+    }, MILESTONE_TOAST_DELAY_MS);
+  }
+
   function copyLoomAddressWithToast(destination: Pick<LoomLink, "path" | "canonicalUri">) {
     copyLoomAddress(destination);
     showLinkCopyToast();
+  }
+
+  function copyShareItem(kind: "address" | "markdown" | "title-address") {
+    const address = currentActiveDestination.canonicalUri ?? currentActiveDestination.path;
+    if (kind === "address") {
+      void browserHostShell.copyText(address);
+      showLinkCopyToast("Loom address is copied");
+      return;
+    }
+    if (kind === "markdown") {
+      void browserHostShell.copyText(
+        toLoomMarkdown({ title: currentActiveDestination.title, path: address })
+      );
+      showLinkCopyToast("Markdown link is copied");
+      return;
+    }
+    void browserHostShell.copyText(`${currentActiveDestination.title}\n${address}`);
+    showLinkCopyToast("Title and address are copied");
+  }
+
+  function exportCurrentLoom(format: "markdown" | "csv") {
+    if (!currentLoomExportTarget) {
+      showToast({
+        title: "Export failed",
+        message: "There is no active Loom surface to export.",
+        color: "neutral",
+      });
+      return;
+    }
+    try {
+      if (format === "markdown") {
+        downloadTextFile(
+          safeExportFilename(currentLoomExportTarget.loom, "md"),
+          exportLoomAsMarkdown(currentLoomExportTarget),
+          "text/markdown;charset=utf-8"
+        );
+        showToast({
+          title: "Markdown export created",
+          message: `${currentLoomExportTarget.loom.title} was exported as Markdown.`,
+          color: "sunset",
+          icon: "copy",
+        });
+        return;
+      }
+      downloadTextFile(
+        safeExportFilename(currentLoomExportTarget.loom, "csv"),
+        exportLoomAsCsv(currentLoomExportTarget),
+        "text/csv;charset=utf-8"
+      );
+      showToast({
+        title: "CSV export created",
+        message: `${currentLoomExportTarget.loom.title} was exported as CSV.`,
+        color: "sunset",
+        icon: "copy",
+      });
+    } catch {
+      showToast({
+        title: "Export failed",
+        message: "Loom export could not be created.",
+        color: "neutral",
+      });
+    }
   }
 
   function copyResponseAnswerWithToast(response: ResponseItem) {
@@ -2573,8 +2812,14 @@ function App() {
 
   function nextGroupName(groups: TabGroup[]) {
     let index = 1;
-    while (groups.some((group) => group.name === `Group #${index}`)) index += 1;
-    return `Group #${index}`;
+    while (
+      groups.some(
+        (group) => group.name === `Group ${index}` || group.name === `Group #${index}`
+      )
+    ) {
+      index += 1;
+    }
+    return `Group ${index}`;
   }
 
   function groupIdForConversation(conversationId: string, groups = tabGroups) {
@@ -2659,6 +2904,13 @@ function App() {
       )
     );
     setRenamingGroupId(null);
+  }
+
+  function setTabGroupColor(groupId: string, color?: string) {
+    setTabGroups((current) =>
+      current.map((group) => (group.id === groupId ? { ...group, color } : group))
+    );
+    setGroupColorTarget(null);
   }
 
   function toggleTabGroup(groupId: string) {
@@ -2930,6 +3182,7 @@ function App() {
           ...markHistoryOlder(current),
         ]);
         pendingScrollPathRef.current = response.address;
+        pendingScrollHighlightRef.current = false;
       }
       setComposerRuntimeState({
         running: false,
@@ -3027,6 +3280,15 @@ function App() {
       ...promotion.bookmark,
       meta: promotedLink.meta ?? promotion.bookmark.meta,
     };
+    const existingBookmark = bookmarks.find(
+      (item) =>
+        item.path === bookmarkWithMetadata.path ||
+        item.targetObjectId === promotion.targetObject.objectId
+    );
+    const firstBookmarkFeedback =
+      !existingBookmark &&
+      bookmarks.length === 0 &&
+      !appSettings.hasSeenFirstBookmarkFeedback;
     setBookmarks((current) => {
       const existingIndex = current.findIndex(
         (item) =>
@@ -3045,7 +3307,34 @@ function App() {
       }
       return [bookmarkWithMetadata, ...current];
     });
-    openUtilityPanel("bookmarks");
+    const bookmarkTitle =
+      (bookmarkWithMetadata.editableTitle ?? bookmarkWithMetadata.title).trim() ||
+      "Untitled Loom";
+    if (existingBookmark) {
+      showToast({
+        title: "Bookmark saved",
+        message: `“${bookmarkTitle}” is already in Bookmarks.`,
+        color: "sunset",
+        icon: "bookmark",
+      });
+      pulseBookmarkFeedback(existingBookmark.id);
+      return;
+    }
+    if (firstBookmarkFeedback) {
+      openUtilityPanel("bookmarks");
+    }
+    showToast({
+      title: "Bookmark saved",
+      message: firstBookmarkFeedback
+        ? `“${bookmarkTitle}” is now addressable.`
+        : `“${bookmarkTitle}” added to Bookmarks.`,
+      color: "sunset",
+      icon: "bookmark",
+    });
+    pulseBookmarkFeedback(bookmarkWithMetadata.id);
+    recordGrowthEvent(
+      firstBookmarkFeedback ? { hasSeenFirstBookmarkFeedback: true } : undefined
+    );
   }
 
   function renameBookmark(bookmark: BookmarkItem) {
@@ -3110,6 +3399,9 @@ function App() {
         type: asLoom ? "loom" : "conversation",
         title: asLoom ? forkTitle ?? conversation.title : conversation.title,
         path: conversation.path,
+        canonicalUri: conversation.meta?.canonicalUri,
+        referenceCode: conversation.meta?.code,
+        meta: conversation.meta,
         subtitle: asLoom ? conversation.title : "Conversation root",
         conversationId: conversation.id,
         children: responses.map((response) => ({
@@ -3117,6 +3409,9 @@ function App() {
           type: "response" as const,
           title: response.title,
           path: response.address,
+          canonicalUri: response.meta?.canonicalUri,
+          referenceCode: response.meta?.code,
+          meta: response.meta,
           subtitle: "Response",
           conversationId: conversation.id,
           responseId: response.id,
@@ -3225,9 +3520,17 @@ function App() {
         ]);
       }
       pendingScrollDestinationRef.current = weftDestination;
+      pendingScrollHighlightRef.current = false;
     };
     if (existingWeft) {
       openWeftDestination(existingWeft);
+      pulseWeftFeedback(existingWeft.id, response.id);
+      showToast({
+        title: "Existing Weft opened",
+        message: "This response already has a Weft.",
+        color: "sunset",
+        icon: "weft",
+      });
       return;
     }
     const id = `c-loom-${Date.now()}`;
@@ -3307,6 +3610,18 @@ function App() {
     }));
     queueLoomMetadataGeneration(conversation);
     openWeftDestination(conversation);
+    pulseWeftFeedback(conversation.id, response.id);
+    showToast({
+      title: "Weft started",
+      message: `Started from “${
+        (responseTitleOverrides[response.id] ?? response.title).trim() ||
+        response.meta?.code ||
+        response.id
+      }”.`,
+      color: "sunset",
+      icon: "weft",
+    });
+    recordGrowthEvent();
   }
 
   function returnToOrigin() {
@@ -3377,6 +3692,9 @@ function App() {
       if (item.id === "pin" || item.id === "unpin") togglePinnedConversation(conversation);
       if (item.id === "rename") renameConversation(conversation);
       if (item.id === "change-icon") setIconPickerTarget(conversation);
+      if (item.id === "move-to-group" && item.targetGroupId) {
+        addConversationToGroup(conversation.id, item.targetGroupId);
+      }
       if (item.id === "bookmark") bookmarkConversation(conversation);
       if (item.id === "copy-address") copyLoomAddress(conversation);
       if (item.id === "archive") archiveConversation(conversation);
@@ -3425,6 +3743,7 @@ function App() {
     if (payload.kind === "group") {
       const { group } = payload;
       if (item.id === "rename") setRenamingGroupId(group.id);
+      if (item.id === "set-group-color") setGroupColorTarget(group);
       if (item.id === "new-tab-group") createConversationInGroup(group.id);
       if (item.id === "ungroup") ungroupTabGroup(group.id);
       if (item.id === "delete-group") deleteTabGroup(group);
@@ -3608,7 +3927,6 @@ function App() {
         active={panelActive}
         onActivate={() => setActiveSplitPanel(panel)}
         onProviderSettingsChange={saveProviderSettings}
-        onOpenProviderSettings={() => setProviderSettingsOpen(true)}
         onDraftChange={(draft) => setComposerDraftForKey(loomId, draft)}
         onRemoveLink={(link) => removeComposerLink(loomId, link)}
         onDropLink={(link) => linkObjectForDraft(link, loomId)}
@@ -3775,6 +4093,8 @@ function App() {
         onBookmarkCurrent={() => {
           bookmarkLoomLink(currentActiveDestination);
         }}
+        onCopyShareItem={copyShareItem}
+        onExportCurrentLoom={exportCurrentLoom}
         onToggleSidebar={() => {
           setSidebarFlyoutOpen(false);
           setSidebarFlyoutDragActive(false);
@@ -3797,7 +4117,6 @@ function App() {
         className={[
           "app-body",
           dockedUtilityOverlay ? "utility-panel-docked" : "",
-          dockedGraphOverlay ? "graph-panel-docked" : "",
         ]
           .filter(Boolean)
           .join(" ")}
@@ -3816,6 +4135,8 @@ function App() {
               : activeConversationId
           }
           activePanel={activePanel}
+          bookmarksNavPulse={bookmarksNavPulse}
+          highlightedConversationId={recentWeftFeedbackLoomId}
           onDropBookmark={bookmarkLoomLink}
           onCreateGroup={createGroupFromConversations}
           onAddToGroup={addConversationToGroup}
@@ -3885,7 +4206,6 @@ function App() {
                 runtimeHealth={activeComposerRuntimeHealth}
                 textInsertionRequest={starterPromptRequest}
                 onProviderSettingsChange={saveProviderSettings}
-                onOpenProviderSettings={() => setProviderSettingsOpen(true)}
                 onDraftChange={setActiveComposerDraft}
                 onRemoveLink={(link) => removeComposerLink(activeDraftKey, link)}
                 onDropLink={linkObject}
@@ -3913,7 +4233,53 @@ function App() {
             </section>
           ) : (
             <>
-              {showWeftSplit ? (
+              {graphMode ? (
+                <GraphView
+                  conversations={conversations}
+                  responsesByConversation={conversationResponses}
+                  forkRecords={forkRecords}
+                  activeLoomId={focusedSplitConversation?.id ?? activeConversation?.id}
+                  focusedResponseId={
+                    currentNavigationDestination?.scrollTargetResponseId ??
+                    recentResponseFeedbackId ??
+                    focusedSplitResponses[focusedSplitResponses.length - 1]?.id
+                  }
+                  bookmarkedResponseAddresses={bookmarkedResponseAddresses}
+                  onOpenLoom={(loomId) => {
+                    visitDestination(loomLinkForId(loomId), {
+                      source: "userNavigation",
+                      navigationDestination: {
+                        loomId,
+                        mode: visibleSplitPanelForLoomId(loomId) ? "split" : "full",
+                        source: "userNavigation",
+                      },
+                    });
+                    setGraphMode(false);
+                  }}
+                  onOpenResponse={(loomId, response) => {
+                    visitDestination(responseLinkForNavigation(loomId, response), {
+                      source: "userNavigation",
+                      navigationDestination: {
+                        loomId,
+                        mode: visibleSplitPanelForLoomId(loomId) ? "split" : "full",
+                        scrollTargetResponseId: response.id,
+                        scrollMode: "exact",
+                        source: "userNavigation",
+                      },
+                    });
+                    setGraphMode(false);
+                  }}
+                  onBookmarkResponse={(loomId, response) => {
+                    bookmarkLoomLink(responseLinkForNavigation(loomId, response));
+                  }}
+                  onLinkResponse={(loomId, response) => {
+                    linkObjectForDraft(responseLinkForNavigation(loomId, response), loomId);
+                  }}
+                  onWeftResponse={(loomId, response) => {
+                    forkResponseLoom(response, loomId);
+                  }}
+                />
+              ) : showWeftSplit ? (
                   <WeftView>
                     <div className="weft-split-view">
                       {originConversation && (
@@ -3947,6 +4313,7 @@ function App() {
                             onCopyAddress={copyLoomAddress}
                             onCopyAddressWithToast={copyLoomAddressWithToast}
                             onCopyResponse={copyResponseAnswerWithToast}
+                            highlightedResponseId={recentResponseFeedbackId}
                           />
                           {renderPanelComposer(originConversation.id, "origin")}
                         </div>
@@ -3983,6 +4350,7 @@ function App() {
                             onCopyAddressWithToast={copyLoomAddressWithToast}
                             onCopyResponse={copyResponseAnswerWithToast}
                             onReturnToOrigin={returnToOrigin}
+                            highlightedResponseId={recentResponseFeedbackId}
                           />
                           {renderPanelComposer(activeConversation.id, "weft")}
                         </div>
@@ -4054,10 +4422,11 @@ function App() {
                     onCopyAddressWithToast={copyLoomAddressWithToast}
                     onCopyResponse={copyResponseAnswerWithToast}
                     onReturnToOrigin={activeWeftOrigin ? returnToOrigin : undefined}
+                    highlightedResponseId={recentResponseFeedbackId}
                   />
                 )}
 
-              {!showWeftSplit && (
+              {!graphMode && !showWeftSplit && (
                 <PromptComposer
                   variant="bottom"
                   draftKey={activeDraftKey}
@@ -4074,7 +4443,6 @@ function App() {
                   runtimeState={composerRuntimeState}
                   runtimeHealth={activeComposerRuntimeHealth}
                   onProviderSettingsChange={saveProviderSettings}
-                  onOpenProviderSettings={() => setProviderSettingsOpen(true)}
                   onDraftChange={setActiveComposerDraft}
                   onRemoveLink={(link) => removeComposerLink(activeDraftKey, link)}
                   onDropLink={linkObject}
@@ -4105,6 +4473,7 @@ function App() {
           activeDestination={currentActiveDestination}
           archived={archived}
           pinned={rightDockPinned}
+          highlightedBookmarkId={recentBookmarkFeedbackId}
           onTogglePin={() => {
             if (activePanel) toggleRightDockPin();
           }}
@@ -4130,60 +4499,14 @@ function App() {
           onRestore={restoreConversation}
           onDeleteRequest={setDeleteTarget}
         />
-        {graphMode && (
-          <div
-            className={
-              rightDockPinned
-                ? "graph-overlay-panel docked"
-                : "graph-overlay-panel"
-            }
-            aria-label="Graph View overlay"
-          >
-            <div className="graph-overlay-controls">
-              <button
-                className={
-                  rightDockPinned
-                    ? "graph-overlay-button active"
-                    : "graph-overlay-button"
-                }
-                type="button"
-                aria-label={
-                  rightDockPinned ? "Unpin panel" : "Pin panel"
-                }
-                title={
-                  rightDockPinned ? "Unpin panel" : "Pin panel"
-                }
-                onClick={toggleRightDockPin}
-              >
-                {rightDockPinned ? (
-                  <PinOff size={14} />
-                ) : (
-                  <Pin size={14} />
-                )}
-              </button>
-              <button
-                className="graph-overlay-button"
-                type="button"
-                aria-label="Close panel"
-                title="Close panel"
-                onClick={() => closeUtilityOverlay("graph")}
-              >
-                <X size={14} />
-              </button>
-            </div>
-            <GraphView
-              conversations={conversations}
-              responses={focusedSplitResponses}
-              onVisit={visitDestination}
-            />
-          </div>
-        )}
       </div>
 
       <ToastNotification
         open={linkCopyToastVisible}
+        title={toastTitle}
         message={copyToastMessage}
-        color="neutral"
+        icon={toastIcon}
+        color={toastColor}
       />
 
       {contextMenu && (
@@ -4203,6 +4526,17 @@ function App() {
           options={conversationIconOptions}
           onCancel={() => setIconPickerTarget(null)}
           onSave={changeConversationIcon}
+        />
+      )}
+
+      {groupColorTarget && (
+        <GroupColorPopover
+          group={
+            tabGroups.find((group) => group.id === groupColorTarget.id) ??
+            groupColorTarget
+          }
+          onCancel={() => setGroupColorTarget(null)}
+          onSave={setTabGroupColor}
         />
       )}
 
@@ -4270,6 +4604,8 @@ interface SidebarProps {
   archivedCount: number;
   activeConversationId: string;
   activePanel: ActivePanel;
+  bookmarksNavPulse: boolean;
+  highlightedConversationId: string | null;
   onDropBookmark: (link: LoomLink) => void;
   onCreateGroup: (sourceId: string, targetId: string) => void;
   onAddToGroup: (conversationId: string, groupId: string) => void;
@@ -4301,6 +4637,8 @@ function Sidebar({
   archivedCount,
   activeConversationId,
   activePanel,
+  bookmarksNavPulse,
+  highlightedConversationId,
   onDropBookmark,
   onCreateGroup,
   onAddToGroup,
@@ -4415,6 +4753,7 @@ function Sidebar({
         className={[
           "conversation-tab",
           conversation.id === activeConversationId ? "active" : "",
+          conversation.id === highlightedConversationId ? "is-newly-added" : "",
           sidebarDnD.groupingPreviewId === conversation.id ? "grouping-preview" : "",
         ]
           .filter(Boolean)
@@ -4503,7 +4842,13 @@ function Sidebar({
 
       <nav className="sidebar-nav">
         <button
-          className={activePanel === "bookmarks" ? "nav-row active" : "nav-row"}
+          className={[
+            "nav-row",
+            activePanel === "bookmarks" ? "active" : "",
+            bookmarksNavPulse ? "is-causal-pulse" : "",
+          ]
+            .filter(Boolean)
+            .join(" ")}
           onClick={() => onOpenPanel("bookmarks")}
           onDragOver={(event) => {
             if (event.dataTransfer.types.includes(LOOM_LINK_MIME)) {
@@ -4572,6 +4917,11 @@ function Sidebar({
               onDragOver={(event) => sidebarDnD.handleGroupDragOver(event, group.id)}
               onDragLeave={sidebarDnD.handleGroupDragLeave}
               onDrop={(event) => sidebarDnD.handleGroupDrop(event, group.id)}
+              style={
+                group.color
+                  ? ({ "--tab-group-accent": group.color } as CSSProperties)
+                  : undefined
+              }
               data-testid={`sidebar-group-${group.id}`}
               data-sidebar-group-id={group.id}
               data-sidebar-dnd-armed={
@@ -4806,6 +5156,8 @@ interface TopBrowserBarProps {
   onForward: () => void;
   onJumpTraversal: (index: number) => void;
   onBookmarkCurrent: () => void;
+  onCopyShareItem: (kind: "address" | "markdown" | "title-address") => void;
+  onExportCurrentLoom: (format: "markdown" | "csv") => void;
   onToggleSidebar: () => void;
   onTogglePanel: (panel: "bookmarks" | "history" | "looms") => void;
   onToggleGraph: () => void;
@@ -4838,12 +5190,15 @@ function TopBrowserBar({
   onForward,
   onJumpTraversal,
   onBookmarkCurrent,
+  onCopyShareItem,
+  onExportCurrentLoom,
   onToggleSidebar,
   onTogglePanel,
   onToggleGraph,
 }: TopBrowserBarProps) {
   const backButtonRef = useRef<HTMLButtonElement | null>(null);
   const forwardButtonRef = useRef<HTMLButtonElement | null>(null);
+  const shareButtonRef = useRef<HTMLButtonElement | null>(null);
   const longPressTimerRef = useRef<number | null>(null);
   const suppressClickRef = useRef(false);
   const [traversalMenu, setTraversalMenu] = useState<{
@@ -4852,6 +5207,9 @@ function TopBrowserBar({
     y: number;
     highlightedIndex: number;
   } | null>(null);
+  const [shareMenuPosition, setShareMenuPosition] = useState<{ x: number; y: number } | null>(
+    null
+  );
   const activeTraversal =
     traversalMenu?.direction === "back" ? backTraversal : forwardTraversal;
 
@@ -4916,6 +5274,44 @@ function TopBrowserBar({
     closeTraversalMenu();
   }
 
+  function closeShareMenu() {
+    setShareMenuPosition(null);
+  }
+
+  function toggleShareMenu() {
+    if (shareMenuPosition) {
+      closeShareMenu();
+      return;
+    }
+    const button = shareButtonRef.current;
+    if (!button) return;
+    const rect = button.getBoundingClientRect();
+    const width = 248;
+    const estimatedHeight = 320;
+    const gap = 6;
+    const viewportPadding = 8;
+    const preferredLeft = rect.right - width;
+    setShareMenuPosition({
+      x: Math.max(
+        viewportPadding,
+        Math.min(preferredLeft, window.innerWidth - width - viewportPadding)
+      ),
+      y: Math.max(viewportPadding, Math.min(rect.bottom + gap, window.innerHeight - estimatedHeight - viewportPadding)),
+    });
+  }
+
+  function handleShareCopy(kind: "address" | "markdown" | "title-address") {
+    if (!canDragCurrentDestination) return;
+    onCopyShareItem(kind);
+    closeShareMenu();
+  }
+
+  function handleShareExport(format: "markdown" | "csv") {
+    if (!canDragCurrentDestination) return;
+    onExportCurrentLoom(format);
+    closeShareMenu();
+  }
+
   useEffect(() => {
     if (!traversalMenu) return;
     function handlePointerDown(event: PointerEvent) {
@@ -4970,6 +5366,33 @@ function TopBrowserBar({
       document.removeEventListener("keydown", handleKeyDown);
     };
   }, [activeTraversal, traversalMenu]);
+
+  useEffect(() => {
+    if (!shareMenuPosition) return;
+    function handlePointerDown(event: PointerEvent) {
+      const target = event.target as Element | null;
+      if (target?.closest(".share-menu, .address-share-button")) return;
+      closeShareMenu();
+    }
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      closeShareMenu();
+    }
+    function handleWindowChange() {
+      closeShareMenu();
+    }
+    document.addEventListener("pointerdown", handlePointerDown);
+    document.addEventListener("keydown", handleKeyDown);
+    window.addEventListener("resize", handleWindowChange);
+    window.addEventListener("scroll", handleWindowChange, true);
+    return () => {
+      document.removeEventListener("pointerdown", handlePointerDown);
+      document.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("resize", handleWindowChange);
+      window.removeEventListener("scroll", handleWindowChange, true);
+    };
+  }, [shareMenuPosition]);
 
   useEffect(() => () => clearLongPressTimer(), []);
 
@@ -5101,9 +5524,26 @@ function TopBrowserBar({
             />
           )}
         </div>
-        <button className="icon-button address-share-button" aria-label="Share">
+        <button
+          ref={shareButtonRef}
+          className="icon-button address-share-button"
+          aria-label="Share"
+          aria-haspopup="menu"
+          aria-expanded={Boolean(shareMenuPosition)}
+          onClick={toggleShareMenu}
+        >
           <Share2 size={16} />
         </button>
+        {shareMenuPosition &&
+          createPortal(
+            <ShareMenu
+              style={{ left: shareMenuPosition.x, top: shareMenuPosition.y }}
+              disabled={!canDragCurrentDestination}
+              onCopy={handleShareCopy}
+              onExport={handleShareExport}
+            />,
+            document.body
+          )}
       </AddressBar>
 
       <div className="top-actions">
@@ -5136,6 +5576,59 @@ function TopBrowserBar({
   );
 }
 
+function ShareMenu({
+  style,
+  disabled,
+  onCopy,
+  onExport,
+}: {
+  style: CSSProperties;
+  disabled: boolean;
+  onCopy: (kind: "address" | "markdown" | "title-address") => void;
+  onExport: (format: "markdown" | "csv") => void;
+}) {
+  return (
+    <div className="share-menu" style={style} role="menu" aria-label="Share current Loom">
+      <div className="share-menu-section">
+        <div className="share-menu-title">Copy</div>
+        <button type="button" role="menuitem" disabled={disabled} onClick={() => onCopy("address")}>
+          Copy Loom Address
+        </button>
+        <button type="button" role="menuitem" disabled={disabled} onClick={() => onCopy("markdown")}>
+          Copy Markdown Link
+        </button>
+        <button type="button" role="menuitem" disabled={disabled} onClick={() => onCopy("title-address")}>
+          Copy Title + Address
+        </button>
+      </div>
+      <div className="share-menu-section">
+        <div className="share-menu-title">Export</div>
+        <button type="button" role="menuitem" disabled={disabled} onClick={() => onExport("markdown")}>
+          Export as Markdown
+        </button>
+        <button type="button" role="menuitem" disabled={disabled} onClick={() => onExport("csv")}>
+          Export as CSV
+        </button>
+        <button type="button" role="menuitem" disabled title="ZIP export is not available yet.">
+          Export as ZIP
+        </button>
+      </div>
+      <div className="share-menu-section">
+        <div className="share-menu-title">Public</div>
+        <button
+          type="button"
+          role="menuitem"
+          disabled
+          title="Public sharing is not available yet."
+        >
+          <span>Make Public</span>
+          <small>Public sharing is not available yet.</small>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function TraversalMenu({
   direction,
   entries,
@@ -5165,6 +5658,7 @@ function TraversalMenu({
         {entries.map((item, index) => {
           const Icon = iconForType[item.entry.type] ?? Globe2;
           const meta = traversalEntryMeta(item.entry);
+          const code = referenceCodeForLink(item.entry);
           return (
             <button
               type="button"
@@ -5180,11 +5674,14 @@ function TraversalMenu({
               onClick={() => onSelect(item)}
             >
               <Icon size={14} />
-              <span>
+              <span className="traversal-menu-copy">
                 <strong>{meta.title}</strong>
                 <small>{meta.subtitle}</small>
               </span>
-              <em>{meta.badge}</em>
+              <span className="traversal-menu-badges">
+                {code ? <code>{code}</code> : null}
+                <em>{meta.badge}</em>
+              </span>
             </button>
           );
         })}
@@ -5376,6 +5873,7 @@ function ChatTranscript({
   onCopyAddressWithToast,
   onCopyResponse,
   onReturnToOrigin,
+  highlightedResponseId,
 }: {
   transcriptRef?: (node: HTMLElement | null) => void;
   conversation?: Conversation;
@@ -5391,6 +5889,7 @@ function ChatTranscript({
   onCopyAddressWithToast: (link: Pick<LoomLink, "path" | "canonicalUri">) => void;
   onCopyResponse: (response: ResponseItem) => void;
   onReturnToOrigin?: () => void;
+  highlightedResponseId?: string | null;
 }) {
   if (!conversation) {
     return (
@@ -5468,7 +5967,14 @@ function ChatTranscript({
         };
         return (
           <article
-            className="qa-item"
+            className={[
+              "qa-item",
+              displayResponse.id === highlightedResponseId
+                ? "response-scroll-highlight"
+                : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
             key={response.id}
             data-response-id={displayResponse.id}
             data-response-address={displayResponse.address}
@@ -5535,9 +6041,8 @@ function ChatTranscript({
                 <AddressMetadataBadge
                   as="button"
                   link={responseLink}
-                  className="link-chip response-action-chip"
+                  className="link-chip response-action-chip response-link-chip"
                   title="Link"
-                  autoCloseMs={3000}
                   onClick={() => onLink(toLinkFromResponse(displayResponse))}
                   testId={`response-link-${displayResponse.id}`}
                   ariaLabel={`Link ${displayResponse.title}`}
@@ -5547,7 +6052,7 @@ function ChatTranscript({
                 </AddressMetadataBadge>
                 <Tooltip label="Start Weft" placement="bottom-right">
                   <button
-                    className="link-chip response-action-chip"
+                    className="link-chip response-action-chip response-weft-chip"
                     onClick={() => onLoom(displayResponse)}
                     aria-label={`Start Weft from ${displayResponse.title}`}
                   >
@@ -5591,7 +6096,6 @@ function PromptComposer({
   active = true,
   textInsertionRequest,
   onProviderSettingsChange,
-  onOpenProviderSettings,
   onActivate,
   onDraftChange,
   onRemoveLink,
@@ -5620,7 +6124,6 @@ function PromptComposer({
   active?: boolean;
   textInsertionRequest?: TextInsertionRequest | null;
   onProviderSettingsChange: (settings: AIProviderSettings) => void;
-  onOpenProviderSettings: () => void;
   onActivate?: () => void;
   onDraftChange: (draft: ComposerDraft) => void;
   onRemoveLink: (link: LoomLink) => void;
@@ -5688,6 +6191,7 @@ function PromptComposer({
     y: number;
   } | null>(null);
   const addressHintTimerRef = useRef<number | null>(null);
+  const addressHintAutoCloseTimerRef = useRef<number | null>(null);
   const addressHintTargetRef = useRef<string | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const lastTextInsertionRequestRef = useRef(0);
@@ -5943,7 +6447,21 @@ function PromptComposer({
     tokenRenamePopover,
   ]);
 
-  useEffect(() => () => clearAddressHintTimer(), []);
+  useEffect(() => () => {
+    clearAddressHintTimer();
+    clearAddressHintAutoCloseTimer();
+  }, []);
+
+  useEffect(() => {
+    clearAddressHintAutoCloseTimer();
+    if (!addressHint) return;
+    addressHintAutoCloseTimerRef.current = window.setTimeout(() => {
+      addressHintAutoCloseTimerRef.current = null;
+      addressHintTargetRef.current = null;
+      setAddressHint(null);
+    }, POPOVER_HINT_AUTO_CLOSE_MS);
+    return clearAddressHintAutoCloseTimer;
+  }, [addressHint?.link.path, addressHint?.x, addressHint?.y]);
 
   useEffect(() => {
     if (!tokenRenamePopover) return;
@@ -6093,8 +6611,15 @@ function PromptComposer({
     addressHintTimerRef.current = null;
   }
 
+  function clearAddressHintAutoCloseTimer() {
+    if (addressHintAutoCloseTimerRef.current === null) return;
+    window.clearTimeout(addressHintAutoCloseTimerRef.current);
+    addressHintAutoCloseTimerRef.current = null;
+  }
+
   function closeAddressHint() {
     clearAddressHintTimer();
+    clearAddressHintAutoCloseTimer();
     addressHintTargetRef.current = null;
     setAddressHint(null);
   }
@@ -6182,7 +6707,7 @@ function PromptComposer({
         x: Math.max(8, Math.min(rect.left, window.innerWidth - 360)),
         y: Math.max(8, rect.top - 12),
       });
-    }, 3000);
+    }, REFERENCE_ADDRESS_HINT_DELAY_MS);
   }
 
   function updateInlineTokenDisplayMode(
@@ -7416,13 +7941,9 @@ function PromptComposer({
           </select>
           <button
             className="composer-icon-action"
-            onClick={onOpenProviderSettings}
-            aria-label="Open AI Provider Settings"
-            title="AI Providers"
+            aria-label="Voice input"
+            title="Voice input"
           >
-            <Settings size={15} />
-          </button>
-          <button className="composer-icon-action" aria-label="Voice input" title="Voice input">
             <Mic size={15} />
           </button>
           <button
@@ -7883,6 +8404,91 @@ function attachSourceLabel(source: AttachContentSource) {
   return "Response";
 }
 
+interface HistoryDateGroup {
+  key: string;
+  label: string;
+  entries: HistoryEntry[];
+}
+
+function startOfLocalDay(date: Date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function historyDateKey(date: Date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function fullHistoryDateLabel(date: Date) {
+  return new Intl.DateTimeFormat(undefined, {
+    weekday: "long",
+    month: "long",
+    day: "numeric",
+    year: "numeric",
+  }).format(date);
+}
+
+function historyGroupLabel(date: Date, now = new Date()) {
+  const today = startOfLocalDay(now);
+  const yesterday = new Date(today);
+  yesterday.setDate(today.getDate() - 1);
+  const target = startOfLocalDay(date);
+  const label = fullHistoryDateLabel(target);
+  if (target.getTime() === today.getTime()) return `Today — ${label}`;
+  if (target.getTime() === yesterday.getTime()) return `Yesterday — ${label}`;
+  return label;
+}
+
+function dateFromHistoryTimestamp(timestamp: string | undefined, now = new Date()) {
+  if (!timestamp) return startOfLocalDay(now);
+  const normalized = timestamp.trim().toLowerCase();
+  if (
+    normalized === "now" ||
+    normalized === "just now" ||
+    normalized.includes("min ago") ||
+    normalized.includes("hour ago") ||
+    normalized.includes("earlier today")
+  ) {
+    return startOfLocalDay(now);
+  }
+  if (normalized === "yesterday") {
+    const yesterday = startOfLocalDay(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    return yesterday;
+  }
+
+  const parsed = Date.parse(
+    /\b\d{4}\b/.test(timestamp) ? timestamp : `${timestamp}, ${now.getFullYear()}`
+  );
+  if (!Number.isNaN(parsed)) return startOfLocalDay(new Date(parsed));
+  return startOfLocalDay(now);
+}
+
+function groupHistoryByDate(entries: HistoryEntry[]) {
+  const now = new Date();
+  const groups: HistoryDateGroup[] = [];
+  const groupIndex = new globalThis.Map<string, HistoryDateGroup>();
+  entries.forEach((entry) => {
+    const date = dateFromHistoryTimestamp(entry.visitedAt, now);
+    const key = historyDateKey(date);
+    const existing = groupIndex.get(key);
+    if (existing) {
+      existing.entries.push(entry);
+      return;
+    }
+    const group = {
+      key,
+      label: historyGroupLabel(date, now),
+      entries: [entry],
+    };
+    groupIndex.set(key, group);
+    groups.push(group);
+  });
+  return groups;
+}
+
 function RightPanel({
   activePanel,
   bookmarks,
@@ -7904,6 +8510,7 @@ function RightPanel({
   onDropBookmark,
   onRestore,
   onDeleteRequest,
+  highlightedBookmarkId,
 }: {
   activePanel: ActivePanel;
   bookmarks: BookmarkItem[];
@@ -7925,6 +8532,7 @@ function RightPanel({
   onDropBookmark: (link: LoomLink) => void;
   onRestore: (conversation: Conversation) => void;
   onDeleteRequest: (conversation: Conversation) => void;
+  highlightedBookmarkId: string | null;
 }) {
   const [bookmarkDragActive, setBookmarkDragActive] = useState(false);
 
@@ -8008,6 +8616,7 @@ function RightPanel({
               onVisit={onVisit}
               onRemove={onRemoveBookmark}
               onOpenContextMenu={onOpenBookmarkMenu}
+              highlighted={bookmark.id === highlightedBookmarkId}
             />
           ))}
         </BookmarkView>
@@ -8015,17 +8624,33 @@ function RightPanel({
 
       {activePanel === "history" && (
         <HistoryView>
-          {history.map((entry) => (
-            <DestinationRow
-              key={entry.id}
-              destination={entry}
-              timestamp={entry.visitedAt}
-              showBadge={false}
-              className="history-destination-row"
-              onVisit={onVisit}
-              onOpenContextMenu={onOpenHistoryMenu}
-            />
-          ))}
+          {groupHistoryByDate(history).map((group) => {
+            const headingId = `history-date-${group.key}`;
+            return (
+              <section
+                key={group.key}
+                className="history-date-group"
+                aria-labelledby={headingId}
+              >
+                <h3 id={headingId} className="history-date-heading">
+                  {group.label}
+                </h3>
+                <div className="history-date-rail">
+                  {group.entries.map((entry) => (
+                    <DestinationRow
+                      key={entry.id}
+                      destination={entry}
+                      timestamp={entry.visitedAt}
+                      showBadge={false}
+                      className="history-destination-row"
+                      onVisit={onVisit}
+                      onOpenContextMenu={onOpenHistoryMenu}
+                    />
+                  ))}
+                </div>
+              </section>
+            );
+          })}
         </HistoryView>
       )}
 
@@ -8126,7 +8751,10 @@ function LoomsPanel({
             : "loom",
       title: node.title,
       path: node.path,
+      canonicalUri: node.canonicalUri,
       badge: node.type === "loom" ? typeLabel.loom : node.type === "response" ? typeLabel.response : typeLabel.conversation,
+      meta: node.meta,
+      referenceCode: node.referenceCode,
     };
   }
 
@@ -8364,7 +8992,10 @@ function LoomsPanel({
     if (action === "open") onVisit(nodeToLink(node));
     if (action === "graph") onOpenGraph(nodeToLink(node));
     if (action === "bookmark") onBookmark(nodeToLink(node));
-    if (action === "copy") void browserHostShell.copyText(node.path);
+    if (action === "copy-address") void browserHostShell.copyText(node.canonicalUri ?? node.path);
+    if (action === "copy-code" && node.referenceCode) {
+      void browserHostShell.copyText(node.referenceCode);
+    }
     if (action === "collapse") setCollapsedIds((current) => new Set([...current, node.id]));
     if (action === "expand") setCollapsedIds((current) => {
       const next = new Set(current);
@@ -8398,7 +9029,7 @@ function LoomsPanel({
             height={contentOverlayHeight}
           />
           <div className="looms-log__rows">
-        {visibleNodes.map(({ node, hasChildren, collapsed, active, inActiveLineage, activeDescendantHidden }) => {
+        {visibleNodes.map(({ node, lane, hasChildren, collapsed, active, inActiveLineage, activeDescendantHidden }) => {
           const Icon =
             node.type === "conversation"
               ? Globe2
@@ -8407,6 +9038,11 @@ function LoomsPanel({
                 : node.type === "quick"
                   ? MessageSquare
                   : FileText;
+          const visibleLaneIndex = clampNumber(lane - laneWindowStart, 0, LOOMS_MAX_VISIBLE_LANES - 1);
+          const rowShift = Math.min(
+            LOOMS_ROW_SHIFT_MAX,
+            visibleLaneIndex * LOOMS_ROW_SHIFT_PER_LANE
+          );
           return (
             <div
               className={[
@@ -8423,7 +9059,9 @@ function LoomsPanel({
               key={node.id}
               role="treeitem"
               data-lineage-node-id={node.id}
+              data-visible-lane={visibleLaneIndex}
               ref={(element) => registerRowRef(node.id, element)}
+              style={{ "--looms-row-shift": `${rowShift}px` } as CSSProperties}
               aria-expanded={hasChildren ? !collapsed : undefined}
               onContextMenu={(event) => {
                 event.preventDefault();
@@ -8449,13 +9087,7 @@ function LoomsPanel({
                   setSelectedId(node.id);
                   onVisit(nodeToLink(node));
                 }}
-                title={
-                  hasChildren
-                    ? collapsed
-                      ? "Expand branch. Double-click or press Enter to open."
-                      : "Collapse branch. Double-click or press Enter to open."
-                    : "Open"
-                }
+                data-title={node.title}
               >
                 <span aria-hidden="true" />
                 <span className="looms-log__main">
@@ -8494,7 +9126,10 @@ function LoomsPanel({
           <button onClick={() => handleMenuAction("open")}>Open</button>
           <button onClick={() => handleMenuAction("graph")}>Open in Graph View</button>
           <button onClick={() => handleMenuAction("bookmark")}>Bookmark</button>
-          <button onClick={() => handleMenuAction("copy")}>Copy Loom Address</button>
+          <button onClick={() => handleMenuAction("copy-code")} disabled={!menu.node.referenceCode}>
+            Copy Code ID
+          </button>
+          <button onClick={() => handleMenuAction("copy-address")}>Copy Loom Address</button>
           <button onClick={() => handleMenuAction("collapse")} disabled={menu.node.children.length === 0}>Collapse Branch</button>
           <button onClick={() => handleMenuAction("expand")} disabled={menu.node.children.length === 0}>Expand Branch</button>
           <button onClick={() => handleMenuAction("focus")}>Focus This Branch</button>
@@ -8511,6 +9146,8 @@ const LOOMS_ROW_HEIGHT = 46;
 const LOOMS_GUTTER_WIDTH = 78;
 const LOOMS_LANE_SPACING = 16;
 const LOOMS_LANE_BASE_X = 17;
+const LOOMS_ROW_SHIFT_PER_LANE = 2;
+const LOOMS_ROW_SHIFT_MAX = 6;
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -8730,6 +9367,7 @@ function DestinationRow<T extends LoomLink>({
   onRemove,
   onOpenContextMenu,
   actions,
+  highlighted = false,
 }: {
   destination: T;
   timestamp?: string;
@@ -8739,8 +9377,10 @@ function DestinationRow<T extends LoomLink>({
   onRemove?: (destination: T) => void;
   onOpenContextMenu?: (event: React.MouseEvent, destination: T) => void;
   actions?: React.ReactNode;
+  highlighted?: boolean;
 }) {
   const dragPreviewCleanupRef = useRef<(() => void) | null>(null);
+  const rowRef = useRef<HTMLDivElement | null>(null);
   const Icon = iconForType[destination.type];
   const title =
     "editableTitle" in destination && typeof destination.editableTitle === "string"
@@ -8749,6 +9389,7 @@ function DestinationRow<T extends LoomLink>({
   const rowClassName = [
     "bookmark-row",
     className,
+    highlighted ? "is-newly-added" : "",
     destination.badge === "Broken reference" ? "broken" : "",
   ]
     .filter(Boolean)
@@ -8761,8 +9402,13 @@ function DestinationRow<T extends LoomLink>({
   ]
     .filter(Boolean)
     .join(" ");
+  useEffect(() => {
+    if (!highlighted) return;
+    rowRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [highlighted]);
   return (
     <div
+      ref={rowRef}
       className={rowClassName}
       draggable
       data-testid={`utility-destination-row-${destination.id}`}
@@ -8813,11 +9459,13 @@ function BookmarkRow({
   onVisit,
   onRemove,
   onOpenContextMenu,
+  highlighted = false,
 }: {
   bookmark: BookmarkItem;
   onVisit: (destination: BookmarkItem) => void;
   onRemove: (destination: BookmarkItem) => void;
   onOpenContextMenu: (event: React.MouseEvent, destination: BookmarkItem) => void;
+  highlighted?: boolean;
 }) {
   return (
     <DestinationRow
@@ -8826,6 +9474,7 @@ function BookmarkRow({
       onVisit={onVisit}
       onRemove={onRemove}
       onOpenContextMenu={onOpenContextMenu}
+      highlighted={highlighted}
     />
   );
 }
@@ -8839,11 +9488,17 @@ function Tooltip({
   placement?: "top-center" | "bottom-right";
   children: React.ReactElement;
 }) {
+  const [suppressed, setSuppressed] = useState(false);
+
   return (
     <span
-      className="tooltip-host"
+      className={suppressed ? "tooltip-host tooltip-suppressed" : "tooltip-host"}
       data-tooltip={label}
       data-placement={placement}
+      onPointerDownCapture={() => setSuppressed(true)}
+      onContextMenuCapture={() => setSuppressed(true)}
+      onMouseLeave={() => setSuppressed(false)}
+      onBlur={() => setSuppressed(false)}
     >
       {children}
     </span>

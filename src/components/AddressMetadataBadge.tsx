@@ -10,6 +10,8 @@ import { createPortal } from "react-dom";
 import type { LoomLink } from "../types";
 import { AddressHintPopover } from "./AddressHintPopover";
 
+const DEFAULT_HINT_AUTO_CLOSE_MS = 2000;
+
 interface AddressMetadataBadgeProps {
   link: LoomLink;
   children: ReactNode;
@@ -34,7 +36,7 @@ export function AddressMetadataBadge({
   title,
   testId,
   delayMs = 700,
-  autoCloseMs,
+  autoCloseMs = DEFAULT_HINT_AUTO_CLOSE_MS,
   showHint = true,
   ariaLabel,
   onClick,
@@ -181,10 +183,13 @@ export function AddressMetadataBadge({
     onFocus: showHint ? openPopover : undefined,
     onBlur: showHint ? scheduleClosePopover : undefined,
     onClick: (event: MouseEvent<HTMLElement>) => {
-      closePopover();
+      closePopover(true);
       onClick?.(event);
     },
-    onContextMenu: (event: MouseEvent<HTMLElement>) => onContextMenu?.(event, link),
+    onContextMenu: (event: MouseEvent<HTMLElement>) => {
+      closePopover(true);
+      onContextMenu?.(event, link);
+    },
   };
 
   return (
