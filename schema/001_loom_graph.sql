@@ -230,6 +230,92 @@ CREATE INDEX IF NOT EXISTS idx_navigation_history_time
 CREATE INDEX IF NOT EXISTS idx_ledger_event_type_time
   ON loom_ledger_events(event_type, created_at);
 
+CREATE TABLE IF NOT EXISTS response_context_capsules (
+  capsule_id TEXT PRIMARY KEY,
+  response_id TEXT NOT NULL,
+  loom_id TEXT NOT NULL,
+  response_code TEXT,
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  key_points_json TEXT NOT NULL,
+  keywords_json TEXT NOT NULL,
+  entities_json TEXT NOT NULL,
+  code_blocks_json TEXT NOT NULL,
+  canonical_uri TEXT,
+  source_hash TEXT NOT NULL,
+  generator TEXT NOT NULL CHECK (generator IN ('heuristic', 'quickModel')),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'ready', 'stale', 'failed')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS loom_checkpoint_summaries (
+  checkpoint_id TEXT PRIMARY KEY,
+  loom_id TEXT NOT NULL,
+  up_to_response_id TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  decisions_json TEXT NOT NULL,
+  constraints_json TEXT NOT NULL,
+  open_questions_json TEXT NOT NULL,
+  entities_json TEXT NOT NULL,
+  wefts_json TEXT NOT NULL,
+  references_json TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'ready', 'stale', 'failed')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS weft_origin_contexts (
+  context_id TEXT PRIMARY KEY,
+  weft_loom_id TEXT NOT NULL,
+  origin_loom_id TEXT NOT NULL,
+  origin_response_id TEXT NOT NULL,
+  origin_capsule_id TEXT,
+  origin_summary TEXT NOT NULL,
+  source_hash TEXT NOT NULL,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'ready', 'stale', 'failed')),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS context_build_jobs (
+  job_id TEXT PRIMARY KEY,
+  job_type TEXT NOT NULL,
+  loom_id TEXT NOT NULL,
+  response_id TEXT,
+  status TEXT NOT NULL CHECK (status IN ('pending', 'ready', 'stale', 'failed')),
+  priority INTEGER NOT NULL,
+  error TEXT,
+  created_at INTEGER NOT NULL,
+  started_at INTEGER,
+  finished_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS context_artifact_events (
+  event_id TEXT PRIMARY KEY,
+  artifact_type TEXT NOT NULL,
+  artifact_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_response_context_capsules_response
+  ON response_context_capsules(loom_id, response_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_loom_checkpoint_summaries_loom
+  ON loom_checkpoint_summaries(loom_id, up_to_response_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_weft_origin_contexts_weft
+  ON weft_origin_contexts(weft_loom_id, status);
+
+CREATE INDEX IF NOT EXISTS idx_context_build_jobs_status
+  ON context_build_jobs(status, priority, created_at);
+
+CREATE INDEX IF NOT EXISTS idx_context_artifact_events_artifact
+  ON context_artifact_events(artifact_type, artifact_id, created_at);
+
 -- Sample recursive query: descendants from a branch root.
 -- WITH RECURSIVE descendants(object_id, depth) AS (
 --   SELECT :root_object_id, 0

@@ -1,3 +1,5 @@
+// E2E data authority classification: LEGACY_TYPESCRIPT_LOCAL.
+// This spec covers legacy graph continuation UI state until graph continuation flows are service-backed.
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 async function openApp(page: Page) {
@@ -71,7 +73,7 @@ async function graphNodeY(node: Locator) {
   });
 }
 
-test.describe("Graph continuation composer", () => {
+test.describe("[legacy-typescript-local] Graph continuation composer", () => {
   test("shows an orange Continue Loom button inside the floating graph controls", async ({
     page,
   }) => {
@@ -134,9 +136,12 @@ test.describe("Graph continuation composer", () => {
 
     await page.keyboard.press("Escape");
     await composer.getByRole("button", { name: "Select model" }).click();
-    const modelMenu = page.getByRole("listbox", { name: "Select model" });
+    const modelMenu = page.getByRole("menu", { name: "Select model and response mode" });
     await expect(modelMenu).toBeVisible();
-    await expect(modelMenu.getByRole("option", { name: "Demo Main Response" })).toBeVisible();
+    await expect(modelMenu.getByRole("menuitemradio", { name: "Demo Main Response" })).toBeVisible();
+    await expect(modelMenu.getByRole("menuitemradio", { name: /Auto/ })).toBeVisible();
+    await expect(modelMenu.getByRole("menuitemradio", { name: /Instant/ })).toBeVisible();
+    await expect(modelMenu.getByRole("menuitemradio", { name: /Thinking/ })).toBeVisible();
   });
 
   test("focuses the latest Response and opens the floating composer", async ({ page }) => {

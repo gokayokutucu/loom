@@ -1,3 +1,5 @@
+// E2E data authority classification: PURE_UI_RENDERING.
+// This spec validates sidebar interaction mechanics over seeded UI state, not product runtime authority.
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 const PRODUCT_GROUP_ID = "g-product-systems";
@@ -64,7 +66,7 @@ async function dragToComposer(page: Page, source: Locator) {
   await dataTransfer.dispose();
 }
 
-test.describe("Loom Sidebar DnD", () => {
+test.describe("[pure-ui-rendering] Loom Sidebar DnD", () => {
   test("standalone plus standalone requires hold before creating a group", async ({ page }) => {
     await openApp(page);
 

@@ -33,10 +33,11 @@ export function GroupColorPopover({
   onCancel,
 }: {
   group: TabGroup;
-  onSave: (groupId: string, color?: string) => void;
+  onSave: (groupId: string, input: { name: string; color?: string }) => void;
   onCancel: () => void;
 }) {
   const [selectedKey, setSelectedKey] = useState(colorKeyForValue(group.color));
+  const [name, setName] = useState(group.name);
   const selectedOption = useMemo(
     () =>
       GROUP_COLOR_OPTIONS.find((option) => option.key === selectedKey) ??
@@ -45,14 +46,24 @@ export function GroupColorPopover({
   );
 
   useEffect(() => {
+    setName(group.name);
+    setSelectedKey(colorKeyForValue(group.color));
+  }, [group.color, group.name]);
+
+  useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") onCancel();
-      if (event.key === "Enter") onSave(group.id, selectedOption.value);
+      if (event.key === "Enter") {
+        const nextName = name.trim();
+        if (nextName) onSave(group.id, { name: nextName, color: selectedOption.value });
+      }
     }
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [group.id, onCancel, onSave, selectedOption.value]);
+  }, [group.id, name, onCancel, onSave, selectedOption.value]);
+
+  const trimmedName = name.trim();
 
   return (
     <div className="icon-picker-backdrop" role="presentation" onClick={onCancel}>
@@ -76,8 +87,16 @@ export function GroupColorPopover({
             aria-hidden="true"
           />
           <div>
-            <span>Group color</span>
-            <h2 id="group-color-title">{group.name}</h2>
+            <span>Group settings</span>
+            <label className="group-name-field" htmlFor="group-color-title">
+              <input
+                id="group-color-title"
+                value={name}
+                autoFocus
+                onChange={(event) => setName(event.target.value)}
+                aria-label="Group name"
+              />
+            </label>
           </div>
         </div>
 
@@ -115,7 +134,13 @@ export function GroupColorPopover({
             <button onClick={onCancel}>Cancel</button>
             <button
               className="primary"
-              onClick={() => onSave(group.id, selectedOption.value)}
+              disabled={!trimmedName}
+              onClick={() =>
+                onSave(group.id, {
+                  name: trimmedName,
+                  color: selectedOption.value,
+                })
+              }
             >
               Done
             </button>

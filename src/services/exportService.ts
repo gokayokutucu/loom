@@ -1,3 +1,8 @@
+/*
+ * Legacy/dev/test-only export composition after the Rust-authoritative cutover.
+ * Do not use this module as product runtime authority.
+ * Product runtime must go through LoomEngineClient -> RustHttpLoomEngineClient -> loom-service.
+ */
 import type { Conversation, LoomLink, ResponseItem } from "../types";
 
 export interface LoomExportInput {
@@ -143,6 +148,24 @@ export function exportLoomMetadataJson({ loom, responses, exportedAt = new Date(
   );
 }
 
+export function textToBase64(content: string) {
+  const bytes = new TextEncoder().encode(content);
+  let binary = "";
+  bytes.forEach((byte) => {
+    binary += String.fromCharCode(byte);
+  });
+  return btoa(binary);
+}
+
+export function base64ToBlob(contentBase64: string, type: string) {
+  const binary = atob(contentBase64);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return new Blob([bytes], { type });
+}
+
 export function safeExportFilename(loom: Conversation, extension: "md" | "csv" | "json" | "zip") {
   const slug =
     loom.title
@@ -157,6 +180,10 @@ export function safeExportFilename(loom: Conversation, extension: "md" | "csv" |
 export function downloadTextFile(filename: string, content: string, type: string) {
   const blob = new Blob([content], { type });
   downloadBlobFile(filename, blob);
+}
+
+export function downloadBase64File(filename: string, contentBase64: string, type: string) {
+  downloadBlobFile(filename, base64ToBlob(contentBase64, type));
 }
 
 export function downloadBlobFile(filename: string, blob: Blob) {

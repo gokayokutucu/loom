@@ -1,4 +1,9 @@
-import type { Conversation, LoomForkRecord, ResponseItem } from "../types";
+/*
+ * Legacy/dev/test-only graph projection after the Rust-authoritative cutover.
+ * Do not use this module as product runtime authority.
+ * Product runtime must go through LoomEngineClient -> RustHttpLoomEngineClient -> loom-service.
+ */
+import type { Conversation, LoomForkRecord, LoomLink, ResponseItem } from "../types";
 
 export type LoomGraphProjectionNodeKind =
   | "root"
@@ -42,6 +47,7 @@ export interface LoomGraphProjectionEdge {
   target: string;
   kind: LoomGraphProjectionEdgeKind;
   label?: string;
+  references?: LoomLink[];
   isActivePath?: boolean;
   isWeftPath?: boolean;
 }
@@ -52,6 +58,11 @@ export interface LoomGraphProjection {
   firstNodeId?: string;
   lastNodeId?: string;
   focusedNodeId?: string;
+  fallbackUsed?: boolean;
+  fallbackReason?: string;
+  serviceGraphStatus?: "resolved" | "not_found" | "empty" | "unavailable";
+  serviceGraphStoreAuthoritative?: boolean;
+  warnings?: string[];
 }
 
 export interface BuildLoomGraphProjectionInput {
@@ -105,9 +116,41 @@ function responseIsAddressable(response: ResponseItem) {
 
 function truncateLabel(label: string | undefined) {
   if (!label) return undefined;
-  const normalized = label.replace(/\s+/g, " ").trim();
+  const cleanLines = label
+    .replace(/\[\[([^\]]+)\]\]/g, "$1")
+    .split(/\n+/)
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+  const normalized =
+    cleanLines.length > 1
+      ? `${cleanLines[0]} +${cleanLines.length - 1} more`
+      : cleanLines[0] ?? "";
   if (normalized.length <= 96) return normalized;
   return `${normalized.slice(0, 93).trim()}...`;
+}
+
+function isFragmentReference(link: LoomLink) {
+  return link.type === "fragment" || Boolean(link.selectedText && link.sourceResponseId);
+}
+
+function isAttachedQuoteReference(link: LoomLink) {
+  return isFragmentReference(link) && link.badge === "Selection";
+}
+
+function cleanGraphQuestionLabel(question: string, references?: LoomLink[]) {
+  return (references ?? []).filter(isAttachedQuoteReference).reduce((current, link) => {
+    const labels = new Set([
+      `[[${link.title}]]`,
+      link.referenceCustomLabel ? `[[${link.referenceCustomLabel}]]` : "",
+      link.selectedText ? `[[${link.selectedText}]]` : "",
+    ]);
+    let next = current;
+    labels.forEach((label) => {
+      if (!label) return;
+      next = next.split(label).join(" ");
+    });
+    return next;
+  }, question).trim();
 }
 
 export function buildLoomGraphProjection({
@@ -262,7 +305,8 @@ export function buildLoomGraphProjection({
         source: previousNodeId,
         target: nodeId,
         kind: index === 0 ? "question" : "derived",
-        label: truncateLabel(response.question),
+        label: truncateLabel(cleanGraphQuestionLabel(response.question, response.questionReferences)),
+        references: response.questionReferences,
         isActivePath: loom.id === activeLoom.id,
         isWeftPath,
       });

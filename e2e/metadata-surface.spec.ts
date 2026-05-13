@@ -1,3 +1,5 @@
+// E2E data authority classification: PURE_UI_RENDERING.
+// This spec validates metadata display behavior over seeded UI state, not product runtime authority.
 import { expect, type Page, test } from "@playwright/test";
 
 async function openApp(page: Page) {
@@ -15,7 +17,7 @@ async function openArchitectureLoom(page: Page) {
   );
 }
 
-test.describe("Loom metadata surface", () => {
+test.describe("[pure-ui-rendering] Loom metadata surface", () => {
   test("Loom header shows readable code without duplicate address", async ({ page }) => {
     await openApp(page);
     await openArchitectureLoom(page);

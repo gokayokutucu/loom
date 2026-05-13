@@ -3,11 +3,13 @@ export function SelectionPopover({
   y,
   onAsk,
   onQuickQuestion,
+  onAddReference,
 }: {
   x: number;
   y: number;
   onAsk: () => void;
   onQuickQuestion: () => void;
+  onAddReference: () => void;
 }) {
   return (
     <div
@@ -31,6 +33,14 @@ export function SelectionPopover({
         onClick={onQuickQuestion}
       >
         Quick Question
+      </button>
+      <button
+        type="button"
+        tabIndex={0}
+        onMouseDown={(event) => event.preventDefault()}
+        onClick={onAddReference}
+      >
+        Add as Reference
       </button>
     </div>
   );

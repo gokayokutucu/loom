@@ -304,7 +304,7 @@ export async function generateMetadataWithQuickModel(
     effort: "Low",
     prompt: `Given this conversation snippet, produce JSON only with keys title, keywords, summary.\n\nSnippet:\n${stripHtml(input.text).slice(0, 2400)}`,
     system:
-      "Return JSON only. title max 8 words. keywords must be 5 to 12 short terms. summary must be one sentence.",
+      "Return JSON only. title max 7 words. keywords must be 5 to 12 short terms. summary must be one sentence. Preserve the user's language when possible. Do not mention internal labels such as Capsule, Context, Response Code, or artifact names.",
   });
   return parseMetadataJson(result.text);
 }

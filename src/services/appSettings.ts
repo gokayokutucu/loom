@@ -7,6 +7,7 @@ export type WeftOpenBehavior = "adaptive" | "split-when-possible" | "always-full
 export type AppFontSize = "very-small" | "small" | "medium" | "large" | "very-large";
 export type AppLanguage = "system" | "en" | "tr" | "el";
 export type AppTheme = "dark" | "light" | "solarized-light" | "system";
+export type ModelResponseMode = "auto" | "instant" | "thinking";
 
 export interface NotificationSettings {
   responseComplete: boolean;
@@ -33,6 +34,7 @@ export interface AccessibilitySettings {
 export interface AppSettings {
   referenceDisplayMode: ReferenceDisplayMode;
   weftOpenBehavior: WeftOpenBehavior;
+  modelResponseMode: ModelResponseMode;
   fontSize: AppFontSize;
   language: AppLanguage;
   theme: AppTheme;
@@ -47,6 +49,7 @@ export interface AppSettings {
 export const defaultAppSettings: AppSettings = {
   referenceDisplayMode: "title",
   weftOpenBehavior: "adaptive",
+  modelResponseMode: "auto",
   fontSize: "medium",
   language: "system",
   theme: "dark",
@@ -81,6 +84,11 @@ function normalizeReferenceDisplayMode(value: unknown): ReferenceDisplayMode {
 function normalizeWeftOpenBehavior(value: unknown): WeftOpenBehavior {
   if (value === "split-when-possible" || value === "always-full") return value;
   return "adaptive";
+}
+
+function normalizeModelResponseMode(value: unknown): ModelResponseMode {
+  if (value === "instant" || value === "thinking") return value;
+  return "auto";
 }
 
 function normalizeFontSize(value: unknown): AppFontSize {
@@ -156,6 +164,7 @@ export function readAppSettings(): AppSettings {
   return {
     referenceDisplayMode: normalizeReferenceDisplayMode(stored.referenceDisplayMode),
     weftOpenBehavior: normalizeWeftOpenBehavior(stored.weftOpenBehavior),
+    modelResponseMode: normalizeModelResponseMode(stored.modelResponseMode),
     fontSize: normalizeFontSize(stored.fontSize),
     language: normalizeLanguage(stored.language),
     theme: normalizeTheme(stored.theme),
@@ -180,6 +189,7 @@ export function writeAppSettings(settings: AppSettings) {
   localStorageAdapter.set(APP_SETTINGS_KEY, {
     referenceDisplayMode: normalizeReferenceDisplayMode(settings.referenceDisplayMode),
     weftOpenBehavior: normalizeWeftOpenBehavior(settings.weftOpenBehavior),
+    modelResponseMode: normalizeModelResponseMode(settings.modelResponseMode),
     fontSize: normalizeFontSize(settings.fontSize),
     language: normalizeLanguage(settings.language),
     theme: normalizeTheme(settings.theme),

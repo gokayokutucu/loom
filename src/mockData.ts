@@ -6,6 +6,13 @@ import type {
   ResponseItem,
 } from "./types";
 
+function mockTimestamp(daysAgo: number, hour: number, minute: number) {
+  const date = new Date();
+  date.setDate(date.getDate() - daysAgo);
+  date.setHours(hour, minute, 0, 0);
+  return date.toISOString();
+}
+
 export const conversations: Conversation[] = [
   {
     id: "c-architecture",
@@ -349,6 +356,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
       title: "Graph View starts as a readable Loom map",
       address: "loom://product/graph-view-site-map/loom/site-map/r-site-map",
       question: "What should the default Graph View demonstrate?",
+      createdAt: mockTimestamp(2, 9, 44),
       answer: [
         "The default graph should immediately explain the Loom mental model: a root Loom at the top, Responses flowing downward, and Weft branches splitting sideways without breaking hierarchy. It should feel like a browser site map for an AI object, not a decorative mind map.",
         "The first screen should include enough real structure to test scanning: bookmarked Responses, linked answers from other Looms, at least two Weft branches, and one Weft that itself has a Weft. That gives the renderer realistic topology without changing the canonical graph model.",
@@ -379,6 +387,23 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
       title: "Linked Responses preserve graph provenance",
       address: "loom://product/graph-view-site-map/loom/evidence/r-evidence-map",
       question: "How should Graph View show evidence from other Looms?",
+      createdAt: mockTimestamp(1, 16, 18),
+      questionReferences: [
+        {
+          id: "fragment:c-graph-map:r-site-map:demo-quote",
+          type: "fragment",
+          title: "Responses flowing downward",
+          path: "loom://product/graph-view-site-map/loom/site-map/r-site-map#fragment=demo-quote",
+          badge: "Fragment",
+          selectedAt: Date.now(),
+          sourceLoomId: "c-graph-map",
+          sourceResponseId: "r-site-map",
+          selectedText: "Responses flowing downward, and Weft branches splitting sideways without breaking hierarchy",
+          sourceResponseTitle: "Graph View starts as a readable Loom map",
+          fragmentHash: "demo-quote",
+          createdAt: Date.now(),
+        },
+      ],
       answer: [
         "Graph View should let a Response carry links to useful answers from other Looms without cloning those answers. A link to research synthesis, citation provenance, or browser navigation remains a Reference usage; the target Response keeps its own address and identity.",
         "This matters for provenance. If the graph demo includes links from the Graph View Loom to the research and navigation Looms, users can see that composition works across Looms while the active top-down path remains uncluttered.",
@@ -407,6 +432,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
       title: "Continue Loom appends below the latest Response",
       address: "loom://product/graph-view-site-map/loom/continuation/r-graph-continuation",
       question: "How should normal continuation work inside Graph View?",
+      createdAt: mockTimestamp(0, 10, 12),
       answer: [
         "Continue Loom is normal Loom continuation, not a Quick Ask and not a Weft. The active Loom's latest Response is focused near the top of the graph, the floating composer collects the next prompt, and the Main Model answer is appended to the same Loom.",
         "After submit, the projection recomputes from Loom state. The new Response appears below the previous latest Response, the edge label carries the prompt, and focus moves to the newly created Response using the same top-centered positioning.",
@@ -429,6 +455,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
       title: "Focused graph positioning keeps work oriented",
       address: "loom://product/graph-view-site-map/loom/focus/r-graph-focus",
       question: "Where should Graph View focus after continuation?",
+      createdAt: mockTimestamp(0, 10, 29),
       answer: [
         "The focused Response should land near the top edge of the graph viewport with equal space left and right. That makes the previous path feel above the user and leaves room below for the next continuation or Weft branch.",
         "This is a product-level projection rule. React Flow renders the graph, but Loom projection owns hierarchy, selected node identity, and the deterministic viewport target.",

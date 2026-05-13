@@ -1,3 +1,5 @@
+// E2E data authority classification: LEGACY_TYPESCRIPT_LOCAL.
+// This spec covers legacy Reference suggestion UI over seeded UI state until Smart References are service-backed.
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 async function openApp(page: Page) {
@@ -32,7 +34,7 @@ async function visibleSuggestionDropdown(page: Page) {
   return dropdown;
 }
 
-test.describe("# Reference suggestions", () => {
+test.describe("[legacy-typescript-local] # Reference suggestions", () => {
   test("dropdown remains inside the viewport near the bottom composer", async ({ page }) => {
     await page.setViewportSize({ width: 1280, height: 720 });
     await openApp(page);

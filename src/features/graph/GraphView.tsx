@@ -24,18 +24,19 @@ import {
 import "@xyflow/react/dist/style.css";
 import { GitBranch, GitFork, LocateFixed, X } from "lucide-react";
 import {
-  buildLoomGraphProjection,
   loomGraphRootNodeId,
   responseGraphNodeId,
   type LoomGraphProjectionNode,
   type LoomGraphProjection,
 } from "../../services/loomGraphProjection";
 import type { Conversation, LoomForkRecord, ResponseItem } from "../../types";
+import type { LoomEngineClient } from "../../engine";
 import { GraphControls } from "./GraphControls";
 import { LoomGraphEdge, type LoomGraphFlowEdge } from "./LoomGraphEdge";
 import { LoomGraphNode, type LoomGraphFlowNode } from "./LoomGraphNode";
 
 export interface GraphViewProps {
+  engineClient: LoomEngineClient;
   conversations: Conversation[];
   responsesByConversation: Record<string, ResponseItem[]>;
   forkRecords: LoomForkRecord[];
@@ -106,7 +107,7 @@ function LoomGraphComposerNode({ data }: NodeProps<LoomGraphComposerFlowNode>) {
   return (
     <section
       ref={composerNodeRef}
-      className="loom-graph-composer-node nodrag nowheel"
+      className="loom-graph-composer-node nodrag nopan nowheel"
       aria-label="Graph composer"
       data-testid="graph-continuation-composer"
     >
@@ -150,6 +151,7 @@ function selectedNodeIdForProjection(projection: LoomGraphProjection) {
 }
 
 function GraphViewInner({
+  engineClient,
   conversations,
   responsesByConversation,
   forkRecords,
@@ -185,28 +187,38 @@ function GraphViewInner({
   });
   const initializedViewportKey = useRef<string | undefined>(undefined);
   const skipNextFollowAfterWeftFocusRef = useRef(false);
+  const skipNextFollowAfterContinuationFocusRef = useRef(false);
 
-  const projection = useMemo(
-    () =>
-      buildLoomGraphProjection({
+  const [projection, setProjection] = useState<LoomGraphProjection>({ nodes: [], edges: [] });
+
+  useEffect(() => {
+    let cancelled = false;
+    void engineClient
+      .getGraphProjection({
         conversations,
         responsesByConversation,
         forkRecords,
         activeLoomId,
         focusedResponseId,
-        expandedNodeIds,
-        bookmarkedResponseAddresses,
-      }),
-    [
-      conversations,
-      responsesByConversation,
-      forkRecords,
-      activeLoomId,
-      focusedResponseId,
-      expandedNodeIds,
-      bookmarkedResponseAddresses,
-    ]
-  );
+        expandedNodeIds: Array.from(expandedNodeIds),
+        bookmarkedResponseAddresses: Array.from(bookmarkedResponseAddresses),
+      })
+      .then((nextProjection) => {
+        if (!cancelled) setProjection(nextProjection);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    engineClient,
+    conversations,
+    responsesByConversation,
+    forkRecords,
+    activeLoomId,
+    focusedResponseId,
+    expandedNodeIds,
+    bookmarkedResponseAddresses,
+  ]);
 
   const centerNode = useCallback(
     (nodeId: string | undefined) => {
@@ -289,8 +301,13 @@ function GraphViewInner({
 
   useEffect(() => {
     if (focusedWeftLoomId) return;
+    if (pendingContinuationFocusNodeId) return;
     if (skipNextFollowAfterWeftFocusRef.current) {
       skipNextFollowAfterWeftFocusRef.current = false;
+      return;
+    }
+    if (skipNextFollowAfterContinuationFocusRef.current) {
+      skipNextFollowAfterContinuationFocusRef.current = false;
       return;
     }
     if (!followLoomScroll) return;
@@ -306,6 +323,7 @@ function GraphViewInner({
     focusedResponseId,
     focusedWeftLoomId,
     followLoomScroll,
+    pendingContinuationFocusNodeId,
     projection.focusedNodeId,
   ]);
 
@@ -355,9 +373,12 @@ function GraphViewInner({
     if (!projection.nodes.some((node) => node.id === pendingContinuationFocusNodeId)) {
       return;
     }
+    skipNextFollowAfterContinuationFocusRef.current = true;
     window.requestAnimationFrame(() => {
-      focusNodeNearTop(pendingContinuationFocusNodeId, 520);
-      setPendingContinuationFocusNodeId(undefined);
+      window.requestAnimationFrame(() => {
+        focusNodeNearTop(pendingContinuationFocusNodeId, 520);
+        setPendingContinuationFocusNodeId(undefined);
+      });
     });
   }, [focusNodeNearTop, pendingContinuationFocusNodeId, projection.nodes]);
 
@@ -526,6 +547,7 @@ function GraphViewInner({
         data: {
           kind: edge.kind,
           label: edge.label,
+          references: edge.references,
           isActivePath: edge.isActivePath,
           isWeftPath: edge.isWeftPath,
         },

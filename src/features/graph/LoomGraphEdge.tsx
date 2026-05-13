@@ -5,10 +5,13 @@ import {
   type Edge,
   type EdgeProps,
 } from "@xyflow/react";
+import { referenceLabelForMode } from "../../services/referenceDisplay";
+import type { LoomLink } from "../../types";
 
 export interface LoomGraphEdgeData extends Record<string, unknown> {
   kind: string;
   label?: string;
+  references?: LoomLink[];
   isActivePath?: boolean;
   isWeftPath?: boolean;
 }
@@ -95,6 +98,19 @@ export function LoomGraphEdge({
             className={`loom-graph-edge-label loom-graph-edge-label--${edgeKind}`}
             style={{ transform: `translate(-50%, -50%) translate(${labelX}px, ${labelY}px)` }}
           >
+            {edgeData.references?.length ? (
+              <span className="loom-graph-edge-reference-row">
+                {edgeData.references.slice(0, 2).map((reference) => (
+                  <span
+                    className="loom-graph-edge-reference-token"
+                    key={`${reference.id}-${reference.path}`}
+                    title={reference.selectedText ?? reference.title}
+                  >
+                    {referenceLabelForMode(reference, reference.referenceDisplayMode ?? "title")}
+                  </span>
+                ))}
+              </span>
+            ) : null}
             {edgeData.label}
           </div>
         </EdgeLabelRenderer>

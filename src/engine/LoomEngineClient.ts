@@ -1,0 +1,84 @@
+import type {
+  AddReferenceInput,
+  AddReferenceResult,
+  BookmarkResponseInput,
+  BookmarkResult,
+  CancelMessageInput,
+  CancelMessageResult,
+  CreateBookmarkInput,
+  CreateLoomInput,
+  CreateLoomResult,
+  CreateOrOpenWeftInput,
+  CreateOrOpenWeftResult,
+  EngineHealth,
+  EngineResponseEvent,
+  ExportLoomInput,
+  ExportLoomResult,
+  ExportResponseInput,
+  CapabilitySummary,
+  DeleteBookmarkInput,
+  GetBookmarkForTargetInput,
+  GetBookmarkInput,
+  GetReferenceInput,
+  GraphProjectionInput,
+  GraphProjectionResult,
+  ListReferencesInput,
+  ListReferencesResult,
+  ListBookmarksResult,
+  LoomDetail,
+  LoomSummary,
+  OpenReferenceInput,
+  PersistWeftTurnsInput,
+  PersistWeftTurnsResult,
+  QuickAskInput,
+  QuickAskResult,
+  RegenerateFromResponseInput,
+  RemoveReferenceInput,
+  RenameLoomInput,
+  ResolveAddressInput,
+  ResolveAddressResult,
+  ServiceConfigStatus,
+  ServiceHealthStatus,
+  SendMessageInput,
+  SuggestReferencesInput,
+  SuggestReferencesResult,
+  UpdateResponseInput,
+  UpdateResponseResult,
+  UpdateLoomInput,
+} from "./LoomEngineTypes";
+import type { LoomNavigationDestination } from "../types";
+
+export interface LoomEngineClient {
+  getHealth(): Promise<EngineHealth>;
+  getServiceHealth(): Promise<ServiceHealthStatus>;
+  getServiceConfigStatus(): Promise<ServiceConfigStatus>;
+  getCapabilitySummary(): Promise<CapabilitySummary>;
+  listLooms(): Promise<LoomSummary[]>;
+  getLoom(loomId: string): Promise<LoomDetail>;
+  createLoom(input: CreateLoomInput): Promise<CreateLoomResult>;
+  renameLoom(input: RenameLoomInput): Promise<void>;
+  updateLoomMetadata(input: UpdateLoomInput): Promise<CreateLoomResult>;
+  sendMessage(input: SendMessageInput): AsyncIterable<EngineResponseEvent>;
+  regenerateFromResponse(input: RegenerateFromResponseInput): AsyncIterable<EngineResponseEvent>;
+  cancelMessage(input: CancelMessageInput): Promise<CancelMessageResult>;
+  quickAsk(input: QuickAskInput): Promise<QuickAskResult>;
+  createOrOpenWeft(input: CreateOrOpenWeftInput): Promise<CreateOrOpenWeftResult>;
+  persistWeftTurns(input: PersistWeftTurnsInput): Promise<PersistWeftTurnsResult>;
+  updateResponse(input: UpdateResponseInput): Promise<UpdateResponseResult>;
+  addReference(input: AddReferenceInput): Promise<AddReferenceResult>;
+  removeReference(input: RemoveReferenceInput): Promise<void>;
+  getReference(input: GetReferenceInput): Promise<AddReferenceResult>;
+  listReferences(input: ListReferencesInput): Promise<ListReferencesResult>;
+  suggestReferences(input: SuggestReferencesInput): Promise<SuggestReferencesResult>;
+  openReference(input: OpenReferenceInput): Promise<LoomNavigationDestination>;
+  createBookmark(input: CreateBookmarkInput): Promise<BookmarkResult>;
+  deleteBookmark(input: DeleteBookmarkInput): Promise<void>;
+  getBookmark(input: GetBookmarkInput): Promise<BookmarkResult>;
+  listBookmarks(): Promise<ListBookmarksResult>;
+  getBookmarkForTarget(input: GetBookmarkForTargetInput): Promise<BookmarkResult>;
+  bookmarkResponse(input: BookmarkResponseInput): Promise<BookmarkResult>;
+  resolveAddress(input: ResolveAddressInput): Promise<ResolveAddressResult>;
+  getGraphProjection(input: GraphProjectionInput): Promise<GraphProjectionResult>;
+  exportLoom(input: ExportLoomInput): Promise<ExportLoomResult>;
+  exportResponse(input: ExportResponseInput): Promise<ExportLoomResult>;
+}

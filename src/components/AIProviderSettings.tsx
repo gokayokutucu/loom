@@ -36,6 +36,12 @@ import type {
   NotificationSettings,
   StartupSettings,
 } from "../services/appSettings";
+import type {
+  CapabilitySummary,
+  LoomEngineClient,
+  ServiceConfigStatus,
+  ServiceHealthStatus,
+} from "../engine";
 
 const provider = new OllamaProvider();
 
@@ -75,6 +81,7 @@ export function AIProviderSettingsModal({
   settings,
   appSettings,
   runtimeHealth,
+  engineClient,
   onSave,
   onAppSettingsSave,
   onClose,
@@ -85,6 +92,7 @@ export function AIProviderSettingsModal({
     checking: boolean;
     testRuntime: () => Promise<RuntimeHealthState>;
   };
+  engineClient: LoomEngineClient;
   onSave: (settings: AIProviderSettings) => void;
   onAppSettingsSave: (settings: AppSettings) => void;
   onClose: () => void;
@@ -94,10 +102,32 @@ export function AIProviderSettingsModal({
   const [query, setQuery] = useState("");
   const [working, setWorking] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [serviceStatus, setServiceStatus] = useState<{
+    health?: ServiceHealthStatus;
+    config?: ServiceConfigStatus;
+    capability?: CapabilitySummary;
+    loading: boolean;
+  }>({ loading: false });
 
   useEffect(() => {
     setDraft(settings);
   }, [settings]);
+
+  async function refreshServiceStatus() {
+    setServiceStatus((current) => ({ ...current, loading: true }));
+    const [health, config, capability] = await Promise.all([
+      engineClient.getServiceHealth(),
+      engineClient.getServiceConfigStatus(),
+      engineClient.getCapabilitySummary(),
+    ]);
+    setServiceStatus({ health, config, capability, loading: false });
+  }
+
+  useEffect(() => {
+    if (activeCategory === "about" && !serviceStatus.health && !serviceStatus.loading) {
+      void refreshServiceStatus();
+    }
+  }, [activeCategory, serviceStatus.health, serviceStatus.loading]);
 
   const filteredModels = useMemo(() => {
     const value = query.trim().toLowerCase();
@@ -390,6 +420,24 @@ export function AIProviderSettingsModal({
                       : "Download selected model"}
             </strong>
             <span>{runtimeHealth.message}</span>
+            {runtimeHealth.checkedAt && (
+              <small>Last checked {new Date(runtimeHealth.checkedAt).toLocaleTimeString()}</small>
+            )}
+            {runtimeHealth.ollama?.version && (
+              <span>Ollama version: {runtimeHealth.ollama.version}</span>
+            )}
+            {runtimeHealth.ollama?.security && (
+              <>
+                <span>
+                  Local-only: {runtimeHealth.ollama.security.localOnly ? "OK" : "Warning"}
+                  {" · "}
+                  Security: {runtimeHealth.ollama.security.versionStatus ?? "unknown"}
+                </span>
+                {runtimeHealth.ollama.security.warnings.slice(0, 2).map((warning) => (
+                  <small key={warning}>{warning}</small>
+                ))}
+              </>
+            )}
             {!demoResponsesEnabled && !runtimeHealth.ollama_installed && (
               <a href="https://ollama.com/download" target="_blank" rel="noreferrer">
                 Install Ollama
@@ -502,7 +550,7 @@ export function AIProviderSettingsModal({
 
         <section className="provider-section provider-runtime-section">
           <label className="settings-field">
-            <span>Context length</span>
+            <span>Max Context Length</span>
             <input
               type="range"
               min={2048}
@@ -519,7 +567,10 @@ export function AIProviderSettingsModal({
                 })
               }
             />
-            <small>{draft.ollama.contextLength.toLocaleString()} tokens</small>
+            <small>
+              Loom chooses request context dynamically up to{" "}
+              {draft.ollama.contextLength.toLocaleString()} tokens.
+            </small>
           </label>
           {draft.ollama.modelLocation && (
             <div className="model-location">
@@ -545,30 +596,53 @@ export function AIProviderSettingsModal({
             </label>
           </div>
           <div className="provider-model-list">
-            {filteredModels.map((model) => (
-              <div className="provider-model-row" key={model.id}>
-                <span>
-                  <strong>{model.name}</strong>
-                  <small>{model.id}</small>
-                  {model.location && <small>{model.location}</small>}
-                  <small>{model.provider}</small>
-                </span>
-                <em className={model.installed ? "installed" : "missing"}>
-                  {model.installed ? "Installed" : "Not installed"}
-                </em>
-                {!model.installed && (
-                  <button
-                    className="download-model-button"
-                    onClick={() => pullModel(model)}
-                    disabled={working === model.id}
-                    aria-label={`Download ${model.name}`}
-                    title="Download"
+            {filteredModels.map((model) => {
+              const selectedProfiles = [
+                draft.profiles.quickModelId === model.id ? "Quick" : "",
+                draft.profiles.mainModelId === model.id ? "Main" : "",
+              ].filter(Boolean);
+              const selectedButUnavailable =
+                selectedProfiles.length > 0 && runtimeHealth.status !== "ready";
+              return (
+                <div className="provider-model-row" key={model.id}>
+                  <span>
+                    <strong>{model.name}</strong>
+                    <small>{model.id}</small>
+                    {model.location && <small>{model.location}</small>}
+                    <small>{model.provider}</small>
+                    {selectedProfiles.length > 0 && (
+                      <small>Selected for {selectedProfiles.join(" / ")}</small>
+                    )}
+                  </span>
+                  <em
+                    className={
+                      selectedButUnavailable
+                        ? "missing"
+                        : model.installed
+                          ? "installed"
+                          : "missing"
+                    }
                   >
-                    <Download size={14} />
-                  </button>
-                )}
-              </div>
-            ))}
+                    {selectedButUnavailable
+                      ? "Runtime unavailable"
+                      : model.installed
+                        ? "Available"
+                        : "Missing"}
+                  </em>
+                  {!model.installed && (
+                    <button
+                      className="download-model-button"
+                      onClick={() => pullModel(model)}
+                      disabled={working === model.id}
+                      aria-label={`Download ${model.name}`}
+                      title="Download"
+                    >
+                      <Download size={14} />
+                    </button>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </section>
       </>
@@ -740,25 +814,123 @@ export function AIProviderSettingsModal({
     );
   }
 
+  function formatBytes(value?: number) {
+    if (!value || value <= 0) return "Unknown";
+    const gib = value / (1024 ** 3);
+    return `${gib.toFixed(gib >= 10 ? 0 : 1)} GiB`;
+  }
+
+  function statusLabel(value?: string) {
+    if (!value) return "Unknown";
+    return value
+      .split(/[-_]/g)
+      .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+      .join(" ");
+  }
+
   function renderAboutSettings() {
+    const health = serviceStatus.health;
+    const config = serviceStatus.config;
+    const capability = serviceStatus.capability;
+    const models = capability?.models ?? [];
+    const compactModels = models.slice(0, 3).map((model) => model.modelName).join(", ");
     return (
-      <section className="provider-section">
-        <div className="provider-section-heading">
-          <div>
-            <span>Loom AI</span>
-            <h3>Local prototype</h3>
+      <>
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Loom AI</span>
+              <h3>Local prototype</h3>
+            </div>
           </div>
-        </div>
-        <div className="settings-placeholder">
-          <strong>Build channel</strong>
-          <span>Local prototype / development build</span>
-        </div>
-        <div className="settings-actions">
-          <button disabled>Documentation</button>
-          <button disabled>Release notes</button>
-          <button disabled>Report issue</button>
-        </div>
-      </section>
+          <div className="settings-placeholder">
+            <strong>Build channel</strong>
+            <span>Local prototype / development build</span>
+          </div>
+          <div className="settings-actions">
+            <button disabled>Documentation</button>
+            <button disabled>Release notes</button>
+            <button disabled>Report issue</button>
+          </div>
+        </section>
+
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Engine</span>
+              <h3>Service status</h3>
+            </div>
+            <button
+              type="button"
+              className="download-model-button"
+              onClick={() => void refreshServiceStatus()}
+              disabled={serviceStatus.loading}
+            >
+              <RefreshCw size={13} />
+              <span>{serviceStatus.loading ? "Refreshing" : "Refresh service status"}</span>
+            </button>
+          </div>
+
+          <div className={`runtime-health-card ${health?.status ?? "degraded"}`}>
+            <strong>
+              {health?.runtime === "rust-service" ? "Rust Service" : "TypeScript Local"}
+              {" · "}
+              {statusLabel(health?.status)}
+            </strong>
+            <span>
+              Mode: {health?.runtime === "rust-service" ? "Rust Service" : "TypeScript Local"}
+              {health?.serviceUrl ? ` · ${health.serviceUrl}` : ""}
+            </span>
+            {health?.version && <span>Version: {health.version}</span>}
+            {health?.database && <span>Database: {statusLabel(health.database.status)}</span>}
+            {health?.config && <span>Config: {statusLabel(health.config.status)}</span>}
+            {health?.providers?.ollama && (
+              <>
+                <span>
+                  Ollama: {statusLabel(health.providers.ollama.status)}{" "}
+                  {health.providers.ollama.version
+                    ? `· ${health.providers.ollama.version}`
+                    : ""}
+                </span>
+                <span>
+                  Local-only:{" "}
+                  {health.providers.ollama.security?.localOnly ? "OK" : "Warning"}
+                  {health.providers.ollama.security?.versionStatus
+                    ? ` · Security: ${health.providers.ollama.security.versionStatus}`
+                    : ""}
+                </span>
+                {health.providers.ollama.security?.warnings?.slice(0, 2).map((warning) => (
+                  <small key={warning}>{warning}</small>
+                ))}
+              </>
+            )}
+            {health?.error && <span>Start loom-service and refresh. {health.error}</span>}
+          </div>
+
+          <div className="service-status-grid">
+            <div className="settings-placeholder">
+              <strong>Config</strong>
+              <span>Status: {statusLabel(config?.status)}</span>
+              {config?.path && <span>Path: {config.path}</span>}
+              <span>Restart required: {config?.restartRequired ? "Yes" : "No"}</span>
+              <span>Pending restart: {config?.pendingRestart ? "Yes" : "No"}</span>
+            </div>
+            <div className="settings-placeholder">
+              <strong>Capability</strong>
+              <span>Status: {statusLabel(capability?.status)}</span>
+              <span>
+                System: {[capability?.system?.osName, capability?.system?.arch]
+                  .filter(Boolean)
+                  .join(" / ") || "Unknown"}
+              </span>
+              <span>Memory: {formatBytes(capability?.system?.totalMemoryBytes)}</span>
+              <span>
+                Models: {models.length > 0 ? `${models.length} (${compactModels})` : "Unknown"}
+              </span>
+            </div>
+          </div>
+        </section>
+      </>
     );
   }
 

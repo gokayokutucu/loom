@@ -1,14 +1,32 @@
 import { useEffect, useRef } from "react";
 import { Bot, CornerDownLeft, Square, X } from "lucide-react";
-import type { ResponseItem } from "../types";
+import type { LoomLink, ResponseItem } from "../types";
 
 export interface AskPopupState {
+  sessionId?: string;
   response: ResponseItem;
   selectedText: string;
+  sourceSelectedText?: string;
+  sourceResponseId?: string;
+  sourceFragment?: LoomLink;
+  contextKind?: "response" | "fragment";
+  contextPreview?: string;
+  contextModeLabel?: string;
   question: string;
   answered: boolean;
   answer?: string;
-  exchanges?: Array<{ question: string; answer: string }>;
+  exchanges?: Array<{
+    id?: string;
+    question: string;
+    answer: string;
+    createdAt?: number;
+    capsuleSnapshot?: unknown;
+    selectedText?: string;
+    sourceLoomId?: string;
+    sourceResponseId?: string;
+    sourceFragment?: LoomLink;
+    payloadReport?: unknown;
+  }>;
   error?: string;
   running?: boolean;
   sourceLoomId?: string;
@@ -69,6 +87,7 @@ export function AskPopup({
       ? [{ question: state.question, answer: state.answer }]
       : []);
   const hasAnswer = exchanges.length > 0;
+  const contextLabel = state.contextKind === "fragment" ? "Context Fragment" : "Context Response";
 
   return (
     <div className="ask-modal-backdrop">
@@ -93,8 +112,9 @@ export function AskPopup({
           </button>
         </div>
         <div className="ask-context" data-testid="ask-context">
-          <span>Context Response</span>
-          <blockquote>{state.selectedText}</blockquote>
+          <span>{contextLabel}</span>
+          {state.contextModeLabel && <em>{state.contextModeLabel}</em>}
+          <blockquote>{state.contextPreview ?? state.selectedText}</blockquote>
         </div>
         {hasAnswer && (
           <div className="ask-answer-list" data-testid="ask-answer-list" ref={answerListRef}>

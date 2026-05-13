@@ -1,3 +1,5 @@
+// E2E data authority classification: LEGACY_TYPESCRIPT_LOCAL / PURE_UI_RENDERING.
+// This spec exercises current browser navigation rendering over legacy seeded UI state.
 import { expect, type Page, test } from "@playwright/test";
 
 const promotedAddressBarUri =
@@ -42,7 +44,7 @@ async function chooseAddressBarSuggestion(page: Page, query: string, title: stri
   await page.getByRole("option", { name: new RegExp(title) }).click();
 }
 
-test.describe("Address Bar navigation", () => {
+test.describe("[legacy-typescript-local][pure-ui-rendering] Address Bar navigation", () => {
   test("clicking the focused Address Bar reopens suggestions after dismissal", async ({ page }) => {
     await openApp(page);
     const addressInput = page.getByLabel("Loom Address Bar");

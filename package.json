@@ -7,7 +7,10 @@
     "dev": "vite --host 0.0.0.0",
     "build": "tsc && vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "service:dev": "cargo run --manifest-path services/loom-service/Cargo.toml",
+    "service:check": "cargo check --manifest-path services/loom-service/Cargo.toml",
+    "service:test": "cargo test --manifest-path services/loom-service/Cargo.toml"
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",

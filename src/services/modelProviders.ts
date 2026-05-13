@@ -1,3 +1,11 @@
+/*
+ * Runtime model execution helpers in this module are legacy/dev/test-only after
+ * the Rust-authoritative cutover. UI settings/types may remain product-adjacent,
+ * but product model execution must go through
+ * LoomEngineClient -> RustHttpLoomEngineClient -> loom-service.
+ */
+import { detectThinkingLoop } from "./thinkingGuard";
+
 export type ModelProviderKind =
   | "ollama"
   | "mock"
@@ -30,6 +38,31 @@ export interface OllamaSettings {
 }
 
 export type RuntimeHealthStatus = "unknown" | "ready" | "not_running" | "degraded";
+export type OllamaRuntimeErrorKind =
+  | "runtime_unavailable"
+  | "model_missing"
+  | "tags_unavailable"
+  | "probe_timeout"
+  | "stream_failed"
+  | "unsafe_remote"
+  | "unknown";
+
+export interface OllamaRuntimeHealth {
+  runtimeReachable: boolean;
+  version?: string;
+  tagsReachable: boolean;
+  availableModels: string[];
+  selectedModelAvailable: boolean;
+  lastCheckedAt?: string;
+  lastErrorKind?: OllamaRuntimeErrorKind;
+  stale: boolean;
+  security?: {
+    localOnly: boolean;
+    networkExposureRisk: "low" | "high" | "unknown";
+    versionStatus?: "ok" | "vulnerable" | "unknown" | "unavailable";
+    warnings: string[];
+  };
+}
 
 export interface RuntimeHealthState {
   ollama_installed: boolean;
@@ -39,6 +72,7 @@ export interface RuntimeHealthState {
   status: RuntimeHealthStatus;
   message: string;
   checkedAt?: string;
+  ollama?: OllamaRuntimeHealth;
 }
 
 export interface ModelProfileSettings {
@@ -67,6 +101,8 @@ export interface ModelProvider {
 }
 
 export type ModelEffort = "Low" | "Medium" | "High";
+export type OllamaContextMode = "auto" | "instant" | "thinking";
+export type ModelOutputBudget = "short" | "medium" | "long" | "extended";
 
 export interface ModelExecutionRequest {
   profile: ModelProfileId;
@@ -74,21 +110,66 @@ export interface ModelExecutionRequest {
   prompt: string;
   system?: string;
   context?: string[];
+  referenceCount?: number;
+  referenceCharCount?: number;
+  messageCount?: number;
   effort?: ModelEffort;
+  mode?: OllamaContextMode;
+  think?: boolean;
+  outputBudget?: ModelOutputBudget;
+  numPredict?: number;
   signal?: AbortSignal;
+  onProgress?: (progress: ModelExecutionProgress) => void;
 }
 
 export interface ModelExecutionResult {
   provider: ModelProviderKind;
   modelId: string;
   text: string;
+  finalContent?: string;
+  thinkingStartedAt?: string;
+  thinkingEndedAt?: string;
+  finalStartedAt?: string;
+  elapsedThinkingSeconds?: number;
+  thinkingTimeoutMs?: number;
+  resolvedNumCtx?: number;
+  think?: boolean;
+  outputBudget?: ModelOutputBudget;
+  numPredict?: number;
+  doneReason?: string;
+  truncated?: boolean;
+  thinkingStalled?: boolean;
+  thinkingStallReason?: string;
+}
+
+export interface ModelExecutionProgress {
+  finalContent?: string;
+  thinkingStartedAt?: string;
+  thinkingEndedAt?: string;
+  finalStartedAt?: string;
+  elapsedThinkingSeconds?: number;
+  thinkingTimeoutMs?: number;
+  resolvedNumCtx?: number;
+  think?: boolean;
+  outputBudget?: ModelOutputBudget;
+  numPredict?: number;
+  doneReason?: string;
+  truncated?: boolean;
+  thinkingStalled?: boolean;
+  thinkingStallReason?: string;
+  done?: boolean;
 }
 
 export class ModelProviderError extends Error {
   provider: ModelProviderKind;
   code:
     | "provider_unavailable"
+    | "runtime_unavailable"
     | "model_missing"
+    | "tags_unavailable"
+    | "probe_timeout"
+    | "stream_failed"
+    | "unsafe_remote"
     | "provider_not_implemented"
     | "request_failed";
 
@@ -107,8 +188,18 @@ export class ModelProviderError extends Error {
 const SETTINGS_KEY = "loom-ai-provider-settings-v1";
 
 export const OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434";
+export const OLLAMA_MAIN_DEFAULT_MODEL_ID = "qwen3.5:9b";
+export const OLLAMA_QUICK_DEFAULT_MODEL_ID = OLLAMA_MAIN_DEFAULT_MODEL_ID;
+const OLLAMA_MODEL_EXECUTION_TIMEOUT_MS = 300000;
+const OLLAMA_PREFLIGHT_VERSION_TIMEOUT_MS = 3500;
+const OLLAMA_PREFLIGHT_TAGS_TIMEOUT_MS = 6000;
+const OLLAMA_MINIMUM_RECOMMENDED_VERSION = "0.17.1";
 
 const suggestedOllamaModels: ModelDescriptor[] = [
+  { id: OLLAMA_MAIN_DEFAULT_MODEL_ID, name: "qwen3.5:9b", provider: "ollama", installed: false },
+  { id: "llama3.2", name: "llama3.2", provider: "ollama", installed: false },
+  { id: "codeqwen:7b-code", name: "codeqwen:7b-code", provider: "ollama", installed: false },
+  { id: "qwen:7b", name: "qwen:7b", provider: "ollama", installed: false },
   { id: "llama3.2:3b", name: "Llama 3.2 3B", provider: "ollama", installed: false },
   { id: "llama3.1:8b", name: "Llama 3.1 8B", provider: "ollama", installed: false },
   { id: "qwen2.5:7b", name: "Qwen 2.5 7B", provider: "ollama", installed: false },
@@ -143,8 +234,8 @@ export const defaultAIProviderSettings: AIProviderSettings = {
     lastConnectionStatus: "unknown",
   },
   profiles: {
-    quickModelId: "llama3.2:3b",
-    mainModelId: "llama3.1:8b",
+    quickModelId: OLLAMA_QUICK_DEFAULT_MODEL_ID,
+    mainModelId: OLLAMA_MAIN_DEFAULT_MODEL_ID,
   },
   demo: {
     mockResponsesEnabled: false,
@@ -170,8 +261,58 @@ export function isMockResponseModeEnabled(settings?: Pick<AIProviderSettings, "d
   );
 }
 
-function mergeSettings(value: Partial<AIProviderSettings>): AIProviderSettings {
+function profileDefaultModelId(profile: ModelProfileId) {
+  return profile === "quick"
+    ? OLLAMA_QUICK_DEFAULT_MODEL_ID
+    : OLLAMA_MAIN_DEFAULT_MODEL_ID;
+}
+
+function resolveProfileModelId(
+  selectedModelId: string | undefined,
+  profile: ModelProfileId,
+  models: ModelDescriptor[]
+) {
+  const selectedModel = selectedModelId
+    ? models.find((model) => model.id === selectedModelId)
+    : undefined;
+  if (selectedModel?.installed) return selectedModel.id;
+
+  const defaultModelId = profileDefaultModelId(profile);
+  const defaultModel = models.find((model) => model.id === defaultModelId);
+  if (defaultModel?.installed) return defaultModel.id;
+
+  return selectedModelId || defaultModelId;
+}
+
+export function reconcileModelProfiles(settings: AIProviderSettings): AIProviderSettings {
+  const quickModelId = resolveProfileModelId(
+    settings.profiles.quickModelId,
+    "quick",
+    settings.ollama.models
+  );
+  const mainModelId = resolveProfileModelId(
+    settings.profiles.mainModelId,
+    "main",
+    settings.ollama.models
+  );
+  if (
+    quickModelId === settings.profiles.quickModelId &&
+    mainModelId === settings.profiles.mainModelId
+  ) {
+    return settings;
+  }
   return {
+    ...settings,
+    profiles: {
+      ...settings.profiles,
+      quickModelId,
+      mainModelId,
+    },
+  };
+}
+
+function mergeSettings(value: Partial<AIProviderSettings>): AIProviderSettings {
+  const merged = {
     ...defaultAIProviderSettings,
     ...value,
     ollama: {
@@ -190,6 +331,7 @@ function mergeSettings(value: Partial<AIProviderSettings>): AIProviderSettings {
       ...value.demo,
     },
   };
+  return reconcileModelProfiles(merged);
 }
 
 export function readAIProviderSettings(): AIProviderSettings {
@@ -218,6 +360,241 @@ export function mergeOllamaModels(models: ModelDescriptor[]) {
   return Array.from(byId.values());
 }
 
+export function normalizeOllamaModelId(modelId: string) {
+  return modelId.endsWith(":latest") ? modelId.slice(0, -":latest".length) : modelId;
+}
+
+function isOllamaThinkingCandidate(modelId: string) {
+  return /\bqwen/i.test(modelId);
+}
+
+export function resolveOllamaThinkValue(input: {
+  modelId: string;
+  mode: OllamaContextMode;
+  promptText: string;
+  referenceCount: number;
+}) {
+  if (input.mode === "instant") return false;
+  if (!isOllamaThinkingCandidate(input.modelId)) return false;
+  if (input.mode === "thinking") return true;
+  return input.referenceCount >= 2 || input.promptText.length > 1200;
+}
+
+export interface OllamaContextLengthInput {
+  promptText: string;
+  referenceCount: number;
+  referenceCharCount: number;
+  messageCount: number;
+  mode: OllamaContextMode;
+  userConfiguredMaxContext: number;
+}
+
+export function resolveOllamaContextLength(input: OllamaContextLengthInput) {
+  const userMax =
+    Number.isFinite(input.userConfiguredMaxContext) && input.userConfiguredMaxContext > 0
+      ? input.userConfiguredMaxContext
+      : 2048;
+  let resolved: number;
+
+  if (
+    input.referenceCount === 0 &&
+    input.promptText.length < 1000 &&
+    input.messageCount <= 2
+  ) {
+    resolved = 2048;
+  } else if (input.referenceCount <= 2 && input.referenceCharCount < 6000) {
+    resolved = 4096;
+  } else if (input.referenceCount <= 6 && input.referenceCharCount < 16000) {
+    resolved = 8192;
+  } else {
+    resolved = userMax;
+  }
+
+  if (input.mode === "instant" && input.referenceCount === 0 && input.promptText.length < 1000) {
+    resolved = 2048;
+  }
+
+  return Math.min(resolved, userMax);
+}
+
+export function resolveThinkingTimeoutMs(input: {
+  promptText: string;
+  referenceCount: number;
+  referenceCharCount: number;
+  messageCount: number;
+  resolvedNumCtx: number;
+  mode: OllamaContextMode;
+}) {
+  let timeout = 90_000;
+  if (
+    input.promptText.length < 1000 &&
+    input.referenceCount === 0 &&
+    input.messageCount <= 2 &&
+    input.resolvedNumCtx <= 2048
+  ) {
+    timeout = 15_000;
+  } else if (
+    input.referenceCount <= 2 &&
+    input.referenceCharCount < 6000 &&
+    input.resolvedNumCtx <= 4096
+  ) {
+    timeout = 30_000;
+  } else if (input.referenceCount <= 6 && input.resolvedNumCtx <= 8192) {
+    timeout = 60_000;
+  }
+  return Math.min(90_000, Math.max(12_000, timeout));
+}
+
+export function resolveOllamaNumPredict(input: {
+  mode: OllamaContextMode;
+  referenceCount: number;
+  referenceCharCount: number;
+  resolvedNumCtx: number;
+  outputBudget?: ModelOutputBudget;
+}) {
+  if (input.outputBudget === "short") return input.mode === "thinking" ? 1024 : 768;
+  if (input.outputBudget === "medium") return input.mode === "thinking" ? 1536 : 1024;
+  if (input.outputBudget === "long") return 8192;
+  if (input.outputBudget === "extended") return 16384;
+  if (input.mode === "instant") return 512;
+  if (input.mode === "thinking") {
+    if (input.resolvedNumCtx > 8192) return 3072;
+    if (input.resolvedNumCtx > 4096) return 2048;
+    if (input.resolvedNumCtx > 2048) return 1536;
+    return 1024;
+  }
+  if (input.referenceCount === 0) return 768;
+  if (input.referenceCount <= 2 && input.referenceCharCount < 6000) return 1024;
+  return 1536;
+}
+
+interface OllamaThinkingAccumulator {
+  provider: ModelProviderKind;
+  modelId: string;
+  thinkingText: string;
+  finalContent: string;
+  thinkingStartedAt?: string;
+  thinkingEndedAt?: string;
+  finalStartedAt?: string;
+  thinkingTimeoutMs?: number;
+  resolvedNumCtx?: number;
+  think?: boolean;
+  outputBudget?: ModelOutputBudget;
+  numPredict?: number;
+  doneReason?: string;
+  truncated?: boolean;
+  thinkingStalled?: boolean;
+  thinkingStallReason?: string;
+}
+
+interface OllamaStreamChunk {
+  message?: {
+    thinking?: string;
+    content?: string;
+  };
+  thinking?: string;
+  response?: string;
+  done?: boolean;
+  done_reason?: string;
+  doneReason?: string;
+  reason?: string;
+  stop_reason?: string;
+  stopReason?: string;
+  error?: string;
+}
+
+function doneReasonFromChunk(chunk: OllamaStreamChunk) {
+  return (
+    chunk.done_reason ??
+    chunk.doneReason ??
+    chunk.stop_reason ??
+    chunk.stopReason ??
+    chunk.reason
+  );
+}
+
+export function isLengthDoneReason(reason?: string) {
+  return Boolean(reason && /length|num_predict|token|limit|max/i.test(reason));
+}
+
+function elapsedSeconds(start?: string, end?: string) {
+  if (!start) return undefined;
+  const startMs = Date.parse(start);
+  const endMs = end ? Date.parse(end) : Date.now();
+  if (Number.isNaN(startMs) || Number.isNaN(endMs)) return undefined;
+  return Math.max(0, (endMs - startMs) / 1000);
+}
+
+function applyOllamaChunk(
+  state: OllamaThinkingAccumulator,
+  thinkingChunk: string,
+  finalChunk: string
+) {
+  if (thinkingChunk) {
+    if (!state.thinkingStartedAt) state.thinkingStartedAt = new Date().toISOString();
+    state.thinkingText += thinkingChunk;
+  }
+  if (finalChunk) {
+    if (!state.finalStartedAt) {
+      state.finalStartedAt = new Date().toISOString();
+      if (state.thinkingStartedAt && !state.thinkingEndedAt) {
+        state.thinkingEndedAt = state.finalStartedAt;
+      }
+    }
+    state.finalContent += finalChunk;
+  }
+}
+
+function resultFromOllamaState(state: OllamaThinkingAccumulator): ModelExecutionResult {
+  if (state.thinkingStartedAt && !state.thinkingEndedAt) {
+    state.thinkingEndedAt = new Date().toISOString();
+  }
+  const text = state.finalContent.trim() || "The model returned no final content.";
+  return {
+    provider: state.provider,
+    modelId: state.modelId,
+    text,
+    finalContent: state.finalContent,
+    thinkingStartedAt: state.thinkingStartedAt,
+    thinkingEndedAt: state.thinkingEndedAt,
+    finalStartedAt: state.finalStartedAt,
+    elapsedThinkingSeconds: elapsedSeconds(state.thinkingStartedAt, state.thinkingEndedAt),
+    thinkingTimeoutMs: state.thinkingTimeoutMs,
+    resolvedNumCtx: state.resolvedNumCtx,
+    think: state.think,
+    outputBudget: state.outputBudget,
+    numPredict: state.numPredict,
+    doneReason: state.doneReason,
+    truncated: state.truncated,
+    thinkingStalled: state.thinkingStalled,
+    thinkingStallReason: state.thinkingStallReason,
+  };
+}
+
+function emitOllamaProgress(
+  request: ModelExecutionRequest,
+  state: OllamaThinkingAccumulator,
+  done = false
+) {
+  request.onProgress?.({
+    finalContent: state.finalContent,
+    thinkingStartedAt: state.thinkingStartedAt,
+    thinkingEndedAt: state.thinkingEndedAt,
+    finalStartedAt: state.finalStartedAt,
+    elapsedThinkingSeconds: elapsedSeconds(state.thinkingStartedAt, state.thinkingEndedAt),
+    thinkingTimeoutMs: state.thinkingTimeoutMs,
+    resolvedNumCtx: state.resolvedNumCtx,
+    think: state.think,
+    outputBudget: state.outputBudget,
+    numPredict: state.numPredict,
+    doneReason: state.doneReason,
+    truncated: state.truncated,
+    thinkingStalled: state.thinkingStalled,
+    thinkingStallReason: state.thinkingStallReason,
+    done,
+  });
+}
+
 export function getInstalledModels(settings: AIProviderSettings) {
   return settings.ollama.models.filter((model) => model.installed);
 }
@@ -242,23 +619,110 @@ function normalizeBaseUrl(value: string) {
   return value.replace(/\/$/, "");
 }
 
+export function validateOllamaBaseUrlSecurity(baseUrl: string) {
+  try {
+    const parsed = new URL(normalizeBaseUrl(baseUrl));
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      return {
+        allowed: false,
+        localOnly: true,
+        networkExposureRisk: "unknown" as const,
+        warning: "Ollama base URL must use http or https.",
+      };
+    }
+    const host = parsed.hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    if (host === "localhost" || host === "127.0.0.1" || host === "::1") {
+      return {
+        allowed: true,
+        localOnly: true,
+        networkExposureRisk: "low" as const,
+        warning: "Ollama is local-only.",
+      };
+    }
+    if (host === "0.0.0.0" || host === "::") {
+      return {
+        allowed: false,
+        localOnly: true,
+        networkExposureRisk: "high" as const,
+        warning: "0.0.0.0 is not a safe Ollama client target.",
+      };
+    }
+    return {
+      allowed: false,
+      localOnly: false,
+      networkExposureRisk: "high" as const,
+      warning: "Remote Ollama URL is not allowed by default.",
+    };
+  } catch {
+    return {
+      allowed: false,
+      localOnly: true,
+      networkExposureRisk: "unknown" as const,
+      warning: "Ollama base URL is invalid.",
+    };
+  }
+}
+
+export function ollamaVersionSecurityStatus(version?: string) {
+  if (!version) return "unavailable" as const;
+  const comparison = compareVersionTriplet(version, OLLAMA_MINIMUM_RECOMMENDED_VERSION);
+  if (comparison === undefined) return "unknown" as const;
+  return comparison < 0 ? "vulnerable" as const : "ok" as const;
+}
+
+function compareVersionTriplet(left: string, right: string) {
+  const leftParts = parseVersionTriplet(left);
+  const rightParts = parseVersionTriplet(right);
+  if (!leftParts || !rightParts) return undefined;
+  for (let index = 0; index < 3; index += 1) {
+    if (leftParts[index] !== rightParts[index]) return leftParts[index] - rightParts[index];
+  }
+  return 0;
+}
+
+function parseVersionTriplet(value: string) {
+  const [version] = value.trim().replace(/^v/i, "").split(/[-+]/);
+  const parts = version.split(".").map((part) => Number.parseInt(part, 10));
+  if (parts.length < 1 || parts.some((part) => Number.isNaN(part))) return undefined;
+  return [parts[0] ?? 0, parts[1] ?? 0, parts[2] ?? 0] as const;
+}
+
+function assertSafeOllamaBaseUrl(baseUrl: string) {
+  const security = validateOllamaBaseUrlSecurity(baseUrl);
+  if (!security.allowed) {
+    throw new ModelProviderError("ollama", "unsafe_remote", security.warning);
+  }
+  return security;
+}
+
 function effortOptions(effort: ModelEffort | undefined) {
-  if (effort === "Low") return { temperature: 0.2, num_ctx: 4096 };
-  if (effort === "High") return { temperature: 0.45, num_ctx: 16384 };
-  return { temperature: 0.3, num_ctx: 8192 };
+  if (effort === "Low") return { temperature: 0.2 };
+  if (effort === "High") return { temperature: 0.45 };
+  return { temperature: 0.3 };
 }
 
 function providerUnavailableMessage(baseUrl: string) {
-  return `Ollama is not reachable at ${baseUrl}. Start Ollama locally or update the base URL in AI Providers.`;
+  return `Ollama is not running or not reachable at ${baseUrl}. Start Ollama, then retry. You can also open AI Providers and use Test Runtime.`;
 }
 
 export function mapOllamaError(error: unknown): RuntimeHealthStatus {
+  if (error instanceof ModelProviderError && error.code === "unsafe_remote") return "degraded";
   if (error instanceof DOMException && error.name === "AbortError") return "degraded";
   if (error instanceof TypeError) return "not_running";
   if (error instanceof Error && /ECONNREFUSED|Failed to fetch|NetworkError/i.test(error.message)) {
     return "not_running";
   }
   return "degraded";
+}
+
+function ollamaErrorKind(error: unknown): OllamaRuntimeErrorKind {
+  if (error instanceof ModelProviderError && error.code === "unsafe_remote") return "unsafe_remote";
+  if (error instanceof DOMException && error.name === "AbortError") return "probe_timeout";
+  if (error instanceof TypeError) return "runtime_unavailable";
+  if (error instanceof Error && /ECONNREFUSED|Failed to fetch|NetworkError/i.test(error.message)) {
+    return "runtime_unavailable";
+  }
+  return "unknown";
 }
 
 export function runtimeHealthMessage(status: RuntimeHealthStatus, baseUrl: string) {
@@ -289,18 +753,126 @@ export async function fetchWithTimeout(
   }
 }
 
+export async function preflightOllamaRuntime(
+  settings: AIProviderSettings,
+  selectedModelId: string,
+  signal?: AbortSignal
+): Promise<OllamaRuntimeHealth> {
+  const baseUrl = normalizeBaseUrl(settings.ollama.baseUrl);
+  const baseUrlSecurity = assertSafeOllamaBaseUrl(baseUrl);
+  const lastCheckedAt = new Date().toISOString();
+  let version: string | undefined;
+
+  try {
+    const versionResponse = await fetchWithTimeout(
+      `${baseUrl}/api/version`,
+      { signal },
+      OLLAMA_PREFLIGHT_VERSION_TIMEOUT_MS
+    );
+    if (!versionResponse.ok) {
+      throw new ModelProviderError(
+        "ollama",
+        "runtime_unavailable",
+        providerUnavailableMessage(baseUrl)
+      );
+    }
+    const versionData = (await versionResponse.json().catch(() => ({}))) as { version?: string };
+    version = versionData.version;
+  } catch (error) {
+    if (error instanceof ModelProviderError) throw error;
+    const kind = ollamaErrorKind(error);
+    throw new ModelProviderError(
+      "ollama",
+      kind === "probe_timeout" ? "probe_timeout" : "runtime_unavailable",
+      providerUnavailableMessage(baseUrl)
+    );
+  }
+
+  let models: ModelDescriptor[];
+  try {
+    const tagsResponse = await fetchWithTimeout(
+      `${baseUrl}/api/tags`,
+      { signal },
+      OLLAMA_PREFLIGHT_TAGS_TIMEOUT_MS
+    );
+    if (!tagsResponse.ok) {
+      throw new ModelProviderError(
+        "ollama",
+        "tags_unavailable",
+        `Ollama is reachable, but model tags are unavailable (${tagsResponse.status}). Open AI Providers and test the runtime.`
+      );
+    }
+    const tags = (await tagsResponse.json()) as {
+      models?: Array<{ name: string; size?: number; modified_at?: string }>;
+    };
+    models =
+      tags.models?.map((model) => {
+        const normalizedName = normalizeOllamaModelId(model.name);
+        return {
+          id: normalizedName,
+          name: normalizedName,
+          provider: "ollama" as const,
+          installed: true,
+          size: model.size ? formatBytes(model.size) : undefined,
+          modifiedAt: model.modified_at,
+          location: settings.ollama.modelLocation,
+        };
+      }) ?? [];
+  } catch (error) {
+    if (error instanceof ModelProviderError) throw error;
+    throw new ModelProviderError(
+      "ollama",
+      "tags_unavailable",
+      "Ollama is reachable, but installed models could not be listed. Open AI Providers and test the runtime."
+    );
+  }
+
+  const availableModels = models.map((model) => model.id);
+  const selectedModelAvailable = availableModels.includes(normalizeOllamaModelId(selectedModelId));
+  if (!selectedModelAvailable) {
+    throw new ModelProviderError(
+      "ollama",
+      "model_missing",
+      `${selectedModelId} is not installed. Pull it from AI Providers, then try again.`
+    );
+  }
+
+  return {
+    runtimeReachable: true,
+    version,
+    tagsReachable: true,
+    availableModels,
+    selectedModelAvailable,
+    lastCheckedAt,
+    stale: false,
+    security: {
+      localOnly: baseUrlSecurity.localOnly,
+      networkExposureRisk: baseUrlSecurity.networkExposureRisk,
+      versionStatus: ollamaVersionSecurityStatus(version),
+      warnings:
+        ollamaVersionSecurityStatus(version) === "vulnerable"
+          ? ["Ollama version may be vulnerable. Update to 0.17.1 or newer."]
+          : [baseUrlSecurity.warning],
+    },
+  };
+}
+
 export class OllamaProvider implements ModelProvider {
   kind: ModelProviderKind = "ollama";
   label = "Ollama";
 
   async testConnection(settings: AIProviderSettings) {
-    const response = await fetchWithTimeout(`${normalizeBaseUrl(settings.ollama.baseUrl)}/api/version`);
+    const baseUrl = normalizeBaseUrl(settings.ollama.baseUrl);
+    assertSafeOllamaBaseUrl(baseUrl);
+    const response = await fetchWithTimeout(`${baseUrl}/api/version`);
     if (!response.ok) throw new Error(`Ollama returned ${response.status}`);
     return true;
   }
 
   async refreshModels(settings: AIProviderSettings) {
-    const response = await fetchWithTimeout(`${normalizeBaseUrl(settings.ollama.baseUrl)}/api/tags`);
+    const baseUrl = normalizeBaseUrl(settings.ollama.baseUrl);
+    assertSafeOllamaBaseUrl(baseUrl);
+    const response = await fetchWithTimeout(`${baseUrl}/api/tags`);
     if (!response.ok) throw new Error(`Ollama returned ${response.status}`);
     const data = (await response.json()) as {
       models?: Array<{
@@ -310,20 +882,33 @@ export class OllamaProvider implements ModelProvider {
       }>;
     };
     const installed =
-      data.models?.map((model) => ({
-        id: model.name,
-        name: model.name,
-        provider: "ollama" as const,
-        installed: true,
-        size: model.size ? formatBytes(model.size) : undefined,
-        modifiedAt: model.modified_at,
-        location: settings.ollama.modelLocation,
-      })) ?? [];
+      data.models?.map((model) => {
+        const normalizedName = normalizeOllamaModelId(model.name);
+        return {
+          id: normalizedName,
+          name: normalizedName,
+          provider: "ollama" as const,
+          installed: true,
+          size: model.size ? formatBytes(model.size) : undefined,
+          modifiedAt: model.modified_at,
+          location: settings.ollama.modelLocation,
+        };
+      }) ?? [];
     return mergeOllamaModels(installed);
   }
 
   async pullModel(settings: AIProviderSettings, modelId: string) {
-    const response = await fetchWithTimeout(`${normalizeBaseUrl(settings.ollama.baseUrl)}/api/pull`, {
+    const baseUrl = normalizeBaseUrl(settings.ollama.baseUrl);
+    assertSafeOllamaBaseUrl(baseUrl);
+    const trustedModel = suggestedOllamaModels.some((model) => model.id === modelId);
+    if (!trustedModel) {
+      throw new ModelProviderError(
+        "ollama",
+        "request_failed",
+        "Model pull is limited to curated Ollama model names."
+      );
+    }
+    const response = await fetchWithTimeout(`${baseUrl}/api/pull`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ model: modelId, stream: false }),
@@ -332,45 +917,196 @@ export class OllamaProvider implements ModelProvider {
   }
 
   async execute(settings: AIProviderSettings, request: ModelExecutionRequest) {
-    const model = settings.ollama.models.find((item) => item.id === request.modelId);
-    if (model && !model.installed) {
-      throw new ModelProviderError(
-        "ollama",
-        "model_missing",
-        `${model.name} is not installed. Pull it from AI Providers, then try again.`
-      );
-    }
-
     const baseUrl = normalizeBaseUrl(settings.ollama.baseUrl);
+    await preflightOllamaRuntime(settings, request.modelId, request.signal);
+    const contextCharCount =
+      request.context?.reduce((total, content) => total + content.length, 0) ?? 0;
+    const referenceCount = request.referenceCount ?? request.context?.length ?? 0;
+    const referenceCharCount = request.referenceCharCount ?? contextCharCount;
+    const messageCount =
+      request.messageCount ?? (request.system ? 1 : 0) + (request.context?.length ?? 0) + 1;
+    const mode = request.mode ?? "auto";
+    const think =
+      request.think ??
+      resolveOllamaThinkValue({
+        modelId: request.modelId,
+        mode,
+        promptText: request.prompt,
+        referenceCount,
+      });
+    const resolvedContextLength = resolveOllamaContextLength({
+      promptText: request.prompt,
+      referenceCount,
+      referenceCharCount,
+      messageCount,
+      mode,
+      userConfiguredMaxContext: settings.ollama.contextLength,
+    });
+    const thinkingTimeoutMs = resolveThinkingTimeoutMs({
+      promptText: request.prompt,
+      referenceCount,
+      referenceCharCount,
+      messageCount,
+      resolvedNumCtx: resolvedContextLength,
+      mode,
+    });
+    const numPredict =
+      request.numPredict ??
+      resolveOllamaNumPredict({
+        mode,
+        referenceCount,
+        referenceCharCount,
+        resolvedNumCtx: resolvedContextLength,
+        outputBudget: request.outputBudget,
+      });
     const options = {
       ...effortOptions(request.effort),
-      num_ctx: settings.ollama.contextLength,
+      num_ctx: resolvedContextLength,
+      num_predict: numPredict,
+    };
+    const state: OllamaThinkingAccumulator = {
+      provider: this.kind,
+      modelId: request.modelId,
+      thinkingText: "",
+      finalContent: "",
+      thinkingTimeoutMs,
+      resolvedNumCtx: resolvedContextLength,
+      think,
+      outputBudget: request.outputBudget,
+      numPredict,
+    };
+
+    const readStream = async (
+      response: Response,
+      selectChunks: (chunk: OllamaStreamChunk) => { thinking: string; content: string }
+    ) => {
+      const reader = response.body?.getReader();
+      if (!reader) return false;
+      const decoder = new TextDecoder();
+      let buffer = "";
+      const thinkingChunks: string[] = [];
+
+      const consumeLine = (line: string) => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        let chunk: OllamaStreamChunk;
+        try {
+          chunk = JSON.parse(trimmed) as OllamaStreamChunk;
+        } catch {
+          throw new ModelProviderError(
+            "ollama",
+            "stream_failed",
+            "Ollama started responding, but the stream returned invalid data. Retry after testing the runtime."
+          );
+        }
+        if (chunk.error) {
+          throw new ModelProviderError("ollama", "request_failed", chunk.error);
+        }
+        const doneReason = doneReasonFromChunk(chunk);
+        if (doneReason) {
+          state.doneReason = doneReason;
+        }
+        const selected = selectChunks(chunk);
+        applyOllamaChunk(state, selected.thinking, selected.content);
+        if (selected.thinking) {
+          thinkingChunks.push(selected.thinking);
+          const startedAt = state.thinkingStartedAt ? Date.parse(state.thinkingStartedAt) : Date.now();
+          const detection = detectThinkingLoop({
+            recentThinkingText: state.thinkingText.slice(-6000),
+            previousChunks: thinkingChunks,
+            elapsedMs: Math.max(0, Date.now() - startedAt),
+            finalContentStarted: Boolean(state.finalStartedAt),
+          });
+          if (detection.isLooping && !state.thinkingStalled) {
+            state.thinkingStalled = true;
+            state.thinkingStallReason = detection.reason;
+          }
+        }
+        if (chunk.done && isLengthDoneReason(state.doneReason)) {
+          state.truncated = true;
+        }
+        if (selected.thinking || selected.content || chunk.done) {
+          emitOllamaProgress(request, state, Boolean(chunk.done));
+        }
+      };
+
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() ?? "";
+        lines.forEach(consumeLine);
+      }
+      buffer += decoder.decode();
+      if (buffer.trim()) consumeLine(buffer);
+      return true;
     };
 
     try {
-      const chatResponse = await fetchWithTimeout(`${baseUrl}/api/chat`, {
-        method: "POST",
-        signal: request.signal,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: request.modelId,
-          stream: false,
-          options,
-          messages: [
-            ...(request.system ? [{ role: "system", content: request.system }] : []),
-            ...(request.context?.map((content) => ({ role: "user", content })) ?? []),
-            { role: "user", content: request.prompt },
-          ],
-        }),
-      });
+      let chatResponse = await fetchWithTimeout(
+        `${baseUrl}/api/chat`,
+        {
+          method: "POST",
+          signal: request.signal,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: request.modelId,
+            stream: true,
+            think,
+            options,
+            messages: [
+              ...(request.system ? [{ role: "system", content: request.system }] : []),
+              ...(request.context?.map((content) => ({ role: "user", content })) ?? []),
+              { role: "user", content: request.prompt },
+            ],
+          }),
+        },
+        OLLAMA_MODEL_EXECUTION_TIMEOUT_MS
+      );
+
+      if (!chatResponse.ok && think && chatResponse.status === 400) {
+        chatResponse = await fetchWithTimeout(
+          `${baseUrl}/api/chat`,
+          {
+            method: "POST",
+            signal: request.signal,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: request.modelId,
+              stream: true,
+              options,
+              messages: [
+                ...(request.system ? [{ role: "system", content: request.system }] : []),
+                ...(request.context?.map((content) => ({ role: "user", content })) ?? []),
+                { role: "user", content: request.prompt },
+              ],
+            }),
+          },
+          OLLAMA_MODEL_EXECUTION_TIMEOUT_MS
+        );
+      }
 
       if (chatResponse.ok) {
-        const data = (await chatResponse.json()) as { message?: { content?: string } };
-        return {
-          provider: this.kind,
-          modelId: request.modelId,
-          text: data.message?.content?.trim() || "The model returned an empty response.",
+        const streamed = await readStream(chatResponse, (chunk) => ({
+          thinking: chunk.message?.thinking ?? "",
+          content: chunk.message?.content ?? "",
+        }));
+        if (streamed) return resultFromOllamaState(state);
+
+        const data = (await chatResponse.json()) as {
+          message?: { content?: string; thinking?: string };
+          done_reason?: string;
+          doneReason?: string;
+          reason?: string;
+          stop_reason?: string;
+          stopReason?: string;
         };
+        state.doneReason = doneReasonFromChunk(data);
+        state.truncated = isLengthDoneReason(state.doneReason);
+        applyOllamaChunk(state, data.message?.thinking ?? "", data.message?.content ?? "");
+        emitOllamaProgress(request, state, true);
+        return resultFromOllamaState(state);
       }
 
       if (chatResponse.status === 404) {
@@ -381,19 +1117,44 @@ export class OllamaProvider implements ModelProvider {
         );
       }
 
-      const generateResponse = await fetchWithTimeout(`${baseUrl}/api/generate`, {
-        method: "POST",
-        signal: request.signal,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: request.modelId,
-          stream: false,
-          prompt: [request.system, ...(request.context ?? []), request.prompt]
-            .filter(Boolean)
-            .join("\n\n"),
-          options,
-        }),
-      });
+      let generateResponse = await fetchWithTimeout(
+        `${baseUrl}/api/generate`,
+        {
+          method: "POST",
+          signal: request.signal,
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: request.modelId,
+            stream: true,
+            think,
+            prompt: [request.system, ...(request.context ?? []), request.prompt]
+              .filter(Boolean)
+              .join("\n\n"),
+            options,
+          }),
+        },
+        OLLAMA_MODEL_EXECUTION_TIMEOUT_MS
+      );
+
+      if (!generateResponse.ok && think && generateResponse.status === 400) {
+        generateResponse = await fetchWithTimeout(
+          `${baseUrl}/api/generate`,
+          {
+            method: "POST",
+            signal: request.signal,
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              model: request.modelId,
+              stream: true,
+              prompt: [request.system, ...(request.context ?? []), request.prompt]
+                .filter(Boolean)
+                .join("\n\n"),
+              options,
+            }),
+          },
+          OLLAMA_MODEL_EXECUTION_TIMEOUT_MS
+        );
+      }
 
       if (generateResponse.status === 404) {
         throw new ModelProviderError(
@@ -411,18 +1172,32 @@ export class OllamaProvider implements ModelProvider {
         );
       }
 
-      const data = (await generateResponse.json()) as { response?: string };
-      return {
-        provider: this.kind,
-        modelId: request.modelId,
-        text: data.response?.trim() || "The model returned an empty response.",
+      const streamed = await readStream(generateResponse, (chunk) => ({
+        thinking: chunk.thinking ?? "",
+        content: chunk.response ?? "",
+      }));
+      if (streamed) return resultFromOllamaState(state);
+
+      const data = (await generateResponse.json()) as {
+        response?: string;
+        thinking?: string;
+        done_reason?: string;
+        doneReason?: string;
+        reason?: string;
+        stop_reason?: string;
+        stopReason?: string;
       };
+      state.doneReason = doneReasonFromChunk(data);
+      state.truncated = isLengthDoneReason(state.doneReason);
+      applyOllamaChunk(state, data.thinking ?? "", data.response ?? "");
+      emitOllamaProgress(request, state, true);
+      return resultFromOllamaState(state);
     } catch (error) {
       if (error instanceof ModelProviderError) throw error;
       const mapped = mapOllamaError(error);
       throw new ModelProviderError(
         "ollama",
-        mapped === "degraded" ? "request_failed" : "provider_unavailable",
+        mapped === "degraded" ? "request_failed" : "runtime_unavailable",
         mapped === "degraded"
           ? "Ollama runtime timed out or returned an unexpected response."
           : providerUnavailableMessage(baseUrl)
@@ -460,12 +1235,84 @@ export class MockModelProvider implements ModelProvider {
   }
 
   private quickResponse(request: ModelExecutionRequest) {
-    const anchor = request.context?.find((item) => item.startsWith("Response title:"));
+    const selectedFragment = request.context?.find((item) =>
+      item.includes("Selected fragment:")
+    );
+    const currentQuestion = request.context
+      ?.find((item) => item.includes("User question:") || item.includes("Current question:"))
+      ?.match(/(?:User question|Current question):\s*"([^"]+)"/)?.[1]?.trim() ?? request.prompt.trim();
+    const detectedIntent = request.context
+      ?.find((item) => item.includes("Detected intent:"))
+      ?.match(/Detected intent:\s*([a-z_]+)/)?.[1]?.trim();
+    const sourceContext = request.context?.find((item) =>
+      item.startsWith("Source context:") ||
+      item.startsWith("Background source context, use only if needed:")
+    );
+    const allContextText = request.context?.join("\n\n") ?? "";
+    const sourceTitle = sourceContext?.match(/Title:\s*([^\n]+)/)?.[1]?.trim();
+    const hasPreviousQuickTurns = Boolean(
+      request.context?.some((item) => item.startsWith("Previous quick turns:"))
+    );
+    const usedFullSource = Boolean(
+      request.context?.some((item) => item.startsWith("Source text:"))
+    );
+    const selectedFragmentText = selectedFragment
+      ?.match(/Selected fragment:\s*"([^"]+)"/)?.[1]
+      ?.trim();
+    const acronymExpansions: Record<string, string> = {
+      API: "Application Programming Interface",
+      CQRS: "Command Query Responsibility Segregation",
+      HTTP: "Hypertext Transfer Protocol",
+      IPC: "Inter-Process Communication",
+      JWT: "JSON Web Token",
+      MCP: "Model Context Protocol",
+    };
+    const selectedAcronym = selectedFragmentText?.toUpperCase();
+    const expansion = selectedAcronym ? acronymExpansions[selectedAcronym] : undefined;
+    if (detectedIntent === "acronym_expansion" && selectedAcronym && expansion) {
+      const sourceAware =
+        selectedAcronym === "MCP" &&
+        /\b(plugin|plugins|tool|tools|session|server|capability|capabilities)\b/i.test(allContextText);
+      return [
+        "Demo quick answer:",
+        `${selectedAcronym} = ${expansion}.`,
+        sourceAware
+          ? "Bu context'te MCP, plugin entegrasyonu ve araç/session akışıyla ilişkili Model Context Protocol anlamında kullanılıyor."
+          : "This answers the current question about the selected fragment, not the broader source response.",
+        sourceAware
+          ? "Seçili parçada açılım açıkça yazmıyorsa bunu context'e göre muhtemel anlam olarak okumak gerekir."
+          : "",
+        hasPreviousQuickTurns ? "It includes previous quick turns." : "",
+        usedFullSource ? "Full source text was sent." : "Full source text was not sent.",
+      ].filter(Boolean).join("\n\n");
+    }
+    if (detectedIntent === "acronym_expansion" && selectedAcronym && !expansion) {
+      return [
+        "Demo quick answer:",
+        `${selectedAcronym} için seçili metinde ya da kaynak context'te açık bir açılım görünmüyor.`,
+        "Bu yüzden kesin bir açılım uydurmak yerine kaynak metindeki kullanım bağlamına göre yorumlamak gerekir.",
+        hasPreviousQuickTurns ? "It includes previous quick turns." : "",
+      ].filter(Boolean).join("\n\n");
+    }
+    if (hasPreviousQuickTurns && selectedFragmentText) {
+      return [
+        "Demo quick answer:",
+        `This uses the selected fragment ${selectedFragmentText}.`,
+        "It includes previous quick turns and uses the current follow-up first.",
+        "It stays concise, but it is not forced into a single line.",
+      ].join("\n\n");
+    }
     return [
       "Demo quick answer:",
-      anchor ? `This stays anchored to ${anchor.replace("Response title:", "").trim()}.` : "This stays anchored to the selected Loom context.",
+      selectedFragmentText
+        ? `This uses the selected fragment ${selectedFragmentText}.`
+        : sourceTitle
+          ? `This stays anchored to ${sourceTitle}.`
+          : "This stays anchored to the selected Loom context.",
+      hasPreviousQuickTurns ? "It includes previous quick turns." : "",
+      usedFullSource ? "Full source text was sent." : "Full source text was not sent.",
       "Use this to validate the Quick Question flow without a live model.",
-    ].join(" ");
+    ].filter(Boolean).join("\n\n");
   }
 
   private mainResponse(request: ModelExecutionRequest) {
