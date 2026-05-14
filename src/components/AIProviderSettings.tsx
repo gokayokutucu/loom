@@ -1,19 +1,16 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  Accessibility,
-  Bell,
   Bot,
-  Box,
   CheckCircle2,
+  Database,
   Download,
   Info,
   Palette,
-  Plug,
+  ShieldCheck,
   RefreshCw,
   RotateCcw,
   Search,
   Server,
-  Settings,
   SlidersHorizontal,
   Workflow,
   X,
@@ -46,33 +43,33 @@ import type {
 const provider = new OllamaProvider();
 
 type SettingsCategoryId =
-  | "general"
+  | "runtime"
   | "ai-providers"
   | "models"
-  | "appearance"
-  | "notifications"
-  | "startup"
-  | "extensions"
-  | "mcp-connectors"
-  | "accessibility"
-  | "about";
+  | "capability"
+  | "context-memory"
+  | "privacy-security"
+  | "data-storage"
+  | "export-import"
+  | "ui-preferences"
+  | "advanced";
 
 const settingsCategories: Array<{
   id: SettingsCategoryId;
   label: string;
   description: string;
-  icon: typeof Settings;
+  icon: typeof Workflow;
 }> = [
-  { id: "general", label: "General", description: "Composer and Loom behavior", icon: Settings },
-  { id: "ai-providers", label: "AI Providers", description: "Runtime connections", icon: Server },
-  { id: "models", label: "Models", description: "Quick and Main models", icon: Bot },
-  { id: "appearance", label: "Appearance", description: "Theme preferences", icon: Palette },
-  { id: "notifications", label: "Notifications", description: "Loom alerts", icon: Bell },
-  { id: "startup", label: "Startup", description: "Launch behavior", icon: SlidersHorizontal },
-  { id: "extensions", label: "Extensions", description: "Extension Pipeline", icon: Box },
-  { id: "mcp-connectors", label: "MCP Connectors", description: "Tool connections", icon: Plug },
-  { id: "accessibility", label: "Accessibility", description: "Comfort controls", icon: Accessibility },
-  { id: "about", label: "About", description: "Prototype details", icon: Info },
+  { id: "runtime", label: "Runtime", description: "Service health and runtime readiness", icon: Workflow },
+  { id: "ai-providers", label: "Providers", description: "Connection, endpoint safety, availability", icon: Server },
+  { id: "models", label: "Models", description: "Quick/Main selection and availability", icon: Bot },
+  { id: "capability", label: "Capability", description: "Local capability and safe strategy", icon: SlidersHorizontal },
+  { id: "context-memory", label: "Context & Memory", description: "Recent turns, retrieval, local memory", icon: Workflow },
+  { id: "privacy-security", label: "Privacy & Security", description: "Local-first and raw-thinking protections", icon: ShieldCheck },
+  { id: "data-storage", label: "Data & Storage", description: "SQLite and local data", icon: Database },
+  { id: "export-import", label: "Export / Import", description: "Portable Loom data", icon: Download },
+  { id: "ui-preferences", label: "UI Preferences", description: "Display and comfort", icon: Palette },
+  { id: "advanced", label: "Advanced", description: "Diagnostics, config, developer plans", icon: Info },
 ];
 
 const futureProviders = ["OpenAI", "Anthropic Claude", "Google Gemini", "OpenAI-compatible"];
@@ -98,7 +95,7 @@ export function AIProviderSettingsModal({
   onClose: () => void;
 }) {
   const [draft, setDraft] = useState(settings);
-  const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>("general");
+  const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>("runtime");
   const [query, setQuery] = useState("");
   const [working, setWorking] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
@@ -124,7 +121,11 @@ export function AIProviderSettingsModal({
   }
 
   useEffect(() => {
-    if (activeCategory === "about" && !serviceStatus.health && !serviceStatus.loading) {
+    if (
+      ["runtime", "capability", "advanced"].includes(activeCategory) &&
+      !serviceStatus.health &&
+      !serviceStatus.loading
+    ) {
       void refreshServiceStatus();
     }
   }, [activeCategory, serviceStatus.health, serviceStatus.loading]);
@@ -278,9 +279,11 @@ export function AIProviderSettingsModal({
     );
   }
 
-  function renderGeneralSettings() {
+  function renderUiPreferencesSettings() {
     return (
       <>
+        {renderAppearanceSettings()}
+
         <section className="provider-section">
           <div className="provider-section-heading">
             <div>
@@ -323,7 +326,7 @@ export function AIProviderSettingsModal({
           <small>Adaptive preserves the current responsive split/full behavior.</small>
         </section>
 
-        <section className="provider-section settings-two-column">
+        <section className="provider-section settings-two-column settings-field-grid">
           <label className="settings-field">
             <span>Font Size</span>
             <select
@@ -341,6 +344,7 @@ export function AIProviderSettingsModal({
               <option value="large">Large</option>
               <option value="very-large">Very Large</option>
             </select>
+            <small>Controls Settings and Loom text scale.</small>
           </label>
           <label className="settings-field">
             <span>Language</span>
@@ -361,6 +365,10 @@ export function AIProviderSettingsModal({
             <small>Language structure only. Full i18n is not enabled yet.</small>
           </label>
         </section>
+
+        {renderNotificationsSettings()}
+        {renderAccessibilitySettings()}
+        {renderStartupSettings()}
       </>
     );
   }
@@ -463,6 +471,23 @@ export function AIProviderSettingsModal({
           </label>
 
           {message && <p className="settings-status">{message}</p>}
+        </section>
+
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Security</span>
+              <h3>Provider secrets</h3>
+            </div>
+            <span className="settings-planned-pill">Planned</span>
+          </div>
+          <div className="settings-placeholder settings-placeholder-disabled">
+            <strong>Secure native storage required</strong>
+            <span>
+              API keys and provider secrets are not stored in this Settings screen. Secret entry is
+              deferred until a secure native storage flow exists.
+            </span>
+          </div>
         </section>
 
         {demoResponsesAvailable && (
@@ -578,6 +603,23 @@ export function AIProviderSettingsModal({
               <strong>{draft.ollama.modelLocation}</strong>
             </div>
           )}
+        </section>
+
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Catalog</span>
+              <h3>Model availability metadata</h3>
+            </div>
+            <span className="settings-planned-pill">Read-only</span>
+          </div>
+          <div className="settings-placeholder">
+            <strong>Provider discovery is a hint</strong>
+            <span>
+              Provider-discovered models can confirm availability, but local benchmarks and stronger
+              catalog signals remain authoritative for capability decisions.
+            </span>
+          </div>
         </section>
 
         <section className="provider-section">
@@ -745,41 +787,6 @@ export function AIProviderSettingsModal({
     );
   }
 
-  function renderExtensionsSettings() {
-    return (
-      <section className="provider-section">
-        <div className="provider-section-heading">
-          <div>
-            <span>Extension Pipeline</span>
-            <h3>Extensions</h3>
-          </div>
-        </div>
-        <div className="settings-placeholder">
-          <strong>Coming soon</strong>
-          <span>Extensions will let Loom connect custom tools, workflows, and local automations.</span>
-        </div>
-      </section>
-    );
-  }
-
-  function renderMcpSettings() {
-    return (
-      <section className="provider-section">
-        <div className="provider-section-heading">
-          <div>
-            <span>MCP</span>
-            <h3>MCP Connectors</h3>
-          </div>
-        </div>
-        <div className="settings-placeholder">
-          <strong>No connectors configured</strong>
-          <span>Connector management is reserved for the upcoming MCP runtime.</span>
-          <button disabled>Add Connector</button>
-        </div>
-      </section>
-    );
-  }
-
   function renderAccessibilitySettings() {
     return (
       <section className="provider-section">
@@ -828,7 +835,350 @@ export function AIProviderSettingsModal({
       .join(" ");
   }
 
-  function renderAboutSettings() {
+  function renderRuntimeSettings() {
+    const health = serviceStatus.health;
+    const config = serviceStatus.config;
+    return (
+      <>
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Runtime</span>
+              <h3>Engine and service status</h3>
+            </div>
+            <button
+              type="button"
+              className="download-model-button"
+              onClick={() => void refreshServiceStatus()}
+              disabled={serviceStatus.loading}
+            >
+              <RefreshCw size={13} />
+              <span>{serviceStatus.loading ? "Refreshing" : "Refresh service status"}</span>
+            </button>
+          </div>
+
+          <div className={`runtime-health-card ${health?.status ?? runtimeHealth.status}`}>
+            <strong>
+              {health?.runtime === "rust-service" ? "Rust Service" : "Runtime"}
+              {" · "}
+              {statusLabel(health?.status ?? runtimeHealth.status)}
+            </strong>
+            <span>
+              Product mode uses the Rust-service engine boundary when service mode is enabled. No
+              TypeScript runtime fallback is introduced here.
+            </span>
+            <span>{runtimeHealth.message}</span>
+            {health?.serviceUrl && <span>Service URL: {health.serviceUrl}</span>}
+            {health?.database && <span>Database: {statusLabel(health.database.status)}</span>}
+            {health?.config && <span>Config: {statusLabel(health.config.status)}</span>}
+            {health?.error && <span>Start loom-service and refresh. {health.error}</span>}
+          </div>
+
+          <div className="settings-actions">
+            <button onClick={testConnection} disabled={working === "test" || runtimeHealth.checking}>
+              <CheckCircle2 size={14} />
+              Test Runtime
+            </button>
+            <button
+              type="button"
+              onClick={() => void refreshServiceStatus()}
+              disabled={serviceStatus.loading}
+            >
+              <RefreshCw size={14} />
+              Refresh service status
+            </button>
+          </div>
+          {message && <p className="settings-status">{message}</p>}
+        </section>
+
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Configuration</span>
+              <h3>Restart and config status</h3>
+            </div>
+          </div>
+          <div className="service-status-grid">
+            <div className="settings-placeholder">
+              <strong>Config</strong>
+              <span>Status: {statusLabel(config?.status)}</span>
+              {config?.path && <span>Path: {config.path}</span>}
+              <span>Restart required: {config?.restartRequired ? "Yes" : "No"}</span>
+              <span>Pending restart: {config?.pendingRestart ? "Yes" : "No"}</span>
+            </div>
+            <div className="settings-placeholder">
+              <strong>Runtime checks</strong>
+              <span>Ollama: {statusLabel(runtimeHealth.status)}</span>
+              <span>
+                Last checked:{" "}
+                {runtimeHealth.checkedAt
+                  ? new Date(runtimeHealth.checkedAt).toLocaleTimeString()
+                  : "Not checked"}
+              </span>
+            </div>
+          </div>
+        </section>
+      </>
+    );
+  }
+
+  function renderCapabilitySettings() {
+    const capability = serviceStatus.capability;
+    const models = capability?.models ?? [];
+    const compactModels = models.slice(0, 3).map((model) => model.modelName).join(", ");
+    return (
+      <>
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Capability</span>
+              <h3>System and strategy summary</h3>
+            </div>
+            <button
+              type="button"
+              className="download-model-button"
+              onClick={() => void refreshServiceStatus()}
+              disabled={serviceStatus.loading}
+            >
+              <RefreshCw size={13} />
+              <span>{serviceStatus.loading ? "Refreshing" : "Refresh"}</span>
+            </button>
+          </div>
+          <div className="service-status-grid">
+            <div className="settings-placeholder">
+              <strong>System</strong>
+              <span>Status: {statusLabel(capability?.status)}</span>
+              <span>
+                Platform: {[capability?.system?.osName, capability?.system?.arch]
+                  .filter(Boolean)
+                  .join(" / ") || "Unknown"}
+              </span>
+              <span>Memory: {formatBytes(capability?.system?.totalMemoryBytes)}</span>
+            </div>
+            <div className="settings-placeholder">
+              <strong>Models</strong>
+              <span>
+                Catalog: {models.length > 0 ? `${models.length} (${compactModels})` : "Unknown"}
+              </span>
+              <span>
+                Strategy resolver: {capability?.strategyAvailable ? "Available" : "Not available"}
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Performance</span>
+              <h3>Manual tuning</h3>
+            </div>
+            <span className="settings-planned-pill">Planned</span>
+          </div>
+          <div className="settings-placeholder settings-placeholder-disabled">
+            <strong>Capability tuning remains service-owned</strong>
+            <span>
+              Local benchmarks, compatibility estimates, and provider discovery feed the service
+              resolver. This screen does not add new routing or strategy controls.
+            </span>
+          </div>
+        </section>
+      </>
+    );
+  }
+
+  function renderContextMemorySettings() {
+    return (
+      <>
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Context</span>
+              <h3>Local conversation memory</h3>
+            </div>
+          </div>
+          <div className="settings-placeholder">
+            <strong>Loom stores conversation memory locally in SQLite.</strong>
+            <span>
+              Recent turns, References, response parts, capsules, checkpoints, tags, graph links,
+              and retrieval candidates are assembled by the Rust-service ContextManager.
+            </span>
+          </div>
+          <div className="settings-placeholder">
+            <strong>Raw model thinking is never stored or reused as future context.</strong>
+            <span>
+              Only visible answer content and safe status metadata can participate in future context.
+            </span>
+          </div>
+        </section>
+
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Memory controls</span>
+              <h3>User memory settings</h3>
+            </div>
+            <span className="settings-planned-pill">Coming later</span>
+          </div>
+          <div className="settings-placeholder settings-placeholder-disabled">
+            <strong>Explicit remember / forget policy required</strong>
+            <span>
+              Memory write, inspect, delete, and provenance controls are deferred until the
+              auditable memory policy is accepted.
+            </span>
+          </div>
+        </section>
+      </>
+    );
+  }
+
+  function renderPrivacySecuritySettings() {
+    return (
+      <>
+        <section className="provider-section settings-posture-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Security</span>
+              <h3>Security posture</h3>
+            </div>
+          </div>
+          <div className="settings-placeholder">
+            <strong>Loom is designed to keep runtime data local-first.</strong>
+            <span>
+              Raw model thinking is never stored, reused, exported, or injected into future
+              context.
+            </span>
+          </div>
+          <div className="settings-posture-grid">
+            {[
+              ["Local-first runtime", "Enabled", "Policy"],
+              ["Raw thinking persistence", "Disabled", "Policy"],
+              ["Remote Ollama", "Blocked by default", "Policy"],
+              ["Provider secrets", "Secure native storage required later", "Policy"],
+              ["Unsafe model management", "Disabled by default", "Policy"],
+            ].map(([label, value, source]) => (
+              <div className="settings-posture-row" key={label}>
+                <span>
+                  <strong>{label}</strong>
+                  <small>{source}</small>
+                </span>
+                <em>{value}</em>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Provider security</span>
+              <h3>Endpoint and secret policy</h3>
+            </div>
+          </div>
+          <div
+            className={`runtime-health-card ${
+              runtimeHealth.ollama?.security?.localOnly ? "ready" : "degraded"
+            }`}
+          >
+            <strong>Remote Ollama endpoints are blocked by default for safety.</strong>
+            <span>
+              Local-only: {runtimeHealth.ollama?.security?.localOnly ? "OK" : "Warning"}
+            </span>
+            {runtimeHealth.ollama?.security?.warnings?.slice(0, 2).map((warning) => (
+              <small key={warning}>{warning}</small>
+            ))}
+          </div>
+          <div className="settings-placeholder settings-placeholder-disabled">
+            <strong>Provider secrets require secure native storage.</strong>
+            <span>
+              API keys are not accepted or stored in this Settings UI, renderer state, or config
+              files.
+            </span>
+          </div>
+        </section>
+      </>
+    );
+  }
+
+  function renderDataStorageSettings() {
+    return (
+      <>
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Data</span>
+              <h3>Local storage</h3>
+            </div>
+          </div>
+          <div className="settings-placeholder">
+            <strong>SQLite canonical store</strong>
+            <span>
+              Loom, Weft, Response, Reference, Bookmark, graph, context, and provider non-secret
+              metadata are owned by loom-service.
+            </span>
+          </div>
+        </section>
+
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Storage controls</span>
+              <h3>Cleanup and data location</h3>
+            </div>
+            <span className="settings-planned-pill">Coming later</span>
+          </div>
+          <div className="settings-placeholder settings-placeholder-disabled">
+            <strong>Data management controls are deferred</strong>
+            <span>
+              Local data location, cleanup, archive/delete, and import flows need service-owned
+              product controls before they become active.
+            </span>
+          </div>
+        </section>
+      </>
+    );
+  }
+
+  function renderExportImportSettings() {
+    return (
+      <>
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Export</span>
+              <h3>Service export capabilities</h3>
+            </div>
+          </div>
+          <div className="settings-placeholder">
+            <strong>Graph-aware exports</strong>
+            <span>
+              Existing exports are routed through the engine/service boundary and must remain
+              raw-thinking-safe.
+            </span>
+          </div>
+        </section>
+
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Import</span>
+              <h3>Import controls</h3>
+            </div>
+            <span className="settings-planned-pill">Coming later</span>
+          </div>
+          <div className="settings-placeholder settings-placeholder-disabled">
+            <strong>Import is not active here yet</strong>
+            <span>
+              Import needs validated service-owned data boundaries before this Settings panel can
+              expose controls.
+            </span>
+          </div>
+        </section>
+      </>
+    );
+  }
+
+  function renderAdvancedSettings() {
     const health = serviceStatus.health;
     const config = serviceStatus.config;
     const capability = serviceStatus.capability;
@@ -840,13 +1190,30 @@ export function AIProviderSettingsModal({
           <div className="provider-section-heading">
             <div>
               <span>Loom AI</span>
-              <h3>Local prototype</h3>
+              <h3>Diagnostics</h3>
             </div>
           </div>
           <div className="settings-placeholder">
             <strong>Build channel</strong>
             <span>Local prototype / development build</span>
           </div>
+          <label className="settings-toggle">
+            <input
+              type="checkbox"
+              checked={appSettings.showGenerationDebug}
+              onChange={(event) =>
+                updateAppSettings({
+                  ...appSettings,
+                  showGenerationDebug: event.target.checked,
+                })
+              }
+            />
+            <span>Show generation debug monitor while answering</span>
+          </label>
+          <small>
+            Shows safe generation metadata during active responses. It does not expose or store raw
+            model thinking.
+          </small>
           <div className="settings-actions">
             <button disabled>Documentation</button>
             <button disabled>Release notes</button>
@@ -930,32 +1297,55 @@ export function AIProviderSettingsModal({
             </div>
           </div>
         </section>
+
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Developer</span>
+              <h3>Developer integrations — planned</h3>
+            </div>
+            <span className="settings-planned-pill">Planned</span>
+          </div>
+          <div className="settings-compact-planned-grid">
+            {[
+              ["Extensions", "Custom tools and local automations"],
+              ["MCP", "Connector management for the future runtime"],
+              ["Tool artifacts", "Service-owned tool output boundaries"],
+            ].map(([title, description]) => (
+              <div className="settings-compact-planned-item" key={title}>
+                <strong>{title}</strong>
+                <span>{description}</span>
+                <em>Planned</em>
+              </div>
+            ))}
+          </div>
+        </section>
       </>
     );
   }
 
   function renderActiveCategory() {
     switch (activeCategory) {
-      case "general":
-        return renderGeneralSettings();
+      case "runtime":
+        return renderRuntimeSettings();
       case "ai-providers":
         return renderAIProvidersSettings();
       case "models":
         return renderModelsSettings();
-      case "appearance":
-        return renderAppearanceSettings();
-      case "notifications":
-        return renderNotificationsSettings();
-      case "startup":
-        return renderStartupSettings();
-      case "extensions":
-        return renderExtensionsSettings();
-      case "mcp-connectors":
-        return renderMcpSettings();
-      case "accessibility":
-        return renderAccessibilitySettings();
-      case "about":
-        return renderAboutSettings();
+      case "capability":
+        return renderCapabilitySettings();
+      case "context-memory":
+        return renderContextMemorySettings();
+      case "privacy-security":
+        return renderPrivacySecuritySettings();
+      case "data-storage":
+        return renderDataStorageSettings();
+      case "export-import":
+        return renderExportImportSettings();
+      case "ui-preferences":
+        return renderUiPreferencesSettings();
+      case "advanced":
+        return renderAdvancedSettings();
     }
   }
 

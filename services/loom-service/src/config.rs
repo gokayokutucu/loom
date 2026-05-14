@@ -6,6 +6,10 @@ use crate::{
         ProviderModelDiscoveryConfig, ProviderProfileConfig, ProviderRequestDefaultsConfig,
         ProviderSecurityPolicyConfig,
     },
+    speech::{
+        apply_speech_patch, validate_speech_config, SpeechToTextConfig, SpeechToTextPatch,
+        SpeechToTextProviderKind,
+    },
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -63,6 +67,7 @@ pub struct LoomServiceConfig {
     pub database: DatabaseSection,
     pub ollama: OllamaSection,
     pub providers: ProviderSection,
+    pub speech: SpeechToTextConfig,
     pub context: ContextSection,
     pub runtime: RuntimeSection,
     pub features: FeatureSection,
@@ -144,6 +149,7 @@ pub struct ConfigPatch {
     pub database: Option<DatabasePatch>,
     pub ollama: Option<OllamaPatch>,
     pub providers: Option<ProviderPatch>,
+    pub speech: Option<SpeechToTextPatch>,
     pub context: Option<ContextPatch>,
     pub runtime: Option<RuntimePatch>,
     pub features: Option<FeaturePatch>,
@@ -273,6 +279,7 @@ impl Default for LoomServiceConfig {
                     DEFAULT_OLLAMA_BASE_URL.to_string(),
                 )],
             },
+            speech: SpeechToTextConfig::default(),
             context: ContextSection {
                 max_context_length: 8_192,
                 default_num_ctx_small: 2_048,
@@ -557,6 +564,67 @@ fn serialize_config(config: &LoomServiceConfig) -> String {
         write_provider_profile(&mut output, profile);
     }
 
+    writeln!(&mut output, "\n[speech]").expect("write speech config");
+    writeln!(&mut output, "enabled = {}", config.speech.enabled).expect("write speech enabled");
+    writeln!(
+        &mut output,
+        "defaultProviderKind = \"{}\"",
+        config.speech.default_provider_kind.as_config_str()
+    )
+    .expect("write speech provider kind");
+    writeln!(
+        &mut output,
+        "allowCloudStt = {}",
+        config.speech.allow_cloud_stt
+    )
+    .expect("write cloud stt policy");
+    writeln!(
+        &mut output,
+        "persistAudio = {}",
+        config.speech.persist_audio
+    )
+    .expect("write audio retention");
+    writeln!(
+        &mut output,
+        "persistTranscript = {}",
+        config.speech.persist_transcript
+    )
+    .expect("write transcript retention");
+    writeln!(
+        &mut output,
+        "maxAudioBytes = {}",
+        config.speech.max_audio_bytes
+    )
+    .expect("write max audio bytes");
+    writeln!(
+        &mut output,
+        "allowedMimeTypes = {}",
+        format_toml_string_array(&config.speech.allowed_mime_types)
+    )
+    .expect("write speech mime types");
+    if let Some(default_language) = &config.speech.default_language {
+        writeln!(
+            &mut output,
+            "defaultLanguage = \"{}\"",
+            escape_toml_string(default_language)
+        )
+        .expect("write speech language");
+    }
+    if let Some(provider_profile_id) = &config.speech.provider_profile_id {
+        writeln!(
+            &mut output,
+            "providerProfileId = \"{}\"",
+            escape_toml_string(provider_profile_id)
+        )
+        .expect("write speech provider profile");
+    }
+    writeln!(
+        &mut output,
+        "warnings = {}",
+        format_toml_string_array(&config.speech.warnings)
+    )
+    .expect("write speech warnings");
+
     writeln!(&mut output, "\n[context]").expect("write context config");
     writeln!(
         &mut output,
@@ -793,6 +861,15 @@ fn write_optional_f32(output: &mut String, key: &str, value: Option<f32>) {
     }
 }
 
+fn format_toml_string_array(values: &[String]) -> String {
+    let quoted = values
+        .iter()
+        .map(|value| format!("\"{}\"", escape_toml_string(value)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("[{quoted}]")
+}
+
 fn parse_config(text: &str) -> Result<LoomServiceConfig, ConfigParseError> {
     let mut config = LoomServiceConfig::default();
     let mut section = String::new();
@@ -888,6 +965,40 @@ fn set_config_value(
                 )));
             };
             set_provider_profile_value(profile, key, value, line_number)?;
+        }
+        ("speech", "enabled") => config.speech.enabled = parse_toml_bool(value, line_number)?,
+        ("speech", "defaultProviderKind") => {
+            let parsed = parse_toml_string(value, line_number)?;
+            config.speech.default_provider_kind = SpeechToTextProviderKind::parse(&parsed)
+                .ok_or_else(|| {
+                    ConfigParseError::new(format!(
+                        "line {line_number}: unknown speech.defaultProviderKind {parsed}"
+                    ))
+                })?;
+        }
+        ("speech", "allowCloudStt") => {
+            config.speech.allow_cloud_stt = parse_toml_bool(value, line_number)?;
+        }
+        ("speech", "persistAudio") => {
+            config.speech.persist_audio = parse_toml_bool(value, line_number)?;
+        }
+        ("speech", "persistTranscript") => {
+            config.speech.persist_transcript = parse_toml_bool(value, line_number)?;
+        }
+        ("speech", "maxAudioBytes") => {
+            config.speech.max_audio_bytes = parse_toml_u64(value, line_number)?;
+        }
+        ("speech", "allowedMimeTypes") => {
+            config.speech.allowed_mime_types = parse_toml_string_array(value, line_number)?;
+        }
+        ("speech", "defaultLanguage") => {
+            config.speech.default_language = Some(parse_toml_string(value, line_number)?);
+        }
+        ("speech", "providerProfileId") => {
+            config.speech.provider_profile_id = Some(parse_toml_string(value, line_number)?);
+        }
+        ("speech", "warnings") => {
+            config.speech.warnings = parse_toml_string_array(value, line_number)?;
         }
         ("context", "maxContextLength") => {
             config.context.max_context_length = parse_toml_u32(value, line_number)?;
@@ -1115,6 +1226,29 @@ fn parse_toml_bool(value: &str, line_number: usize) -> Result<bool, ConfigParseE
     }
 }
 
+fn parse_toml_string_array(
+    value: &str,
+    line_number: usize,
+) -> Result<Vec<String>, ConfigParseError> {
+    let value = value.trim();
+    let Some(inner) = value
+        .strip_prefix('[')
+        .and_then(|stripped| stripped.strip_suffix(']'))
+    else {
+        return Err(ConfigParseError::new(format!(
+            "line {line_number}: expected string array"
+        )));
+    };
+    if inner.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+
+    inner
+        .split(',')
+        .map(|item| parse_toml_string(item.trim(), line_number))
+        .collect()
+}
+
 fn parse_toml_u16(value: &str, line_number: usize) -> Result<u16, ConfigParseError> {
     value.trim().parse::<u16>().map_err(|error| {
         ConfigParseError::new(format!("line {line_number}: expected u16 number: {error}"))
@@ -1220,6 +1354,7 @@ pub fn validate_config(config: &LoomServiceConfig) -> Result<(), ServiceError> {
         ))
     })?)?;
     validate_provider_profiles(&config.providers.profiles)?;
+    validate_speech_config(&config.speech)?;
 
     Ok(())
 }
@@ -1348,6 +1483,9 @@ fn apply_patch(config: &mut LoomServiceConfig, patch: ConfigPatch) {
         if let Some(value) = providers.profiles {
             config.providers.profiles = value;
         }
+    }
+    if let Some(speech) = patch.speech {
+        apply_speech_patch(&mut config.speech, speech);
     }
     if let Some(context) = patch.context {
         if let Some(value) = context.max_context_length {
@@ -1502,6 +1640,7 @@ pub fn classify_restart_requirement(
             &candidate.providers.profiles,
         );
     }
+    check!("speech", current.speech, candidate.speech, false);
     check!(
         "context.maxContextLength",
         current.context.max_context_length,
@@ -1617,6 +1756,7 @@ mod tests {
         ProviderConfigChangeClassification, ProviderKind, ProviderProfileConfig,
         ProviderRequestNormalizationInput,
     };
+    use crate::speech::SpeechToTextProviderKind;
 
     #[test]
     fn creates_default_config_file_if_missing() {
@@ -1750,6 +1890,49 @@ mod tests {
         }
         assert!(serialized.contains("[[providers.profiles]]"));
         assert!(serialized.contains("requiresSecret = false"));
+    }
+
+    #[test]
+    fn speech_config_parses_from_toml_and_defaults_to_disabled() {
+        let mut config = LoomServiceConfig::default();
+        config.speech.enabled = true;
+        config.speech.default_provider_kind = SpeechToTextProviderKind::MockTest;
+        config.speech.default_language = Some("tr".to_string());
+        config.speech.allowed_mime_types = vec!["audio/webm".to_string(), "audio/wav".to_string()];
+        let path = test_path("speech-config");
+        write_config_atomic(&path, &config).expect("write config");
+
+        let loaded = load_or_create_config(&path).expect("load config");
+        assert!(loaded.speech.enabled);
+        assert_eq!(
+            loaded.speech.default_provider_kind,
+            SpeechToTextProviderKind::MockTest
+        );
+        assert_eq!(loaded.speech.default_language.as_deref(), Some("tr"));
+        assert_eq!(
+            loaded.speech.allowed_mime_types,
+            vec!["audio/webm".to_string(), "audio/wav".to_string()]
+        );
+    }
+
+    #[test]
+    fn speech_config_serializes_without_secrets_or_raw_thinking() {
+        let serialized = serialize_config(&LoomServiceConfig::default());
+        assert!(serialized.contains("[speech]"));
+        assert!(serialized.contains("enabled = false"));
+        assert!(serialized.contains("persistAudio = false"));
+        assert!(serialized.contains("persistTranscript = false"));
+        for forbidden in [
+            "apiKey",
+            "bearerToken",
+            "password",
+            "raw_thinking",
+            "thinking_text",
+            "chain_of_thought",
+            "hidden_reasoning",
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
     }
 
     #[test]

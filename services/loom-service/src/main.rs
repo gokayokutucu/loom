@@ -10,6 +10,7 @@ mod graph;
 mod orchestration;
 mod providers;
 mod runtime;
+mod speech;
 mod storage;
 
 use config::{ConfigManager, ServiceConfig};

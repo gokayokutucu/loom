@@ -10,6 +10,7 @@ export type DeterministicProviderMode = "event-sourcing";
 
 export interface ServiceTestHarnessOptions {
   deterministicProvider?: DeterministicProviderMode;
+  forceGenericQuickAskFirstAttempt?: boolean;
   requestTimeoutMs?: number;
   startApp?: boolean;
 }
@@ -88,6 +89,9 @@ export async function createServiceTestHarness(
       LOOM_OLLAMA_BASE_URL: "http://127.0.0.1:9",
       ...(options.deterministicProvider
         ? { LOOM_SERVICE_E2E_PROVIDER: options.deterministicProvider }
+        : {}),
+      ...(options.forceGenericQuickAskFirstAttempt
+        ? { LOOM_SERVICE_E2E_QUICK_GENERIC_FIRST: "true" }
         : {}),
     },
   });

@@ -139,6 +139,9 @@ test.describe("[product-service-backed] Quick Ask product proof", () => {
     const quickAskUrls: string[] = [];
     await page.route(/\/ask\/quick$/, async (route) => {
       quickAskUrls.push(route.request().url());
+      if (quickAskUrls.length === 1) {
+        await page.waitForTimeout(300);
+      }
       await route.continue();
     });
 
@@ -169,20 +172,19 @@ test.describe("[product-service-backed] Quick Ask product proof", () => {
 
       const popup = page.getByRole("dialog");
       await expect(popup).toBeVisible();
-      await expect(popup.getByTestId("ask-context")).toContainText("Context Fragment");
-      await expect(popup.getByTestId("ask-context")).toContainText("MCP");
+      await expect(popup.getByTestId("ask-context")).toHaveCount(0);
+      await expect(popup.getByTestId("ask-selected-fragment")).toContainText("MCP");
 
       await popup.getByLabel("Ask question").fill("açılımı nedir");
       await popup.getByRole("button", { name: /^Ask$/ }).click();
+      await expect(popup.getByTestId("ask-answer")).toContainText("açılımı nedir");
+      await expect(popup.getByTestId("ask-selected-fragment").first()).toContainText("MCP");
 
       await expect(popup.getByTestId("ask-answer")).toContainText(
         "MCP = Model Context Protocol"
       );
       await expect(popup.getByTestId("ask-answer")).toContainText("plugin entegrasyonu");
       await expect(popup.getByTestId("ask-answer")).toContainText("session");
-      await expect(popup.getByTestId("ask-answer")).not.toContainText(
-        "Microsoft Component Platform"
-      );
 
       await popup.getByLabel("Ask question").fill("Event Sourcing ile ilişkisi ne?");
       await popup.getByRole("button", { name: /^Ask$/ }).click();
@@ -218,6 +220,1331 @@ test.describe("[product-service-backed] Quick Ask product proof", () => {
       expectNoForbiddenPayload(wefts);
       expectNoForbiddenPayload(weftResponses);
       expect(scenario.dbPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] resolves active chip as subject for short Quick Ask questions", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+    const quickAskBodies: unknown[] = [];
+    const quickAskResponses: unknown[] = [];
+    await page.route(/\/ask\/quick$/, async (route) => {
+      quickAskBodies.push(route.request().postDataJSON());
+      const response = await route.fetch();
+      const json = await response.json();
+      quickAskResponses.push(json);
+      await route.fulfill({
+        status: response.status(),
+        contentType: "application/json",
+        body: JSON.stringify(json),
+      });
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(page, "Compaction Event Sourcing bağlamında ne anlama gelir?");
+      await expect(page.getByText("Compaction in Event Sourcing").first()).toBeVisible({
+        timeout: 30_000,
+      });
+
+      const rootLoom = (await scenario.client.listLooms()).find((item) =>
+        item.title.includes("Compaction")
+      );
+      expect(rootLoom).toBeTruthy();
+      const responses = await exportedLoomResponses(scenario, rootLoom!.loomId);
+      const assistant = responses.find(
+        (response) => response.role === "assistant" && response.content.includes("Compaction")
+      );
+      expect(assistant).toBeTruthy();
+
+      await selectResponseText(page, assistant!.responseId, "Compaction");
+      const selectionToolbar = page.getByRole("toolbar", { name: "Selection actions" });
+      await expect(selectionToolbar).toBeVisible();
+      await selectionToolbar.getByRole("button", { name: "Quick Question" }).click();
+
+      const popup = page.getByRole("dialog");
+      await expect(popup).toBeVisible();
+      await expect(popup.getByTestId("ask-selected-fragment")).toContainText("Compaction");
+      const visibleChipLabels = await popup.getByTestId("ask-selected-fragment").allInnerTexts();
+      expect(visibleChipLabels).toContain("Compaction");
+
+      await popup.getByLabel("Ask question").fill("ne anlama geliyor");
+      await popup.getByRole("button", { name: /^Ask$/ }).click();
+
+      await expect(popup.getByTestId("ask-answer")).toContainText("Compaction");
+      await expect(popup.getByTestId("ask-answer")).toContainText("Event Sourcing");
+      await expect(popup.getByTestId("ask-answer")).toContainText("event log");
+      await expect(popup.getByTestId("ask-answer")).toContainText("snapshot");
+      await expect(popup.getByTestId("ask-answer")).not.toContainText(
+        "Deterministic E2E provider only answers"
+      );
+      await expect(popup.getByTestId("ask-answer")).not.toContainText(
+        "Event Sourcing nedir?"
+      );
+      await popup.getByTestId("quick-ask-debug").locator("summary").click();
+      await expect(popup.getByTestId("quick-ask-debug-composed-task")).toContainText(
+        "Event Sourcing bağlamında Compaction ne anlama gelir?"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "genericSourceOnlyDetected=false"
+      );
+
+      expect(quickAskBodies).toHaveLength(1);
+      expect(quickAskBodies[0]).toMatchObject({
+        selectedText: "Compaction",
+        question: "ne anlama geliyor",
+        intent: "definition",
+        activeReferences: [
+          expect.objectContaining({
+            label: "Compaction",
+            selectedText: "Compaction",
+            sourceResponseId: assistant!.responseId,
+          }),
+        ],
+      });
+      expect(quickAskResponses[0]).toMatchObject({
+        focusSubject: "Compaction",
+        focusSubjectSource: "selected_fragment",
+        resolvedIntent: "definition",
+        requestedTopic: "Event Sourcing",
+        diagnostics: expect.objectContaining({
+          selectedText: "Compaction",
+          activeReferenceLabels: ["Compaction"],
+          sourceResponseId: assistant!.responseId,
+          previousAskTurnCount: 0,
+          focusSubject: "Compaction",
+          focusSubjectSource: "selected_fragment",
+          resolvedIntent: "definition",
+          requestedTopic: "Event Sourcing",
+          composedTask: "Event Sourcing bağlamında Compaction ne anlama gelir?",
+          promptSectionOrder: expect.arrayContaining([
+            "composed_task",
+            "focus_subject",
+            "selected_fragment",
+            "background_source_context",
+          ]),
+          providerRequestSummary: expect.objectContaining({
+            focusSubject: "Compaction",
+            activeReferenceLabels: ["Compaction"],
+            selectedText: "Compaction",
+            requestedTopic: "Event Sourcing",
+            composedTaskPreview: "Event Sourcing bağlamında Compaction ne anlama gelir?",
+            containsFocusSubject: true,
+            focusSubjectBeforeSource: true,
+          }),
+          answerValidation: expect.objectContaining({
+            includesFocusSubject: true,
+            includesRequestedTopic: true,
+            genericSourceOnlyDetected: false,
+          }),
+        }),
+      });
+      expectNoForbiddenPayload(quickAskBodies[0]);
+      expectNoForbiddenPayload(quickAskResponses[0]);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] traces visible chip composition for Write Side meaning", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+    const quickAskBodies: unknown[] = [];
+    const quickAskResponses: unknown[] = [];
+    await page.route(/\/ask\/quick$/, async (route) => {
+      quickAskBodies.push(route.request().postDataJSON());
+      const response = await route.fetch();
+      const json = await response.json();
+      quickAskResponses.push(json);
+      await route.fulfill({
+        status: response.status(),
+        contentType: "application/json",
+        body: JSON.stringify(json),
+      });
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(page, "Event store detaylı anlat");
+      await expect(page.getByText("Write Side").first()).toBeVisible({
+        timeout: 30_000,
+      });
+
+      const rootLoom = (await scenario.client.listLooms()).find((item) =>
+        item.title.toLowerCase().includes("event store")
+      );
+      expect(rootLoom).toBeTruthy();
+      const responses = await exportedLoomResponses(scenario, rootLoom!.loomId);
+      const assistant = responses.find(
+        (response) => response.role === "assistant" && response.content.includes("Write Side")
+      );
+      expect(assistant).toBeTruthy();
+
+      await selectResponseText(page, assistant!.responseId, "Write Side");
+      const selectionToolbar = page.getByRole("toolbar", { name: "Selection actions" });
+      await expect(selectionToolbar).toBeVisible();
+      await selectionToolbar.getByRole("button", { name: "Quick Question" }).click();
+
+      const popup = page.getByRole("dialog");
+      await expect(popup).toBeVisible();
+      await expect(popup.getByTestId("ask-selected-fragment")).toContainText("Write Side");
+
+      await popup.getByLabel("Ask question").fill("ne anlama geliyor");
+      await popup.getByRole("button", { name: /^Ask$/ }).click();
+
+      await expect(popup.getByTestId("ask-answer")).toContainText("Write Side");
+      await expect(popup.getByTestId("ask-answer")).toContainText("Event Store");
+      await expect(popup.getByTestId("ask-answer")).toContainText("komut");
+      await expect(popup.getByTestId("ask-answer")).not.toContainText(
+        "Debug failure"
+      );
+      await expect(popup.getByTestId("ask-answer")).not.toContainText(
+        "Event Store nedir?"
+      );
+
+      const debugPanel = popup.getByTestId("quick-ask-debug");
+      await debugPanel.locator("summary").click();
+      await expect(popup.getByTestId("quick-ask-debug-engine-mode")).toContainText(
+        "rust-service"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-client-kind")).toContainText(
+        "rust-http"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-request-attempted")).toContainText(
+        "true"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-endpoint")).toContainText(
+        "/ask/quick"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-http-status")).toContainText("200");
+      await expect(popup.getByTestId("quick-ask-debug-response-parse-status")).toContainText(
+        "success"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-diagnostics-received")).toContainText(
+        "true"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-visible-chips")).toContainText(
+        "Write Side"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-input-active-references")).toContainText(
+        "Write Side"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-service-active-references")).toContainText(
+        "Write Side"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-focus-subject")).toContainText(
+        "Write Side"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-requested-topic")).toContainText(
+        "Event Store"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-composed-task")).toContainText(
+        "Event Store bağlamında Write Side ne anlama gelir?"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-prompt-order")).toContainText(
+        "composed_task"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-provider-summary")).toContainText(
+        "focusBeforeSource=true"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "includesFocusSubject=true"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "validationPassed=true"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "finalAnswerSource=first_attempt"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "genericSourceOnlyDetected=false"
+      );
+
+      expect(quickAskBodies).toHaveLength(1);
+      expect(quickAskBodies[0]).toMatchObject({
+        quickAskTraceId: expect.stringMatching(/^quick-ask-/),
+        selectedText: "Write Side",
+        question: "ne anlama geliyor",
+        activeReferences: [
+          expect.objectContaining({
+            label: "Write Side",
+            selectedText: "Write Side",
+            sourceResponseId: assistant!.responseId,
+          }),
+        ],
+      });
+      expect(quickAskResponses[0]).toMatchObject({
+        focusSubject: "Write Side",
+        focusSubjectSource: "selected_fragment",
+        resolvedIntent: "definition",
+        requestedTopic: "Event Store",
+        diagnostics: expect.objectContaining({
+          traceId: expect.stringMatching(/^quick-ask-/),
+          inputActiveReferenceLabels: ["Write Side"],
+          serviceActiveReferenceLabels: ["Write Side"],
+          composedTask: "Event Store bağlamında Write Side ne anlama gelir?",
+          promptSectionOrder: expect.arrayContaining([
+            "current_task",
+            "composed_task",
+            "focus_subject",
+            "background_source_context",
+          ]),
+          providerRequestSummary: expect.objectContaining({
+            focusSubject: "Write Side",
+            requestedTopic: "Event Store",
+            composedTaskPreview: "Event Store bağlamında Write Side ne anlama gelir?",
+            containsFocusSubject: true,
+            focusSubjectBeforeSource: true,
+          }),
+          answerValidation: expect.objectContaining({
+            includesFocusSubject: true,
+            includesRequestedTopic: true,
+            genericSourceOnlyDetected: false,
+            startsWithFocusSubjectOrDefinition: true,
+            validationPassed: true,
+            finalAnswerSource: "first_attempt",
+          }),
+        }),
+      });
+      expectNoForbiddenPayload(quickAskBodies[0]);
+      expectNoForbiddenPayload(quickAskResponses[0]);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] blocks generic source-only Quick Ask answer for focused chip", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      forceGenericQuickAskFirstAttempt: true,
+      startApp: true,
+    });
+    const quickAskResponses: unknown[] = [];
+    await page.route(/\/ask\/quick$/, async (route) => {
+      const response = await route.fetch();
+      const json = await response.json();
+      quickAskResponses.push(json);
+      await route.fulfill({
+        status: response.status(),
+        contentType: "application/json",
+        body: JSON.stringify(json),
+      });
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(page, "Time Travel Event Sourcing bağlamında detaylı anlat");
+      await expect(page.getByText("Time Travel in Event Sourcing").first()).toBeVisible({
+        timeout: 30_000,
+      });
+
+      const rootLoom = (await scenario.client.listLooms()).find((item) =>
+        item.title.toLowerCase().includes("time travel")
+      );
+      expect(rootLoom).toBeTruthy();
+      const responses = await exportedLoomResponses(scenario, rootLoom!.loomId);
+      const assistant = responses.find(
+        (response) => response.role === "assistant" && response.content.includes("Time Travel")
+      );
+      expect(assistant).toBeTruthy();
+
+      await selectResponseText(page, assistant!.responseId, "Time Travel");
+      const selectionToolbar = page.getByRole("toolbar", { name: "Selection actions" });
+      await expect(selectionToolbar).toBeVisible();
+      await selectionToolbar.getByRole("button", { name: "Quick Question" }).click();
+
+      const popup = page.getByRole("dialog");
+      await expect(popup).toBeVisible();
+      await popup.getByLabel("Ask question").fill("nasıl kullanılıyor? bu ne demek");
+      await popup.getByRole("button", { name: /^Ask$/ }).click();
+
+      await expect(popup.getByTestId("ask-answer")).toContainText(
+        "Quick Ask could not produce an answer focused on Time Travel"
+      );
+      await expect(popup.getByTestId("ask-answer")).not.toContainText(
+        "Finans, sipariş yönetimi, audit"
+      );
+
+      await popup.getByTestId("quick-ask-debug").locator("summary").click();
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "includesFocusSubject=false"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "genericSourceOnlyDetected=true"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "validationPassed=false"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "finalAnswerSource=validation_error"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "validation_missing_focus"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "provider_ignored_focus"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-warnings")).toContainText(
+        "quick_ask_focus_validation_failed"
+      );
+
+      expect(quickAskResponses[0]).toMatchObject({
+        answer: expect.stringContaining(
+          "Quick Ask could not produce an answer focused on Time Travel"
+        ),
+        focusSubject: "Time Travel",
+        diagnostics: expect.objectContaining({
+          focusSubject: "Time Travel",
+          requestedTopic: "Event Sourcing",
+          answerValidation: expect.objectContaining({
+            includesFocusSubject: false,
+            includesRequestedTopic: true,
+            genericSourceOnlyDetected: true,
+            validationPassed: false,
+            finalAnswerSource: "validation_error",
+            failureReasons: expect.arrayContaining([
+              "validation_missing_focus",
+              "provider_ignored_focus",
+            ]),
+          }),
+        }),
+      });
+      expectNoForbiddenPayload(quickAskResponses[0]);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] proves Time Travel Quick Ask transport diagnostics", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+    const quickAskBodies: unknown[] = [];
+    const quickAskResponses: unknown[] = [];
+    await page.route(/\/ask\/quick$/, async (route) => {
+      quickAskBodies.push(route.request().postDataJSON());
+      const response = await route.fetch();
+      const json = await response.json();
+      quickAskResponses.push(json);
+      await route.fulfill({
+        status: response.status(),
+        contentType: "application/json",
+        body: JSON.stringify(json),
+      });
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(page, "Time Travel Event Sourcing bağlamında detaylı anlat");
+      await expect(page.getByText("Time Travel in Event Sourcing").first()).toBeVisible({
+        timeout: 30_000,
+      });
+
+      const rootLoom = (await scenario.client.listLooms()).find((item) =>
+        item.title.toLowerCase().includes("time travel")
+      );
+      expect(rootLoom).toBeTruthy();
+      const responses = await exportedLoomResponses(scenario, rootLoom!.loomId);
+      const assistant = responses.find(
+        (response) => response.role === "assistant" && response.content.includes("Time Travel")
+      );
+      expect(assistant).toBeTruthy();
+
+      await selectResponseText(page, assistant!.responseId, "Time Travel");
+      const selectionToolbar = page.getByRole("toolbar", { name: "Selection actions" });
+      await expect(selectionToolbar).toBeVisible();
+      await selectionToolbar.getByRole("button", { name: "Quick Question" }).click();
+
+      const popup = page.getByRole("dialog");
+      await expect(popup).toBeVisible();
+      await expect(popup.getByTestId("ask-selected-fragment")).toContainText("Time Travel");
+
+      await popup.getByLabel("Ask question").fill("nasıl kullanılıyor? bu ne demek");
+      await popup.getByRole("button", { name: /^Ask$/ }).click();
+
+      await expect(popup.getByTestId("ask-answer")).toContainText("Time Travel");
+      await expect(popup.getByTestId("ask-answer")).toContainText("Event Sourcing");
+      await expect(popup.getByTestId("ask-answer")).not.toContainText("Debug failure");
+
+      const debugPanel = popup.getByTestId("quick-ask-debug");
+      await debugPanel.locator("summary").click();
+      await expect(popup.getByTestId("quick-ask-debug-engine-mode")).toContainText(
+        "rust-service"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-client-kind")).toContainText(
+        "rust-http"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-request-attempted")).toContainText(
+        "true"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-endpoint")).toContainText(
+        "/ask/quick"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-http-status")).toContainText("200");
+      await expect(popup.getByTestId("quick-ask-debug-response-parse-status")).toContainText(
+        "success"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-diagnostics-received")).toContainText(
+        "true"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-visible-chips")).toContainText(
+        "Time Travel"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-input-active-references")).toContainText(
+        "Time Travel"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-service-active-references")).toContainText(
+        "Time Travel"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-focus-subject")).toContainText(
+        "Time Travel"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-requested-topic")).toContainText(
+        "Event Sourcing"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-composed-task")).toContainText(
+        "Time Travel"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-provider-summary")).toContainText(
+        "focusBeforeSource=true"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "includesFocusSubject=true"
+      );
+
+      expect(quickAskBodies).toHaveLength(1);
+      expect(quickAskBodies[0]).toMatchObject({
+        quickAskTraceId: expect.stringMatching(/^quick-ask-/),
+        selectedText: "Time Travel",
+        question: "nasıl kullanılıyor? bu ne demek",
+        activeReferences: [
+          expect.objectContaining({
+            label: "Time Travel",
+            selectedText: "Time Travel",
+            sourceResponseId: assistant!.responseId,
+          }),
+        ],
+      });
+      expect(quickAskResponses[0]).toMatchObject({
+        focusSubject: "Time Travel",
+        requestedTopic: "Event Sourcing",
+        diagnostics: expect.objectContaining({
+          traceId: expect.stringMatching(/^quick-ask-/),
+          inputActiveReferenceLabels: ["Time Travel"],
+          serviceActiveReferenceLabels: ["Time Travel"],
+          providerRequestSummary: expect.objectContaining({
+            focusSubject: "Time Travel",
+            requestedTopic: "Event Sourcing",
+            containsFocusSubject: true,
+            focusSubjectBeforeSource: true,
+          }),
+          answerValidation: expect.objectContaining({
+            includesFocusSubject: true,
+            includesRequestedTopic: true,
+            genericSourceOnlyDetected: false,
+          }),
+        }),
+      });
+      expectNoForbiddenPayload(quickAskBodies[0]);
+      expectNoForbiddenPayload(quickAskResponses[0]);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] recovers Quick Ask after typed provider failure without page refresh", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+    let quickAskCount = 0;
+    await page.route(/\/ask\/quick$/, async (route) => {
+      quickAskCount += 1;
+      if (quickAskCount === 1) {
+        await route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "RUNTIME_UNAVAILABLE",
+            message: "Ollama provider is unavailable.",
+            kind: "runtime_unavailable",
+            retryable: true,
+            correlationId: "quick-provider-failure",
+            details: {
+              endpoint: "/ask/quick",
+              raw_thinking: "hidden",
+            },
+          }),
+        });
+        return;
+      }
+      const response = await route.fetch();
+      await route.fulfill({ response });
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(page, "MCP, CQRS ve Event Sourcing ilişkisini anlat.");
+      await expect(page.getByText("Model Context Protocol").first()).toBeVisible({
+        timeout: 30_000,
+      });
+
+      const rootLoom = (await scenario.client.listLooms()).find((item) =>
+        item.title.includes("MCP")
+      );
+      expect(rootLoom).toBeTruthy();
+      const responses = await exportedLoomResponses(scenario, rootLoom!.loomId);
+      const assistant = responses.find(
+        (response) => response.role === "assistant" && response.content.includes("MCP")
+      );
+      expect(assistant).toBeTruthy();
+
+      await selectResponseText(page, assistant!.responseId, "MCP");
+      const selectionToolbar = page.getByRole("toolbar", { name: "Selection actions" });
+      await expect(selectionToolbar).toBeVisible();
+      await selectionToolbar.getByRole("button", { name: "Quick Question" }).click();
+
+      const popup = page.getByRole("dialog");
+      await expect(popup).toBeVisible();
+      await popup.getByLabel("Ask question").fill("açılımı nedir");
+      await popup.getByRole("button", { name: /^Ask$/ }).click();
+
+      await expect(popup.locator(".ask-error")).toContainText("Ollama provider is unavailable.");
+      await expect(popup.getByRole("button", { name: /^Ask$/ })).toBeDisabled();
+      await expect(popup.getByText("loom-service request failed.")).toHaveCount(0);
+      await expect(popup.getByText("raw_thinking")).toHaveCount(0);
+      await popup.getByTestId("quick-ask-debug").locator("summary").click();
+      await expect(popup.getByTestId("quick-ask-debug-engine-mode")).toContainText(
+        "rust-service"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-request-attempted")).toContainText(
+        "true"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-endpoint")).toContainText(
+        "/ask/quick"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-http-status")).toContainText("503");
+      await expect(popup.getByTestId("quick-ask-debug-diagnostics-received")).toContainText(
+        "false"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-transport-error")).toContainText(
+        "provider_unavailable"
+      );
+
+      await popup.getByLabel("Ask question").fill("açılımı nedir");
+      await expect(popup.getByRole("button", { name: /^Ask$/ })).toBeEnabled();
+      await popup.getByRole("button", { name: /^Ask$/ }).click();
+      await expect(popup.getByTestId("ask-answer-list")).toContainText(
+        "MCP = Model Context Protocol"
+      );
+      await expect(popup.getByTestId("ask-answer-list")).toContainText("session");
+      expect(quickAskCount).toBe(2);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] audits visible chip to provider request for Audit Trail usage", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+    const quickAskBodies: unknown[] = [];
+    const quickAskResponses: unknown[] = [];
+    await page.route(/\/ask\/quick$/, async (route) => {
+      quickAskBodies.push(route.request().postDataJSON());
+      const response = await route.fetch();
+      const json = await response.json();
+      quickAskResponses.push(json);
+      await route.fulfill({
+        status: response.status(),
+        contentType: "application/json",
+        body: JSON.stringify(json),
+      });
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(page, "Audit Trail Event Sourcing bağlamında ne işe yarar?");
+      await expect(page.getByText("Audit Trail in Event Sourcing").first()).toBeVisible({
+        timeout: 30_000,
+      });
+
+      const rootLoom = (await scenario.client.listLooms()).find((item) =>
+        item.title.includes("Audit Trail")
+      );
+      expect(rootLoom).toBeTruthy();
+      const responses = await exportedLoomResponses(scenario, rootLoom!.loomId);
+      const assistant = responses.find(
+        (response) => response.role === "assistant" && response.content.includes("Audit Trail")
+      );
+      expect(assistant).toBeTruthy();
+
+      await selectResponseText(page, assistant!.responseId, "Audit Trail");
+      const selectionToolbar = page.getByRole("toolbar", { name: "Selection actions" });
+      await expect(selectionToolbar).toBeVisible();
+      await selectionToolbar.getByRole("button", { name: "Quick Question" }).click();
+
+      const popup = page.getByRole("dialog");
+      await expect(popup).toBeVisible();
+      await expect(popup.getByTestId("ask-selected-fragment")).toContainText("Audit Trail");
+      const visibleChipLabels = await popup.getByTestId("ask-selected-fragment").allInnerTexts();
+      expect(visibleChipLabels).toContain("Audit Trail");
+
+      await popup.getByLabel("Ask question").fill("hangi işlerde kullanılıyor ki?");
+      await popup.getByRole("button", { name: /^Ask$/ }).click();
+
+      await expect(popup.getByTestId("ask-answer")).toContainText("Audit Trail");
+      await expect(popup.getByTestId("ask-answer")).toContainText("Event Sourcing");
+      await expect(popup.getByTestId("ask-answer")).toContainText("kimin");
+      await expect(popup.getByTestId("ask-answer")).toContainText("uyumluluk");
+      await expect(popup.getByTestId("ask-answer")).not.toContainText(
+        "Deterministic E2E provider only answers"
+      );
+      await expect(popup.getByTestId("ask-answer")).not.toContainText(
+        "Event Sourcing, uygulama durumunu"
+      );
+      await popup.getByTestId("quick-ask-debug").locator("summary").click();
+      await expect(popup.getByTestId("quick-ask-debug-composed-task")).toContainText(
+        "Event Sourcing bağlamında Audit Trail hangi işlerde kullanılır?"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "genericSourceOnlyDetected=false"
+      );
+
+      expect(quickAskBodies).toHaveLength(1);
+      expect(quickAskBodies[0]).toMatchObject({
+        selectedText: "Audit Trail",
+        question: "hangi işlerde kullanılıyor ki?",
+        intent: "usage",
+        activeReferences: [
+          expect.objectContaining({
+            label: "Audit Trail",
+            selectedText: "Audit Trail",
+            sourceResponseId: assistant!.responseId,
+          }),
+        ],
+      });
+      expect(quickAskResponses[0]).toMatchObject({
+        focusSubject: "Audit Trail",
+        focusSubjectSource: "selected_fragment",
+        resolvedIntent: "usage",
+        requestedTopic: "Event Sourcing",
+        diagnostics: expect.objectContaining({
+          selectedText: "Audit Trail",
+          activeReferenceLabels: ["Audit Trail"],
+          sourceResponseId: assistant!.responseId,
+          previousAskTurnCount: 0,
+          focusSubject: "Audit Trail",
+          focusSubjectSource: "selected_fragment",
+          resolvedIntent: "usage",
+          requestedTopic: "Event Sourcing",
+          composedTask: "Event Sourcing bağlamında Audit Trail hangi işlerde kullanılır?",
+          promptSectionOrder: expect.arrayContaining([
+            "current_task",
+            "composed_task",
+            "focus_subject",
+            "active_references",
+            "selected_fragment",
+            "background_source_context",
+            "current_question",
+          ]),
+          providerRequestSummary: expect.objectContaining({
+            focusSubject: "Audit Trail",
+            activeReferenceLabels: ["Audit Trail"],
+            selectedText: "Audit Trail",
+            requestedTopic: "Event Sourcing",
+            composedTaskPreview:
+              "Event Sourcing bağlamında Audit Trail hangi işlerde kullanılır?",
+            containsFocusSubject: true,
+            focusSubjectBeforeSource: true,
+          }),
+          answerValidation: expect.objectContaining({
+            includesFocusSubject: true,
+            includesRequestedTopic: true,
+            genericSourceOnlyDetected: false,
+          }),
+        }),
+      });
+      expectNoForbiddenPayload(quickAskBodies[0]);
+      expectNoForbiddenPayload(quickAskResponses[0]);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] normalizes noisy Quick Ask focus labels before provider request", async () => {
+    test.setTimeout(90_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+    });
+
+    try {
+      const response = await scenario.fetchJson<{
+        answer: string;
+        focusSubject?: string;
+        requestedTopic?: string;
+        diagnostics?: {
+          originalFocusSubject?: string;
+          normalizedFocusSubject?: string;
+          focusSubject?: string;
+          requestedTopic?: string;
+          composedTask?: string;
+          providerRequestSummary?: {
+            focusSubject?: string;
+            composedTaskPreview?: string;
+            containsFocusSubject?: boolean;
+          };
+          answerValidation?: {
+            includesFocusSubject?: boolean;
+            genericSourceOnlyDetected?: boolean;
+            validationPassed?: boolean;
+          };
+        };
+      }>("/ask/quick", {
+        method: "POST",
+        body: JSON.stringify({
+          sessionId: "audit-trail-normalization",
+          quickAskTraceId: "quick-ask-normalization-e2e",
+          sourceLoomId: "loom-event-sourcing",
+          sourceResponseId: "response-event-sourcing",
+          selectedText: "Audit Trail)",
+          sourceContext: {
+            title: "Event Sourcing",
+            responseCode: "R-AUDIT",
+            summary: "Event Sourcing stores domain events for auditability.",
+            keyPoints: ["Audit Trail is a common Event Sourcing use case."],
+            keywords: ["event sourcing", "audit trail"],
+            entities: ["Event Sourcing"],
+          },
+          activeReferences: [
+            {
+              label: "Audit Trail)",
+              targetKind: "fragment",
+              targetId: "response-audit-trail",
+              selectedText: "Audit Trail)",
+              sourceResponseId: "response-event-sourcing",
+            },
+          ],
+          turns: [],
+          question: "Bu ne demek? nasıl kullanılır?",
+          intent: "usage",
+          options: { model: "deterministic-event-sourcing:e2e" },
+        }),
+      });
+
+      expect(response.focusSubject).toBe("Audit Trail");
+      expect(response.requestedTopic).toBe("Event Sourcing");
+      expect(response.answer).toContain("Audit Trail");
+      expect(response.answer).toContain("Event Sourcing");
+      expect(response.answer).not.toContain("Focus subject:");
+      expect(response.answer).not.toContain("Audit Trail) Audit Trail)");
+      expect(response.diagnostics).toMatchObject({
+        originalFocusSubject: "Audit Trail)",
+        normalizedFocusSubject: "Audit Trail",
+        focusSubject: "Audit Trail",
+        requestedTopic: "Event Sourcing",
+        composedTask:
+          "Event Sourcing bağlamında Audit Trail ne anlama gelir ve nasıl kullanılır?",
+        providerRequestSummary: expect.objectContaining({
+          focusSubject: "Audit Trail",
+          composedTaskPreview:
+            "Event Sourcing bağlamında Audit Trail ne anlama gelir ve nasıl kullanılır?",
+          containsFocusSubject: true,
+        }),
+        answerValidation: expect.objectContaining({
+          includesFocusSubject: true,
+          genericSourceOnlyDetected: false,
+          validationPassed: true,
+        }),
+      });
+      expectNoForbiddenPayload(response);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] composes event chip meaning in natural Turkish", async () => {
+    test.setTimeout(90_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+    });
+
+    try {
+      const response = await scenario.fetchJson<{
+        answer: string;
+        focusSubject?: string;
+        diagnostics?: {
+          originalFocusSubject?: string;
+          normalizedFocusSubject?: string;
+          focusSubjectSource?: string;
+          composedTask?: string;
+          normalizedComposedQuestion?: string;
+          answerValidation?: {
+            validationPassed?: boolean;
+            languageContaminationDetected?: boolean;
+          };
+        };
+      }>("/ask/quick", {
+        method: "POST",
+        body: JSON.stringify({
+          sessionId: "event-meaning-composition",
+          quickAskTraceId: "quick-ask-event-composition-e2e",
+          sourceLoomId: "loom-event-sourcing",
+          sourceResponseId: "response-event-sourcing",
+          selectedText: "event)",
+          sourceContext: {
+            title: "Event Sourcing",
+            responseCode: "R-EVENT",
+            summary: "Event Sourcing stores state changes as events.",
+            keyPoints: ["An event records a state change."],
+            keywords: ["event sourcing", "event"],
+            entities: ["Event Sourcing"],
+          },
+          activeReferences: [
+            {
+              label: "event)",
+              targetKind: "fragment",
+              targetId: "response-event",
+              selectedText: "event)",
+              sourceResponseId: "response-event-sourcing",
+            },
+          ],
+          turns: [],
+          question: "ne demek",
+          intent: "definition",
+          options: { model: "deterministic-event-sourcing:e2e" },
+        }),
+      });
+
+      expect(response.focusSubject).toBe("event");
+      expect(response.answer).toContain("event");
+      expect(response.answer).toContain("Event Sourcing");
+      expect(response.diagnostics).toMatchObject({
+        originalFocusSubject: "event)",
+        normalizedFocusSubject: "event",
+        focusSubjectSource: "selected_fragment",
+        composedTask: "Event Sourcing bağlamında event ne anlama gelir?",
+        normalizedComposedQuestion: "Event Sourcing bağlamında event ne anlama gelir?",
+        answerValidation: expect.objectContaining({
+          validationPassed: true,
+          languageContaminationDetected: false,
+        }),
+      });
+      expect(response.diagnostics?.composedTask).not.toContain("event olarak ne demek");
+      expectNoForbiddenPayload(response);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] previous Quick Ask answer term beats stale chip", async () => {
+    test.setTimeout(90_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+    });
+
+    try {
+      const response = await scenario.fetchJson<{
+        answer: string;
+        focusSubject?: string;
+        focusSubjectSource?: string;
+        diagnostics?: {
+          previousAnswerTermMatched?: string;
+          activeChipUsedAsPrimary?: boolean;
+          activeChipUsedAsBackground?: boolean;
+          composedTask?: string;
+          language?: string;
+          staleChipOverrideDetected?: boolean;
+          languageContaminationDetected?: boolean;
+          answerValidation?: {
+            validationPassed?: boolean;
+            staleChipOverrideDetected?: boolean;
+            languageContaminationDetected?: boolean;
+          };
+        };
+      }>("/ask/quick", {
+        method: "POST",
+        body: JSON.stringify({
+          sessionId: "resultado-follow-up",
+          quickAskTraceId: "quick-ask-resultado-follow-up-e2e",
+          sourceLoomId: "loom-event-sourcing",
+          sourceResponseId: "response-event-sourcing",
+          selectedText: "event)",
+          sourceContext: {
+            title: "Event Sourcing",
+            responseCode: "R-EVENT",
+            summary: "Event Sourcing stores state changes as events.",
+            keyPoints: ["An event records a state change."],
+            keywords: ["event sourcing", "event"],
+            entities: ["Event Sourcing"],
+          },
+          activeReferences: [
+            {
+              label: "event)",
+              targetKind: "fragment",
+              targetId: "response-event",
+              selectedText: "event)",
+              sourceResponseId: "response-event-sourcing",
+            },
+          ],
+          turns: [
+            {
+              question: "ne demek",
+              answer:
+                "Event, Event Sourcing bağlamında bir durum değişikliğini kaydeder. Resultado burada sonuç anlamına gelen yabancı bir kelimedir.",
+            },
+          ],
+          question: "resultado ne be",
+          intent: "definition",
+          options: { model: "deterministic-event-sourcing:e2e" },
+        }),
+      });
+
+      expect(response.focusSubject).toBe("resultado");
+      expect(response.focusSubjectSource).toBe("previous_assistant_answer");
+      expect(response.answer.toLowerCase()).toContain("resultado");
+      expect(response.answer.toLowerCase()).toContain("sonuç");
+      expect(response.answer).not.toMatch(/^event[,)]/i);
+      expect(response.diagnostics).toMatchObject({
+        previousAnswerTermMatched: "resultado",
+        activeChipUsedAsPrimary: false,
+        activeChipUsedAsBackground: true,
+        composedTask: 'Önceki yanıtta geçen "resultado" ne anlama gelir?',
+        language: "tr",
+        staleChipOverrideDetected: false,
+        languageContaminationDetected: false,
+        answerValidation: expect.objectContaining({
+          validationPassed: true,
+          staleChipOverrideDetected: false,
+          languageContaminationDetected: false,
+        }),
+      });
+      expectNoForbiddenPayload(response);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] follow-up usage keeps seed chip as background and avoids repeating definition", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+    const quickAskBodies: unknown[] = [];
+    const quickAskResponses: unknown[] = [];
+    await page.route(/\/ask\/quick$/, async (route) => {
+      quickAskBodies.push(route.request().postDataJSON());
+      const response = await route.fetch();
+      const json = await response.json();
+      quickAskResponses.push(json);
+      await route.fulfill({
+        status: response.status(),
+        contentType: "application/json",
+        body: JSON.stringify(json),
+      });
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(page, "event logging Event Sourcing bağlamında nedir?");
+      await expect(page.getByText("Event Logging in Event Sourcing").first()).toBeVisible({
+        timeout: 30_000,
+      });
+
+      const rootLoom = (await scenario.client.listLooms()).find((item) =>
+        item.title.toLowerCase().includes("event logging")
+      );
+      expect(rootLoom).toBeTruthy();
+      const responses = await exportedLoomResponses(scenario, rootLoom!.loomId);
+      const assistant = responses.find(
+        (response) => response.role === "assistant" && response.content.includes("event logging)")
+      );
+      expect(assistant).toBeTruthy();
+
+      await selectResponseText(page, assistant!.responseId, "event logging)");
+      const selectionToolbar = page.getByRole("toolbar", { name: "Selection actions" });
+      await expect(selectionToolbar).toBeVisible();
+      await selectionToolbar.getByRole("button", { name: "Quick Question" }).click();
+
+      const popup = page.getByRole("dialog");
+      await expect(popup).toBeVisible();
+      await expect(popup.getByTestId("ask-selected-fragment")).toContainText("event logging)");
+
+      await popup.getByLabel("Ask question").fill("bu ne");
+      await popup.getByRole("button", { name: /^Ask$/ }).click();
+
+      await expect(popup.getByTestId("ask-answer")).toHaveCount(1);
+      await expect(popup.getByTestId("ask-answer").first()).toContainText("event logging");
+      await expect(popup.getByTestId("ask-answer").first()).toContainText("Event Sourcing");
+      await expect(popup.getByTestId("ask-answer").first()).toContainText("yaklaşımı");
+
+      await popup.getByLabel("Ask question").fill("nasıl kullanılıyor");
+      await popup.getByRole("button", { name: /^Ask$/ }).click();
+
+      await expect(popup.getByTestId("ask-answer")).toHaveCount(2);
+      const secondExchange = popup.getByTestId("ask-answer").nth(1);
+      await expect(secondExchange).toContainText("nasıl kullanılıyor");
+      await expect(secondExchange.getByTestId("ask-selected-fragment")).toHaveCount(0);
+      await expect(secondExchange).toContainText("event logging");
+      await expect(secondExchange).toContainText("Event Store");
+      await expect(secondExchange).toContainText("event log");
+      await expect(secondExchange).toContainText("replay");
+      await expect(secondExchange).toContainText("projection");
+      await expect(secondExchange).not.toContainText("place");
+
+      await popup.getByTestId("quick-ask-debug").locator("summary").click();
+      await expect(popup.getByTestId("quick-ask-debug-seed-context")).toContainText(
+        "event logging"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-seed-mode")).toContainText(
+        "background"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-primary-context")).toContainText(
+        "previous_answer + current_question"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-follow-up-intent")).toContainText(
+        "usage"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "repeatsPreviousAnswer=false"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "answerAddsNewInformation=true"
+      );
+      await expect(popup.getByTestId("quick-ask-debug-answer-validation")).toContainText(
+        "validationPassed=true"
+      );
+
+      expect(quickAskBodies).toHaveLength(2);
+      expect(quickAskBodies[1]).toMatchObject({
+        selectedText: "event logging)",
+        question: "nasıl kullanılıyor",
+        turns: [
+          expect.objectContaining({
+            question: "bu ne",
+          }),
+        ],
+      });
+      expect(quickAskResponses[1]).toMatchObject({
+        focusSubject: "event logging",
+        focusSubjectSource: "previous_assistant_answer",
+        resolvedIntent: "usage",
+        diagnostics: expect.objectContaining({
+          seedContextLabels: ["event logging"],
+          seedContextMode: "background",
+          currentTurnPrimaryContext: "previous_answer + current_question",
+          followUpIntent: "usage",
+          answerValidation: expect.objectContaining({
+            followsUpOnPreviousTurn: true,
+            seedChipRenderedAsCurrentTurn: false,
+            repeatsPreviousAnswer: false,
+            answerAddsNewInformation: true,
+            languageContaminationDetected: false,
+            validationPassed: true,
+          }),
+        }),
+      });
+
+      await popup.getByRole("button", { name: "Convert to Weft" }).click();
+      const weftPanel = page.locator(".weft-split-panel").last();
+      await expect(weftPanel).toBeVisible();
+      await expect(weftPanel).toContainText("bu ne");
+      await expect(weftPanel).toContainText("nasıl kullanılıyor");
+      await expect(weftPanel).toContainText("event logging");
+      await expect(weftPanel).not.toContainText("Hidden context");
+      await expect(weftPanel).not.toContainText("WeftOriginContextSnapshot");
+
+      expectNoForbiddenPayload(quickAskBodies);
+      expectNoForbiddenPayload(quickAskResponses);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] sends active Reference context for relation-to-topic Quick Ask", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+    const quickAskBodies: unknown[] = [];
+    const quickAskResponses: unknown[] = [];
+    await page.route(/\/ask\/quick$/, async (route) => {
+      const body = route.request().postDataJSON();
+      quickAskBodies.push(body);
+      const response = await route.fetch();
+      const json = await response.json();
+      quickAskResponses.push(json);
+      await route.fulfill({
+        status: response.status(),
+        contentType: "application/json",
+        body: JSON.stringify(json),
+      });
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(page, "Error Tracking event sourcing ile nasıl yapılır?");
+      await expect(page.getByText("CommandFailed").first()).toBeVisible({
+        timeout: 30_000,
+      });
+
+      const rootLoom = (await scenario.client.listLooms()).find((item) =>
+        item.title.includes("Error Tracking")
+      );
+      expect(rootLoom).toBeTruthy();
+      const responses = await exportedLoomResponses(scenario, rootLoom!.loomId);
+      const assistant = responses.find(
+        (response) => response.role === "assistant" && response.content.includes("Error Tracking")
+      );
+      expect(assistant).toBeTruthy();
+
+      await selectResponseText(page, assistant!.responseId, "Error Tracking");
+      const selectionToolbar = page.getByRole("toolbar", { name: "Selection actions" });
+      await expect(selectionToolbar).toBeVisible();
+      await selectionToolbar.getByRole("button", { name: "Quick Question" }).click();
+
+      const popup = page.getByRole("dialog");
+      await expect(popup).toBeVisible();
+      await expect(popup.getByTestId("ask-selected-fragment")).toContainText("Error Tracking");
+
+      await popup.getByLabel("Ask question").fill("nasıl yapılır event sourcingde?");
+      await popup.getByRole("button", { name: /^Ask$/ }).click();
+
+      await expect(popup.getByTestId("ask-answer")).toContainText("Error Tracking");
+      await expect(popup.getByTestId("ask-answer")).toContainText("Event Sourcing");
+      await expect(popup.getByTestId("ask-answer")).toContainText("CommandFailed");
+      await expect(popup.getByTestId("ask-answer")).toContainText("Event Store");
+      await expect(popup.getByTestId("ask-answer")).not.toContainText(
+        "Deterministic E2E provider only answers"
+      );
+
+      expect(quickAskBodies).toHaveLength(1);
+      expect(quickAskBodies[0]).toMatchObject({
+        selectedText: "Error Tracking",
+        question: "nasıl yapılır event sourcingde?",
+        intent: "implementation_in_topic",
+        activeReferences: [
+          expect.objectContaining({
+            label: "Error Tracking",
+            selectedText: "Error Tracking",
+            sourceResponseId: assistant!.responseId,
+          }),
+        ],
+      });
+      expect(quickAskResponses[0]).toMatchObject({
+        focusSubject: "Error Tracking",
+        focusSubjectSource: "selected_fragment",
+        resolvedIntent: "implementation_in_topic",
+        requestedTopic: "Event Sourcing",
+        diagnostics: expect.objectContaining({
+          activeReferenceLabels: ["Error Tracking"],
+          composedTask: "Event Sourcing bağlamında Error Tracking nasıl yapılır?",
+          providerRequestSummary: expect.objectContaining({
+            focusSubject: "Error Tracking",
+            activeReferenceLabels: ["Error Tracking"],
+            requestedTopic: "Event Sourcing",
+            composedTaskPreview: "Event Sourcing bağlamında Error Tracking nasıl yapılır?",
+            containsFocusSubject: true,
+            focusSubjectBeforeSource: true,
+          }),
+          answerValidation: expect.objectContaining({
+            includesFocusSubject: true,
+            includesRequestedTopic: true,
+            genericSourceOnlyDetected: false,
+          }),
+        }),
+      });
+      expectNoForbiddenPayload(quickAskBodies[0]);
+      expectNoForbiddenPayload(quickAskResponses[0]);
     } finally {
       const cleanup = await scenario.cleanup();
       expect(cleanup.serviceStopped).toBe(true);
@@ -294,6 +1621,38 @@ test.describe("[legacy-typescript-local] Graph node Ask", () => {
     expect(payload.backgroundContext[0]).toContain("Source context clues:");
   });
 
+  test("detects English translation requests for selected fragments", () => {
+    const response: ResponseItem = {
+      id: "r-translation",
+      title: "Event Sourcing terms",
+      address: "loom://test/translation",
+      question: "Event sourcing nedir?",
+      answer: ["Tarihsel Takip terimi bu yanıtta geçiyor."],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    };
+    const capsule = createHeuristicResponseContextCapsule(
+      response,
+      "c-translation",
+      "Tarihsel Takip"
+    );
+    const payload = buildAskContextPayload({
+      response,
+      selectedText: "Tarihsel Takip",
+      userQuestion: "ingilizcesi ne",
+      capsule,
+    });
+
+    expect(resolveFocusedAskIntent({
+      selectedText: "Tarihsel Takip",
+      currentQuestion: "ingilizcesi ne",
+    })).toBe("translation");
+    expect(payload.focusedIntent).toBe("translation");
+    expect(payload.context[0]).toContain("Translate only the selected fragment");
+    expect(payload.context[0]).toContain("answer with the English translation first");
+    expect(payload.context[0]).not.toContain("Event Sourcing terms");
+  });
+
   test("uses selected Response text as primary Quick Question fragment context", async ({
     page,
   }) => {
@@ -312,11 +1671,12 @@ test.describe("[legacy-typescript-local] Graph node Ask", () => {
 
     const popup = page.getByRole("dialog");
     await expect(popup).toBeVisible();
-    await expect(popup.getByTestId("ask-context")).toContainText("Context Fragment");
-    await expect(popup.getByTestId("ask-context")).toContainText("MCP-backed tool");
+    await expect(popup.getByTestId("ask-context")).toHaveCount(0);
+    await expect(popup.getByTestId("ask-selected-fragment")).toContainText("MCP-backed tool");
 
     await popup.getByLabel("Ask question").fill("What does this mean?");
     await popup.getByRole("button", { name: /^Ask$/ }).click();
+    await expect(popup.getByTestId("ask-answer")).toContainText("What does this mean?");
 
     await expect(popup.getByTestId("ask-answer")).toContainText(
       "selected fragment MCP-backed tool"
@@ -358,11 +1718,12 @@ test.describe("[legacy-typescript-local] Graph node Ask", () => {
 
     const popup = page.getByRole("dialog");
     await expect(popup).toBeVisible();
-    await expect(popup.getByTestId("ask-context")).toContainText("Context Fragment");
-    await expect(popup.getByTestId("ask-context")).toContainText("MCP");
+    await expect(popup.getByTestId("ask-context")).toHaveCount(0);
+    await expect(popup.getByTestId("ask-selected-fragment")).toContainText("MCP");
 
     await popup.getByLabel("Ask question").fill("açılımı");
     await popup.getByRole("button", { name: /^Ask$/ }).click();
+    await expect(popup.getByTestId("ask-answer")).toContainText("açılımı");
 
     await expect(popup.getByTestId("ask-answer")).toContainText(
       "MCP = Model Context Protocol"
@@ -406,11 +1767,12 @@ test.describe("[legacy-typescript-local] Graph node Ask", () => {
 
     const popup = page.getByRole("dialog");
     await expect(popup).toBeVisible();
-    await expect(popup.getByTestId("ask-context")).toContainText("Context Fragment");
-    await expect(popup.getByTestId("ask-context")).toContainText("IPC");
+    await expect(popup.getByTestId("ask-context")).toHaveCount(0);
+    await expect(popup.getByTestId("ask-selected-fragment")).toContainText("IPC");
 
     await popup.getByLabel("Ask question").fill("açılımı ne");
     await popup.getByRole("button", { name: /^Ask$/ }).click();
+    await expect(popup.getByTestId("ask-answer")).toContainText("açılımı ne");
 
     await expect(popup.getByTestId("ask-answer")).toContainText(
       "IPC = Inter-Process Communication"
@@ -432,12 +1794,8 @@ test.describe("[legacy-typescript-local] Graph node Ask", () => {
     await openMcpGraph(page);
     const popup = await clickFocusedGraphAsk(page);
 
-    await expect(popup.getByTestId("ask-context")).toContainText(
-      "Plugins should attach to Loom objects"
-    );
-    await expect(popup.getByTestId("ask-context")).toContainText(
-      "type PluginContribution"
-    );
+    await expect(popup.getByTestId("ask-context")).toHaveCount(0);
+    await expect(popup.getByTestId("ask-selected-fragment")).toHaveCount(0);
     await expect(popup.getByLabel("Ask question")).toBeFocused();
   });
 
@@ -470,19 +1828,13 @@ test.describe("[legacy-typescript-local] Graph node Ask", () => {
     expect(hitTarget.isBackdrop).toBe(true);
   });
 
-  test("keeps long Response context internally scrollable", async ({ page }) => {
+  test("keeps full Response context hidden from the Ask popup surface", async ({ page }) => {
     await openMcpGraph(page);
     const popup = await clickFocusedGraphAsk(page);
-    const context = popup.getByTestId("ask-context").locator("blockquote");
 
-    await expect(context).toBeVisible();
-    const contextMetrics = await context.evaluate((element) => ({
-        scrollable: element.scrollHeight > element.clientHeight,
-        maxHeight: Number.parseFloat(getComputedStyle(element).maxHeight),
-      }));
-    expect(contextMetrics.scrollable).toBe(true);
-    expect(contextMetrics.maxHeight).toBeGreaterThan(0);
-    expect(contextMetrics.maxHeight).toBeLessThanOrEqual(240);
+    await expect(popup.getByTestId("ask-context")).toHaveCount(0);
+    await expect(popup.getByTestId("ask-selected-fragment")).toHaveCount(0);
+    await expect(popup).not.toContainText("type PluginContribution");
 
     const popupBox = await popup.boundingBox();
     expect(popupBox).not.toBeNull();

@@ -1510,14 +1510,32 @@ fn deterministic_e2e_answer(
     let has_event_context = context_text.contains("event sourcing")
         && (context_text.contains("event store") || context_text.contains("cqrs"));
 
+    if prompt.contains("mcp") && prompt.contains("cqrs") {
+        return Some(mcp_cqrs_quick_ask_e2e_answer());
+    }
+    if prompt.contains("error tracking") && prompt.contains("event sourcing") {
+        return Some(error_tracking_event_sourcing_e2e_answer());
+    }
+    if prompt.contains("compaction") && prompt.contains("event sourcing") {
+        return Some(compaction_event_sourcing_e2e_answer());
+    }
+    if prompt.contains("audit trail") && prompt.contains("event sourcing") {
+        return Some(audit_trail_event_sourcing_e2e_answer());
+    }
+    if prompt.contains("time travel") && prompt.contains("event sourcing") {
+        return Some(time_travel_event_sourcing_e2e_answer());
+    }
+    if prompt.contains("event logging") && prompt.contains("event sourcing") {
+        return Some(event_logging_event_sourcing_e2e_answer());
+    }
     if prompt.contains("event sourcing") && prompt.contains("detay") {
         return Some(event_sourcing_detailed_e2e_answer());
     }
+    if prompt.contains("event store") && prompt.contains("detay") {
+        return Some(event_store_detailed_e2e_answer());
+    }
     if prompt.contains("event sourcing") && prompt.contains("avantaj") {
         return Some(event_sourcing_detailed_e2e_answer());
-    }
-    if prompt.contains("mcp") && prompt.contains("cqrs") {
-        return Some(mcp_cqrs_quick_ask_e2e_answer());
     }
     if prompt.contains("tablo") && prompt.contains("avantaj") && prompt.contains("dezavantaj") {
         return Some(if has_event_context {
@@ -1569,6 +1587,48 @@ fn event_sourcing_detailed_e2e_answer() -> String {
     .join("\n")
 }
 
+fn time_travel_event_sourcing_e2e_answer() -> String {
+    [
+        "# Time Travel in Event Sourcing",
+        "",
+        "Time Travel, Event Sourcing bağlamında Event Store'daki geçmiş olayları belirli bir ana kadar Replay ederek sistem durumunu o zamanki haliyle yeniden kurma yaklaşımıdır.",
+        "",
+        "- Bir siparişin, hesabın veya aggregate'in geçmiş tarihteki durumunu denetlemek için kullanılır.",
+        "- Audit, hata araştırması, müşteri destek incelemesi ve projection doğrulama senaryolarında işe yarar.",
+        "- Snapshot ve Replay stratejileriyle maliyet kontrol edilir; audit gereksinimleri korunmadan olay geçmişi budanmamalıdır.",
+    ]
+    .join("\n")
+}
+
+fn event_logging_event_sourcing_e2e_answer() -> String {
+    [
+        "# Event Logging in Event Sourcing",
+        "",
+        "event logging), Event Sourcing bağlamında domain eventleri append-only bir event log içinde saklama yaklaşımıdır.",
+        "",
+        "- Her anlamlı state change bir event olarak Event Store'a yazılır.",
+        "- event logging audit, replay, projection ve hata ayıklama için kaynak oluşturur.",
+        "- Örnek eventler: `OrderCreated`, `PaymentFailed`, `StockReserved`.",
+    ]
+    .join("\n")
+}
+
+fn event_store_detailed_e2e_answer() -> String {
+    [
+        "# Event Store",
+        "",
+        "Event Store, domain değişikliklerini sıralı event stream olarak saklayan kalıcı kayıt kaynağıdır. Write Side komutları işler, aggregate kurallarını çalıştırır ve başarılı değişiklikleri Event Store'a append eder.",
+        "",
+        "## Temel parçalar",
+        "",
+        "- Write Side: command handling, aggregate validation ve event append akışını yönetir.",
+        "- Read Side: Event Store'daki olaylardan projection/read model üretir.",
+        "- Replay: kayıtlı event stream'i yeniden oynatarak state veya projection kurar.",
+        "- Audit Trail: kimin neyi ne zaman değiştirdiğini olaylardan izlemeyi sağlar.",
+    ]
+    .join("\n")
+}
+
 fn event_sourcing_table_e2e_answer() -> String {
     [
         "Event Sourcing için avantajlar ve dezavantajlar:",
@@ -1595,6 +1655,47 @@ fn mcp_cqrs_quick_ask_e2e_answer() -> String {
         "CQRS, Command Query Responsibility Segregation anlamına gelir. Event Sourcing ile birlikte kullanıldığında yazma tarafı Event Store'a olayları kaydeder, okuma tarafı Replay ile projeksiyonları yeniden kurabilir.",
         "",
         "Bu Loom'da MCP kaynak bağlamı plugin/session/tool context tarafını, CQRS ise Event Sourcing mimari tarafını açıklar.",
+    ]
+    .join("\n")
+}
+
+fn error_tracking_event_sourcing_e2e_answer() -> String {
+    [
+        "# Error Tracking with Event Sourcing",
+        "",
+        "Error Tracking, Event Sourcing içinde başarısız komutlar ve hata olayları üzerinden izlenebilir.",
+        "",
+        "- CommandFailed, ErrorOccurred, RetryScheduled gibi olaylar Event Store'a yazılır.",
+        "- correlationId, causationId, command id, aggregate id ve timestamp hata zincirini bağlar.",
+        "- Error Tracking projection/read model dashboard ve alerting için kullanılır.",
+        "- Retry, dead-letter ve outbox akışları projection üzerinden takip edilebilir.",
+    ]
+    .join("\n")
+}
+
+fn compaction_event_sourcing_e2e_answer() -> String {
+    [
+        "# Compaction in Event Sourcing",
+        "",
+        "Compaction, Event Sourcing'de uzun event log geçmişini yönetilebilir tutmak için eski olayların snapshot, özet projection veya arşiv stratejisiyle küçültülmesidir.",
+        "",
+        "- Event Store geçmiş olayları saklar; Compaction Replay maliyetini azaltır.",
+        "- Snapshot aggregate durumunu belli bir noktada temsil eder.",
+        "- Eski eventler budanacaksa audit, yasal saklama ve yeniden kurma garantileri korunmalıdır.",
+        "- Projection/read model tarafında kompakt özetler kullanılabilir ama kaynak olayların anlamı kaybolmamalıdır.",
+    ]
+    .join("\n")
+}
+
+fn audit_trail_event_sourcing_e2e_answer() -> String {
+    [
+        "# Audit Trail in Event Sourcing",
+        "",
+        "Audit Trail, Event Sourcing'de sistemde kimin, neyi, ne zaman ve neden yaptığını olay akışı üzerinden izlemeyi sağlar.",
+        "",
+        "- Event Store her domain değişikliğini olay olarak kaydeder.",
+        "- correlationId, causationId, userId, aggregateId ve timestamp ile iz sürülebilirlik kurulur.",
+        "- Finansal sistemler, sipariş yaşam döngüsü, güvenlik incelemeleri, hata araştırması ve uyumluluk raporları için kullanılır.",
     ]
     .join("\n")
 }

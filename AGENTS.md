@@ -362,7 +362,126 @@ For non-service product/UI tasks, the normal Task ID, validation, and ledger rep
 
 ---
 
-## 14) Raw Thinking Privacy Rule
+## 14) Rust Service Binary Authority Policy
+
+For every task touching any of these paths or boundaries:
+
+- `services/loom-service/**`
+- service provider/runtime code
+- orchestration code
+- context code
+- speech code
+- capability code
+- storage, migrations, and repositories
+- Rust API endpoints
+- Rust config
+- frontend code that calls `loom-service` and requires runtime validation
+
+Codex MUST treat the Rust service binary as an authority boundary:
+
+1. Build the Rust service after source changes.
+2. Stop any stale `loom-service` process that Codex started for the task.
+3. Start the service from the freshly built binary for live/manual/service-backed validation.
+4. Verify and report the executable path.
+5. Verify and report the PID and service port.
+6. Call `GET /health` and verify it reports the expected `loom-service` runtime.
+7. Prefer a build/version/fingerprint check when available.
+8. Run relevant tests against that verified fresh service.
+9. Report the database path and config path, and whether they are test/temp or dev paths.
+10. Report whether any pre-existing user/dev-owned `loom-service` process was left untouched.
+11. Never claim live/manual validation passed unless it used the verified fresh binary.
+
+Live dev service anti-stale rule:
+
+- If the user is validating the current browser app, Codex MUST identify the exact service URL/port used by that app before judging behavior.
+- If that service process started before the current `services/loom-service/target/debug/loom-service` binary modification time, Codex MUST classify it as `runtime_binary_mismatch`.
+- A `runtime_binary_mismatch` blocks debugging of prompts, providers, context, UI state, or model behavior until the process is replaced.
+- When the stale process owns the service URL/port used by the current browser app, Codex MUST restart that process from the freshly built binary on the same port before continuing live/manual validation. This is not optional cleanup; it is part of the validation contract.
+- Codex may leave unrelated `loom-service` processes untouched only if they are not the process backing the current app/test being validated.
+- After restart, Codex MUST refresh or explicitly ask the user to refresh the browser when frontend or runtime state could be cached.
+- Codex MUST re-run the failing request or a direct equivalent `/ask/quick`, `/orchestration/execute`, or relevant endpoint proof against the restarted service before saying the task is fixed.
+
+End-of-task browser/runtime sync gate:
+
+- For every task that changes Rust service code, service-calling frontend code, engine client code, Quick Ask, Main composer generation, provider/runtime behavior, or service-backed tests, and the user has the browser open on the local app, Codex MUST verify the service behind the browser's configured endpoint before the final response.
+- This gate applies even when the task's visible change is mostly frontend/UI, if that UI calls `loom-service` or is validated against `loom-service`.
+- The check MUST resolve the browser app's service route, including Vite proxy routes such as `/__loom -> http://127.0.0.1:17633`.
+- Codex MUST compare the running process executable path/inode/start time with `services/loom-service/target/debug/loom-service` after the final build.
+- If the browser-backed process is stale, Codex MUST restart it from the fresh binary before finalizing, then call `/health` and report the new PID/port/binary path/DB/config.
+- A separate fresh-binary smoke test on an isolated port is NOT sufficient when the user's open browser is backed by a different long-running dev service.
+- Codex MUST NOT finish a Rust-service, engine-boundary, Quick Ask, Main composer, provider/runtime, or service-backed UI task with "completed" status while the current browser app is still connected to a stale `loom-service` process.
+- The final response for any task covered by this gate MUST explicitly state one of:
+  - browser-backed service verified fresh, with PID, port, binary path, health result, DB path, and config path
+  - no active browser/dev service was used for validation
+  - blocked by `runtime_binary_mismatch` because restart was not allowed
+- If Codex cannot restart the stale browser-backed process because permission is denied or the user refuses, the task status MUST be `blocked` or `partial`, and the final answer must say the browser is not using the latest service.
+- A task is not complete if tests pass against a temporary service but the user-facing browser app still points at a stale dev service.
+
+Mandatory commands when Rust service files change:
+
+- `cargo fmt --manifest-path services/loom-service/Cargo.toml --check`
+- `cargo check --manifest-path services/loom-service/Cargo.toml`
+- `cargo test --manifest-path services/loom-service/Cargo.toml`
+- `npm run service:check`
+- `npm run service:test`
+- `npm run build`
+- `git diff --check`
+
+If E2E or manual service behavior is validated, Codex MUST also:
+
+- build a fresh service binary first
+- start the service from that fresh binary
+- call `/health`
+- record binary path, PID, port, DB path, and config path
+- run the relevant E2E/manual validation against that verified service
+
+Fresh binary verification rules:
+
+- Before starting a service, kill only test-owned `loom-service` processes.
+- Do not kill user/dev-owned service processes unless explicitly instructed, except when that process is the stale runtime backing the current browser app/test under validation. In that case, restart it from the fresh binary and report the action.
+- If a process already owns the desired port, identify it and either fail with a clear reason or use an isolated test port.
+- After starting the service, record service URL, PID, executable path, working directory, database path, config path, and whether it is using a temp test DB or dev DB.
+- Provider health may be degraded, but DB/config must be ready for data tests.
+- Health output must not be accepted as proof if it may come from a stale process.
+- If no build/runtime fingerprint endpoint or health field exists, add follow-up task `SERVICE-BINARY-FINGERPRINT-001`.
+
+Product-mode E2E harnesses MUST use:
+
+- temp SQLite DB
+- temporary `loom-service`
+- freshly built service binary
+- strict `rust-service` mode
+- data created through service/product flow
+- cleanup after test
+
+If Playwright starts a service, it must use the fresh binary and must not silently connect to an already-running stale service. If validating against an existing manually running app, report that it is manual/dev validation only and do not use it as CI proof.
+
+Manual UI validation MUST report:
+
+- service URL used by the UI
+- running `loom-service` PID
+- executable path
+- process start time
+- binary modification time
+- whether the binary was rebuilt after the latest Rust source change
+- whether the running process started after the rebuilt binary
+- whether the browser was refreshed after service restart
+- whether stale Vite/app state could exist
+- DB path and config path
+
+Manual validation is invalid if the service binary path is unknown, PID is unknown, service was not restarted after Rust changes, the process start time is older than the rebuilt binary, the browser points to a stale service URL, or the UI bundle was not refreshed after frontend changes.
+
+Codex MUST NOT say "live smoke passed", "real UI verified", "service-backed proof passed", or "manual scenario passed" unless it reports fresh binary path, service PID, service port, health result, DB/config path, and test command/output.
+
+If a stale binary or wrong service process is detected, classify it as:
+
+`runtime_binary_mismatch`
+
+This is a blocking error. It must not be treated as a model, prompt, context, provider, or UI bug until the binary/process mismatch is resolved.
+
+---
+
+## 15) Raw Thinking Privacy Rule
 
 Raw model thinking/internal monologue must never be persisted.
 

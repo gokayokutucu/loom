@@ -28,3 +28,7 @@ docs/loom_service_architecture_ledger.md
 docs/loom_service_capability_ingestion.md
 docs/stability_baseline.md
 docs/typescript_runtime_deprecation_plan.md
+
+# Local source/tree dumps generated during development.
+loom_ai_all_source.txt
+tree_loom.txt

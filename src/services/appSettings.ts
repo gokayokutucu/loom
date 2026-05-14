@@ -41,6 +41,7 @@ export interface AppSettings {
   notifications: NotificationSettings;
   startup: StartupSettings;
   accessibility: AccessibilitySettings;
+  showGenerationDebug: boolean;
   hasSeenFirstBookmarkFeedback: boolean;
   growthEventCount: number;
   shownGrowthMilestones: number[];
@@ -72,6 +73,7 @@ export const defaultAppSettings: AppSettings = {
     alwaysShowIconLabels: false,
     keyboardNavigationHints: false,
   },
+  showGenerationDebug: true,
   hasSeenFirstBookmarkFeedback: false,
   growthEventCount: 0,
   shownGrowthMilestones: [],
@@ -171,6 +173,8 @@ export function readAppSettings(): AppSettings {
     notifications: normalizeNotificationSettings(stored.notifications),
     startup: normalizeStartupSettings(stored.startup),
     accessibility: normalizeAccessibilitySettings(stored.accessibility),
+    showGenerationDebug:
+      stored.showGenerationDebug === undefined ? true : Boolean(stored.showGenerationDebug),
     hasSeenFirstBookmarkFeedback: Boolean(stored.hasSeenFirstBookmarkFeedback),
     growthEventCount:
       typeof stored.growthEventCount === "number" && Number.isFinite(stored.growthEventCount)
@@ -196,6 +200,7 @@ export function writeAppSettings(settings: AppSettings) {
     notifications: normalizeNotificationSettings(settings.notifications),
     startup: normalizeStartupSettings(settings.startup),
     accessibility: normalizeAccessibilitySettings(settings.accessibility),
+    showGenerationDebug: Boolean(settings.showGenerationDebug),
     hasSeenFirstBookmarkFeedback: Boolean(settings.hasSeenFirstBookmarkFeedback),
     growthEventCount: Math.max(0, Math.floor(settings.growthEventCount)),
     shownGrowthMilestones: settings.shownGrowthMilestones.filter(

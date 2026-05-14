@@ -248,6 +248,7 @@ test.describe("[legacy-typescript-local] Reference display tokens", () => {
 
     await page.getByTestId("profile-menu-trigger").click();
     await page.getByTestId("open-app-settings").click();
+    await page.getByRole("button", { name: /UI Preferences/ }).click();
     await page.getByRole("radio", { name: "Code" }).check();
     await page.getByRole("button", { name: "Close settings" }).click();
 

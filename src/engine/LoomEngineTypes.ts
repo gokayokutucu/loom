@@ -209,8 +209,12 @@ export type QuickAskIntent =
   | "definition"
   | "translation"
   | "explain_this"
+  | "relation_to_reference"
+  | "implementation_in_topic"
+  | "how_it_works_with_reference"
   | "relation_to_source"
   | "how_it_works"
+  | "usage"
   | "unknown";
 
 export interface QuickAskTurn {
@@ -228,12 +232,25 @@ export interface QuickAskSourceContext {
   entities?: string[];
 }
 
+export interface QuickAskActiveReference {
+  referenceId?: string;
+  label: string;
+  targetKind?: string;
+  targetId?: string;
+  targetUri?: string;
+  selectedText?: string;
+  preview?: string;
+  sourceResponseId?: string;
+}
+
 export interface QuickAskInput {
   sessionId: string;
+  quickAskTraceId?: string;
   sourceLoomId?: string;
   sourceResponseId?: string;
   selectedText?: string;
   sourceContext?: QuickAskSourceContext;
+  activeReferences?: QuickAskActiveReference[];
   turns: QuickAskTurn[];
   question: string;
   intent: QuickAskIntent;
@@ -242,12 +259,18 @@ export interface QuickAskInput {
     numCtx?: number;
     numPredict?: number;
   };
+  signal?: AbortSignal;
 }
 
 export interface QuickAskResult {
   answer: string;
   model?: string;
   warnings: string[];
+  focusSubject?: string;
+  focusSubjectSource?: string;
+  resolvedIntent?: string;
+  requestedTopic?: string;
+  diagnostics?: JsonValue;
 }
 
 export type EngineResponseEvent =

@@ -72,9 +72,15 @@ import {
 
 export type RustHttpLoomEngineErrorKind =
   | "service_unavailable"
+  | "provider_unavailable"
+  | "provider_error"
+  | "invalid_config"
+  | "model_missing"
   | "request_failed"
+  | "request_aborted"
   | "unsupported_method"
   | "invalid_response"
+  | "response_parse_error"
   | "timeout";
 
 export class RustHttpLoomEngineError extends Error {
@@ -86,6 +92,16 @@ export class RustHttpLoomEngineError extends Error {
     super(message);
     this.name = "RustHttpLoomEngineError";
   }
+}
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
+const GENERATION_STREAM_OPEN_TIMEOUT_MS = 120_000;
+
+interface RequestJsonTransportMeta {
+  endpoint: string;
+  requestAttempted: boolean;
+  httpStatus?: number;
+  responseParseStatus?: "not_started" | "success" | "failed";
 }
 
 const forbiddenThinkingKeys = new Set([
@@ -111,6 +127,84 @@ function sanitizeEnginePayload(value: unknown): unknown {
       .filter(([key]) => !forbiddenThinkingKeys.has(key))
       .map(([key, entry]) => [key, sanitizeEnginePayload(entry)])
   );
+}
+
+async function serviceErrorFromResponse(
+  response: Response,
+  path: string
+): Promise<RustHttpLoomEngineError> {
+  const baseDetails: Record<string, unknown> = {
+    path,
+    status: response.status,
+    method: "HTTP",
+  };
+  let payload: unknown;
+  let rawText = "";
+  try {
+    rawText = await response.text();
+    payload = rawText ? JSON.parse(rawText) : undefined;
+  } catch {
+    payload = undefined;
+  }
+  const sanitizedPayload = sanitizeEnginePayload(payload);
+  if (isRecord(sanitizedPayload)) {
+    const serviceKind = stringValue(sanitizedPayload, "kind");
+    const message =
+      stringValue(sanitizedPayload, "message") ??
+      messageForHttpStatus(response.status, path);
+    const details = isRecord(sanitizedPayload.details)
+      ? sanitizeEnginePayload(sanitizedPayload.details)
+      : undefined;
+    return new RustHttpLoomEngineError(mapServiceErrorKind(serviceKind, response.status), message, {
+      ...baseDetails,
+      serviceKind,
+      providerErrorKind: serviceKind,
+      retryable: booleanValue(sanitizedPayload, "retryable"),
+      correlationId: stringValue(sanitizedPayload, "correlationId"),
+      details,
+    });
+  }
+  return new RustHttpLoomEngineError(mapServiceErrorKind(undefined, response.status), messageForHttpStatus(response.status, path), {
+    ...baseDetails,
+    responseBodyPresent: Boolean(rawText),
+  });
+}
+
+function mapServiceErrorKind(
+  serviceKind: string | undefined,
+  status: number
+): RustHttpLoomEngineErrorKind {
+  switch (serviceKind) {
+    case "invalid_config":
+      return "invalid_config";
+    case "runtime_unavailable":
+    case "timeout_before_first_chunk":
+    case "timeout_during_stream":
+      return "provider_unavailable";
+    case "model_missing":
+      return "model_missing";
+    case "unexpected_response":
+    case "stream_parse_error":
+    case "provider_rejected_think":
+    case "done_reason_length":
+      return "provider_error";
+    case "aborted":
+      return "request_aborted";
+    default:
+      if (status === 408 || status === 504) return "timeout";
+      if (status === 502 || status === 503) return "provider_unavailable";
+      if (status === 400 || status === 422) return "request_failed";
+      return "request_failed";
+  }
+}
+
+function messageForHttpStatus(status: number, path: string): string {
+  if (status === 502 || status === 503) {
+    return `loom-service provider request failed for ${path}.`;
+  }
+  if (status === 408 || status === 504) return `loom-service request timed out for ${path}.`;
+  if (status === 400 || status === 422) return `loom-service rejected the request for ${path}.`;
+  return `loom-service request failed for ${path}.`;
 }
 
 export function sanitizeEngineResponseEvent(event: EngineResponseEvent): EngineResponseEvent {
@@ -629,10 +723,12 @@ function regeneratePayload(input: RegenerateFromResponseInput) {
 function quickAskPayload(input: QuickAskInput) {
   return {
     sessionId: input.sessionId,
+    quickAskTraceId: input.quickAskTraceId,
     sourceLoomId: input.sourceLoomId,
     sourceResponseId: input.sourceResponseId,
     selectedText: input.selectedText,
     sourceContext: input.sourceContext,
+    activeReferences: input.activeReferences,
     turns: input.turns,
     question: input.question,
     intent: input.intent,
@@ -781,13 +877,64 @@ function validateQuickAskResponse(response: unknown): QuickAskResult {
       endpoint: "/ask/quick",
     });
   }
-  return {
+  const result: QuickAskResult = {
     answer,
     model: stringValue(response, "model"),
     warnings: Array.isArray(response.warnings)
       ? response.warnings.filter((warning): warning is string => typeof warning === "string")
       : [],
+    focusSubject: stringValue(response, "focusSubject"),
+    focusSubjectSource: stringValue(response, "focusSubjectSource"),
+    resolvedIntent: stringValue(response, "resolvedIntent"),
+    requestedTopic: stringValue(response, "requestedTopic"),
   };
+  if (response.diagnostics !== undefined) {
+    result.diagnostics = response.diagnostics as JsonValue;
+  }
+  return result;
+}
+
+function quickAskTransportDiagnostics(
+  result: QuickAskResult,
+  input: QuickAskInput,
+  transportMeta: RequestJsonTransportMeta
+): JsonValue {
+  const serviceDiagnostics = isRecord(result.diagnostics) ? result.diagnostics : {};
+  const diagnosticsReceived = isRecord(result.diagnostics);
+  const inputActiveReferenceLabels =
+    Array.isArray(serviceDiagnostics.inputActiveReferenceLabels) &&
+    serviceDiagnostics.inputActiveReferenceLabels.some((entry) => typeof entry === "string")
+      ? serviceDiagnostics.inputActiveReferenceLabels
+      : (input.activeReferences ?? [])
+          .map((reference) => reference.label.trim())
+          .filter((label) => label.length > 0);
+  const warnings = [
+    ...arrayOfStrings(serviceDiagnostics.warnings),
+    ...result.warnings,
+    ...(diagnosticsReceived ? [] : ["service_diagnostics_missing"]),
+    ...(inputActiveReferenceLabels.length > 0 ? [] : ["no_active_references_sent"]),
+  ];
+  return sanitizeEnginePayload({
+    ...serviceDiagnostics,
+    traceId:
+      typeof serviceDiagnostics.traceId === "string"
+        ? serviceDiagnostics.traceId
+        : input.quickAskTraceId,
+    engineMode: "rust-service",
+    clientKind: "rust-http",
+    requestAttempted: transportMeta.requestAttempted,
+    endpoint: transportMeta.endpoint,
+    httpStatus: transportMeta.httpStatus,
+    responseParseStatus: transportMeta.responseParseStatus ?? "not_started",
+    diagnosticsReceived,
+    serviceRequestReceived: diagnosticsReceived,
+    selectedText:
+      typeof serviceDiagnostics.selectedText === "string"
+        ? serviceDiagnostics.selectedText
+        : input.selectedText,
+    inputActiveReferenceLabels,
+    warnings: Array.from(new Set(warnings)),
+  }) as JsonValue;
 }
 
 function referenceTargetKind(link: LoomLink): "loom" | "response" | "weft" | "fragment" | "external" {
@@ -1134,28 +1281,49 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
 
   constructor(options: RustHttpLoomEngineClientOptions) {
     this.serviceUrl = options.serviceUrl.replace(/\/+$/g, "");
-    this.requestTimeoutMs = options.requestTimeoutMs ?? 5000;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.fetchImpl = options.fetch ?? globalThis.fetch.bind(globalThis);
   }
 
   private async requestJson<T>(
     path: string,
-    options: RequestInit & { timeoutMs?: number } = {}
+    options: RequestInit & {
+      timeoutMs?: number;
+      onTransportMeta?: (meta: RequestJsonTransportMeta) => void;
+    } = {}
   ): Promise<T> {
+    const { timeoutMs, onTransportMeta, ...fetchOptions } = options;
     const controller = new AbortController();
+    let timedOut = false;
+    const abortFromInputSignal = () => controller.abort();
+    if (fetchOptions.signal?.aborted) {
+      controller.abort();
+    } else {
+      fetchOptions.signal?.addEventListener("abort", abortFromInputSignal, { once: true });
+    }
     const timeout = globalThis.setTimeout(
-      () => controller.abort(),
-      options.timeoutMs ?? this.requestTimeoutMs
+      () => {
+        timedOut = true;
+        controller.abort();
+      },
+      timeoutMs ?? this.requestTimeoutMs
     );
+    const transportMeta: RequestJsonTransportMeta = {
+      endpoint: path,
+      requestAttempted: true,
+      responseParseStatus: "not_started",
+    };
     try {
       const response = await this.fetchImpl(`${this.serviceUrl}${path}`, {
-        ...options,
+        ...fetchOptions,
         headers: {
           "Content-Type": "application/json",
-          ...options.headers,
+          ...fetchOptions.headers,
         },
         signal: controller.signal,
       });
+      transportMeta.httpStatus = response.status;
+      onTransportMeta?.({ ...transportMeta });
       if (response.status === 404 || response.status === 501) {
         throw new RustHttpLoomEngineError("unsupported_method", "loom-service endpoint is not available yet.", {
           path,
@@ -1163,25 +1331,48 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
         });
       }
       if (!response.ok) {
-        throw new RustHttpLoomEngineError("request_failed", "loom-service request failed.", {
-          path,
-          status: response.status,
-        });
+        throw await serviceErrorFromResponse(response, path);
       }
       if (response.status === 204) {
+        transportMeta.responseParseStatus = "success";
+        onTransportMeta?.({ ...transportMeta });
         return {} as T;
       }
-      return sanitizeEnginePayload(await response.json()) as T;
+      try {
+        const payload = sanitizeEnginePayload(await response.json()) as T;
+        transportMeta.responseParseStatus = "success";
+        onTransportMeta?.({ ...transportMeta });
+        return payload;
+      } catch (error) {
+        transportMeta.responseParseStatus = "failed";
+        onTransportMeta?.({ ...transportMeta });
+        throw new RustHttpLoomEngineError("response_parse_error", "loom-service returned malformed JSON.", {
+          path,
+          message: error instanceof Error ? error.message : "response parse failed",
+        });
+      }
     } catch (error) {
       if (error instanceof RustHttpLoomEngineError) throw error;
       if (error instanceof DOMException && error.name === "AbortError") {
-        throw new RustHttpLoomEngineError("timeout", "loom-service request timed out.", { path });
+        if (fetchOptions.signal?.aborted && !timedOut) {
+          throw new RustHttpLoomEngineError("request_aborted", "loom-service request was cancelled.", {
+            path,
+            aborted: true,
+            timedOut: false,
+          });
+        }
+        throw new RustHttpLoomEngineError("timeout", "loom-service request timed out.", {
+          path,
+          aborted: true,
+          timedOut: true,
+        });
       }
       throw new RustHttpLoomEngineError("service_unavailable", "loom-service is not reachable.", {
         path,
       });
     } finally {
       globalThis.clearTimeout(timeout);
+      fetchOptions.signal?.removeEventListener("abort", abortFromInputSignal);
     }
   }
 
@@ -1442,7 +1633,10 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     } else {
       input.signal?.addEventListener("abort", abortFromInputSignal, { once: true });
     }
-    const timeout = globalThis.setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const timeout = globalThis.setTimeout(
+      () => controller.abort(),
+      Math.max(this.requestTimeoutMs, GENERATION_STREAM_OPEN_TIMEOUT_MS)
+    );
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.serviceUrl}/orchestration/execute`, {
@@ -1460,9 +1654,15 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
             path: "/orchestration/execute",
           });
         }
-        throw new RustHttpLoomEngineError("timeout", "loom-service generation request timed out.", {
-          path: "/orchestration/execute",
-        });
+        throw new RustHttpLoomEngineError(
+          "timeout",
+          "loom-service generation stream did not open before the startup timeout.",
+          {
+            path: "/orchestration/execute",
+            timeoutMs: Math.max(this.requestTimeoutMs, GENERATION_STREAM_OPEN_TIMEOUT_MS),
+            requestKind: "orchestration_execute",
+          }
+        );
       }
       input.signal?.removeEventListener("abort", abortFromInputSignal);
       throw new RustHttpLoomEngineError("service_unavailable", "loom-service is not reachable.", {
@@ -1555,7 +1755,10 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     } else {
       input.signal?.addEventListener("abort", abortFromInputSignal, { once: true });
     }
-    const timeout = globalThis.setTimeout(() => controller.abort(), this.requestTimeoutMs);
+    const timeout = globalThis.setTimeout(
+      () => controller.abort(),
+      Math.max(this.requestTimeoutMs, GENERATION_STREAM_OPEN_TIMEOUT_MS)
+    );
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.serviceUrl}${endpoint}`, {
@@ -1573,9 +1776,15 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
             path: endpoint,
           });
         }
-        throw new RustHttpLoomEngineError("timeout", "loom-service regenerate request timed out.", {
-          path: endpoint,
-        });
+        throw new RustHttpLoomEngineError(
+          "timeout",
+          "loom-service regenerate stream did not open before the startup timeout.",
+          {
+            path: endpoint,
+            timeoutMs: Math.max(this.requestTimeoutMs, GENERATION_STREAM_OPEN_TIMEOUT_MS),
+            requestKind: "prompt_regenerate",
+          }
+        );
       }
       throw new RustHttpLoomEngineError("service_unavailable", "loom-service is not reachable.", {
         path: endpoint,
@@ -1695,11 +1904,38 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
   }
 
   async quickAsk(input: QuickAskInput): Promise<QuickAskResult> {
-    const response = await this.requestJson<unknown>("/ask/quick", {
-      method: "POST",
-      body: JSON.stringify(quickAskPayload(input)),
-    });
-    return validateQuickAskResponse(response);
+    const endpoint = "/ask/quick";
+    let transportMeta: RequestJsonTransportMeta = {
+      endpoint,
+      requestAttempted: false,
+      responseParseStatus: "not_started",
+    };
+    try {
+      const response = await this.requestJson<unknown>(endpoint, {
+        method: "POST",
+        body: JSON.stringify(quickAskPayload(input)),
+        timeoutMs: 120_000,
+        signal: input.signal,
+        onTransportMeta: (meta) => {
+          transportMeta = meta;
+        },
+      });
+      const result = validateQuickAskResponse(response);
+      result.diagnostics = quickAskTransportDiagnostics(result, input, transportMeta);
+      return result;
+    } catch (error) {
+      if (error instanceof RustHttpLoomEngineError) {
+        throw new RustHttpLoomEngineError(error.kind, error.message, {
+          ...error.details,
+          endpoint,
+          requestAttempted: transportMeta.requestAttempted,
+          httpStatus: transportMeta.httpStatus,
+          responseParseStatus: transportMeta.responseParseStatus ?? "not_started",
+          diagnosticsReceived: false,
+        });
+      }
+      throw error;
+    }
   }
 
   async createOrOpenWeft(input: CreateOrOpenWeftInput): Promise<CreateOrOpenWeftResult> {

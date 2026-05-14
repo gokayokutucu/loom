@@ -1911,6 +1911,36 @@ test.describe("[engine-contract] Loom engine client selection", () => {
     expect(JSON.stringify(body)).not.toContain("numPredict");
   });
 
+  test("Rust HTTP client gives generation stream startup more than the short JSON timeout", async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    const recordedTimeouts: number[] = [];
+    globalThis.setTimeout = ((...args: Parameters<typeof globalThis.setTimeout>) => {
+      recordedTimeouts.push(Number(args[1] ?? 0));
+      return originalSetTimeout(...args);
+    }) as typeof globalThis.setTimeout;
+    try {
+      const client = new RustHttpLoomEngineClient({
+        serviceUrl: "http://127.0.0.1:17633",
+        fetch: async () => sseResponse([]),
+      });
+
+      for await (const _event of client.sendMessage({
+        loomId: "L-1",
+        promptText: "hello",
+        references: [],
+        responseMode: "auto",
+        source: "composer",
+      })) {
+        // Empty stream for startup timeout verification.
+      }
+
+      expect(recordedTimeouts).toContain(120_000);
+      expect(recordedTimeouts).not.toContain(5_000);
+    } finally {
+      globalThis.setTimeout = originalSetTimeout;
+    }
+  });
+
   test("Rust HTTP client uses caller abort signal for generation stream", async () => {
     const abortController = new AbortController();
     const client = new RustHttpLoomEngineClient({
@@ -2017,6 +2047,16 @@ test.describe("[engine-contract] Loom engine client selection", () => {
           sourceLoomId: "loom-1",
           sourceResponseId: "response-1",
           selectedText: "MCP",
+          activeReferences: [
+            {
+              label: "MCP",
+              targetKind: "fragment",
+              targetId: "response-1",
+              targetUri: "loom://response/response-1#fragment=mcp",
+              selectedText: "MCP",
+              sourceResponseId: "response-1",
+            },
+          ],
           question: "açılımı nedir?",
           intent: "acronym_expansion",
           options: {
@@ -2030,6 +2070,33 @@ test.describe("[engine-contract] Loom engine client selection", () => {
             answer: "MCP = Model Context Protocol.",
             model: "llama3.2:latest",
             warnings: [],
+            focusSubject: "MCP",
+            focusSubjectSource: "selected_fragment",
+            resolvedIntent: "acronym_expansion",
+            requestedTopic: "plugin context",
+            diagnostics: {
+              traceId: "trace-1",
+              inputActiveReferenceLabels: ["MCP"],
+              serviceActiveReferenceLabels: ["MCP"],
+              focusSubject: "MCP",
+              focusSubjectSource: "selected_fragment",
+              resolvedIntent: "acronym_expansion",
+              requestedTopic: "plugin context",
+              composedTask: "plugin context bağlamında MCP açılımı nedir?",
+              promptSectionOrder: ["current_task", "focus_subject", "background_source_context"],
+              providerRequestSummary: {
+                focusSubject: "MCP",
+                requestedTopic: "plugin context",
+                focusSubjectBeforeSource: true,
+              },
+              answerValidation: {
+                includesFocusSubject: true,
+                includesRequestedTopic: true,
+                genericSourceOnlyDetected: false,
+                validationPassed: true,
+              },
+              warnings: [],
+            },
             raw_thinking: "hidden",
           }),
           { status: 200 }
@@ -2039,6 +2106,7 @@ test.describe("[engine-contract] Loom engine client selection", () => {
 
     const result = await client.quickAsk({
       sessionId: "ask-1",
+      quickAskTraceId: "trace-1",
       sourceLoomId: "loom-1",
       sourceResponseId: "response-1",
       selectedText: "MCP",
@@ -2047,18 +2115,121 @@ test.describe("[engine-contract] Loom engine client selection", () => {
         summary: "MCP connects models to tools.",
         keyPoints: ["Model Context Protocol"],
       },
+      activeReferences: [
+        {
+          label: "MCP",
+          targetKind: "fragment",
+          targetId: "response-1",
+          targetUri: "loom://response/response-1#fragment=mcp",
+          selectedText: "MCP",
+          sourceResponseId: "response-1",
+        },
+      ],
       turns: [{ question: "önceki", answer: "cevap" }],
       question: "açılımı nedir?",
       intent: "acronym_expansion",
       options: { model: "llama3.2:latest", numCtx: 1024, numPredict: 768 },
     });
 
-    expect(result).toEqual({
+    expect(result).toMatchObject({
       answer: "MCP = Model Context Protocol.",
       model: "llama3.2:latest",
       warnings: [],
+      focusSubject: "MCP",
+      focusSubjectSource: "selected_fragment",
+      resolvedIntent: "acronym_expansion",
+      requestedTopic: "plugin context",
+      diagnostics: expect.objectContaining({
+        traceId: "trace-1",
+        engineMode: "rust-service",
+        clientKind: "rust-http",
+        requestAttempted: true,
+        endpoint: "/ask/quick",
+        httpStatus: 200,
+        responseParseStatus: "success",
+        diagnosticsReceived: true,
+        serviceRequestReceived: true,
+        inputActiveReferenceLabels: ["MCP"],
+        serviceActiveReferenceLabels: ["MCP"],
+        focusSubject: "MCP",
+        answerValidation: expect.objectContaining({
+          validationPassed: true,
+        }),
+      }),
     });
     expect(JSON.stringify(result)).not.toContain("hidden");
+  });
+
+  test("Rust HTTP client maps Quick Ask service errors to typed diagnostics", async () => {
+    const client = new RustHttpLoomEngineClient({
+      serviceUrl: "http://127.0.0.1:17633",
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            code: "RUNTIME_UNAVAILABLE",
+            message: "Ollama provider is unavailable.",
+            kind: "runtime_unavailable",
+            retryable: true,
+            correlationId: "quick-ask-typed-error",
+            details: {
+              endpoint: "/ask/quick",
+              raw_thinking: "hidden",
+            },
+          }),
+          { status: 503 }
+        ),
+    });
+
+    await expect(
+      client.quickAsk({
+        sessionId: "ask-typed-error",
+        turns: [],
+        question: "ne anlama geliyor?",
+        intent: "definition",
+      })
+    ).rejects.toMatchObject({
+      kind: "provider_unavailable",
+      message: "Ollama provider is unavailable.",
+      details: {
+        path: "/ask/quick",
+        status: 503,
+        serviceKind: "runtime_unavailable",
+        retryable: true,
+        correlationId: "quick-ask-typed-error",
+      },
+    });
+  });
+
+  test("Rust HTTP client aborts Quick Ask when caller signal is cancelled", async () => {
+    const controller = new AbortController();
+    const client = new RustHttpLoomEngineClient({
+      serviceUrl: "http://127.0.0.1:17633",
+      fetch: async (_input, init) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener("abort", () => {
+            reject(new DOMException("aborted", "AbortError"));
+          });
+        }),
+    });
+
+    const pending = client.quickAsk({
+      sessionId: "ask-abort",
+      turns: [],
+      question: "iptal et",
+      intent: "unknown",
+      signal: controller.signal,
+    });
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({
+      kind: "request_aborted",
+      message: "loom-service request was cancelled.",
+      details: {
+        path: "/ask/quick",
+        aborted: true,
+        timedOut: false,
+      },
+    });
   });
 
   test("rust-service Quick Ask does not fallback when service is unavailable", async () => {

@@ -183,7 +183,7 @@ impl OllamaRuntime {
         let mut body = serde_json::json!({
             "model": input.model,
             "messages": input.messages,
-            "stream": true,
+            "stream": input.stream.unwrap_or(true),
             "options": input.options.clone().unwrap_or_default()
         });
 
@@ -486,7 +486,12 @@ fn safe_preview(body: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{assess_base_url_security, version_security_status, OllamaRuntime};
-    use crate::{config::OllamaConfig, providers::types::OllamaRuntimeErrorKind};
+    use crate::{
+        config::OllamaConfig,
+        providers::types::{
+            OllamaChatRequest, OllamaMessage, OllamaOptions, OllamaRuntimeErrorKind,
+        },
+    };
     use std::time::Duration;
 
     fn test_config(base_url: &str) -> OllamaConfig {
@@ -611,6 +616,66 @@ mod tests {
         assert_eq!(health.security.network_exposure_risk, "high");
         assert_eq!(health.security.version_status, "remote_unsafe");
         assert_eq!(models_error.kind, OllamaRuntimeErrorKind::InvalidConfig);
+    }
+
+    #[tokio::test]
+    async fn post_chat_respects_non_streaming_request_flag() {
+        let server = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind test server");
+        let address = server.local_addr().expect("server addr");
+        let handle = tokio::spawn(async move {
+            let (mut socket, _) = server.accept().await.expect("accept request");
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            loop {
+                let read = tokio::io::AsyncReadExt::read(&mut socket, &mut buffer)
+                    .await
+                    .expect("read request");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+                if request.windows(4).any(|window| window == b"\r\n\r\n")
+                    && String::from_utf8_lossy(&request).contains("\"stream\":false")
+                {
+                    break;
+                }
+            }
+            let body = r#"{"message":{"role":"assistant","content":"ok"},"done":true}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes())
+                .await
+                .expect("write response");
+            String::from_utf8(request).expect("request utf8")
+        });
+        let runtime = OllamaRuntime::new(test_config(&format!("http://{address}")));
+        let request = OllamaChatRequest {
+            model: "llama3.2:latest".to_string(),
+            messages: vec![OllamaMessage {
+                role: "user".to_string(),
+                content: "hello".to_string(),
+            }],
+            stream: Some(false),
+            think: Some(false),
+            options: Some(OllamaOptions {
+                num_ctx: Some(1024),
+                num_predict: Some(128),
+                temperature: Some(0.2),
+            }),
+            request_id: Some("quick-test".to_string()),
+        };
+
+        let response = runtime.post_chat(&request).await.expect("chat response");
+        assert!(response.status().is_success());
+        let request_text = handle.await.expect("server task");
+
+        assert!(request_text.contains("\"stream\":false"));
+        assert!(request_text.contains("\"think\":false"));
     }
 
     #[tokio::test]

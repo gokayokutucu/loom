@@ -151,6 +151,7 @@ import {
 import {
   buildAskContextPayload,
   createHeuristicResponseContextCapsule,
+  type AskActiveReferenceContext,
   type AskContextPayload,
   type FocusedAskIntent,
   type ResponseContextCapsule,
@@ -169,7 +170,6 @@ import {
   buildAssistantCopyPayload,
   buildAssistantDefaultClipboardData,
   normalizeAssistantMarkdownSource,
-  parseAssistantMarkdown,
   responseMarkdownSource,
 } from "./services/assistantMarkdown";
 import { prepareContextArtifactsForGeneration } from "./services/contextReadinessGate";
@@ -222,6 +222,7 @@ import { AddressMetadataBadge } from "./components/AddressMetadataBadge";
 import { AIProviderSettingsModal } from "./components/AIProviderSettings";
 import { AddressHintPopover } from "./components/AddressHintPopover";
 import { AskPopup, type AskPopupState } from "./components/AskPopup";
+import { AssistantMarkdownContent } from "./components/AssistantMarkdownContent";
 import { BookmarkView } from "./components/BookmarkView";
 import { ChangeIconPopover } from "./components/ChangeIconPopover";
 import { ContextMenu, type ContextMenuState } from "./components/ContextMenu";
@@ -328,10 +329,34 @@ interface AskExchange {
   sourceLoomId?: string;
   sourceResponseId?: string;
   sourceFragment?: LoomLink;
+  activeReferences?: AskActiveReferenceContext[];
   payloadReport?: Pick<
     AskContextPayload,
     "usedFullResponse" | "contextCharCount" | "capsuleSource" | "includedSelectedText"
   >;
+  debugTrace?: QuickAskDebugTrace;
+}
+
+interface QuickAskDebugTrace {
+  traceId: string;
+  engineMode?: string;
+  clientKind?: string;
+  requestAttempted?: boolean;
+  endpoint?: string;
+  httpStatus?: number;
+  transportErrorKind?: string;
+  responseParseStatus?: string;
+  diagnosticsReceived?: boolean;
+  visibleChipLabels: string[];
+  userQuestion: string;
+  selectedFragmentPreview?: string;
+  sourceTitle?: string;
+  sourceResponseCode?: string;
+  inputActiveReferenceLabels: string[];
+  previousAskTurnCount: number;
+  diagnostics?: JsonValue;
+  errorKind?: string;
+  warnings?: string[];
 }
 
 interface SelectionAskState {
@@ -1736,6 +1761,20 @@ function App() {
                 input.selectedText
                   ? `Selected fragment:\n"${input.selectedText}"`
                   : "",
+                input.activeReferences?.length
+                  ? [
+                      "Active reference/context:",
+                      ...input.activeReferences.map((reference) =>
+                        [
+                          `- ${reference.label}`,
+                          reference.selectedText ? `  selected text: ${reference.selectedText}` : "",
+                          reference.preview ? `  preview: ${reference.preview}` : "",
+                          reference.targetUri ? `  target URI: ${reference.targetUri}` : "",
+                        ].filter(Boolean).join("\n")
+                      ),
+                      "Instruction: treat active reference/context chips as first-class context.",
+                    ].join("\n")
+                  : "",
                 input.sourceContext
                   ? [
                       input.sourceContext.title ? `Title: ${input.sourceContext.title}` : "",
@@ -2678,6 +2717,23 @@ function App() {
 
   function providerErrorMessage(error: unknown) {
     const message = error instanceof Error ? error.message : "The selected model provider failed.";
+    const kind =
+      typeof error === "object" && error !== null && "kind" in error
+        ? String((error as { kind?: unknown }).kind)
+        : undefined;
+    if (kind === "request_aborted") return "Request cancelled.";
+    if (kind === "timeout") {
+      return "loom-service timed out while opening the model stream. Check the service/provider status and retry.";
+    }
+    if (kind === "provider_unavailable") {
+      return message || "The selected provider is unavailable. Check the provider and retry.";
+    }
+    if (kind === "model_missing") {
+      return message || "The selected model is not available. Choose another model and retry.";
+    }
+    if (kind === "invalid_config") {
+      return message || "Provider configuration is invalid. Check Settings and retry.";
+    }
     if (
       message.includes("loom-service is not reachable") ||
       message.includes("service down") ||
@@ -5833,6 +5889,7 @@ function App() {
       sourceLoomId?: string;
       sourceResponseId?: string;
       sourceFragment?: LoomLink;
+      activeReferences?: AskActiveReferenceContext[];
     }
   ): Promise<boolean> {
     const sourceConversation =
@@ -5933,6 +5990,7 @@ function App() {
                 sourceLoomId: initialExchange.sourceLoomId ?? sourceLoomId,
                 sourceResponseId: initialExchange.sourceResponseId ?? response.id,
                 sourceFragment: initialExchange.sourceFragment,
+                activeReferences: initialExchange.activeReferences,
               } satisfies AskExchange,
             ]
           : [];
@@ -6089,6 +6147,7 @@ function App() {
                   sourceLoomId: turn.sourceLoomId,
                   sourceResponseId: turn.sourceResponseId,
                   sourceFragment: turn.sourceFragment,
+                  activeReferences: turn.activeReferences,
                   payloadReport: turn.payloadReport,
                 }),
               })),
@@ -6856,19 +6915,26 @@ function App() {
   }
 
   function updateLatestQuickAskAnswer(question: string, answer: string) {
+    const visibleAnswer = stripQuickAskFocusSubjectPrefix(answer);
     setAskState((current) => {
       if (!current) return current;
       const exchanges = current.exchanges ?? [];
       return {
         ...current,
-        answer,
+        answer: visibleAnswer,
         exchanges: exchanges.map((exchange, index) =>
           index === exchanges.length - 1 && exchange.question === question
-            ? { ...exchange, answer }
+            ? { ...exchange, answer: visibleAnswer }
             : exchange
         ),
       };
     });
+  }
+
+  function stripQuickAskFocusSubjectPrefix(answer: string) {
+    return answer
+      .replace(/^\s*(Focus subject|Answer focus|Current task|Composed task|Answer requirements):\s*/i, "")
+      .trimStart();
   }
 
   async function revealQuickAskAnswer(
@@ -6925,6 +6991,24 @@ function App() {
     quickRevealQuestionRef.current = null;
   }
 
+  function quickAskActiveReferencesFromState(state: AskState): AskActiveReferenceContext[] {
+    const selectedLabel = state.sourceSelectedText?.trim() || state.selectedText?.trim();
+    const sourceFragment = state.sourceFragment;
+    if (!selectedLabel && !sourceFragment?.title) return [];
+    const label = selectedLabel || sourceFragment?.title || "Active Reference";
+    return [
+      {
+        label,
+        targetKind: sourceFragment?.type ?? state.contextKind,
+        targetId: sourceFragment?.targetObjectId ?? sourceFragment?.sourceResponseId ?? state.sourceResponseId,
+        targetUri: sourceFragment?.canonicalUri ?? sourceFragment?.path,
+        selectedText: sourceFragment?.selectedText ?? selectedLabel,
+        preview: state.contextPreview,
+        sourceResponseId: sourceFragment?.sourceResponseId ?? state.sourceResponseId ?? state.response.id,
+      },
+    ];
+  }
+
   async function submitQuickQuestion() {
     if (!askState || askState.running) return;
     const prompt = askState.question.trim();
@@ -6951,11 +7035,17 @@ function App() {
         askState.sourceLoomId ?? activeConversationId,
         askState.sourceSelectedText
       );
+    const activeReferences = quickAskActiveReferencesFromState(askState);
+    const visibleChipLabels = activeReferences
+      .map((reference) => reference.label.trim())
+      .filter((label) => label.length > 0);
+    const quickAskTraceId = `quick-ask-${Date.now()}-${generationId}`;
     const askPayload = buildAskContextPayload({
       response: askState.response,
       selectedText: askState.sourceSelectedText,
       userQuestion: prompt,
       capsule,
+      activeReferences,
     });
     const previousAskTurnContext = buildTemporaryAskTurnContext(
       (askState.exchanges ?? []).map((exchange, index) => ({
@@ -6969,8 +7059,13 @@ function App() {
       }))
     );
     const quickModelName = getProfileModel(providerSettings, "quick").name;
+    const quickServiceModel =
+      quickModelName === getProfileModel(providerSettings, "main").name
+        ? undefined
+        : quickModelName;
     const quickAskInput = {
       sessionId: askState.sessionId ?? `ask-${askState.response.id}`,
+      quickAskTraceId,
       sourceLoomId: askState.sourceLoomId ?? activeConversationId,
       sourceResponseId: askState.sourceResponseId ?? askState.response.id,
       selectedText: askState.sourceSelectedText,
@@ -6983,6 +7078,7 @@ function App() {
         keywords: capsule.keywords,
         entities: capsule.entities,
       },
+      activeReferences,
       turns: (askState.exchanges ?? []).map((exchange) => ({
         question: exchange.question,
         answer: exchange.answer,
@@ -6990,15 +7086,60 @@ function App() {
       question: prompt,
       intent: askPayload.focusedIntent,
       options: {
-        model: quickModelName,
+        model: useRustServiceQuickAsk ? quickServiceModel : quickModelName,
         numCtx: 1024,
         numPredict: quickAskNumPredict(
           askPayload.focusedIntent,
           Boolean(askState.sourceSelectedText)
         ),
       },
+      signal: controller.signal,
     };
-    setAskState({ ...askState, running: true, error: undefined });
+    const optimisticExchange: AskExchange = {
+      id: `ask-turn-${Date.now()}`,
+      question: prompt,
+      answer: "",
+      createdAt: Date.now(),
+      capsuleSnapshot: capsule,
+      selectedText: askState.sourceSelectedText,
+      sourceLoomId: askState.sourceLoomId,
+      sourceResponseId: askState.sourceResponseId ?? askState.response.id,
+      sourceFragment: askState.sourceFragment,
+      activeReferences,
+      payloadReport: {
+        usedFullResponse: askPayload.usedFullResponse,
+        contextCharCount: askPayload.contextCharCount,
+        capsuleSource: askPayload.capsuleSource,
+        includedSelectedText: askPayload.includedSelectedText,
+      },
+      debugTrace: {
+        traceId: quickAskTraceId,
+        engineMode: useRustServiceQuickAsk ? "rust-service" : "typescript-local",
+        clientKind: useRustServiceQuickAsk ? "rust-http" : "typescript-local",
+        requestAttempted: true,
+        endpoint: useRustServiceQuickAsk ? "/ask/quick" : "typescript-local.quickAsk",
+        responseParseStatus: "not_started",
+        diagnosticsReceived: false,
+        visibleChipLabels,
+        userQuestion: prompt,
+        selectedFragmentPreview: askState.sourceSelectedText,
+        sourceTitle: capsule.sourceTitle ?? capsule.title,
+        sourceResponseCode: capsule.sourceResponseCode ?? capsule.responseCode,
+        inputActiveReferenceLabels: visibleChipLabels,
+        previousAskTurnCount: askState.exchanges?.length ?? 0,
+        warnings: useRustServiceQuickAsk ? [] : ["non_rust_service_path"],
+      },
+    };
+    quickRevealQuestionRef.current = prompt;
+    setAskState({
+      ...askState,
+      question: "",
+      running: true,
+      answered: true,
+      answer: "",
+      exchanges: [...(askState.exchanges ?? []), optimisticExchange],
+      error: undefined,
+    });
     try {
       const result = useRustServiceQuickAsk
         ? await loomEngineClient.quickAsk(quickAskInput)
@@ -7021,39 +7162,20 @@ function App() {
               : "Answer this as a Loom Quick Ask. Use the provided source context and previous temporary Ask turns silently. Preserve local Ask continuity while staying anchored to the source Response. Keep instant, no-thinking behavior, but do not force the answer into one sentence. Use 2-5 sentences or short bullets when useful, and do not write a long essay. Answer directly; do not mention context blocks, capsules, wrapper labels, or artifact names.",
           });
       if (controller.signal.aborted || quickGenerationRef.current !== generationId) return;
-      setAskState((current) => {
-        if (!current) return current;
-        return {
-          ...current,
-          question: "",
-          running: true,
-          answered: true,
-          answer: "",
-          exchanges: [
-            ...(current.exchanges ?? []),
-            {
-              id: `ask-turn-${Date.now()}`,
-              question: prompt,
-              answer: "",
-              createdAt: Date.now(),
-              capsuleSnapshot: capsule,
-              selectedText: askState.sourceSelectedText,
-              sourceLoomId: askState.sourceLoomId,
-              sourceResponseId: askState.sourceResponseId ?? askState.response.id,
-              sourceFragment: askState.sourceFragment,
-              payloadReport: {
-                usedFullResponse: askPayload.usedFullResponse,
-                contextCharCount: askPayload.contextCharCount,
-                capsuleSource: askPayload.capsuleSource,
-                includedSelectedText: askPayload.includedSelectedText,
-              },
-            } satisfies AskExchange,
-          ],
-          error: undefined,
-        };
-      });
-      quickRevealQuestionRef.current = prompt;
-      const sanitizedAnswer = sanitizeModelAnswer("answer" in result ? result.answer : result.text);
+      const sanitizedAnswer = stripQuickAskFocusSubjectPrefix(
+        sanitizeModelAnswer("answer" in result ? result.answer : result.text)
+      );
+      const resultDiagnostics = "diagnostics" in result ? result.diagnostics : undefined;
+      const resultWarnings = "warnings" in result ? result.warnings : [];
+      const resultDiagnosticsRecord =
+        resultDiagnostics && typeof resultDiagnostics === "object" && !Array.isArray(resultDiagnostics)
+          ? (resultDiagnostics as Record<string, unknown>)
+          : undefined;
+      const diagnosticsReceived = Boolean(resultDiagnosticsRecord?.diagnosticsReceived);
+      const transportWarnings = [
+        ...resultWarnings,
+        ...(diagnosticsReceived ? [] : ["service_diagnostics_missing"]),
+      ];
       if (
         looksLikeRestatedQuickAskQuestion({
           answer: sanitizedAnswer,
@@ -7078,7 +7200,29 @@ function App() {
           answer: sanitizedAnswer,
           exchanges: exchanges.map((exchange, index) =>
             index === exchanges.length - 1 && exchange.question === prompt
-              ? { ...exchange, answer: sanitizedAnswer }
+              ? {
+                  ...exchange,
+                  answer: sanitizedAnswer,
+                  debugTrace: {
+                    ...(exchange.debugTrace ?? optimisticExchange.debugTrace),
+                    traceId: quickAskTraceId,
+                    engineMode: useRustServiceQuickAsk ? "rust-service" : "typescript-local",
+                    clientKind: useRustServiceQuickAsk ? "rust-http" : "typescript-local",
+                    requestAttempted: true,
+                    endpoint: useRustServiceQuickAsk ? "/ask/quick" : "typescript-local.quickAsk",
+                    httpStatus:
+                      typeof resultDiagnosticsRecord?.httpStatus === "number"
+                        ? resultDiagnosticsRecord.httpStatus
+                        : undefined,
+                    responseParseStatus:
+                      typeof resultDiagnosticsRecord?.responseParseStatus === "string"
+                        ? resultDiagnosticsRecord.responseParseStatus
+                        : resultDiagnostics ? "success" : undefined,
+                    diagnosticsReceived,
+                    diagnostics: resultDiagnostics,
+                    warnings: transportWarnings,
+                  },
+                }
               : exchange
           ),
           error: undefined,
@@ -7093,11 +7237,53 @@ function App() {
         setAskState((current) => current ? { ...current, running: false } : current);
         return;
       }
-      setAskState({
-        ...askState,
-        running: false,
-        error: providerErrorMessage(error),
-      });
+      setAskState((current) =>
+        current
+          ? {
+              ...current,
+              running: false,
+              error: providerErrorMessage(error),
+              exchanges: (current.exchanges ?? []).map((exchange, index, exchanges) =>
+                index === exchanges.length - 1 && exchange.question === prompt
+                  ? {
+                      ...exchange,
+                      debugTrace: {
+                        ...(exchange.debugTrace ?? optimisticExchange.debugTrace),
+                        traceId: quickAskTraceId,
+                        engineMode: useRustServiceQuickAsk ? "rust-service" : "typescript-local",
+                        clientKind: useRustServiceQuickAsk ? "rust-http" : "typescript-local",
+                        requestAttempted: true,
+                        endpoint: useRustServiceQuickAsk ? "/ask/quick" : "typescript-local.quickAsk",
+                        httpStatus:
+                          typeof (error as { details?: Record<string, unknown> })?.details?.httpStatus === "number"
+                            ? (error as { details?: { httpStatus?: number } }).details?.httpStatus
+                            : typeof (error as { details?: Record<string, unknown> })?.details?.status === "number"
+                              ? (error as { details?: { status?: number } }).details?.status
+                              : undefined,
+                        responseParseStatus:
+                          typeof (error as { details?: Record<string, unknown> })?.details?.responseParseStatus === "string"
+                            ? String((error as { details?: { responseParseStatus?: unknown } }).details?.responseParseStatus)
+                            : undefined,
+                        diagnosticsReceived: false,
+                        errorKind:
+                          error instanceof Error && "kind" in error
+                            ? String((error as { kind?: unknown }).kind)
+                            : undefined,
+                        transportErrorKind:
+                          error instanceof Error && "kind" in error
+                            ? String((error as { kind?: unknown }).kind)
+                            : undefined,
+                        warnings: [
+                          providerErrorMessage(error),
+                          useRustServiceQuickAsk ? "service_diagnostics_missing" : "non_rust_service_path",
+                        ],
+                      },
+                    }
+                  : exchange
+              ),
+            }
+          : current
+      );
       markRuntimeUnavailableFromError(error);
       if (quickAbortRef.current === controller) quickAbortRef.current = null;
       quickRevealQuestionRef.current = null;
@@ -7121,6 +7307,9 @@ function App() {
   }
 
   function closeSelectionAskFlow() {
+    quickAbortRef.current?.abort();
+    quickAbortRef.current = null;
+    quickRevealQuestionRef.current = null;
     setSelectionAskState(null);
     setAskState(null);
     setSelectionReference(null);
@@ -7903,6 +8092,7 @@ function App() {
                             onContinueTruncatedResponse={continueTruncatedResponse}
                             onEditPrompt={updateResponsePrompt}
                             onRegenerateFromPrompt={regenerateFromEditedPrompt}
+                            showGenerationDebug={appSettings.showGenerationDebug}
                           />
                           {renderPanelComposer(originConversation.id, "origin")}
                         </div>
@@ -7955,6 +8145,7 @@ function App() {
                             onContinueTruncatedResponse={continueTruncatedResponse}
                             onEditPrompt={updateResponsePrompt}
                             onRegenerateFromPrompt={regenerateFromEditedPrompt}
+                            showGenerationDebug={appSettings.showGenerationDebug}
                           />
                           {renderPanelComposer(activeConversation.id, "weft")}
                         </div>
@@ -8042,6 +8233,7 @@ function App() {
                     onContinueTruncatedResponse={continueTruncatedResponse}
                     onEditPrompt={updateResponsePrompt}
                     onRegenerateFromPrompt={regenerateFromEditedPrompt}
+                    showGenerationDebug={appSettings.showGenerationDebug}
                   />
                 )}
 
@@ -8193,6 +8385,8 @@ function App() {
                 sourceLoomId: exchange.sourceLoomId,
                 sourceResponseId: exchange.sourceResponseId,
                 sourceFragment: exchange.sourceFragment,
+                activeReferences:
+                  exchange.activeReferences as AskActiveReferenceContext[] | undefined,
                 payloadReport: exchange.payloadReport as AskExchange["payloadReport"],
               }));
             const latestExchange =
@@ -8208,6 +8402,7 @@ function App() {
                     sourceLoomId: askState.sourceLoomId,
                     sourceResponseId: askState.sourceResponseId ?? askState.response.id,
                     sourceFragment: askState.sourceFragment,
+                    activeReferences: quickAskActiveReferencesFromState(askState),
                   }
                 : undefined);
             if (!latestExchange) return;
@@ -8223,6 +8418,8 @@ function App() {
                 sourceLoomId: latestExchange.sourceLoomId,
                 sourceResponseId: latestExchange.sourceResponseId,
                 sourceFragment: latestExchange.sourceFragment,
+                activeReferences:
+                  latestExchange.activeReferences as AskActiveReferenceContext[] | undefined,
               }
             );
             if (converted) closeSelectionAskFlow();
@@ -9533,191 +9730,6 @@ function NewLoomStarterPanel({
   );
 }
 
-const codeKeywords = new Set([
-  "as",
-  "async",
-  "await",
-  "boolean",
-  "break",
-  "case",
-  "class",
-  "const",
-  "continue",
-  "default",
-  "else",
-  "export",
-  "extends",
-  "false",
-  "for",
-  "from",
-  "function",
-  "if",
-  "import",
-  "interface",
-  "let",
-  "new",
-  "null",
-  "private",
-  "public",
-  "return",
-  "string",
-  "switch",
-  "true",
-  "type",
-  "undefined",
-  "void",
-]);
-
-function renderInlineMarkdown(text: string, keyPrefix: string) {
-  const elements: Array<string | JSX.Element> = [];
-  const tokenPattern = /(`[^`]+`|\*\*[^*]+\*\*)/g;
-  let cursor = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = tokenPattern.exec(text)) !== null) {
-    if (match.index > cursor) {
-      elements.push(text.slice(cursor, match.index));
-    }
-    const token = match[0];
-    if (token.startsWith("**")) {
-      elements.push(
-        <strong key={`${keyPrefix}-strong-${match.index}`}>
-          {token.slice(2, -2)}
-        </strong>
-      );
-    } else {
-      elements.push(
-        <code key={`${keyPrefix}-code-${match.index}`}>
-          {token.slice(1, -1)}
-        </code>
-      );
-    }
-    cursor = match.index + token.length;
-  }
-
-  if (cursor < text.length) elements.push(text.slice(cursor));
-  return elements.length > 0 ? elements : text;
-}
-
-function syntaxClassForToken(token: string) {
-  if (/^\/\/.*/.test(token)) return "comment";
-  if (/^(['"`]).*\1$/.test(token)) return "string";
-  if (/^\d+(\.\d+)?$/.test(token)) return "number";
-  if (/^[A-Z][A-Za-z0-9_]*$/.test(token)) return "type";
-  if (codeKeywords.has(token)) return "keyword";
-  if (/^[A-Za-z_$][\w$]*(?=\()/.test(token)) return "function";
-  return undefined;
-}
-
-function renderCodeLine(line: string, lineIndex: number) {
-  const tokenPattern =
-    /(\/\/.*|(['"`])(?:\\.|(?!\2).)*\2|\b\d+(?:\.\d+)?\b|\b[A-Za-z_$][\w$]*(?=\()|\b[A-Za-z_$][\w$]*\b)/g;
-  const parts: JSX.Element[] = [];
-  let cursor = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = tokenPattern.exec(line)) !== null) {
-    if (match.index > cursor) {
-      parts.push(
-        <span key={`${lineIndex}-plain-${cursor}`}>
-          {line.slice(cursor, match.index)}
-        </span>
-      );
-    }
-    const token = match[0];
-    const tokenClass = syntaxClassForToken(token);
-    parts.push(
-      <span
-        className={tokenClass ? `syntax-token syntax-${tokenClass}` : undefined}
-        key={`${lineIndex}-token-${match.index}`}
-      >
-        {token}
-      </span>
-    );
-    cursor = match.index + token.length;
-    if (token.startsWith("//")) break;
-  }
-
-  if (cursor < line.length) {
-    parts.push(<span key={`${lineIndex}-tail`}>{line.slice(cursor)}</span>);
-  }
-  return parts.length > 0 ? parts : "\u00a0";
-}
-
-function SyntaxHighlightedCode({ code }: { code: string }) {
-  return (
-    <>
-      {code.split("\n").map((line, index) => (
-        <span className="assistant-code-line" key={`${index}-${line}`}>
-          {renderCodeLine(line, index)}
-        </span>
-      ))}
-    </>
-  );
-}
-
-function CodeBlock({
-  language,
-  code,
-  closed,
-  onCopyCode,
-}: {
-  language: string;
-  code: string;
-  closed: boolean;
-  onCopyCode: (code: string) => Promise<boolean>;
-}) {
-  const [copied, setCopied] = useState(false);
-  const copiedTimerRef = useRef<number | null>(null);
-  const canCopy = closed && code.trim().length > 0;
-
-  useEffect(() => {
-    return () => {
-      if (copiedTimerRef.current) window.clearTimeout(copiedTimerRef.current);
-    };
-  }, []);
-
-  async function copyCode() {
-    if (!canCopy) return;
-    const success = await onCopyCode(code);
-    if (!success) return;
-    setCopied(true);
-    if (copiedTimerRef.current) window.clearTimeout(copiedTimerRef.current);
-    copiedTimerRef.current = window.setTimeout(() => {
-      setCopied(false);
-      copiedTimerRef.current = null;
-    }, 2000);
-  }
-
-  return (
-    <figure className="assistant-code-block">
-      <figcaption>
-        <span>{language}</span>
-        <button
-          type="button"
-          className={copied ? "assistant-code-copy copied" : "assistant-code-copy"}
-          disabled={!canCopy}
-          onClick={copyCode}
-          aria-label={copied ? "Copied" : `Copy ${language} code`}
-          title={canCopy ? (copied ? "Copied" : "Copy") : "Copy unavailable until code block completes"}
-        >
-          <Copy size={13} />
-          {copied && (
-            <span className="assistant-code-copy-check" aria-hidden="true">
-              <Check size={9} strokeWidth={3} />
-            </span>
-          )}
-        </button>
-      </figcaption>
-      <pre>
-        <code>
-          <SyntaxHighlightedCode code={code} />
-        </code>
-      </pre>
-    </figure>
-  );
-}
-
 function formatThinkingSeconds(value: number | undefined) {
   if (value === undefined) return undefined;
   if (value < 10) return value.toFixed(1);
@@ -9739,7 +9751,13 @@ function AnimatedProgressText({ text }: { text: string }) {
   );
 }
 
-function ResponseProgressChecklist({ progress }: { progress: VisibleAnswerProgress }) {
+function ResponseProgressChecklist({
+  progress,
+  showDebug,
+}: {
+  progress: VisibleAnswerProgress;
+  showDebug: boolean;
+}) {
   const activeTask = progress.tasks.find((task) => task.id === progress.activeTaskId);
   const statusText = progress.statusText || (activeTask ? `${activeTask.title}...` : "Preparing response...");
   const now = Date.now();
@@ -9819,7 +9837,8 @@ function ResponseProgressChecklist({ progress }: { progress: VisibleAnswerProgre
           </ul>
         </div>
       )}
-      {(debugFacts.length > 0 || chunkFacts.length > 0 || (progress.debugEvents?.length ?? 0) > 0) && (
+      {showDebug &&
+        (debugFacts.length > 0 || chunkFacts.length > 0 || (progress.debugEvents?.length ?? 0) > 0) && (
         <div className="assistant-progress-debug" aria-label="Generation debug monitor">
           <div className="assistant-progress-outline-label">Debug monitor</div>
           {debugFacts.length > 0 && (
@@ -9978,93 +9997,7 @@ function ResponseContent({
   markdown: string;
   onCopyCode: (code: string) => Promise<boolean>;
 }) {
-  return (
-    <>
-      {parseAssistantMarkdown(markdown).map((block, index) => {
-        if (block.kind === "paragraph") {
-          return (
-            <p key={`paragraph-${index}`}>
-              {renderInlineMarkdown(block.text, `paragraph-${index}`)}
-            </p>
-          );
-        }
-        if (block.kind === "heading") {
-          const Heading = `h${block.level}` as keyof JSX.IntrinsicElements;
-          return (
-            <Heading className="assistant-markdown-heading" key={`heading-${index}`}>
-              {renderInlineMarkdown(block.text, `heading-${index}`)}
-            </Heading>
-          );
-        }
-        if (block.kind === "list") {
-          const List = block.ordered ? "ol" : "ul";
-          return (
-            <List className="assistant-markdown-list" key={`list-${index}`}>
-              {block.items.map((item, itemIndex) => (
-                <li key={`${itemIndex}-${item}`}>
-                  {renderInlineMarkdown(item, `list-${index}-${itemIndex}`)}
-                </li>
-              ))}
-            </List>
-          );
-        }
-        if (block.kind === "table") {
-          return (
-            <div className="assistant-markdown-table-wrap" key={`table-${index}`}>
-              <table className="assistant-markdown-table">
-                <thead>
-                  <tr>
-                    {block.headers.map((header, headerIndex) => (
-                      <th
-                        key={`${headerIndex}-${header}`}
-                        style={
-                          block.align[headerIndex]
-                            ? { textAlign: block.align[headerIndex] }
-                            : undefined
-                        }
-                      >
-                        {renderInlineMarkdown(header, `table-${index}-header-${headerIndex}`)}
-                      </th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {block.rows.map((row, rowIndex) => (
-                    <tr key={`row-${rowIndex}`}>
-                      {block.headers.map((_, cellIndex) => (
-                        <td
-                          key={`${rowIndex}-${cellIndex}`}
-                          style={
-                            block.align[cellIndex]
-                              ? { textAlign: block.align[cellIndex] }
-                              : undefined
-                          }
-                        >
-                          {renderInlineMarkdown(
-                            row[cellIndex] ?? "",
-                            `table-${index}-${rowIndex}-${cellIndex}`
-                          )}
-                        </td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          );
-        }
-        return (
-          <CodeBlock
-            key={`code-${index}`}
-            language={block.language}
-            code={block.code}
-            closed={block.closed}
-            onCopyCode={onCopyCode}
-          />
-        );
-      })}
-    </>
-  );
+  return <AssistantMarkdownContent markdown={markdown} onCopyCode={onCopyCode} />;
 }
 
 function UserPromptContent({
@@ -10248,6 +10181,7 @@ function ChatTranscript({
   onContinueTruncatedResponse,
   onEditPrompt,
   onRegenerateFromPrompt,
+  showGenerationDebug,
 }: {
   transcriptRef?: (node: HTMLElement | null) => void;
   conversation?: Conversation;
@@ -10277,6 +10211,7 @@ function ChatTranscript({
   onContinueTruncatedResponse: (responseId: string) => void;
   onEditPrompt: (loomId: string, responseId: string, nextPrompt: string) => Promise<boolean>;
   onRegenerateFromPrompt: (loomId: string, responseId: string) => void;
+  showGenerationDebug: boolean;
 }) {
   const [sentReferenceHint, setSentReferenceHint] = useState<{
     link: LoomLink;
@@ -10588,7 +10523,10 @@ function ChatTranscript({
               )}
               <div className="assistant-body">
                 {showResponseProgress && displayResponse.visibleProgress && (
-                  <ResponseProgressChecklist progress={displayResponse.visibleProgress} />
+                  <ResponseProgressChecklist
+                    progress={displayResponse.visibleProgress}
+                    showDebug={showGenerationDebug}
+                  />
                 )}
                 <ThinkingPanel
                   response={displayResponse}
@@ -11403,12 +11341,16 @@ function PromptComposer({
 
   function getTokenFromEventTarget(target: EventTarget | null) {
     if (target instanceof HTMLElement) {
-      return target.closest<HTMLElement>(".inline-loom-token, .selection-reference-chip");
+      const token = target.closest<HTMLElement>(".inline-loom-token, .selection-reference-chip");
+      if (token?.classList.contains("selection-reference-chip--quote")) return null;
+      return token;
     }
     if (target instanceof Text) {
-      return target.parentElement?.closest<HTMLElement>(
+      const token = target.parentElement?.closest<HTMLElement>(
         ".inline-loom-token, .selection-reference-chip"
       ) ?? null;
+      if (token?.classList.contains("selection-reference-chip--quote")) return null;
+      return token;
     }
     return null;
   }

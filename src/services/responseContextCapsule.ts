@@ -43,9 +43,23 @@ export type FocusedAskIntent =
   | "definition"
   | "translation"
   | "explain_this"
+  | "relation_to_reference"
+  | "implementation_in_topic"
+  | "how_it_works_with_reference"
   | "relation_to_source"
   | "how_it_works"
+  | "usage"
   | "unknown";
+
+export interface AskActiveReferenceContext {
+  label: string;
+  targetKind?: string;
+  targetId?: string;
+  targetUri?: string;
+  selectedText?: string;
+  preview?: string;
+  sourceResponseId?: string;
+}
 
 export interface AskContextPayload {
   context: string[];
@@ -248,19 +262,60 @@ function isAcronymLike(value: string) {
 
 export function resolveFocusedAskIntent(input: {
   selectedText?: string;
+  activeReferences?: AskActiveReferenceContext[];
   currentQuestion: string;
 }): FocusedAskIntent {
   const selectedText = input.selectedText?.trim() ?? "";
   const question = input.currentQuestion.toLocaleLowerCase("tr-TR");
+  const hasActiveReference = Boolean(input.activeReferences?.some((reference) => reference.label.trim()));
+  const mentionsImplementation =
+    question.includes("nasıl yapılır") ||
+    question.includes("nasil yapilir") ||
+    question.includes("nasıl uygulanır") ||
+    question.includes("nasil uygulanir") ||
+    question.includes("nasıl olur") ||
+    question.includes("nasil olur") ||
+    question.includes("nerede kullanılır") ||
+    /\b(how is this done|how would you implement|how does .* work|where is it used)\b/i.test(
+      input.currentQuestion
+    );
+  const mentionsRelation =
+    question.includes("ilişkisi") ||
+    question.includes("ilişkili") ||
+    question.includes("bağlantısı") ||
+    question.includes("bağlarız") ||
+    /\b(relation|relationship|relate|related|connect|with)\b/i.test(input.currentQuestion);
+  const mentionsTopic =
+    question.includes("event sourcing") ||
+    question.includes("cqrs") ||
+    question.includes("plugin") ||
+    question.includes("source") ||
+    question.includes("tarafında") ||
+    question.includes("içinde") ||
+    /\b(with|in|inside|using)\b/i.test(input.currentQuestion);
   const asksExpansion =
     question.includes("açılım") ||
     question.includes("acilim") ||
+    question.includes("ne anlama geliyor") ||
     question.includes("ne demek") ||
     /\b(what does it stand for|stands for|meaning|expansion)\b/i.test(input.currentQuestion);
+  const asksUsage =
+    question.includes("hangi işlerde") ||
+    question.includes("hangi islerde") ||
+    question.includes("nerede kullanılır") ||
+    question.includes("nerelerde kullanılır") ||
+    question.includes("ne için kullanılır") ||
+    question.includes("ne icin kullanilir") ||
+    question.includes("hangi durumlarda") ||
+    /\b(where is it used|what is it used for|use cases)\b/i.test(input.currentQuestion);
   if (selectedText && isAcronymLike(selectedText) && asksExpansion) {
     return "acronym_expansion";
   }
-  if (/\b(çevir|translate|translation|türkçesi)\b/i.test(input.currentQuestion)) {
+  if (
+    /\b(çevir|translate|translation|türkçesi|ingilizcesi|english)\b/i.test(
+      input.currentQuestion
+    )
+  ) {
     return "translation";
   }
   if (
@@ -268,7 +323,20 @@ export function resolveFocusedAskIntent(input: {
     question.includes("bağlantısı") ||
     /\b(relation|relationship|related)\b/i.test(input.currentQuestion)
   ) {
+    if (hasActiveReference) return "relation_to_reference";
     return "relation_to_source";
+  }
+  if (hasActiveReference && mentionsImplementation && mentionsTopic) {
+    return "implementation_in_topic";
+  }
+  if (hasActiveReference && mentionsImplementation) {
+    return "how_it_works_with_reference";
+  }
+  if (hasActiveReference && mentionsRelation) {
+    return "relation_to_reference";
+  }
+  if (hasActiveReference && asksUsage) {
+    return "usage";
   }
   if (
     question.includes("nasıl") ||
@@ -278,8 +346,10 @@ export function resolveFocusedAskIntent(input: {
   }
   if (
     question.includes("nedir") ||
+    question.includes("ne anlama geliyor") ||
     question.includes("ne demek") ||
-    /\b(what is|define|definition)\b/i.test(input.currentQuestion)
+    question.includes("bu ne") ||
+    /\b(what is|what does it mean|what is it|define|definition)\b/i.test(input.currentQuestion)
   ) {
     return "definition";
   }
@@ -298,6 +368,7 @@ export function buildAskContextPayload(input: {
   selectedText?: string;
   userQuestion: string;
   capsule: ResponseContextCapsule;
+  activeReferences?: AskActiveReferenceContext[];
 }): AskContextPayload {
   const fullText = responseText(input.response);
   const selectedText = input.selectedText?.trim();
@@ -305,6 +376,7 @@ export function buildAskContextPayload(input: {
   const hasSelectedText = Boolean(selectedText);
   const focusedIntent = resolveFocusedAskIntent({
     selectedText,
+    activeReferences: input.activeReferences,
     currentQuestion: input.userQuestion,
   });
   const sourceContextClues = buildSourceContextClues({
@@ -358,6 +430,12 @@ export function buildAskContextPayload(input: {
           "- Do not ask a new question.",
           "- Do not explain the whole source response unless needed.",
           "- If the selected fragment is an acronym and the user asks for its expansion, give the expansion first.",
+          focusedIntent === "translation"
+            ? "- Translate only the selected fragment. Do not explain the whole source response."
+            : "",
+          focusedIntent === "translation"
+            ? "- If the user asks for English, answer with the English translation first."
+            : "",
           "- Keep the answer concise and conversational; 1-3 short paragraphs are okay when useful.",
           focusedIntent === "acronym_expansion"
             ? `- The answer should start with: "${selectedText} = <expansion>".`
@@ -371,8 +449,38 @@ export function buildAskContextPayload(input: {
         ].filter(Boolean).join("\n"),
       ].join("\n\n")
     : "";
+  const activeReferenceFocus = input.activeReferences?.length
+    ? [
+        "Active reference/context:",
+        ...input.activeReferences.map((reference) => {
+          const details = [
+            `- ${compactText(reference.label, 180)}`,
+            reference.selectedText ? `  selected text: ${compactText(reference.selectedText, 220)}` : "",
+            reference.preview ? `  preview: ${compactText(reference.preview, 260)}` : "",
+            reference.targetUri ? `  target URI: ${compactText(reference.targetUri, 220)}` : "",
+          ].filter(Boolean);
+          return details.join("\n");
+        }),
+        "Instruction: Treat active reference/context chips as first-class context, not decoration.",
+        focusedIntent === "implementation_in_topic"
+          ? "Current task: connect the active reference/context to the topic requested in the user question."
+          : "",
+        focusedIntent === "relation_to_reference"
+          ? "Current task: explain the relationship between the active reference/context and the requested source/topic."
+          : "",
+        focusedIntent === "how_it_works_with_reference"
+          ? "Current task: explain how the active reference/context works in the requested source/topic."
+          : "",
+        focusedIntent === "usage"
+          ? "Current task: explain where the active reference/context is used in the requested source/topic."
+          : "",
+        "- Do not ignore the active reference/context.",
+        "- Do not answer only with generic source-topic basics when an active reference/context is present.",
+      ].filter(Boolean).join("\n")
+    : "";
   const context = [
     selectedFocus,
+    activeReferenceFocus,
     selectedText ? "" : `Source context:\n${[sourceMetadata, sourceBackground].filter(Boolean).join("\n")}`,
   ].filter(Boolean);
   const backgroundContext = [

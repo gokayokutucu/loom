@@ -14,6 +14,7 @@ mod orchestration;
 mod references;
 pub(crate) mod resolve;
 mod responses;
+mod speech;
 mod state;
 mod wefts;
 
@@ -60,6 +61,7 @@ pub fn router(
         .route("/dev/seed-fixtures", post(dev::seed_fixtures))
         .route("/dev/e2e-proof/:loom_id", get(dev::e2e_proof))
         .route("/ask/quick", post(ask::quick))
+        .route("/speech/transcribe", post(speech::transcribe))
         .route(
             "/bookmarks",
             get(bookmarks::list_bookmarks).post(bookmarks::create_bookmark),
