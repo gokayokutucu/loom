@@ -876,27 +876,13 @@ textarea:focus-visible {
   overflow: hidden;
 }
 
-.conversation-tab-copy::after {
-  content: "";
-  position: absolute;
-  top: 0;
-  right: 0;
-  bottom: 0;
-  width: 30px;
-  background: linear-gradient(
-    to left,
-    var(--conversation-tab-fade-surface) 0%,
-    var(--conversation-tab-fade-surface) 28%,
-    transparent 100%
-  );
-  pointer-events: none;
-}
-
 .conversation-tab-copy strong,
 .conversation-tab-copy small {
   overflow: hidden;
   text-overflow: clip;
   white-space: nowrap;
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 30px), transparent 100%);
+  mask-image: linear-gradient(to right, #000 calc(100% - 30px), transparent 100%);
 }
 
 .conversation-tab-copy strong {
