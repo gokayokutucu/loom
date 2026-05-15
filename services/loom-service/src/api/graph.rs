@@ -21,6 +21,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
 const REFERENCE_EDGE_CAP: usize = 50;
+const GRAPH_LANE_WIDTH: f64 = 360.0;
+const GRAPH_ROW_GAP: f64 = 300.0;
 
 const FORBIDDEN_THINKING_KEYS: [&str; 4] = [
     "raw_thinking",
@@ -154,7 +156,7 @@ pub(crate) async fn build_graph_projection(
         let node_id = response_node_id(&response.response_id);
         response_depths.insert(response.response_id.clone(), depth);
         response_node_ids.insert(response.response_id.clone(), node_id.clone());
-        nodes.push(response_node(response, &node_id, depth));
+        nodes.push(response_node(response, &node_id, depth, 0));
 
         if index == 0 {
             edges.push(GraphEdge {
@@ -189,17 +191,17 @@ pub(crate) async fn build_graph_projection(
             .and_then(|response_id| response_depths.get(response_id))
             .map(|depth| depth + 1)
             .unwrap_or((responses.len() as i64) + 1);
-        let node_id = loom_node_id(&weft.loom_id);
-        loom_node_ids.insert(weft.loom_id.clone(), node_id.clone());
-        nodes.push(loom_node(weft, &node_id, depth, lane));
+        let weft_node_id = loom_node_id(&weft.loom_id);
+        loom_node_ids.insert(weft.loom_id.clone(), weft_node_id.clone());
+        nodes.push(loom_node(weft, &weft_node_id, depth, lane));
 
         if let Some(source_response_id) = source_response_id {
             if let Some(source) = response_node_ids.get(&source_response_id) {
                 edges.push(GraphEdge {
-                    id: format!("edge:{}:{}", source, node_id),
+                    id: format!("edge:{}:{}", source, weft_node_id),
                     kind: "weft_origin".to_string(),
                     source: source.clone(),
-                    target: node_id,
+                    target: weft_node_id.clone(),
                     label: Some("Weft origin".to_string()),
                     prompt_text: None,
                     metadata: Some(serde_json::json!({
@@ -218,6 +220,47 @@ pub(crate) async fn build_graph_projection(
                 "Skipped Weft origin edge for {} because origin Response metadata is missing.",
                 weft.loom_id
             ));
+        }
+
+        let weft_responses = response_repository
+            .list_responses_for_loom(&weft.loom_id)
+            .await
+            .map_err(GraphProjectionError::Storage)?;
+        for (response_index, response) in weft_responses.iter().enumerate() {
+            let response_depth = depth + (response_index as i64) + 1;
+            let weft_response_node_id = response_node_id(&response.response_id);
+            response_depths.insert(response.response_id.clone(), response_depth);
+            response_node_ids.insert(response.response_id.clone(), weft_response_node_id.clone());
+            nodes.push(response_node(
+                response,
+                &weft_response_node_id,
+                response_depth,
+                lane,
+            ));
+
+            if response_index == 0 {
+                edges.push(GraphEdge {
+                    id: format!("edge:{}:{}", weft_node_id, weft_response_node_id),
+                    kind: "loom_response".to_string(),
+                    source: weft_node_id.clone(),
+                    target: weft_response_node_id,
+                    label: None,
+                    prompt_text: None,
+                    metadata: None,
+                });
+            } else {
+                let previous = &weft_responses[response_index - 1];
+                let source = response_node_id(&previous.response_id);
+                edges.push(GraphEdge {
+                    id: format!("edge:{}:{}", source, weft_response_node_id),
+                    kind: "response_sequence".to_string(),
+                    source,
+                    target: weft_response_node_id,
+                    label: None,
+                    prompt_text: None,
+                    metadata: None,
+                });
+            }
         }
     }
 
@@ -599,7 +642,7 @@ fn loom_node(loom: &LoomRecord, id: &str, depth: i64, lane: i64) -> GraphNode {
     }
 }
 
-fn response_node(response: &ResponseRecord, id: &str, depth: i64) -> GraphNode {
+fn response_node(response: &ResponseRecord, id: &str, depth: i64, lane: i64) -> GraphNode {
     let title = response
         .title
         .as_deref()
@@ -617,16 +660,16 @@ fn response_node(response: &ResponseRecord, id: &str, depth: i64) -> GraphNode {
         code: response.code.clone(),
         canonical_uri: response.canonical_uri.clone(),
         depth,
-        lane: 0,
-        position: Some(position(depth, 0)),
+        lane,
+        position: Some(position(depth, lane)),
         metadata: None,
     }
 }
 
 fn position(depth: i64, lane: i64) -> GraphPosition {
     GraphPosition {
-        x: (lane as f64) * 320.0,
-        y: (depth as f64) * 180.0,
+        x: (lane as f64) * GRAPH_LANE_WIDTH,
+        y: (depth as f64) * GRAPH_ROW_GAP,
     }
 }
 
@@ -725,7 +768,7 @@ fn graph_error(error: GraphProjectionError) -> (StatusCode, Json<GraphApiError>)
 
 #[cfg(test)]
 mod tests {
-    use super::{build_graph_projection, GraphProjectionError, GraphQuery};
+    use super::{build_graph_projection, GraphProjectionError, GraphQuery, GRAPH_ROW_GAP};
     use crate::storage::{
         db::test_database,
         repositories::{
@@ -851,6 +894,24 @@ mod tests {
             Some("response-origin"),
         )
         .await;
+        insert_response(
+            &database,
+            "weft-1",
+            "weft-response-1",
+            "assistant",
+            "Weft answer one",
+            0,
+        )
+        .await;
+        insert_response(
+            &database,
+            "weft-1",
+            "weft-response-2",
+            "assistant",
+            "Weft answer two",
+            1,
+        )
+        .await;
 
         let graph = build_graph_projection(&database, "loom-1", GraphQuery::default())
             .await
@@ -860,6 +921,21 @@ mod tests {
             .nodes
             .iter()
             .any(|node| node.id == "loom:weft-1" && node.kind == "weft"));
+        let origin = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "response:response-origin")
+            .expect("origin response");
+        let weft = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "loom:weft-1")
+            .expect("weft node");
+        assert!(
+            weft.position.as_ref().expect("weft position").y
+                - origin.position.as_ref().expect("origin position").y
+                >= GRAPH_ROW_GAP
+        );
         let edge = graph
             .edges
             .iter()
@@ -867,6 +943,36 @@ mod tests {
             .expect("weft origin edge");
         assert_eq!(edge.source, "response:response-origin");
         assert_eq!(edge.target, "loom:weft-1");
+        let first_weft_response = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "response:weft-response-1")
+            .expect("first Weft response node");
+        let second_weft_response = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "response:weft-response-2")
+            .expect("second Weft response node");
+        assert_eq!(first_weft_response.lane, weft.lane);
+        assert_eq!(second_weft_response.lane, weft.lane);
+        assert!(
+            first_weft_response
+                .position
+                .as_ref()
+                .expect("first Weft response position")
+                .y
+                > weft.position.as_ref().expect("weft position").y
+        );
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == "loom_response"
+                && edge.source == "loom:weft-1"
+                && edge.target == "response:weft-response-1"
+        }));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == "response_sequence"
+                && edge.source == "response:weft-response-1"
+                && edge.target == "response:weft-response-2"
+        }));
     }
 
     #[tokio::test]

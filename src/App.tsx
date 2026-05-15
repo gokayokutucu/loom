@@ -962,6 +962,46 @@ function sortAttachmentsBySelection(attachments: ComposerAttachment[]) {
 
 const EPHEMERAL_DRAFT_ID = "draft-new-conversation";
 
+const LAST_ACTIVE_LOOM_STORAGE_KEY = "loom:last-active-loom-v1";
+
+interface LastActiveLoomSession {
+  activeLoomId: string;
+  updatedAt: number;
+}
+
+function readLastActiveLoomId(conversations: Conversation[]) {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(LAST_ACTIVE_LOOM_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<LastActiveLoomSession>;
+    const activeLoomId = parsed.activeLoomId;
+    if (!activeLoomId || activeLoomId === EPHEMERAL_DRAFT_ID) return null;
+    return conversations.some((conversation) => conversation.id === activeLoomId)
+      ? activeLoomId
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeLastActiveLoomId(activeLoomId: string | null) {
+  if (typeof window === "undefined") return;
+  try {
+    if (!activeLoomId || activeLoomId === EPHEMERAL_DRAFT_ID) {
+      window.localStorage.removeItem(LAST_ACTIVE_LOOM_STORAGE_KEY);
+      return;
+    }
+    const session: LastActiveLoomSession = {
+      activeLoomId,
+      updatedAt: Date.now(),
+    };
+    window.localStorage.setItem(LAST_ACTIVE_LOOM_STORAGE_KEY, JSON.stringify(session));
+  } catch {
+    // Session restore is best-effort only.
+  }
+}
+
 const LOOM_LINK_MIME = "application/loom-link";
 
 const seedComposerLink: LoomLink = {
@@ -972,16 +1012,31 @@ const seedComposerLink: LoomLink = {
   badge: "Linked",
 };
 
-const initialNavigationDestination: LoomLink = {
-  id: EPHEMERAL_DRAFT_ID,
-  type: "conversation",
-  title: "New conversation",
-  path: "loom://drafts/new-conversation",
-  badge: "Draft",
-};
+const restoredInitialLoomId = readLastActiveLoomId(seedConversations);
+const restoredInitialLoom = restoredInitialLoomId
+  ? seedConversations.find((conversation) => conversation.id === restoredInitialLoomId)
+  : undefined;
+
+const initialNavigationDestination: LoomLink = restoredInitialLoom
+  ? {
+      id: restoredInitialLoom.id,
+      type: "conversation",
+      title: restoredInitialLoom.title,
+      path: restoredInitialLoom.path,
+      badge: "Loom",
+      canonicalUri: restoredInitialLoom.meta?.canonicalUri,
+      meta: restoredInitialLoom.meta,
+    }
+  : {
+      id: EPHEMERAL_DRAFT_ID,
+      type: "conversation",
+      title: "New conversation",
+      path: "loom://drafts/new-conversation",
+      badge: "Draft",
+    };
 
 const initialResolvedNavigationDestination: LoomNavigationDestination = {
-  loomId: EPHEMERAL_DRAFT_ID,
+  loomId: restoredInitialLoom?.id ?? EPHEMERAL_DRAFT_ID,
   mode: "full",
   source: "userNavigation",
 };
@@ -1056,6 +1111,13 @@ const initialForkRecords: ForkRecord[] = [
     parentResponseId: "r-host-shell",
     childConversationId: "c-privacy",
     title: "Local resolver branch",
+  },
+  {
+    id: "fork-integrations-mcp-tools",
+    parentConversationId: "c-integrations",
+    parentResponseId: "r-mcp-execution-boundary",
+    childConversationId: "c-integrations-mcp-tools",
+    title: "MCP tool execution branch",
   },
   {
     id: "fork-security-support",
@@ -1333,8 +1395,12 @@ function App() {
     summary: "Clean unsaved conversation draft.",
     iconKey: "compass",
   });
-  const [activeConversationId, setActiveConversationId] = useState(EPHEMERAL_DRAFT_ID);
-  const [activeObjectTitle, setActiveObjectTitle] = useState("New conversation");
+  const [activeConversationId, setActiveConversationId] = useState(
+    initialResolvedNavigationDestination.loomId
+  );
+  const [activeObjectTitle, setActiveObjectTitle] = useState(
+    initialNavigationDestination.title
+  );
   const [activePanel, setActivePanel] = useState<ActivePanel>(null);
   const [activeSplitPanel, setActiveSplitPanel] = useState<"origin" | "weft">("weft");
   const [splitPanelMenu, setSplitPanelMenu] = useState<{
@@ -1467,6 +1533,27 @@ function App() {
 
   useEffect(() => {
     activeConversationIdRef.current = activeConversationId;
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    writeLastActiveLoomId(
+      activeConversationId === EPHEMERAL_DRAFT_ID ? null : activeConversationId
+    );
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    if (activeConversationId === EPHEMERAL_DRAFT_ID) return;
+    setTabGroups((current) => {
+      let changed = false;
+      const next = current.map((group) => {
+        if (!group.collapsed || !group.conversationIds.includes(activeConversationId)) {
+          return group;
+        }
+        changed = true;
+        return { ...group, collapsed: false };
+      });
+      return changed ? next : current;
+    });
   }, [activeConversationId]);
 
   useEffect(() => {
@@ -7966,13 +8053,6 @@ function App() {
                   onWeftResponse={(loomId, response) => {
                     forkResponseLoom(response, loomId);
                   }}
-                  onAskResponse={(loomId, response) => {
-                    openAsk(
-                      response,
-                      response.answer.join("\n\n"),
-                      loomId
-                    );
-                  }}
                   renderContinuationComposer={({
                     loomId,
                     onSubmitStart,
@@ -8542,12 +8622,22 @@ function Sidebar({
     },
   });
 
-  useEffect(() => {
-    folderListRef.current?.scrollTo({
-      top: folderListRef.current.scrollHeight,
-      behavior: "smooth",
-    });
-  }, [conversations.length, activeConversationId]);
+  useLayoutEffect(() => {
+    const folderList = folderListRef.current;
+    if (!folderList || !activeConversationId) return;
+    const activeTab = folderList.querySelector<HTMLElement>(
+      `[data-loom-id="${CSS.escape(activeConversationId)}"]`
+    );
+    if (!activeTab) return;
+
+    const folderRect = folderList.getBoundingClientRect();
+    const tabRect = activeTab.getBoundingClientRect();
+    const fullyVisible =
+      tabRect.top >= folderRect.top && tabRect.bottom <= folderRect.bottom;
+    if (fullyVisible) return;
+
+    activeTab.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [conversations.length, activeConversationId, tabGroups]);
 
   useEffect(() => {
     if (!profileMenuOpen) return;
@@ -13643,6 +13733,38 @@ function LoomsPanel({
   const [collapsedIds, setCollapsedIds] = useState<Set<string>>(new Set());
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [menu, setMenu] = useState<{ x: number; y: number; node: LineageNode } | null>(null);
+  const [visibleHintNodeId, setVisibleHintNodeId] = useState<string | null>(null);
+  const hintTimerRef = useRef<number | null>(null);
+
+  const clearHintTimer = useCallback(() => {
+    if (hintTimerRef.current === null) return;
+    window.clearTimeout(hintTimerRef.current);
+    hintTimerRef.current = null;
+  }, []);
+
+  const scheduleStillHint = useCallback(
+    (nodeId: string) => {
+      clearHintTimer();
+      hintTimerRef.current = window.setTimeout(() => {
+        setVisibleHintNodeId(nodeId);
+        hintTimerRef.current = null;
+      }, HINT_STILL_DELAY_MS);
+    },
+    [clearHintTimer]
+  );
+
+  const hideStillHint = useCallback(() => {
+    clearHintTimer();
+    setVisibleHintNodeId(null);
+  }, [clearHintTimer]);
+
+  const handleHintMouseMove = useCallback(
+    (nodeId: string) => {
+      hideStillHint();
+      scheduleStillHint(nodeId);
+    },
+    [hideStillHint, scheduleStillHint]
+  );
 
   function nodeToLink(node: LineageNode): LoomLink {
     return {
@@ -13773,6 +13895,13 @@ function LoomsPanel({
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [menu]);
+
+  useEffect(
+    () => () => {
+      clearHintTimer();
+    },
+    [clearHintTimer]
+  );
 
   useEffect(() => {
     if (!visibleNodes.length) return;
@@ -13957,6 +14086,7 @@ function LoomsPanel({
                 collapsed ? "collapsed" : "",
                 activeDescendantHidden ? "collapsed-active-lineage" : "",
                 selectedId === node.id ? "selected" : "",
+                visibleHintNodeId === node.id ? "hint-active" : "",
               ]
                 .filter(Boolean)
                 .join(" ")}
@@ -13978,8 +14108,14 @@ function LoomsPanel({
               }}
             >
               <button
-                className="looms-log__row-hit"
+                className={[
+                  "looms-log__row-hit",
+                  visibleHintNodeId === node.id ? "hint-visible" : "",
+                ]
+                  .filter(Boolean)
+                  .join(" ")}
                 onClick={() => {
+                  hideStillHint();
                   setSelectedId(node.id);
                   if (hasChildren) {
                     toggleNode(node);
@@ -13988,9 +14124,15 @@ function LoomsPanel({
                   onVisit(nodeToLink(node));
                 }}
                 onDoubleClick={() => {
+                  hideStillHint();
                   setSelectedId(node.id);
                   onVisit(nodeToLink(node));
                 }}
+                onMouseEnter={() => scheduleStillHint(node.id)}
+                onMouseMove={() => handleHintMouseMove(node.id)}
+                onMouseLeave={hideStillHint}
+                onFocus={() => setVisibleHintNodeId(node.id)}
+                onBlur={hideStillHint}
                 data-title={node.title}
               >
                 <span aria-hidden="true" />
@@ -14052,6 +14194,7 @@ const LOOMS_LANE_SPACING = 16;
 const LOOMS_LANE_BASE_X = 17;
 const LOOMS_ROW_SHIFT_PER_LANE = 2;
 const LOOMS_ROW_SHIFT_MAX = 6;
+const HINT_STILL_DELAY_MS = 2000;
 
 function clampNumber(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -14393,16 +14536,69 @@ function Tooltip({
   children: React.ReactElement;
 }) {
   const [suppressed, setSuppressed] = useState(false);
+  const [visible, setVisible] = useState(false);
+  const timerRef = useRef<number | null>(null);
+
+  const clearTimer = useCallback(() => {
+    if (timerRef.current === null) return;
+    window.clearTimeout(timerRef.current);
+    timerRef.current = null;
+  }, []);
+
+  const scheduleHint = useCallback(() => {
+    if (suppressed) return;
+    clearTimer();
+    timerRef.current = window.setTimeout(() => {
+      setVisible(true);
+      timerRef.current = null;
+    }, HINT_STILL_DELAY_MS);
+  }, [clearTimer, suppressed]);
+
+  const hideHint = useCallback(() => {
+    clearTimer();
+    setVisible(false);
+  }, [clearTimer]);
+
+  useEffect(
+    () => () => {
+      clearTimer();
+    },
+    [clearTimer]
+  );
 
   return (
     <span
-      className={suppressed ? "tooltip-host tooltip-suppressed" : "tooltip-host"}
+      className={[
+        "tooltip-host",
+        suppressed ? "tooltip-suppressed" : "",
+        visible && !suppressed ? "hint-visible" : "",
+      ]
+        .filter(Boolean)
+        .join(" ")}
       data-tooltip={label}
       data-placement={placement}
-      onPointerDownCapture={() => setSuppressed(true)}
-      onContextMenuCapture={() => setSuppressed(true)}
-      onMouseLeave={() => setSuppressed(false)}
-      onBlur={() => setSuppressed(false)}
+      onMouseEnter={scheduleHint}
+      onMouseMove={() => {
+        hideHint();
+        scheduleHint();
+      }}
+      onMouseLeave={() => {
+        hideHint();
+        setSuppressed(false);
+      }}
+      onFocus={() => setVisible(true)}
+      onPointerDownCapture={() => {
+        hideHint();
+        setSuppressed(true);
+      }}
+      onContextMenuCapture={() => {
+        hideHint();
+        setSuppressed(true);
+      }}
+      onBlur={() => {
+        hideHint();
+        setSuppressed(false);
+      }}
     >
       {children}
     </span>

@@ -282,6 +282,8 @@ test.describe("[legacy-typescript-local] Reference display tokens", () => {
 
     await token.hover();
     const hint = page.getByTestId("address-hint-popover");
+    await page.waitForTimeout(800);
+    await expect(hint).toHaveCount(0);
     await expect(hint).toBeVisible({ timeout: 4000 });
     await expect(hint).toContainText("loom://");
     await expect(hint).toContainText(/R-[0-9A-HJKMNP-TV-Z]{5}/);

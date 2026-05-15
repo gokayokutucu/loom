@@ -31,6 +31,7 @@ import {
 } from "../../services/loomGraphProjection";
 import type { Conversation, LoomForkRecord, ResponseItem } from "../../types";
 import type { LoomEngineClient } from "../../engine";
+import { AssistantMarkdownContent } from "../../components/AssistantMarkdownContent";
 import { GraphControls } from "./GraphControls";
 import { LoomGraphEdge, type LoomGraphFlowEdge } from "./LoomGraphEdge";
 import { LoomGraphNode, type LoomGraphFlowNode } from "./LoomGraphNode";
@@ -49,7 +50,6 @@ export interface GraphViewProps {
   onBookmarkResponse: (loomId: string, response: ResponseItem) => void;
   onLinkResponse: (loomId: string, response: ResponseItem) => void;
   onWeftResponse: (loomId: string, response: ResponseItem) => void;
-  onAskResponse: (loomId: string, response: ResponseItem) => void;
   renderContinuationComposer: (props: {
     loomId: string;
     onSubmitStart: () => void;
@@ -80,6 +80,11 @@ type LoomGraphComposerFlowNode = Node<
 >;
 
 type LoomGraphAnyNode = LoomGraphFlowNode | LoomGraphComposerFlowNode;
+
+interface GraphResponsePreview {
+  question: string;
+  answerMarkdown: string;
+}
 
 function LoomGraphComposerNode({ data }: NodeProps<LoomGraphComposerFlowNode>) {
   const composerNodeRef = useRef<HTMLElement | null>(null);
@@ -164,7 +169,6 @@ function GraphViewInner({
   onBookmarkResponse,
   onLinkResponse,
   onWeftResponse,
-  onAskResponse,
   renderContinuationComposer,
 }: GraphViewProps) {
   const reactFlow = useReactFlow<LoomGraphAnyNode, LoomGraphFlowEdge>();
@@ -185,6 +189,8 @@ function GraphViewInner({
     x: 0,
     y: 0,
   });
+  const [projectionError, setProjectionError] = useState<string | null>(null);
+  const [responsePreview, setResponsePreview] = useState<GraphResponsePreview | null>(null);
   const initializedViewportKey = useRef<string | undefined>(undefined);
   const skipNextFollowAfterWeftFocusRef = useRef(false);
   const skipNextFollowAfterContinuationFocusRef = useRef(false);
@@ -204,7 +210,19 @@ function GraphViewInner({
         bookmarkedResponseAddresses: Array.from(bookmarkedResponseAddresses),
       })
       .then((nextProjection) => {
-        if (!cancelled) setProjection(nextProjection);
+        if (!cancelled) {
+          setProjection(nextProjection);
+          setProjectionError(null);
+        }
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setProjection({ nodes: [], edges: [] });
+        setProjectionError(
+          error instanceof Error
+            ? error.message
+            : "Graph projection is not available for this Loom."
+        );
       });
     return () => {
       cancelled = true;
@@ -407,7 +425,17 @@ function GraphViewInner({
     setContinuationNodeId(undefined);
     setPendingContinuationFocusNodeId(undefined);
     setPendingWeftFocusNodeId(undefined);
+    setResponsePreview(null);
   }, [activeLoomId]);
+
+  useEffect(() => {
+    if (!responsePreview) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setResponsePreview(null);
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [responsePreview]);
 
   const handleContinuationResponseCreated = useCallback(
     (response: ResponseItem) => {
@@ -467,9 +495,6 @@ function GraphViewInner({
             onWeft: (node, nodeResponse) => {
               if (nodeResponse) onWeftResponse(node.loomId, nodeResponse);
             },
-            onAsk: (node, nodeResponse) => {
-              if (nodeResponse) onAskResponse(node.loomId, nodeResponse);
-            },
             onContinue: (node) => {
               setContinuationNodeId(node.id);
               setSelectedNodeId(node.id);
@@ -514,7 +539,6 @@ function GraphViewInner({
       onOpenLoom,
       onOpenResponse,
       onWeftResponse,
-      onAskResponse,
       forkRecords,
       projection.nodes,
       responsesByConversation,
@@ -575,11 +599,25 @@ function GraphViewInner({
   );
 
   const handleNodeClick = useCallback<NodeMouseHandler<LoomGraphAnyNode>>(
-    (_event, node) => {
+    (event, node) => {
       if (node.type === "loomGraphComposerNode") return;
       setSelectedNodeId(node.id);
+      const target = event.target instanceof Element ? event.target : null;
+      if (
+        target?.closest(
+          "button, a, input, textarea, select, [role='button'], .loom-graph-node-actions"
+        )
+      ) {
+        return;
+      }
+      const nodeResponse = responseForNode(node.data.projectionNode, responsesByConversation);
+      if (!nodeResponse) return;
+      setResponsePreview({
+        question: nodeResponse.question,
+        answerMarkdown: nodeResponse.answer.join("\n\n"),
+      });
     },
-    []
+    [responsesByConversation]
   );
 
   const handleNodeDoubleClick = useCallback<NodeMouseHandler<LoomGraphAnyNode>>(
@@ -688,7 +726,46 @@ function GraphViewInner({
             Weft branch
           </span>
         </div>
+        {projectionError && (
+          <div className="loom-graph-empty-state" role="status">
+            <strong>Graph projection unavailable</strong>
+            <span>{projectionError}</span>
+          </div>
+        )}
       </div>
+      {responsePreview && (
+        <div
+          className="graph-response-preview-backdrop"
+          role="presentation"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) setResponsePreview(null);
+          }}
+        >
+          <section
+            className="graph-response-preview-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-label="Response question and answer"
+          >
+            <button
+              type="button"
+              className="graph-response-preview-close"
+              aria-label="Close response preview"
+              onClick={() => setResponsePreview(null)}
+            >
+              <X size={18} />
+            </button>
+            <div className="graph-response-preview-block">
+              <span>Soru</span>
+              <p>{responsePreview.question}</p>
+            </div>
+            <div className="graph-response-preview-block graph-response-preview-answer">
+              <span>Cevap</span>
+              <AssistantMarkdownContent markdown={responsePreview.answerMarkdown} />
+            </div>
+          </section>
+        </div>
+      )}
     </section>
   );
 }

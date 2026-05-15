@@ -396,6 +396,7 @@ mod tests {
             "loom://research/citation-provenance-review",
             "loom://writing/draft-workspace-comparisons",
             "loom://engineering/mcp-plugin-integration",
+            "loom://engineering/mcp-plugin-integration/weft/tool-execution",
             "loom://engineering/private-address-resolution",
             "loom://go-to-market/v1-release-checklist",
             "loom://support/broken-reference-workflows",
@@ -447,6 +448,48 @@ mod tests {
             graph.focused_node_id.as_deref(),
             Some("response:r-graph-continuation")
         );
+
+        let integration_graph = build_graph_projection(
+            &database,
+            "c-integrations",
+            GraphQuery {
+                include_references: true,
+                include_bookmarks: true,
+                focused_response_id: None,
+            },
+        )
+        .await
+        .expect("integration graph projection");
+        assert!(integration_graph
+            .nodes
+            .iter()
+            .any(|node| node.id == "response:r-plugin-boundary"));
+        assert!(integration_graph
+            .nodes
+            .iter()
+            .any(|node| node.id == "response:r-mcp-execution-boundary"));
+        assert!(integration_graph
+            .nodes
+            .iter()
+            .any(|node| node.id == "loom:c-integrations-mcp-tools"));
+        assert!(integration_graph
+            .nodes
+            .iter()
+            .any(|node| node.id == "response:r-mcp-invocation-flow"));
+        assert!(integration_graph
+            .nodes
+            .iter()
+            .any(|node| node.id == "response:r-mcp-error-boundary"));
+        assert!(integration_graph.edges.iter().any(|edge| {
+            edge.kind == "weft_origin"
+                && edge.source == "response:r-mcp-execution-boundary"
+                && edge.target == "loom:c-integrations-mcp-tools"
+        }));
+        assert!(integration_graph.edges.iter().any(|edge| {
+            edge.kind == "loom_response"
+                && edge.source == "loom:c-integrations-mcp-tools"
+                && edge.target == "response:r-mcp-invocation-flow"
+        }));
 
         let export = export_loom_impl(
             &database,

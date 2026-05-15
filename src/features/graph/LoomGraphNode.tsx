@@ -19,7 +19,6 @@ export interface LoomGraphNodeData extends Record<string, unknown> {
   onBookmark: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
   onLink: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
   onWeft: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
-  onAsk: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
   onContinue: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
   hasExistingWeft?: boolean;
   isTerminalResponse?: boolean;
@@ -48,6 +47,10 @@ function nodeKindLabel(node: LoomGraphProjectionNode) {
   return "Reference";
 }
 
+function normalizePreviewText(value?: string) {
+  return value?.replace(/\s+/g, " ").trim() ?? "";
+}
+
 export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
   const {
     projectionNode,
@@ -56,7 +59,6 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
     onBookmark,
     onLink,
     onWeft,
-    onAsk,
     onContinue,
     hasExistingWeft,
     isTerminalResponse,
@@ -64,8 +66,13 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
     viewportZoom = 1,
   } = data;
   const canActOnResponse = projectionNode.kind === "response" && Boolean(response);
+  const canOpenNode = projectionNode.kind === "response" ? Boolean(response) : true;
   const showContinuationButton =
     canActOnResponse && isTerminalResponse && !continuationOpen;
+  const summaryText = normalizePreviewText(projectionNode.summary);
+  const previewText = normalizePreviewText(projectionNode.contentPreview);
+  const showSummary = Boolean(summaryText) && projectionNode.kind !== "response";
+  const showPreview = Boolean(previewText) && previewText !== summaryText;
 
   return (
     <article className={nodeClassName(projectionNode)}>
@@ -84,7 +91,7 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
           {projectionNode.kind === "weft" ? <Workflow size={13} /> : <MessageSquare size={13} />}
           {nodeKindLabel(projectionNode)}
         </span>
-        {canActOnResponse && (
+        {canOpenNode && (
           <button
             type="button"
             className="loom-graph-node-open"
@@ -97,10 +104,10 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
         )}
       </div>
       <h3>{projectionNode.title}</h3>
-      {projectionNode.summary && projectionNode.kind !== "response" && (
+      {showSummary && (
         <p className="loom-graph-summary">{projectionNode.summary}</p>
       )}
-      {projectionNode.contentPreview && (
+      {showPreview && (
         <p className="loom-graph-preview">{projectionNode.contentPreview}</p>
       )}
       <div className="loom-graph-node-flags" aria-label="Node metadata">
@@ -148,16 +155,6 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
             <span>Weft</span>
           </button>
         </div>
-      )}
-      {projectionNode.kind === "response" && projectionNode.isFocused && (
-        <button
-          type="button"
-          className="loom-graph-node-composer"
-          aria-label="Ask from this response"
-          onClick={() => onAsk(projectionNode, response)}
-        >
-          <span>Ask from this node...</span>
-        </button>
       )}
       <Handle
         type="source"
