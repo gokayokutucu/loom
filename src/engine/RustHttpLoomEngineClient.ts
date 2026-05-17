@@ -22,6 +22,8 @@ import type {
   GetBookmarkForTargetInput,
   GetBookmarkInput,
   GetReferenceInput,
+  GetUiStateInput,
+  GetUiStateResult,
   GraphProjectionInput,
   GraphProjectionResult,
   JsonValue,
@@ -49,6 +51,7 @@ import type {
   ServiceConfigStatus,
   ServiceHealthStatus,
   SendMessageInput,
+  SaveUiStateInput,
   SpeechProviderHealth,
   SpeechToTextProviderKind,
   SpeechToTextRuntimeConfig,
@@ -60,6 +63,7 @@ import type {
   UpdateLoomInput,
   UpdateResponseInput,
   UpdateResponseResult,
+  UiStateRecord,
   VisibleWeftSeedResponse,
 } from "./LoomEngineTypes";
 import type {
@@ -618,6 +622,10 @@ function rowVisibleTitle(row: ServiceResponseRow, question: string) {
   return fallbackVisibleTitle(question, row.content);
 }
 
+function isHiddenWeftSeedRow(row: ServiceResponseRow) {
+  return isRecord(row.metadata) && row.metadata.source === "weft_visible_seed";
+}
+
 function responseMetaFromRow(row: ServiceResponseRow, fallbackTitle: string) {
   if (!row.displayCode && !row.code && !row.canonicalUri && !row.metadata) return undefined;
   const metadata = isRecord(row.metadata) ? row.metadata : {};
@@ -640,7 +648,9 @@ function responseMetaFromRow(row: ServiceResponseRow, fallbackTitle: string) {
 }
 
 function buildResponseItemsFromRows(rows: ServiceResponseRow[]): ResponseItem[] {
-  const responses = [...rows].sort((a, b) => a.sequenceIndex - b.sequenceIndex);
+  const responses = rows
+    .filter((row) => !isHiddenWeftSeedRow(row))
+    .sort((a, b) => a.sequenceIndex - b.sequenceIndex);
   const items: ResponseItem[] = [];
   let pendingUser: ServiceResponseRow | null = null;
   for (const row of responses) {
@@ -1518,6 +1528,36 @@ function validateHistoryEnvelope(value: unknown, endpoint: string): HistoryEntry
     });
   }
   return validateServiceHistoryEntry(value.entry, endpoint);
+}
+
+function validateUiStateRecord(value: unknown, endpoint: string): UiStateRecord {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid UI state.", {
+      endpoint,
+    });
+  }
+  const key = stringValue(value, "key");
+  if (!key || !("value" in value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid UI state.", {
+      endpoint,
+    });
+  }
+  return {
+    key,
+    value: sanitizeEnginePayload(value.value) as JsonValue,
+    updatedAt: stringValue(value, "updatedAt"),
+  };
+}
+
+function validateUiStateEnvelope(value: unknown, endpoint: string): GetUiStateResult {
+  if (!isRecord(value) || !("state" in value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid UI state response.", {
+      endpoint,
+    });
+  }
+  return {
+    state: value.state === null ? null : validateUiStateRecord(value.state, endpoint),
+  };
 }
 
 function bookmarkPayload(input: CreateBookmarkInput) {
@@ -2479,6 +2519,27 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
       body: JSON.stringify({ entry: sanitizeEnginePayload(input.entry) }),
     });
     return validateHistoryEnvelope(response, "/history");
+  }
+
+  async getUiState(input: GetUiStateInput): Promise<GetUiStateResult> {
+    const endpoint = `/ui/state/${encodeURIComponent(input.key)}`;
+    const response = await this.requestJson<unknown>(endpoint, { method: "GET" });
+    return validateUiStateEnvelope(response, endpoint);
+  }
+
+  async saveUiState(input: SaveUiStateInput): Promise<UiStateRecord> {
+    const endpoint = `/ui/state/${encodeURIComponent(input.key)}`;
+    const response = await this.requestJson<unknown>(endpoint, {
+      method: "PUT",
+      body: JSON.stringify({ value: sanitizeEnginePayload(input.value) }),
+    });
+    const result = validateUiStateEnvelope(response, endpoint);
+    if (!result.state) {
+      throw new RustHttpLoomEngineError("invalid_response", "loom-service did not return saved UI state.", {
+        endpoint,
+      });
+    }
+    return result.state;
   }
 
   async getBookmarkForTarget(input: GetBookmarkForTargetInput): Promise<BookmarkResult> {

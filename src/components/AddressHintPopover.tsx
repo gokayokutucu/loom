@@ -13,6 +13,7 @@ export function AddressHintPopover({
   link,
   style,
   closing = false,
+  placement = "top",
   onEnter,
   onCopy,
   onClose,
@@ -20,6 +21,7 @@ export function AddressHintPopover({
   link: LoomLink;
   style: CSSProperties;
   closing?: boolean;
+  placement?: "top" | "bottom";
   onEnter?: () => void;
   onCopy?: (link: Pick<LoomLink, "path" | "canonicalUri">) => void;
   onClose?: () => void;
@@ -36,6 +38,7 @@ export function AddressHintPopover({
     <div
       className={closing ? "address-hint-popover closing" : "address-hint-popover"}
       data-testid="address-hint-popover"
+      data-placement={placement}
       style={style}
       role="tooltip"
       onMouseEnter={onEnter}

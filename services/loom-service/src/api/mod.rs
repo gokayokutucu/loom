@@ -17,6 +17,7 @@ pub(crate) mod resolve;
 mod responses;
 mod speech;
 mod state;
+mod ui_state;
 mod wefts;
 
 use crate::config::ConfigManager;
@@ -71,6 +72,10 @@ pub fn router(
         .route(
             "/history",
             get(history::list_history).post(history::record_history),
+        )
+        .route(
+            "/ui/state/:key",
+            get(ui_state::get_ui_state).put(ui_state::put_ui_state),
         )
         .route("/bookmarks/target", get(bookmarks::get_bookmark_for_target))
         .route(

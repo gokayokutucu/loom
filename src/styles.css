@@ -825,6 +825,11 @@ textarea:focus-visible {
   box-shadow: none;
 }
 
+.sidebar.collapsed .conversation-tab.active[data-sidebar-group-id]:not([data-sidebar-group-id="standalone"]) {
+  background: var(--loom-control-active-bg);
+  box-shadow: none;
+}
+
 .sidebar.collapsed .conversation-tab[data-sidebar-group-id="standalone"] {
   margin-left: 0;
 }
@@ -837,6 +842,24 @@ textarea:focus-visible {
   border: 0;
   background: transparent;
   box-shadow: none;
+}
+
+.sidebar.collapsed .conversation-tab.active {
+  --conversation-tab-fade-surface: var(--loom-control-active-bg);
+  background: var(--loom-control-active-bg);
+  color: var(--text-primary);
+  box-shadow: none;
+}
+
+.sidebar.collapsed .conversation-tab.active .conversation-tab-main {
+  background: transparent;
+}
+
+.sidebar.collapsed .conversation-tab.active .conversation-favicon {
+  display: grid;
+  place-items: center;
+  background: transparent;
+  color: var(--text-primary);
 }
 
 .conversation-tab.active {
@@ -1077,10 +1100,8 @@ textarea:focus-visible {
   flex: 0 0 auto;
   padding-top: 8px;
   border-top: 1px solid rgba(255, 255, 255, 0.06);
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.018), rgba(255, 255, 255, 0.012)),
-    var(--loom-sidebar-bg);
-  box-shadow: 0 -10px 18px rgba(0, 0, 0, 0.2);
+  background: transparent;
+  box-shadow: none;
 }
 
 .sidebar-footer {
@@ -2366,6 +2387,40 @@ kbd {
   transform: translateY(0);
 }
 
+.prompt-revision-branch-indicator {
+  justify-self: end;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  width: fit-content;
+  max-width: 76%;
+  margin-top: -3px;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-fallback) 10%, var(--loom-bg-surface));
+  color: var(--accent, var(--accent-fallback));
+  font-size: 12px;
+  line-height: 1;
+  box-shadow: inset 0 -1px 0 color-mix(in srgb, var(--accent-fallback) 58%, transparent);
+}
+
+.prompt-revision-branch-indicator svg {
+  width: 13px;
+  height: 13px;
+}
+
+.prompt-revision-count {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-fallback) 18%, transparent);
+  font-size: 11px;
+}
+
 .prompt-action-button {
   display: inline-flex;
   align-items: center;
@@ -2597,6 +2652,10 @@ kbd {
   color: var(--loom-text-muted);
 }
 
+.thinking-panel.is-running {
+  border-left-color: var(--loom-accent);
+}
+
 .thinking-panel-toggle {
   display: inline-flex;
   width: fit-content;
@@ -2609,11 +2668,20 @@ kbd {
   font-size: 12px;
   line-height: 1.35;
   text-align: left;
+  cursor: pointer;
 }
 
 .thinking-panel-toggle:hover,
 .thinking-panel-toggle:focus-visible {
   color: var(--loom-text-primary);
+  outline: 0;
+}
+
+.thinking-panel-detail {
+  max-width: 560px;
+  color: var(--loom-text-muted);
+  font-size: 11px;
+  line-height: 1.45;
 }
 
 .thinking-panel-guard {
@@ -3269,6 +3337,16 @@ kbd {
   background: color-mix(in srgb, currentColor 12%, transparent);
 }
 
+.response-weft-branch-counter button:disabled {
+  opacity: 0.38;
+  cursor: default;
+}
+
+.response-weft-branch-counter button:disabled:hover,
+.response-weft-branch-counter button:disabled:focus-visible {
+  background: transparent;
+}
+
 .weft-count-badge {
   min-width: 14px;
   height: 14px;
@@ -3644,7 +3722,8 @@ kbd {
   background: var(--loom-border-strong);
 }
 
-.prompt-editor:empty::before {
+.prompt-editor:empty::before,
+.prompt-editor[data-empty="true"]::before {
   content: attr(data-placeholder);
   color: var(--loom-text-muted);
   pointer-events: none;
@@ -3694,17 +3773,29 @@ kbd {
     0 18px 48px rgba(0, 0, 0, 0.42),
     inset 0 1px 0 var(--loom-border-subtle);
   opacity: 1;
-  transform: translateY(0);
-  transition:
-    opacity 240ms ease,
-    transform 240ms ease;
+  transition: opacity 180ms ease;
   animation: address-hint-popover-in 120ms ease-out;
   user-select: text;
 }
 
+.address-hint-popover::after {
+  position: absolute;
+  right: 0;
+  left: 0;
+  height: 14px;
+  content: "";
+}
+
+.address-hint-popover[data-placement="top"]::after {
+  top: 100%;
+}
+
+.address-hint-popover[data-placement="bottom"]::after {
+  bottom: 100%;
+}
+
 .address-hint-popover.closing {
   opacity: 0;
-  transform: translateY(4px);
   animation: none;
   pointer-events: none;
 }
@@ -3712,12 +3803,10 @@ kbd {
 @keyframes address-hint-popover-in {
   from {
     opacity: 0;
-    transform: translateY(3px);
   }
 
   to {
     opacity: 1;
-    transform: translateY(0);
   }
 }
 

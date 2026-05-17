@@ -63,6 +63,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "loom_soft_delete",
         sql: include_str!("../../migrations/0011_loom_soft_delete.sql"),
     },
+    Migration {
+        version: 12,
+        name: "ui_state",
+        sql: include_str!("../../migrations/0012_ui_state.sql"),
+    },
 ];
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
@@ -156,6 +161,7 @@ mod tests {
             "loom_topic_index",
             "context_graph_links",
             "navigation_history",
+            "ui_state",
         ] {
             columns.extend(
                 sqlx::query_scalar::<_, String>(&format!(

@@ -174,25 +174,37 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
           loom.weftKind === "revision"
       );
       expect(revisionWeft).toBeTruthy();
-      const revisionResponses = await waitForPersistedResponses(scenario, revisionWeft!.loomId, 4);
-      expect(revisionResponses.map((response) => response.content)).toEqual(
-        expect.arrayContaining([promptA, userA!.content, assistantA!.content, editedPrompt])
-      );
+      const revisionResponses = await waitForPersistedResponses(scenario, revisionWeft!.loomId, 2);
+      expect(revisionResponses[0]).toMatchObject({
+        role: "user",
+        content: editedPrompt,
+      });
+      expect(revisionResponses[1]?.role).toBe("assistant");
+      expect(
+        revisionResponses.some((response) => response.content.includes(promptA))
+      ).toBe(false);
+      expect(
+        revisionResponses.some((response) => response.content.includes(userA!.content))
+      ).toBe(false);
       expect(
         revisionResponses.some((response) => response.content.includes(promptB))
       ).toBe(false);
       expect(
         revisionResponses.some((response) => response.content.includes(promptC))
       ).toBe(false);
-      const editedPromptIndex = revisionResponses.findIndex(
-        (response) => response.content === editedPrompt
-      );
-      expect(editedPromptIndex).toBeGreaterThanOrEqual(0);
       expect(
-        revisionResponses
-          .slice(editedPromptIndex + 1)
-          .some((response) => response.role === "assistant" && response.content.trim().length > 0)
+        revisionResponses.some(
+          (response) => response.role === "assistant" && response.content.trim().length > 0
+        )
       ).toBe(true);
+      await expect(page.locator(".weft-split-view")).toBeVisible();
+      await expect(page.locator(".origin-split-panel")).toContainText(promptB);
+      await expect(page.locator(".origin-split-panel .prompt-revision-branch-indicator")).toContainText(
+        "Revision created"
+      );
+      await expect(page.locator(".weft-split-panel")).toContainText(editedPrompt);
+      await expect(page.locator(".weft-split-panel .qa-item")).not.toContainText(promptA);
+      await expect(page.locator(".origin-split-panel .response-weft-chip.is-revision-wefted")).toHaveCount(1);
       expectNoForbiddenPayload(originAfter);
       expectNoForbiddenPayload(revisionResponses);
       expect(scenario.dbPath).toContain(scenario.tempDir);

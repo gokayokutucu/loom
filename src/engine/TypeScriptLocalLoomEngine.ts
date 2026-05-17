@@ -23,6 +23,8 @@ import type {
   ExportLoomResult,
   ExportResponseInput,
   GetReferenceInput,
+  GetUiStateInput,
+  GetUiStateResult,
   DeleteBookmarkInput,
   DeleteLoomInput,
   GetBookmarkForTargetInput,
@@ -52,6 +54,7 @@ import type {
   SpeechProviderHealth,
   ServiceHealthStatus,
   SendMessageInput,
+  SaveUiStateInput,
   SuggestReferencesInput,
   SuggestReferencesResult,
   TranscribeSpeechInput,
@@ -60,6 +63,7 @@ import type {
   UpdateLoomInput,
   UpdateResponseInput,
   UpdateResponseResult,
+  UiStateRecord,
 } from "./LoomEngineTypes";
 import { buildLoomGraphProjection } from "../services/loomGraphProjection";
 import { resolveLoomAddress } from "../services/loomProtocol";
@@ -205,6 +209,20 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
       return this.dependencies.recordHistory(input);
     }
     return input.entry;
+  }
+
+  async getUiState(input: GetUiStateInput): Promise<GetUiStateResult> {
+    if (this.dependencies.getUiState) {
+      return this.dependencies.getUiState(input);
+    }
+    return { state: null };
+  }
+
+  async saveUiState(input: SaveUiStateInput): Promise<UiStateRecord> {
+    if (this.dependencies.saveUiState) {
+      return this.dependencies.saveUiState(input);
+    }
+    return { key: input.key, value: input.value, updatedAt: new Date().toISOString() };
   }
 
   async createOrOpenWeft(_input: CreateOrOpenWeftInput): Promise<CreateOrOpenWeftResult> {

@@ -87,6 +87,9 @@ test.describe("[product-service-backed] Temporary Weft workspace", () => {
       await expect(weftPanel.getByText("maliyet", { exact: false })).toBeVisible({
         timeout: 30_000,
       });
+      await expect(weftPanel.locator(".qa-item")).not.toContainText(
+        "Event Sourcing AWS üzerinde nasıl kurgulanır?"
+      );
       await expect(addressBar).toHaveAttribute("placeholder", /Loom:/);
 
       await page.locator(".origin-split-panel").click({ position: { x: 40, y: 40 } });

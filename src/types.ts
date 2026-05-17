@@ -239,6 +239,7 @@ export interface LoomForkRecord {
   childConversationId: string;
   title: string;
   kind?: "exploration" | "revision";
+  revisionSourceResponseId?: string;
 }
 
 export interface LoomLink {

@@ -21,6 +21,8 @@ import type {
   GetBookmarkForTargetInput,
   GetBookmarkInput,
   GetReferenceInput,
+  GetUiStateInput,
+  GetUiStateResult,
   GraphProjectionInput,
   GraphProjectionResult,
   ListReferencesInput,
@@ -46,6 +48,7 @@ import type {
   SpeechProviderHealth,
   ServiceHealthStatus,
   SendMessageInput,
+  SaveUiStateInput,
   SuggestReferencesInput,
   SuggestReferencesResult,
   TranscribeSpeechInput,
@@ -54,6 +57,7 @@ import type {
   UpdateResponseInput,
   UpdateResponseResult,
   UpdateLoomInput,
+  UiStateRecord,
 } from "./LoomEngineTypes";
 import type { HistoryEntry, LoomNavigationDestination } from "../types";
 
@@ -91,6 +95,8 @@ export interface LoomEngineClient {
   listBookmarks(): Promise<ListBookmarksResult>;
   listHistory(): Promise<ListHistoryResult>;
   recordHistory(input: RecordHistoryInput): Promise<HistoryEntry>;
+  getUiState(input: GetUiStateInput): Promise<GetUiStateResult>;
+  saveUiState(input: SaveUiStateInput): Promise<UiStateRecord>;
   getBookmarkForTarget(input: GetBookmarkForTargetInput): Promise<BookmarkResult>;
   bookmarkResponse(input: BookmarkResponseInput): Promise<BookmarkResult>;
   resolveAddress(input: ResolveAddressInput): Promise<ResolveAddressResult>;

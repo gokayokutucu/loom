@@ -63,6 +63,28 @@ test.describe("[pure-ui-rendering] assistant Markdown rendering helpers", () => 
     });
   });
 
+  test("repairs collapsed generated tables with loose separator cells", () => {
+    const markdown =
+      "| AWS Servisi | Başlangıç Maliyeti | Ortalama | Büyüme Maliyeti | |---------|-|-----------------|------| | EventStoreDB (EKS EC2) | ~$300 | ~$500 | ~$1000+ | | Amazon Kinesis | ~$10 | ~$100 | ~$500+ | | Amazon DynamoDB | ~$5 | ~$50 | ~$500+ | | Amazon QLDB | ~$100 | ~$300 | ~$1000+ | | AWS Lambda + S3 | ~$10 | ~$50 | ~$200+ |";
+    const repaired = repairCollapsedMarkdownTables(markdown);
+    const blocks = parseAssistantMarkdown(repaired);
+
+    expect(repaired.split("\n")).toHaveLength(7);
+    expect(blocks).toHaveLength(1);
+    expect(blocks[0]).toMatchObject({
+      kind: "table",
+      headers: ["AWS Servisi", "Başlangıç Maliyeti", "Ortalama", "Büyüme Maliyeti"],
+      rows: [
+        ["EventStoreDB (EKS EC2)", "~$300", "~$500", "~$1000+"],
+        ["Amazon Kinesis", "~$10", "~$100", "~$500+"],
+        ["Amazon DynamoDB", "~$5", "~$50", "~$500+"],
+        ["Amazon QLDB", "~$100", "~$300", "~$1000+"],
+        ["AWS Lambda + S3", "~$10", "~$50", "~$200+"],
+      ],
+    });
+    expect(assistantMarkdownToSafeHtml(markdown)).toContain("<table>");
+  });
+
   test("removes orphan Markdown heading markers produced around separators", () => {
     const markdown = [
       "AWS araçları şunlardır: ###",

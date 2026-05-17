@@ -183,6 +183,25 @@ export interface RecordHistoryInput {
   entry: HistoryEntry;
 }
 
+export interface UiStateRecord {
+  key: string;
+  value: JsonValue;
+  updatedAt?: string;
+}
+
+export interface GetUiStateInput {
+  key: string;
+}
+
+export interface SaveUiStateInput {
+  key: string;
+  value: JsonValue;
+}
+
+export interface GetUiStateResult {
+  state: UiStateRecord | null;
+}
+
 export interface CreateLoomInput {
   loomId?: string;
   title?: string;
@@ -639,6 +658,8 @@ export interface TypeScriptLocalLoomEngineDependencies {
   listBookmarks?: () => Promise<ListBookmarksResult>;
   listHistory?: () => Promise<ListHistoryResult>;
   recordHistory?: (input: RecordHistoryInput) => Promise<HistoryEntry>;
+  getUiState?: (input: GetUiStateInput) => Promise<GetUiStateResult>;
+  saveUiState?: (input: SaveUiStateInput) => Promise<UiStateRecord>;
   getBookmarkForTarget?: (input: GetBookmarkForTargetInput) => Promise<BookmarkResult>;
   bookmarkResponse?: (input: BookmarkResponseInput) => Promise<BookmarkResult>;
   exportLoom?: (input: ExportLoomInput) => Promise<ExportLoomResult>;

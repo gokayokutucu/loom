@@ -137,7 +137,11 @@ function isMarkdownTableLine(line: string) {
 
 function isTableAlignmentLine(line: string) {
   const cells = tableCells(line);
-  return cells.length >= 2 && cells.every((cell) => /^:?-{3,}:?$/.test(cell.trim()));
+  return cells.length >= 2 && cells.every(isTableAlignmentCell);
+}
+
+function isTableAlignmentCell(cell: string) {
+  return /^:?-{1,}:?$/.test(cell.trim());
 }
 
 function tableCells(line: string) {

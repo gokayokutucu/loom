@@ -591,15 +591,12 @@ fn persisted_weft_kind(loom: &LoomRecord) -> WeftKind {
         .unwrap_or(WeftKind::Exploration)
 }
 
-fn default_seed_mode(source: WeftSource, weft_kind: WeftKind) -> WeftSeedMode {
-    if weft_kind == WeftKind::Revision {
-        return WeftSeedMode::RevisionLineage;
-    }
+fn default_seed_mode(source: WeftSource, _weft_kind: WeftKind) -> WeftSeedMode {
     match source {
-        WeftSource::QuickAskConvert => WeftSeedMode::None,
-        WeftSource::ResponseAction | WeftSource::GraphNode | WeftSource::Reference => {
-            WeftSeedMode::OriginQaPair
-        }
+        WeftSource::QuickAskConvert
+        | WeftSource::ResponseAction
+        | WeftSource::GraphNode
+        | WeftSource::Reference => WeftSeedMode::None,
     }
 }
 
@@ -1162,8 +1159,7 @@ fn stable_hash(value: &str) -> String {
 mod tests {
     use super::{
         create_weft, list_wefts_for_loom, list_wefts_for_response, persist_weft_responses,
-        CreateWeftRequest, PersistWeftTurn, PersistWeftTurnsRequest, WeftKind, WeftSeedMode,
-        WeftSource,
+        CreateWeftRequest, PersistWeftTurn, PersistWeftTurnsRequest, WeftKind, WeftSource,
     };
     use crate::{
         api::{graph::build_graph_projection, resolve::resolve_address, state::AppState},
@@ -1209,7 +1205,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn normal_response_weft_creates_visible_origin_qa_seed_pair() {
+    async fn normal_response_weft_keeps_visible_seed_empty_by_default() {
         let state = seeded_state().await;
         let response = create_weft(State(state.clone()), Json(response_action_request(true)))
             .await
@@ -1217,34 +1213,13 @@ mod tests {
             .1
              .0;
 
-        assert_eq!(response.visible_seed_responses.len(), 2);
-        assert_eq!(response.visible_seed_responses[0].role, "user");
-        assert_eq!(
-            response.visible_seed_responses[0].content,
-            "Origin question"
-        );
-        assert_eq!(response.visible_seed_responses[0].sequence_index, 0);
-        assert_eq!(response.visible_seed_responses[1].role, "assistant");
-        assert_eq!(response.visible_seed_responses[1].content, "Origin content");
-        assert_eq!(response.visible_seed_responses[1].sequence_index, 1);
+        assert!(response.visible_seed_responses.is_empty());
 
         let persisted = ResponseRepository::new(&state.database)
             .list_responses_for_loom(&response.weft.loom_id)
             .await
             .expect("list seed responses");
-        assert_eq!(
-            persisted
-                .iter()
-                .map(|response| response.content.as_str())
-                .collect::<Vec<_>>(),
-            vec!["Origin question", "Origin content"]
-        );
-        let metadata: serde_json::Value =
-            serde_json::from_str(persisted[0].metadata_json.as_deref().expect("metadata"))
-                .expect("metadata json");
-        assert_eq!(metadata["source"], json!("weft_visible_seed"));
-        assert_eq!(metadata["seedKind"], json!("origin_qa_pair"));
-        assert_eq!(metadata["copiedFromResponseId"], json!("origin-question"));
+        assert!(persisted.is_empty());
     }
 
     #[tokio::test]
@@ -1263,12 +1238,12 @@ mod tests {
 
         assert_eq!(second.weft.loom_id, first.weft.loom_id);
         assert!(second.reused);
-        assert_eq!(second.visible_seed_responses.len(), 2);
+        assert!(second.visible_seed_responses.is_empty());
         let persisted = ResponseRepository::new(&state.database)
             .list_responses_for_loom(&first.weft.loom_id)
             .await
             .expect("list seed responses");
-        assert_eq!(persisted.len(), 2);
+        assert!(persisted.is_empty());
     }
 
     #[tokio::test]
@@ -1296,7 +1271,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn revision_weft_persists_kind_and_seeds_lineage_without_deleting_origin() {
+    async fn revision_weft_persists_kind_without_visible_lineage_or_deleting_origin() {
         let state = seeded_state().await;
         let response_repository = ResponseRepository::new(&state.database);
         response_repository
@@ -1334,7 +1309,6 @@ mod tests {
 
         let mut request = response_action_request(false);
         request.weft_kind = Some(WeftKind::Revision);
-        request.seed_mode = Some(WeftSeedMode::RevisionLineage);
         request.title = Some("Revision Weft".to_string());
         let response = create_weft(State(state.clone()), Json(request))
             .await
@@ -1354,14 +1328,12 @@ mod tests {
                 .and_then(|metadata| metadata.get("weftKind")),
             Some(&json!("revision"))
         );
-        assert_eq!(
-            response
-                .visible_seed_responses
-                .iter()
-                .map(|response| response.content.as_str())
-                .collect::<Vec<_>>(),
-            vec!["Origin question", "Origin content"]
-        );
+        assert!(response.visible_seed_responses.is_empty());
+        let revision_responses = response_repository
+            .list_responses_for_loom(&response.weft.loom_id)
+            .await
+            .expect("list revision responses");
+        assert!(revision_responses.is_empty());
         let origin_responses = response_repository
             .list_responses_for_loom("origin-loom")
             .await
