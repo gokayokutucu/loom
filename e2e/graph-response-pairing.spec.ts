@@ -95,6 +95,25 @@ test.describe("graph response pairing", () => {
     );
   });
 
+  test("normalizes Markdown from paired response previews", () => {
+    const paired = response("assistant-1");
+    paired.finalContent = [
+      "**AWS üzerinde Event Sourcing implementasyonu** için kullanılan araçlar: ###",
+      "",
+      "--- ###",
+      "",
+      "1. **Event Store Seçenekleri**",
+    ].join("\n");
+
+    const preview = graphNodePreviewText(graphResponseNode("assistant-1"), paired);
+
+    expect(preview).toContain("AWS üzerinde Event Sourcing implementasyonu");
+    expect(preview).toContain("Event Store Seçenekleri");
+    expect(preview).not.toContain("**");
+    expect(preview).not.toContain("###");
+    expect(preview).not.toContain("---");
+  });
+
   test("does not duplicate non-response preview when it matches summary", () => {
     const rootNode: LoomGraphProjectionNode = {
       id: "loom:loom-1:root",

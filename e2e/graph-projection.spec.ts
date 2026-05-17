@@ -248,6 +248,7 @@ test.describe("[legacy-typescript-local] Loom graph projection hierarchy", () =>
       },
       forkRecords: [],
       activeLoomId: "root",
+      expandedNodeIds: new Set([responseGraphNodeId("root", "r1")]),
       bookmarkedResponseAddresses: new Set<string>(),
     });
 
@@ -260,6 +261,48 @@ test.describe("[legacy-typescript-local] Loom graph projection hierarchy", () =>
     expect(first?.position.y).toBeGreaterThan(root?.position.y ?? -1);
     expect(second?.position.y).toBeGreaterThan(first?.position.y ?? -1);
     expect(third?.position.y).toBeGreaterThan(second?.position.y ?? -1);
+  });
+
+  test("normalizes Markdown in graph root and response preview labels", () => {
+    const projection = buildLoomGraphProjection({
+      conversations: [
+        {
+          ...loom("root", "Loom: **AWS üzerinde Event Sourcing implementasyonu**"),
+          summary: "Temporary Flow from **event sourcing**. ###",
+        },
+      ],
+      responsesByConversation: {
+        root: [
+          {
+            ...response("r1", "**AWS üzerinde nasıl implementasyon** yapıyoruz?"),
+            title: "**AWS üzerinde nasıl implementasyon** yapıyoruz",
+            answer: [
+              "**AWS üzerinde Event Sourcing implementasyonu** için kullanılan araçlar: ###",
+              "--- ###",
+              "1. **Event Store Seçenekleri**",
+            ],
+          },
+        ],
+      },
+      forkRecords: [],
+      activeLoomId: "root",
+      expandedNodeIds: new Set([responseGraphNodeId("root", "r1")]),
+      bookmarkedResponseAddresses: new Set<string>(),
+    });
+
+    const root = projection.nodes.find((node) => node.id === loomGraphRootNodeId("root"));
+    const responseNode = projection.nodes.find((node) =>
+      node.id === responseGraphNodeId("root", "r1")
+    );
+
+    expect(root?.title).toBe("Loom: AWS üzerinde Event Sourcing implementasyonu");
+    expect(root?.summary).toBe("Temporary Flow from event sourcing.");
+    expect(responseNode?.title).toBe("AWS üzerinde nasıl implementasyon yapıyoruz");
+    expect(responseNode?.contentPreview).toContain("AWS üzerinde Event Sourcing implementasyonu");
+    expect(responseNode?.contentPreview).toContain("Event Store Seçenekleri");
+    expect(`${root?.title} ${root?.summary} ${responseNode?.title} ${responseNode?.contentPreview}`)
+      .not.toContain("**");
+    expect(responseNode?.contentPreview).not.toContain("###");
   });
 
   test("anchors Weft branches at the origin response and continues downward", () => {

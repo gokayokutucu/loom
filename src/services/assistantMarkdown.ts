@@ -20,7 +20,7 @@ export function responseMarkdownSource(response: Pick<ResponseItem, "answer" | "
 }
 
 export function normalizeAssistantMarkdownSource(markdown: string) {
-  return repairCollapsedMarkdownTables(markdown);
+  return cleanOrphanMarkdownMarkers(repairCollapsedMarkdownTables(markdown));
 }
 
 export function containsForbiddenThinkingKey(value: string) {
@@ -82,6 +82,26 @@ export function repairCollapsedMarkdownTables(markdown: string) {
       }
       if (inCodeBlock) return [line];
       return splitCollapsedTableLine(line) ?? [line];
+    })
+    .join("\n");
+}
+
+export function cleanOrphanMarkdownMarkers(markdown: string) {
+  const lines = markdown.split("\n");
+  let inCodeBlock = false;
+  return lines
+    .flatMap((line) => {
+      if (line.trimStart().startsWith("```")) {
+        inCodeBlock = !inCodeBlock;
+        return [line];
+      }
+      if (inCodeBlock) return [line];
+
+      const trimmed = line.trim();
+      if (/^#{1,6}$/.test(trimmed)) return [];
+      if (/^(?:-{3,}|_{3,}|\*{3,})\s+#{1,6}$/.test(trimmed)) return [];
+
+      return [line.replace(/\s+#{1,6}\s*$/, "")];
     })
     .join("\n");
 }
@@ -277,6 +297,17 @@ export function assistantMarkdownToPlainText(markdown: string) {
     })
     .filter(Boolean)
     .join("\n\n");
+}
+
+export function cleanMarkdownDisplayText(value?: string) {
+  const normalized = normalizeAssistantMarkdownSource(value ?? "");
+  if (!normalized.trim()) return "";
+  return assistantMarkdownToPlainText(normalized)
+    .replace(/\[\[([^\]]+)\]\]/g, "$1")
+    .replace(/<\/?[^>]+>/g, " ")
+    .replace(/\\([\\`*_{}\[\]()#+\-.!|>])/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 export function assistantMarkdownToSafeHtml(markdown: string) {

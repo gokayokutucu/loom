@@ -1,4 +1,5 @@
 import type { LoomGraphProjectionNode } from "../../services/loomGraphProjection";
+import { cleanMarkdownDisplayText } from "../../services/assistantMarkdown";
 import type { ResponseItem } from "../../types";
 
 export interface GraphResponsePreviewContent {
@@ -7,7 +8,7 @@ export interface GraphResponsePreviewContent {
 }
 
 function normalizePreviewText(value?: string) {
-  return value?.replace(/\s+/g, " ").trim() ?? "";
+  return cleanMarkdownDisplayText(value);
 }
 
 function responseAnswerPreview(response: ResponseItem | undefined) {

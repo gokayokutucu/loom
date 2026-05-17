@@ -111,7 +111,7 @@ impl ContextManager {
             limit_recent_messages_for_plan(&input.recent_messages, &budget_plan);
         let mut messages = vec![ContextMessage::new(
             ContextMessageRole::System,
-            "Use the provided Loom context, explicit references, and recent conversation to answer the current user question. If the current question omits the topic, infer it from the recent conversation when available. Never include raw model thinking/internal monologue in context or output.",
+            "Use the provided Loom context, explicit references, and recent conversation to answer the current user question. If the current question omits the topic, infer it from the recent conversation when available. Write valid Markdown only: headings must include heading text, and never emit orphan separators or markers such as `--- ###` or trailing `###`. Never include raw model thinking/internal monologue in context or output.",
             Some(ContextSourceKind::SystemPolicy),
             None,
         )];

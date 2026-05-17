@@ -189,6 +189,7 @@ import {
 import { resolveAnswerExecutionConfig } from "./services/answerExecution";
 import {
   buildAssistantCopyPayload,
+  cleanMarkdownDisplayText,
   normalizeAssistantMarkdownSource,
   responseMarkdownSource,
 } from "./services/assistantMarkdown";
@@ -1426,25 +1427,13 @@ function normalizeAddressBarTitle(value?: string) {
 function cleanMarkdownDisplayTitle(value?: string) {
   const normalized = normalizeAddressBarTitle(value);
   if (!normalized) return "";
-  const cleaned = normalized
-    .replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1")
-    .replace(/\[([^\]]+)\]\([^)]+\)/g, "$1")
-    .replace(/`([^`]+)`/g, "$1")
-    .replace(/<\/?[^>]+>/g, " ")
-    .replace(/\\([\\`*_{}\[\]()#+\-.!|>])/g, "$1")
-    .replace(/(^|\s)#{1,6}\s+/g, "$1")
-    .replace(/(^|\s)>\s+/g, "$1")
-    .replace(/(^|\s)[*-]\s+/g, "$1")
-    .replace(/(^|\s)\d+\.\s+/g, "$1")
-    .replace(/[*_~#>`]+/g, "")
-    .replace(/\s+/g, " ")
-    .trim();
+  const cleaned = cleanMarkdownDisplayText(normalized);
   return cleaned || normalized;
 }
 
 function formatAddressBarTitle(activeLoom?: Pick<Conversation, "title"> | null, destinationTitle?: string) {
-  const loomTitle = normalizeAddressBarTitle(activeLoom?.title);
-  const targetTitle = normalizeAddressBarTitle(destinationTitle);
+  const loomTitle = cleanMarkdownDisplayTitle(activeLoom?.title);
+  const targetTitle = cleanMarkdownDisplayTitle(destinationTitle);
 
   if (!loomTitle && !targetTitle) return "Archive / No active conversation";
   if (!loomTitle) return targetTitle;
@@ -10941,6 +10930,8 @@ function Sidebar({
     const pinned = pinnedConversationIds.includes(conversation.id);
     const groupId = sidebarDnD.getGroupIdForConversation(conversation.id);
     const Icon = getConversationIconOption(conversation.iconKey).Icon;
+    const displayTitle = cleanMarkdownDisplayTitle(conversation.title);
+    const displaySummary = cleanMarkdownDisplayTitle(conversation.summary);
     return (
       <div
         key={conversation.id}
@@ -10979,15 +10970,15 @@ function Sidebar({
           onDragStart={(event) => handleConversationDragStart(event, conversation)}
           onDragEnd={handleConversationDragEnd}
           onClick={() => onSelectConversation(conversation)}
-          aria-label={`Open ${conversation.title}`}
-          title={collapsed ? conversation.title : undefined}
+          aria-label={`Open ${displayTitle}`}
+          title={collapsed ? displayTitle : undefined}
         >
           <span className="conversation-favicon">
             <Icon size={13} />
           </span>
           <span className="conversation-tab-copy">
-            <strong>{conversation.title}</strong>
-            <small>{conversation.summary}</small>
+            <strong>{displayTitle}</strong>
+            <small>{displaySummary}</small>
           </span>
           <span className="conversation-tab-meta">
             {conversation.pinned && <em>Pinned</em>}
@@ -10998,7 +10989,7 @@ function Sidebar({
           <button
             className="icon-button subtle"
             onClick={() => onArchive(conversation)}
-            aria-label={`Archive ${conversation.title}`}
+            aria-label={`Archive ${displayTitle}`}
             title="Archive conversation"
           >
             <X size={12} />
@@ -11312,6 +11303,7 @@ function PinnedConversationTab({
   onDragEnd: () => void;
 }) {
   const Icon = getConversationIconOption(conversation.iconKey).Icon;
+  const displayTitle = cleanMarkdownDisplayTitle(conversation.title);
   return (
     <button
       className={active ? "pinned-tab active" : "pinned-tab"}
@@ -11320,8 +11312,8 @@ function PinnedConversationTab({
       onDragEnd={onDragEnd}
       onClick={() => onSelect(conversation)}
       onContextMenu={(event) => onOpenContextMenu(event, conversation)}
-      title={conversation.title}
-      aria-label={`Open pinned ${conversation.title}`}
+      title={displayTitle}
+      aria-label={`Open pinned ${displayTitle}`}
       data-testid={`sidebar-pinned-loom-${conversation.id}`}
       data-loom-id={conversation.id}
       data-sidebar-pinned="true"
@@ -12820,7 +12812,7 @@ function ChatTranscript({
           )}
         </div>
         <div className="conversation-context-title-row">
-          <h1>{conversation.title}</h1>
+          <h1>{cleanMarkdownDisplayTitle(conversation.title)}</h1>
           {onReturnToOrigin && (
             <Tooltip label="Return to Origin">
               <button
@@ -12833,7 +12825,7 @@ function ChatTranscript({
             </Tooltip>
           )}
         </div>
-        <p>{conversation.summary}</p>
+        <p>{cleanMarkdownDisplayTitle(conversation.summary)}</p>
       </div>
 
       {responses.map((response, index) => {
@@ -13161,6 +13153,7 @@ function ChatTranscript({
                   link={responseLink}
                   className="link-chip response-action-chip response-link-chip"
                   title="Link"
+                  showHint={false}
                   onClick={() => onLink(responseLink)}
                   testId={`response-link-${displayResponse.id}`}
                   ariaLabel={`Link ${displayResponse.title}`}

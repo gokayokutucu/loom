@@ -4,6 +4,7 @@
  * Product runtime must go through LoomEngineClient -> RustHttpLoomEngineClient -> loom-service.
  */
 import type { Conversation, LoomForkRecord, LoomLink, ResponseItem } from "../types";
+import { cleanMarkdownDisplayText } from "./assistantMarkdown";
 
 export type LoomGraphProjectionNodeKind =
   | "root"
@@ -92,7 +93,7 @@ export function responseGraphNodeId(loomId: string, responseId: string) {
 
 function responsePreview(response: ResponseItem, expanded: boolean) {
   const lines = expanded ? response.answer : response.answer.slice(0, 2);
-  return lines.join("\n").trim();
+  return cleanMarkdownDisplayText(lines.join("\n"));
 }
 
 function responseFullContent(response: ResponseItem) {
@@ -100,7 +101,7 @@ function responseFullContent(response: ResponseItem) {
 }
 
 function nodeTitle(response: ResponseItem) {
-  return response.meta?.title || response.title || "Untitled response";
+  return cleanMarkdownDisplayText(response.meta?.title || response.title) || "Untitled response";
 }
 
 function responseCode(response: ResponseItem) {
@@ -117,7 +118,7 @@ function responseIsAddressable(response: ResponseItem) {
 
 function truncateLabel(label: string | undefined) {
   if (!label) return undefined;
-  const cleanLines = label
+  const cleanLines = cleanMarkdownDisplayText(label)
     .replace(/\[\[([^\]]+)\]\]/g, "$1")
     .split(/\n+/)
     .map((line) => line.replace(/\s+/g, " ").trim())
@@ -244,9 +245,9 @@ export function buildLoomGraphProjection({
       id: rootNodeId,
       kind: isActiveRoot ? "root" : "weft",
       loomId: loom.id,
-      title: loom.title,
+      title: cleanMarkdownDisplayText(loom.title) || "Untitled Loom",
       code: loom.meta?.code,
-      summary: loom.summary,
+      summary: cleanMarkdownDisplayText(loom.summary),
       canonicalUri: loom.meta?.canonicalUri,
       isAddressable: Boolean(loom.meta?.canonicalUri),
       isFocused: isActiveRoot && !focusedResponseId,
@@ -284,7 +285,7 @@ export function buildLoomGraphProjection({
         responseId: response.id,
         title: nodeTitle(response),
         code: responseCode(response),
-        summary: response.meta?.summary,
+        summary: cleanMarkdownDisplayText(response.meta?.summary),
         contentPreview: responsePreview(response, expanded),
         fullContent: responseFullContent(response),
         canonicalUri: responseCanonicalUri(response),

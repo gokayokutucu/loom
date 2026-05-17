@@ -11,6 +11,7 @@ import {
 import type { CSSProperties } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { formatBadgeCode } from "../../services/displayCode";
+import { cleanMarkdownDisplayText } from "../../services/assistantMarkdown";
 import type { LoomGraphProjectionNode } from "../../services/loomGraphProjection";
 import type { ResponseItem } from "../../types";
 import { graphNodePreviewText } from "./graphNodePreview";
@@ -54,7 +55,7 @@ function nodeKindLabel(node: LoomGraphProjectionNode) {
 }
 
 function normalizePreviewText(value?: string) {
-  return value?.replace(/\s+/g, " ").trim() ?? "";
+  return cleanMarkdownDisplayText(value);
 }
 
 export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
@@ -83,6 +84,7 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
   const showSummary = Boolean(summaryText) && projectionNode.kind !== "response";
   const showPreview = Boolean(previewText);
   const showPending = projectionNode.kind === "response" && isResponsePending && !showPreview;
+  const nodeTitle = cleanMarkdownDisplayText(projectionNode.title) || projectionNode.title;
 
   return (
     <article className={nodeClassName(projectionNode)}>
@@ -106,16 +108,16 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
             type="button"
             className="loom-graph-node-open"
             title="Open"
-            aria-label={`Open ${projectionNode.title}`}
+            aria-label={`Open ${nodeTitle}`}
             onClick={() => onOpen(projectionNode, response)}
           >
             <ExternalLink size={13} />
           </button>
         )}
       </div>
-      <h3>{projectionNode.title}</h3>
+      <h3>{nodeTitle}</h3>
       {showSummary && (
-        <p className="loom-graph-summary">{projectionNode.summary}</p>
+        <p className="loom-graph-summary">{summaryText}</p>
       )}
       {showPreview && (
         <p className="loom-graph-preview">{previewText}</p>
@@ -154,7 +156,7 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
             aria-label={
               projectionNode.isBookmarked
                 ? `Remove bookmark for ${projectionNode.title}`
-                : `Bookmark ${projectionNode.title}`
+                : `Bookmark ${nodeTitle}`
             }
             onClick={() => onBookmark(projectionNode, response)}
           >

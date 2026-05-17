@@ -8,11 +8,13 @@ import {
   buildAssistantDefaultClipboardData,
   buildAssistantDefaultCopyPayload,
   buildAssistantRichClipboardData,
+  cleanMarkdownDisplayText,
   normalizeAssistantMarkdownSource,
   parseAssistantMarkdown,
   repairCollapsedMarkdownTables,
   responseMarkdownSource,
   sanitizeAssistantMarkdownForRenderedCopy,
+  cleanOrphanMarkdownMarkers,
 } from "../src/services/assistantMarkdown";
 import type { ResponseItem } from "../src/types";
 
@@ -59,6 +61,53 @@ test.describe("[pure-ui-rendering] assistant Markdown rendering helpers", () => 
       kind: "table",
       rows: [["x", "y"]],
     });
+  });
+
+  test("removes orphan Markdown heading markers produced around separators", () => {
+    const markdown = [
+      "AWS araçları şunlardır: ###",
+      "",
+      "| Çözüm | Açıklama |",
+      "| :--- | :--- |",
+      "| Kinesis | Event stream kaydetme |",
+      "",
+      "--- ###",
+      "",
+      "1. AWS Service Mimarisi Örneği",
+      "",
+      "```md",
+      "--- ###",
+      "```",
+    ].join("\n");
+
+    const normalized = normalizeAssistantMarkdownSource(markdown);
+
+    expect(cleanOrphanMarkdownMarkers(markdown)).toContain("```md\n--- ###\n```");
+    expect(normalized).toContain("AWS araçları şunlardır:");
+    expect(normalized).toContain("| Çözüm | Açıklama |");
+    expect(normalized).not.toContain("şunlardır: ###");
+    expect(normalized.split("```md")[0]).not.toContain("--- ###");
+    expect(parseAssistantMarkdown(markdown).some((block) => block.kind === "code" && block.code.includes("---"))).toBe(
+      true
+    );
+  });
+
+  test("normalizes Markdown display text for titles and previews", () => {
+    const markdown = [
+      "Loom: **AWS üzerinde Event Sourcing implementasyonu** için kullanılan araçlar ###",
+      "",
+      "--- ###",
+      "",
+      "1. **Event Store Seçenekleri**",
+    ].join("\n");
+
+    const displayText = cleanMarkdownDisplayText(markdown);
+
+    expect(displayText).toContain("Loom: AWS üzerinde Event Sourcing implementasyonu");
+    expect(displayText).toContain("Event Store Seçenekleri");
+    expect(displayText).not.toContain("**");
+    expect(displayText).not.toContain("###");
+    expect(displayText).not.toContain("---");
   });
 
   test("does not repair pipe text inside fenced code", () => {
