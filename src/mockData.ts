@@ -6,6 +6,13 @@ import type {
   ResponseItem,
 } from "./types";
 
+function mockTimestamp(daysAgo: number, hour: number, minute: number) {
+  const date = new Date();
+  date.setDate(date.getDate() - daysAgo);
+  date.setHours(hour, minute, 0, 0);
+  return date.toISOString();
+}
+
 export const conversations: Conversation[] = [
   {
     id: "c-architecture",
@@ -137,6 +144,14 @@ export const conversations: Conversation[] = [
     folder: "Engineering",
     summary: "Future host shell integration and extension boundaries.",
     iconKey: "puzzle",
+  },
+  {
+    id: "c-integrations-mcp-tools",
+    title: "MCP tool execution Weft",
+    path: "loom://engineering/mcp-plugin-integration/weft/tool-execution",
+    folder: "Engineering",
+    summary: "Branch on plugin invocation, artifacts, and provenance.",
+    iconKey: "workflow",
   },
   {
     id: "c-privacy",
@@ -349,6 +364,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
       title: "Graph View starts as a readable Loom map",
       address: "loom://product/graph-view-site-map/loom/site-map/r-site-map",
       question: "What should the default Graph View demonstrate?",
+      createdAt: mockTimestamp(2, 9, 44),
       answer: [
         "The default graph should immediately explain the Loom mental model: a root Loom at the top, Responses flowing downward, and Weft branches splitting sideways without breaking hierarchy. It should feel like a browser site map for an AI object, not a decorative mind map.",
         "The first screen should include enough real structure to test scanning: bookmarked Responses, linked answers from other Looms, at least two Weft branches, and one Weft that itself has a Weft. That gives the renderer realistic topology without changing the canonical graph model.",
@@ -379,6 +395,23 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
       title: "Linked Responses preserve graph provenance",
       address: "loom://product/graph-view-site-map/loom/evidence/r-evidence-map",
       question: "How should Graph View show evidence from other Looms?",
+      createdAt: mockTimestamp(1, 16, 18),
+      questionReferences: [
+        {
+          id: "fragment:c-graph-map:r-site-map:demo-quote",
+          type: "fragment",
+          title: "Responses flowing downward",
+          path: "loom://product/graph-view-site-map/loom/site-map/r-site-map#fragment=demo-quote",
+          badge: "Fragment",
+          selectedAt: Date.now(),
+          sourceLoomId: "c-graph-map",
+          sourceResponseId: "r-site-map",
+          selectedText: "Responses flowing downward, and Weft branches splitting sideways without breaking hierarchy",
+          sourceResponseTitle: "Graph View starts as a readable Loom map",
+          fragmentHash: "demo-quote",
+          createdAt: Date.now(),
+        },
+      ],
       answer: [
         "Graph View should let a Response carry links to useful answers from other Looms without cloning those answers. A link to research synthesis, citation provenance, or browser navigation remains a Reference usage; the target Response keeps its own address and identity.",
         "This matters for provenance. If the graph demo includes links from the Graph View Loom to the research and navigation Looms, users can see that composition works across Looms while the active top-down path remains uncluttered.",
@@ -407,6 +440,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
       title: "Continue Loom appends below the latest Response",
       address: "loom://product/graph-view-site-map/loom/continuation/r-graph-continuation",
       question: "How should normal continuation work inside Graph View?",
+      createdAt: mockTimestamp(0, 10, 12),
       answer: [
         "Continue Loom is normal Loom continuation, not a Quick Ask and not a Weft. The active Loom's latest Response is focused near the top of the graph, the floating composer collects the next prompt, and the Main Model answer is appended to the same Loom.",
         "After submit, the projection recomputes from Loom state. The new Response appears below the previous latest Response, the edge label carries the prompt, and focus moves to the newly created Response using the same top-centered positioning.",
@@ -429,6 +463,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
       title: "Focused graph positioning keeps work oriented",
       address: "loom://product/graph-view-site-map/loom/focus/r-graph-focus",
       question: "Where should Graph View focus after continuation?",
+      createdAt: mockTimestamp(0, 10, 29),
       answer: [
         "The focused Response should land near the top edge of the graph viewport with equal space left and right. That makes the previous path feel above the user and leaves room below for the next continuation or Weft branch.",
         "This is a product-level projection rule. React Flow renders the graph, but Loom projection owns hierarchy, selected node identity, and the deterministic viewport target.",
@@ -661,6 +696,66 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
         "```",
         "A concrete example: a GitHub MCP plugin should not add a permanent GitHub panel to the shell. It should expose actions like Search Issues, Summarize PR, or Link Repository Object. When the user invokes one from a Response or composer Reference, the result becomes a normal Loom Response and the source issue or PR is stored as a Reference.",
         "That boundary keeps plugin work graph-first. The plugin supplies capability and provenance; Loom owns navigation, Weft creation, addressability, and promotion.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-mcp-execution-boundary",
+      title: "MCP tool execution becomes a Loom Response",
+      address:
+        "loom://engineering/mcp-plugin-integration/loom/tool-execution/r-mcp-execution-boundary",
+      question: "What happens when a plugin tool is invoked?",
+      answer: [
+        "An MCP tool invocation should start from a Loom object: a Response action, a Reference in the prompt surface, or a selected fragment. The runtime builds a capability request that includes intent, source Loom, source Response, selected text, and safe Reference metadata. It should not pass hidden browser state or raw provider internals to the plugin.",
+        "The host or service boundary executes the tool and returns a typed result. Loom then captures the result as an addressable Response with provenance: which server/tool ran, what user-visible input summary was used, which artifacts were produced, and whether the result is safe to reuse as context.",
+        "A typical invocation path is: the user chooses a tool action from a Response, Loom builds a typed capability request, the host validates permissions and input shape, the MCP server runs the tool, and the returned result is normalized before it reaches the graph. The normalized result can include a concise answer, structured metadata, artifact handles, source links, and recoverable diagnostics.",
+        "The important boundary is that tool execution does not become an invisible side effect. If a GitHub plugin summarizes a pull request, the PR URL should become a Reference, the generated summary should become Response content, and any generated file should remain an artifact with a stable handle. If a database or design plugin reads external data, Loom should record the safe user-visible summary and provenance without storing provider secrets or raw hidden payloads.",
+        "The invocation should also be cancellable and explainable. Timeouts, permission denials, missing tool servers, invalid JSON, unsafe output, and artifact write failures should map to typed failure states. The user should see what failed, what can be retried, and whether any partial artifact was produced. That keeps the Weft honest because failed tool work is still part of the reasoning path, but it is not confused with a successful answer.",
+        "For future Electron/native integrations, this same shape can be reused with stronger local capabilities. Native secret storage can supply credentials by reference, file system tools can return artifact handles instead of raw files, and local-only tools can be marked as safe to reuse. The renderer still should not own secrets, raw tool payloads, or direct graph writes.",
+        "Failures should also become safe Loom state. A tool timeout, missing permission, or provider error should be visible as a recoverable Response/error event instead of a silent side effect. Provider secrets stay outside renderer/config storage, and raw model thinking is never stored, exported, graphed, or injected into future context.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-plugin-artifacts",
+      title: "Tool artifacts stay attached as References",
+      address: "loom://engineering/mcp-plugin-integration/loom/artifacts/r-plugin-artifacts",
+      question: "Where should plugin outputs and files live?",
+      answer: [
+        "Plugin outputs should become explicit References or artifacts attached to a Response, not hidden mutations in the conversation. A search result, generated file, fetched issue, or analysis report needs a source URI, tool identity, timestamp, and a compact summary that can be shown in the Loom surface.",
+        "Large files and documents should remain artifacts with stable handles. The graph can show that a Response used or produced an artifact without copying the artifact into every prompt. Window projections can render the artifact when the user opens it, while the ContextManager decides what safe summary enters future model context.",
+        "This keeps MCP useful without turning plugins into uncontrolled data pipes. The plugin contributes capability and provenance; Loom owns addressability, References, Wefts, and user-visible recovery.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-integrations-mcp-tools": [
+    {
+      id: "r-mcp-invocation-flow",
+      title: "Invocation flow stays Loom-aware",
+      address:
+        "loom://engineering/mcp-plugin-integration/weft/tool-execution/r-mcp-invocation-flow",
+      question: "What should the MCP invocation flow look like?",
+      answer: [
+        "The flow should be: user action, Loom capability request, host/service execution, typed tool result, Response capture, and optional Reference promotion. Each step keeps the current Loom, source Response, and selected Reference metadata attached so the result can be traced later.",
+        "For example, a GitHub MCP action from a selected Response can run `Summarize PR`, return a compact report plus source links, and create a new Response under the MCP tool execution Weft. The PR URL becomes a Reference; the generated summary becomes Response content; any files remain artifacts.",
+        "The important constraint is that tool execution is not a shortcut around Loom. It is a way to create addressable AI objects with provenance.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-mcp-error-boundary",
+      title: "Tool errors become safe Responses",
+      address:
+        "loom://engineering/mcp-plugin-integration/weft/tool-execution/r-mcp-error-boundary",
+      question: "How should MCP failures appear?",
+      answer: [
+        "MCP failures should be typed and recoverable: unavailable server, missing permission, timeout, invalid tool result, artifact write failure, or unsafe output. The user should see what failed and what can be retried without leaking secrets, prompts, raw provider payloads, or raw thinking.",
+        "A failed invocation can still be useful as a Response because it preserves the attempted action, source context, and safe diagnostic class. That makes the Weft honest: it shows where the workflow branched, where a tool failed, and what the next retry or fallback should do.",
       ],
       suggestedLinks: [],
       bookmarkedLinks: [],

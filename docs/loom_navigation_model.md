@@ -39,6 +39,7 @@ Weft is NOT a thread.
 
 Weft is:
 - an anchored exploration path
+- an edited revision path when created by prompt edit
 - a new Loom created from a specific Response
 - preserving a context snapshot
 - allowing return to its origin
@@ -51,7 +52,8 @@ Weft supports:
 
 Each Weft has:
 - originLoomId
-- originResponseId
+- originResponseId when anchored to a concrete Response
+- weftKind (`exploration` or `revision`)
 
 A Weft is always a Loom.
 The difference is:
@@ -166,11 +168,20 @@ Creating a Weft from a Response creates a new Loom with origin metadata:
 
 - `originLoomId`
 - `originResponseId`
+- `weftKind = exploration`
+
+Editing an existing prompt creates a Revision Weft:
+
+- `weftKind = revision`
+- `originLoomId` points to the original Loom
+- `originResponseId` points to the previous assistant Response before the edited prompt
+- the original Loom remains unchanged and active
+- the Revision Weft inherits visible context up to the anchor, then diverges with the edited prompt
 
 The new Loom may open in split mode or full mode depending on available viewport width.
 The origin Loom is preserved as metadata even when not visible.
 
-Returning to origin creates a session navigation destination with:
+Returning to origin from a full Weft restores split mode when the viewport supports split. The origin Loom appears on the left, the current Weft remains on the right, and the origin scroll target is the anchor Response. When split is unavailable, returning to origin creates a session navigation destination with:
 
 - `loomId = originLoomId`
 - `scrollTargetResponseId = originResponseId`

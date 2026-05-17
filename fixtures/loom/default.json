@@ -1,0 +1,432 @@
+{
+  "fixture": "default",
+  "source": "src/mockData.ts",
+  "looms": [
+    {
+      "loomId": "c-architecture",
+      "title": "Loom AI navigation architecture",
+      "summary": "Browser-first navigation model, addresses, and lifecycle rules.",
+      "code": "L-TEST",
+      "canonicalUri": "loom://loom-ai/navigation-architecture",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:00Z",
+      "updatedAt": "2026-05-10T00:00:00Z"
+    },
+    {
+      "loomId": "c-research",
+      "title": "Research synthesis workflow",
+      "summary": "How to reuse model answers across literature review sessions.",
+      "canonicalUri": "loom://research/synthesis-workflow",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:00Z",
+      "updatedAt": "2026-05-10T00:00:00Z"
+    },
+    {
+      "loomId": "c-prompts",
+      "title": "Prompt reuse library for long-form launch narratives and reusable context",
+      "summary": "Reusable prompts and prior answers for long-form drafting.",
+      "canonicalUri": "loom://prompts/reuse-library",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:00Z",
+      "updatedAt": "2026-05-10T00:00:00Z"
+    },
+    {
+      "loomId": "c-security",
+      "title": "Security review Looms",
+      "summary": "Threat modeling and mitigation Q+A history.",
+      "canonicalUri": "loom://engineering/security-review",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:00Z",
+      "updatedAt": "2026-05-10T00:00:00Z"
+    },
+    {
+      "loomId": "c-launch",
+      "title": "Launch narrative options",
+      "summary": "Positioning experiments for the V1 release.",
+      "canonicalUri": "loom://go-to-market/launch-narrative",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:00Z",
+      "updatedAt": "2026-05-10T00:00:00Z"
+    },
+    {
+      "loomId": "c-onboarding",
+      "title": "Onboarding questions and first-run browser flow",
+      "summary": "First-run moments and empty-state prompts for new users.",
+      "canonicalUri": "loom://product/onboarding-browser-flow",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:00Z",
+      "updatedAt": "2026-05-10T00:00:00Z"
+    },
+    {
+      "loomId": "c-bookmarks",
+      "title": "Bookmark interaction polish",
+      "summary": "Saved destinations, hover affordances, and right-click actions.",
+      "canonicalUri": "loom://product/bookmark-interaction-polish",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:00Z",
+      "updatedAt": "2026-05-10T00:00:00Z"
+    },
+    {
+      "loomId": "c-browser-shell",
+      "title": "Browser shell keyboard navigation model",
+      "summary": "Back, forward, address focus, and menu keyboard behaviors.",
+      "canonicalUri": "loom://product/browser-shell-keyboard-navigation",
+      "kind": "weft",
+      "originLoomId": "c-architecture",
+      "originResponseId": "r-address-bar",
+      "createdAt": "2026-05-10T00:00:01Z",
+      "updatedAt": "2026-05-10T00:00:01Z"
+    },
+    {
+      "loomId": "c-graph-map",
+      "title": "Weft-aware Loom graph",
+      "summary": "Top-down Graph View behavior, Weft branches, and continuation flow.",
+      "canonicalUri": "loom://product/graph-view-site-map",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:02Z",
+      "updatedAt": "2026-05-10T00:00:02Z"
+    },
+    {
+      "loomId": "c-graph-spacing",
+      "title": "Graph spacing and edge labels",
+      "summary": "Readable prompt labels, branch spacing, and node hierarchy in Graph View.",
+      "canonicalUri": "loom://product/graph-view-site-map/weft/spacing",
+      "kind": "weft",
+      "originLoomId": "c-graph-map",
+      "originResponseId": "r-site-map",
+      "createdAt": "2026-05-10T00:00:03Z",
+      "updatedAt": "2026-05-10T00:00:03Z"
+    },
+    {
+      "loomId": "c-graph-continuation",
+      "title": "Graph continuation composer behavior",
+      "summary": "Continuing the active Loom from the latest Response inside Graph View.",
+      "canonicalUri": "loom://product/graph-view-site-map/weft/continuation",
+      "kind": "weft",
+      "originLoomId": "c-graph-map",
+      "originResponseId": "r-graph-continuation",
+      "createdAt": "2026-05-10T00:00:04Z",
+      "updatedAt": "2026-05-10T00:00:04Z"
+    },
+    {
+      "loomId": "c-graph-continuation-errors",
+      "title": "Graph continuation error states",
+      "summary": "Runtime failure, draft preservation, and focused graph recovery.",
+      "canonicalUri": "loom://product/graph-view-site-map/weft/continuation/errors",
+      "kind": "weft",
+      "originLoomId": "c-graph-continuation",
+      "originResponseId": "r-continuation-main-route",
+      "createdAt": "2026-05-10T00:00:05Z",
+      "updatedAt": "2026-05-10T00:00:05Z"
+    },
+    {
+      "loomId": "c-memory",
+      "title": "Semantic memory ranking experiments",
+      "summary": "Search ranking tests for personal AI web destinations.",
+      "canonicalUri": "loom://research/semantic-memory-ranking",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:06Z",
+      "updatedAt": "2026-05-10T00:00:06Z"
+    },
+    {
+      "loomId": "c-citations",
+      "title": "Citation reuse and provenance review",
+      "summary": "How selected text, references, and sources move into prompts.",
+      "canonicalUri": "loom://research/citation-provenance-review",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:06Z",
+      "updatedAt": "2026-05-10T00:00:06Z"
+    },
+    {
+      "loomId": "c-drafts",
+      "title": "Draft writing workspace comparisons",
+      "summary": "Long-form writing flows with reusable conversation references.",
+      "canonicalUri": "loom://writing/draft-workspace-comparisons",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:06Z",
+      "updatedAt": "2026-05-10T00:00:06Z"
+    },
+    {
+      "loomId": "c-integrations",
+      "title": "MCP and plugin integration notes",
+      "summary": "Future host shell integration and extension boundaries.",
+      "canonicalUri": "loom://engineering/mcp-plugin-integration",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:06Z",
+      "updatedAt": "2026-05-10T00:00:06Z"
+    },
+    {
+      "loomId": "c-integrations-mcp-tools",
+      "title": "MCP tool execution Weft",
+      "summary": "Branch on plugin invocation, artifacts, and provenance.",
+      "canonicalUri": "loom://engineering/mcp-plugin-integration/weft/tool-execution",
+      "kind": "weft",
+      "originLoomId": "c-integrations",
+      "originResponseId": "r-mcp-execution-boundary",
+      "createdAt": "2026-05-10T00:00:07Z",
+      "updatedAt": "2026-05-10T00:00:07Z"
+    },
+    {
+      "loomId": "c-privacy",
+      "title": "Private local address resolution",
+      "summary": "Local-first addressing and resolver trust boundaries.",
+      "canonicalUri": "loom://engineering/private-address-resolution",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:06Z",
+      "updatedAt": "2026-05-10T00:00:06Z"
+    },
+    {
+      "loomId": "c-release",
+      "title": "Release checklist for V1 conversation browser",
+      "summary": "Launch readiness tasks and V1 quality bar.",
+      "canonicalUri": "loom://go-to-market/v1-release-checklist",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:06Z",
+      "updatedAt": "2026-05-10T00:00:06Z"
+    },
+    {
+      "loomId": "c-support",
+      "title": "Support workflows for broken references",
+      "summary": "Recovery states for archived and deleted conversation links.",
+      "canonicalUri": "loom://support/broken-reference-workflows",
+      "kind": "loom",
+      "createdAt": "2026-05-10T00:00:06Z",
+      "updatedAt": "2026-05-10T00:00:06Z"
+    }
+  ],
+  "responses": [
+    {
+      "responseId": "r-address-bar",
+      "loomId": "c-architecture",
+      "role": "assistant",
+      "title": "Address Bar as local AI web navigator",
+      "code": "R-ADDR",
+      "canonicalUri": "loom://loom-ai-navigation-architecture/L-TEST/r/R-ADDR?id=meta-response-address",
+      "content": "Question: How should the address bar work if Loom AI is a browser for conversations?\n\nTreat the Address Bar as the user's primary orientation device. It should accept a Loom address, a natural-language query, or the title of a remembered answer without forcing the user to choose a search mode first.\n\nThe result list should feel closer to browser autocomplete than a database search table. Each row needs a destination type, a readable title, a path, and a confidence cue such as Recent, Semantic, or Bookmark.\n\nThe important design constraint is that search and navigation are not separate products. Typing is already the act of asking where to go next inside the user's personal AI web.",
+      "sequenceIndex": 0,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:01:00Z",
+      "updatedAt": "2026-05-10T00:01:00Z"
+    },
+    {
+      "responseId": "r-composer",
+      "loomId": "c-architecture",
+      "role": "assistant",
+      "title": "Hypertext composer beats copy-paste",
+      "canonicalUri": "loom://loom-ai/navigation-architecture/loom/composer/r-inline-references",
+      "content": "Question: How should prompt composition work when users reuse prior answers?\n\nThe composer should accept saved destinations and linked responses directly inside the prompt surface. A user can drop a bookmark into the prompt, insert a response through Link, and then write ordinary prose around those references.\n\nThe canonical representation can serialize to Markdown links, but the visual layer should stay richer: chips should show the title, object type, and provenance so the user knows exactly what they are bringing into the prompt.",
+      "sequenceIndex": 1,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:02:00Z",
+      "updatedAt": "2026-05-10T00:02:00Z"
+    },
+    {
+      "responseId": "r-site-map",
+      "loomId": "c-graph-map",
+      "role": "assistant",
+      "title": "Graph View starts as a readable Loom map",
+      "canonicalUri": "loom://product/graph-view-site-map/loom/site-map/r-site-map",
+      "content": "Question: What should the default Graph View demonstrate?\n\nThe default graph should immediately explain the Loom mental model: a root Loom at the top, Responses flowing downward, and Weft branches splitting sideways without breaking hierarchy. It should feel like a browser site map for an AI object, not a decorative mind map.\n\nThe first screen should include enough real structure to test scanning: bookmarked Responses, linked answers from other Looms, at least two Weft branches, and one Weft that itself has a Weft.\n\nA useful demo graph also makes product rules visible. Continuing the Loom should append below the latest Response, Ask from a node should stay contextual, and Open should still navigate back to the normal Loom surface.",
+      "sequenceIndex": 0,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:03:00Z",
+      "updatedAt": "2026-05-10T00:03:00Z"
+    },
+    {
+      "responseId": "r-evidence-map",
+      "loomId": "c-graph-map",
+      "role": "assistant",
+      "title": "Linked Responses preserve graph provenance",
+      "canonicalUri": "loom://product/graph-view-site-map/loom/evidence/r-evidence-map",
+      "content": "Question: How should Graph View show evidence from other Looms?\n\nGraph View should let a Response carry links to useful answers from other Looms without cloning those answers. A link to research synthesis, citation provenance, or browser navigation remains a Reference usage; the target Response keeps its own address and identity.\n\nThis matters for provenance. If the graph demo includes links from the Graph View Loom to the research and navigation Looms, users can see that composition works across Looms while the active top-down path remains uncluttered.",
+      "sequenceIndex": 1,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:04:00Z",
+      "updatedAt": "2026-05-10T00:04:00Z"
+    },
+    {
+      "responseId": "r-graph-continuation",
+      "loomId": "c-graph-map",
+      "role": "assistant",
+      "title": "Continue Loom appends below the latest Response",
+      "canonicalUri": "loom://product/graph-view-site-map/loom/continuation/r-graph-continuation",
+      "content": "Question: How should normal continuation work inside Graph View?\n\nContinue Loom is normal Loom continuation, not a Quick Ask and not a Weft. The active Loom's latest Response is focused near the top of the graph, the floating composer collects the next prompt, and the Main Model answer is appended to the same Loom.\n\nAfter submit, the projection recomputes from Loom state. The new Response appears below the previous latest Response, the edge label carries the prompt, and focus moves to the newly created Response using the same top-centered positioning.",
+      "sequenceIndex": 2,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:05:00Z",
+      "updatedAt": "2026-05-10T00:05:00Z"
+    },
+    {
+      "responseId": "r-graph-focus",
+      "loomId": "c-graph-map",
+      "role": "assistant",
+      "title": "Focused graph positioning keeps work oriented",
+      "canonicalUri": "loom://product/graph-view-site-map/loom/focus/r-graph-focus",
+      "content": "Question: Where should Graph View focus after continuation?\n\nThe focused Response should land near the top edge of the graph viewport with equal space left and right. That makes the previous path feel above the user and leaves room below for the next continuation or Weft branch.\n\nThis is a product-level projection rule. React Flow renders the graph, but Loom projection owns hierarchy, selected node identity, and the deterministic viewport target.",
+      "sequenceIndex": 3,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:06:00Z",
+      "updatedAt": "2026-05-10T00:06:00Z"
+    },
+    {
+      "responseId": "r-spacing-rules",
+      "loomId": "c-graph-spacing",
+      "role": "assistant",
+      "title": "Spacing makes prompt labels readable",
+      "canonicalUri": "loom://product/graph-view-site-map/weft/spacing/r-spacing-rules",
+      "content": "Question: Where should prompt labels sit on graph edges?\n\nPrompt labels should sit on edges with enough distance from source and target cards. The graph needs breathing room between source Response, question label, and target Response so the user can read the path without mistaking labels for node content.\n\nWeft branches should split sideways but continue downward.",
+      "sequenceIndex": 0,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:07:00Z",
+      "updatedAt": "2026-05-10T00:07:00Z"
+    },
+    {
+      "responseId": "r-continuation-main-route",
+      "loomId": "c-graph-continuation",
+      "role": "assistant",
+      "title": "Graph continuation uses the Main Model route",
+      "canonicalUri": "loom://product/graph-view-site-map/weft/continuation/r-continuation-main-route",
+      "content": "Question: Which model route should Graph continuation use?\n\nGraph continuation should call the same Main Model append path as the normal Loom composer. The floating graph composer is a projection-specific entry point, but it should not create a second business system for Responses.\n\nThe result is a normal Response in the active Loom.",
+      "sequenceIndex": 0,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:08:00Z",
+      "updatedAt": "2026-05-10T00:08:00Z"
+    },
+    {
+      "responseId": "r-runtime-unavailable",
+      "loomId": "c-graph-continuation-errors",
+      "role": "assistant",
+      "title": "Runtime errors keep the graph composer open",
+      "canonicalUri": "loom://product/graph-view-site-map/weft/continuation/errors/r-runtime-unavailable",
+      "content": "Question: What happens if the Main Model runtime is unavailable?\n\nThe graph composer should keep the draft visible and report the existing model readiness error. The user remains in Graph View, with the focused Response still selected, so they can retry after switching provider settings or enabling Demo Responses.",
+      "sequenceIndex": 0,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:09:00Z",
+      "updatedAt": "2026-05-10T00:09:00Z"
+    },
+    {
+      "responseId": "r-host-shell",
+      "loomId": "c-integrations",
+      "role": "assistant",
+      "title": "Host shell adapters keep Electron optional",
+      "canonicalUri": "loom://engineering/mcp-plugin-integration/loom/host-shell/r-host-shell",
+      "content": "Question: How should the web prototype stay Electron-ready?\n\nKeep the renderer written as if it is running in a browser, and put every host-specific capability behind a narrow adapter. The Loom surface should ask for capabilities such as opening a file, resolving a local address, copying a canonical URI, or starting an MCP session.\n\nA practical adapter shape is small and boring. The important part is that the Graph, Address Bar, composer, and Weft flows call the same interface instead of branching on runtime details.\n\n```ts\nexport interface HostShellAdapter {\n  openExternal(uri: string): Promise<void>;\n  readClipboard(): Promise<string>;\n  writeClipboard(value: string): Promise<void>;\n  resolveLocalAddress(uri: string): Promise<LoomResolutionResult>;\n  listAvailableTools(): Promise<HostToolDescriptor[]>;\n}\n```\n\nThe key rule is that adapters return Loom objects or tool descriptors, not UI instructions.",
+      "sequenceIndex": 0,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:10:00Z",
+      "updatedAt": "2026-05-10T00:10:00Z"
+    },
+    {
+      "responseId": "r-plugin-boundary",
+      "loomId": "c-integrations",
+      "role": "assistant",
+      "title": "Plugin boundary should not leak shell assumptions",
+      "canonicalUri": "loom://engineering/mcp-plugin-integration/loom/plugin-boundary/r-plugin-boundary",
+      "content": "Question: Where should plugin behavior attach?\n\nPlugins should attach to Loom objects and declared capabilities. They should not patch the browser chrome, own navigation, or write directly into the graph store.\n\nFor MCP, treat each server as a capability source. Discovery can produce tool descriptors, but invocation still goes through a Loom-aware execution boundary so outputs are captured as addressable Responses with provenance.\n\n```ts\ntype PluginContribution =\n  | { kind: 'command'; id: string; title: string; run: CommandHandler }\n  | { kind: 'resolver'; scheme: string; resolve: AddressResolver }\n  | { kind: 'mcp-tool'; serverId: string; toolName: string; intent: 'quick' | 'main' };\n```\n\nThat boundary keeps plugin work graph-first. The plugin supplies capability and provenance; Loom owns navigation, Weft creation, addressability, and promotion.",
+      "sequenceIndex": 1,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:11:00Z",
+      "updatedAt": "2026-05-10T00:11:00Z"
+    },
+    {
+      "responseId": "r-mcp-execution-boundary",
+      "loomId": "c-integrations",
+      "role": "assistant",
+      "title": "MCP tool execution becomes a Loom Response",
+      "canonicalUri": "loom://engineering/mcp-plugin-integration/loom/tool-execution/r-mcp-execution-boundary",
+      "content": "Question: What happens when a plugin tool is invoked?\n\nAn MCP tool invocation should start from a Loom object: a Response action, a Reference in the prompt surface, or a selected fragment. The runtime builds a capability request that includes intent, source Loom, source Response, selected text, and safe Reference metadata. It should not pass hidden browser state or raw provider internals to the plugin.\n\nThe host or service boundary executes the tool and returns a typed result. Loom then captures the result as an addressable Response with provenance: which server/tool ran, what user-visible input summary was used, which artifacts were produced, and whether the result is safe to reuse as context.\n\nA typical invocation path is: the user chooses a tool action from a Response, Loom builds a typed capability request, the host validates permissions and input shape, the MCP server runs the tool, and the returned result is normalized before it reaches the graph. The normalized result can include a concise answer, structured metadata, artifact handles, source links, and recoverable diagnostics.\n\nThe important boundary is that tool execution does not become an invisible side effect. If a GitHub plugin summarizes a pull request, the PR URL should become a Reference, the generated summary should become Response content, and any generated file should remain an artifact with a stable handle. If a database or design plugin reads external data, Loom should record the safe user-visible summary and provenance without storing provider secrets or raw hidden payloads.\n\nThe invocation should also be cancellable and explainable. Timeouts, permission denials, missing tool servers, invalid JSON, unsafe output, and artifact write failures should map to typed failure states. The user should see what failed, what can be retried, and whether any partial artifact was produced. That keeps the Weft honest because failed tool work is still part of the reasoning path, but it is not confused with a successful answer.\n\nFor future Electron/native integrations, this same shape can be reused with stronger local capabilities. Native secret storage can supply credentials by reference, file system tools can return artifact handles instead of raw files, and local-only tools can be marked as safe to reuse. The renderer still should not own secrets, raw tool payloads, or direct graph writes.\n\nFailures should also become safe Loom state. A tool timeout, missing permission, or provider error should be visible as a recoverable Response/error event instead of a silent side effect. Provider secrets stay outside renderer/config storage, and raw model thinking is never stored, exported, graphed, or injected into future context.",
+      "sequenceIndex": 2,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:12:00Z",
+      "updatedAt": "2026-05-10T00:12:00Z"
+    },
+    {
+      "responseId": "r-plugin-artifacts",
+      "loomId": "c-integrations",
+      "role": "assistant",
+      "title": "Tool artifacts stay attached as References",
+      "canonicalUri": "loom://engineering/mcp-plugin-integration/loom/artifacts/r-plugin-artifacts",
+      "content": "Question: Where should plugin outputs and files live?\n\nPlugin outputs should become explicit References or artifacts attached to a Response, not hidden mutations in the conversation. A search result, generated file, fetched issue, or analysis report needs a source URI, tool identity, timestamp, and a compact summary that can be shown in the Loom surface.\n\nLarge files and documents should remain artifacts with stable handles. The graph can show that a Response used or produced an artifact without copying the artifact into every prompt. Window projections can render the artifact when the user opens it, while the ContextManager decides what safe summary enters future model context.\n\nThis keeps MCP useful without turning plugins into uncontrolled data pipes. The plugin contributes capability and provenance; Loom owns addressability, References, Wefts, and user-visible recovery.",
+      "sequenceIndex": 3,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:13:00Z",
+      "updatedAt": "2026-05-10T00:13:00Z"
+    },
+    {
+      "responseId": "r-mcp-invocation-flow",
+      "loomId": "c-integrations-mcp-tools",
+      "role": "assistant",
+      "title": "Invocation flow stays Loom-aware",
+      "canonicalUri": "loom://engineering/mcp-plugin-integration/weft/tool-execution/r-mcp-invocation-flow",
+      "content": "Question: What should the MCP invocation flow look like?\n\nThe flow should be: user action, Loom capability request, host/service execution, typed tool result, Response capture, and optional Reference promotion. Each step keeps the current Loom, source Response, and selected Reference metadata attached so the result can be traced later.\n\nFor example, a GitHub MCP action from a selected Response can run `Summarize PR`, return a compact report plus source links, and create a new Response under the MCP tool execution Weft. The PR URL becomes a Reference; the generated summary becomes Response content; any files remain artifacts.\n\nThe important constraint is that tool execution is not a shortcut around Loom. It is a way to create addressable AI objects with provenance.",
+      "sequenceIndex": 0,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:14:00Z",
+      "updatedAt": "2026-05-10T00:14:00Z"
+    },
+    {
+      "responseId": "r-mcp-error-boundary",
+      "loomId": "c-integrations-mcp-tools",
+      "role": "assistant",
+      "title": "Tool errors become safe Responses",
+      "canonicalUri": "loom://engineering/mcp-plugin-integration/weft/tool-execution/r-mcp-error-boundary",
+      "content": "Question: How should MCP failures appear?\n\nMCP failures should be typed and recoverable: unavailable server, missing permission, timeout, invalid tool result, artifact write failure, or unsafe output. The user should see what failed and what can be retried without leaking secrets, prompts, raw provider payloads, or raw thinking.\n\nA failed invocation can still be useful as a Response because it preserves the attempted action, source context, and safe diagnostic class. That makes the Weft honest: it shows where the workflow branched, where a tool failed, and what the next retry or fallback should do.",
+      "sequenceIndex": 1,
+      "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
+      "createdAt": "2026-05-10T00:15:00Z",
+      "updatedAt": "2026-05-10T00:15:00Z"
+    }
+  ],
+  "aliases": [
+    {
+      "aliasId": "alias-response-r-address-bar-legacy",
+      "canonicalUri": "loom://loom-ai-navigation-architecture/L-TEST/r/R-ADDR?id=meta-response-address",
+      "aliasUri": "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
+      "status": "active",
+      "createdAt": "2026-05-10T00:10:00Z"
+    }
+  ],
+  "references": [
+    {
+      "referenceId": "ref-r-evidence-map-fragment",
+      "sourceLoomId": "c-graph-map",
+      "sourceResponseId": "r-evidence-map",
+      "targetKind": "fragment",
+      "targetId": "r-site-map",
+      "targetUri": "loom://product/graph-view-site-map/loom/site-map/r-site-map#fragment=demo-quote",
+      "selectedText": "Responses flowing downward, and Weft branches splitting sideways without breaking hierarchy",
+      "label": "Responses flowing downward",
+      "metadataJson": "{\"fixture\":\"default\",\"fragmentHash\":\"demo-quote\"}",
+      "createdAt": "2026-05-10T00:11:00Z"
+    }
+  ],
+  "bookmarks": [
+    {
+      "bookmarkId": "b-graph-default",
+      "targetKind": "loom",
+      "targetId": "c-graph-map",
+      "targetUri": "loom://product/graph-view-site-map",
+      "title": "Default Graph View demo",
+      "metadataJson": "{\"fixture\":\"default\"}",
+      "createdAt": "2026-05-10T00:12:00Z"
+    },
+    {
+      "bookmarkId": "b-graph-continuation",
+      "targetKind": "response",
+      "targetId": "r-graph-continuation",
+      "targetUri": "loom://product/graph-view-site-map/loom/continuation/r-graph-continuation",
+      "title": "Graph continuation rule",
+      "metadataJson": "{\"fixture\":\"default\"}",
+      "createdAt": "2026-05-10T00:13:00Z"
+    },
+    {
+      "bookmarkId": "b-address",
+      "targetKind": "response",
+      "targetId": "r-address-bar",
+      "targetUri": "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
+      "title": "Address Bar navigator rules",
+      "metadataJson": "{\"fixture\":\"default\"}",
+      "createdAt": "2026-05-10T00:14:00Z"
+    }
+  ]
+}

@@ -4,6 +4,7 @@ export type LoomObjectType =
   | "conversation"
   | "loom"
   | "response"
+  | "fragment"
   | "bookmark"
   | "semantic"
   | "recent";
@@ -38,8 +39,11 @@ export type LoomObjectStatus = "active" | "archived" | "deleted" | "unreachable"
 
 export type LoomResolutionStatus =
   | "resolved"
+  | "alias_resolved"
+  | "missing"
   | "not_found"
   | "deleted"
+  | "invalid"
   | "alias_stale"
   | "snapshot_missing"
   | "window_invalid"
@@ -87,6 +91,16 @@ export interface LoomResolutionResult {
   canonicalUri?: string;
   aliasUri?: string;
   staleAliasReplacement?: string;
+  destination?: LoomNavigationDestination;
+  fallbackReason?:
+    | "service_missing_non_authoritative"
+    | "service_unavailable"
+    | "request_failed"
+    | "timeout"
+    | "unsupported_method"
+    | "invalid_response";
+  serviceResolutionStatus?: LoomResolutionStatus;
+  serviceAddressStoreAuthoritative?: boolean;
   reason?: string;
 }
 
@@ -194,6 +208,7 @@ export interface LoomGraphMutationRepository extends LoomGraphRepository {
 export interface LoomMetadata {
   id: string;
   code?: string;
+  displayCode?: string;
   title: string;
   canonicalUri?: string;
   keywords: string[];
@@ -223,6 +238,7 @@ export interface LoomForkRecord {
   parentResponseId: string;
   childConversationId: string;
   title: string;
+  kind?: "exploration" | "revision";
 }
 
 export interface LoomLink {
@@ -238,8 +254,84 @@ export interface LoomLink {
   referenceCode?: string;
   referenceDisplayMode?: ReferenceDisplayMode;
   referenceCustomLabel?: string;
+  referenceOccurrenceIndex?: number;
   referenceMentionId?: string;
   resolutionStatus?: LoomResolutionStatus;
+  sourceLoomId?: string;
+  sourceResponseId?: string;
+  selectedText?: string;
+  sourceResponseCode?: string;
+  sourceResponseTitle?: string;
+  sourceCanonicalUri?: string;
+  fragmentHash?: string;
+  createdAt?: number;
+}
+
+export type VisibleAnswerTaskStatus =
+  | "pending"
+  | "running"
+  | "done"
+  | "failed"
+  | "skipped";
+
+export type VisibleAnswerStage =
+  | "orchestration"
+  | "context"
+  | "references"
+  | "planning"
+  | "generation"
+  | "finalizing";
+
+export interface VisibleAnswerTask {
+  id: string;
+  title: string;
+  status: VisibleAnswerTaskStatus;
+  stage: VisibleAnswerStage;
+  startedAt?: number;
+  completedAt?: number;
+  durationMs?: number;
+}
+
+export interface VisibleAnswerDebugEvent {
+  id: string;
+  label: string;
+  detail?: string;
+  createdAt: number;
+  elapsedMs: number;
+}
+
+export interface VisibleAnswerDebugState {
+  startedAt: number;
+  model?: string;
+  responseMode?: string;
+  think?: boolean;
+  numCtx?: number;
+  numPredict?: number;
+  outputBudget?: string;
+  referenceCount?: number;
+  contextMessageCount?: number;
+  targetLoomId?: string;
+  targetResponseId?: string;
+  finalChunkCount?: number;
+  finalCharCount?: number;
+  lastChunkAt?: number;
+}
+
+export interface VisibleAnswerProgress {
+  tasks: VisibleAnswerTask[];
+  activeTaskId?: string;
+  statusText: string;
+  contentOutline?: string[];
+  debug?: VisibleAnswerDebugState;
+  debugEvents?: VisibleAnswerDebugEvent[];
+}
+
+export interface VisibleAnswerPlan {
+  id: string;
+  source: "quickModel" | "deterministic";
+  tasks: VisibleAnswerTask[];
+  contentOutline?: string[];
+  createdAt: number;
 }
 
 export interface ResponseItem {
@@ -247,7 +339,35 @@ export interface ResponseItem {
   title: string;
   address: string;
   question: string;
+  createdAt?: string;
+  promptEditedAt?: string;
+  answerStale?: boolean;
+  questionReferences?: LoomLink[];
   answer: string[];
+  finalContent?: string;
+  thinkingStartedAt?: string;
+  thinkingEndedAt?: string;
+  finalStartedAt?: string;
+  elapsedThinkingSeconds?: number;
+  thinkingTimeoutMs?: number;
+  doneReason?: string;
+  truncated?: boolean;
+  outputBudget?: "short" | "medium" | "long" | "extended";
+  numPredict?: number;
+  workflowRunId?: string;
+  serviceUserResponseId?: string;
+  thinkingGuardTimedOut?: boolean;
+  thinkingStalled?: boolean;
+  thinkingStallReason?: string;
+  thinkingContinueCount?: number;
+  thinkingStopped?: boolean;
+  visiblePlan?: VisibleAnswerPlan;
+  visibleProgress?: VisibleAnswerProgress;
+  askContextCapsuleSnapshot?: unknown;
+  askSelectedText?: string;
+  askSourceLoomId?: string;
+  askSourceResponseId?: string;
+  askSourceFragment?: LoomLink;
   suggestedLinks: LoomLink[];
   bookmarkedLinks: LoomLink[];
   bookmarked?: boolean;

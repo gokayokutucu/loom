@@ -1,11 +1,41 @@
+// E2E data authority classification:
+// - PRODUCT_SERVICE_BACKED for the rust-service Graph proof.
+// - LEGACY_TYPESCRIPT_LOCAL for the projection helper layout tests below.
 import { readFileSync } from "node:fs";
-import { test, expect } from "@playwright/test";
+import { test, expect, type Page } from "@playwright/test";
 import {
   buildLoomGraphProjection,
   loomGraphRootNodeId,
   responseGraphNodeId,
 } from "../src/services/loomGraphProjection";
-import type { Conversation, LoomForkRecord, ResponseItem } from "../src/types";
+import { createTypeScriptLocalLoomEngine } from "../src/engine";
+import type { Conversation, LoomForkRecord, LoomLink, ResponseItem } from "../src/types";
+import { createServiceTestHarness } from "./helpers/serviceTestHarness";
+
+interface ServiceGraphNode {
+  id: string;
+  kind: string;
+  loomId: string;
+  responseId?: string;
+  title: string;
+  metadata?: unknown;
+}
+
+interface ServiceGraphEdge {
+  id: string;
+  kind: string;
+  source: string;
+  target: string;
+  label?: string;
+  metadata?: unknown;
+}
+
+interface ServiceGraphProjection {
+  loomId: string;
+  nodes: ServiceGraphNode[];
+  edges: ServiceGraphEdge[];
+  warnings: string[];
+}
 
 function loom(id: string, title: string): Conversation {
   return {
@@ -29,7 +59,183 @@ function response(id: string, question: string): ResponseItem {
   };
 }
 
-test.describe("Loom graph projection hierarchy", () => {
+async function sendMainPrompt(page: Page, prompt: string) {
+  const editor = page.getByRole("textbox", { name: "Prompt" }).first();
+  await expect(editor).toBeVisible();
+  await editor.click();
+  await page.keyboard.insertText(prompt);
+  await page.getByRole("button", { name: "Send" }).click();
+}
+
+function expectNoForbiddenGraphPayload(value: unknown) {
+  const serialized = JSON.stringify(value);
+  expect(serialized).not.toContain("raw_thinking");
+  expect(serialized).not.toContain("thinking_text");
+  expect(serialized).not.toContain("chain_of_thought");
+  expect(serialized).not.toContain("hidden_reasoning");
+}
+
+function expectCleanGraphLabels(graph: ServiceGraphProjection) {
+  for (const node of graph.nodes) {
+    expect(node.title).not.toContain("[[");
+    expect(node.title).not.toContain("]]");
+    expect(node.title).not.toContain("Group 1");
+    expect(node.title).not.toContain("Group 2");
+  }
+  for (const edge of graph.edges) {
+    expect(edge.label ?? "").not.toContain("[[");
+    expect(edge.label ?? "").not.toContain("]]");
+    expect(edge.label ?? "").not.toContain("Group 1");
+    expect(edge.label ?? "").not.toContain("Group 2");
+  }
+}
+
+test.describe("[product-service-backed] Graph projection product proof", () => {
+  test("[product-service-backed] renders service-created Loom graph data with Weft, Reference, and Bookmark coverage", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(
+        page,
+        "Event Sourcing nedir? nasıl kullanılır? Detaylı olarak anlat"
+      );
+      await expect(page.getByText("Event Store").first()).toBeVisible({ timeout: 30_000 });
+
+      const looms = await scenario.client.listLooms();
+      const rootLoom = looms.find((item) => item.title.includes("Event Sourcing"));
+      expect(rootLoom).toBeTruthy();
+      const loomId = rootLoom!.loomId;
+
+      await scenario.sendPrompt(
+        loomId,
+        "Avantajları ve dezavantajları tablo şeklinde verebilir misin?"
+      );
+      await scenario.sendPrompt(loomId, "Dezavantajları ve avantajları biraz daha açar mısın");
+      await scenario.runPendingContextJobs();
+
+      const detail = await scenario.client.getLoom(loomId);
+      expect(detail.responses.length).toBeGreaterThanOrEqual(4);
+      const originResponse = detail.responses[1];
+      const latestResponse = detail.responses[detail.responses.length - 1];
+      expect(originResponse).toBeTruthy();
+      expect(latestResponse).toBeTruthy();
+
+      const weft = await scenario.client.createOrOpenWeft({
+        originLoomId: loomId,
+        originResponseId: originResponse!.id,
+        title: "Event Sourcing implementation Weft",
+        summary: "Service-created Weft for Graph E2E proof",
+        source: "graph_node",
+        seedMode: "none",
+        createOriginContextSnapshot: true,
+      });
+
+      const reference: LoomLink = {
+        id: originResponse!.id,
+        type: "response",
+        title: "Event Store reference",
+        path: originResponse!.address || originResponse!.id,
+        badge: "Response",
+        targetObjectId: originResponse!.id,
+        sourceLoomId: loomId,
+        sourceResponseId: latestResponse.id,
+        canonicalUri: originResponse!.meta?.canonicalUri ?? originResponse!.address,
+        referenceMentionId: "graph-service-reference",
+      };
+      await scenario.client.addReference({
+        loomId,
+        sourceResponseId: latestResponse.id,
+        reference,
+      });
+      await scenario.client.createBookmark({
+        targetKind: "response",
+        targetId: originResponse!.id,
+        targetUri: originResponse!.meta?.canonicalUri ?? originResponse!.address,
+        title: "Bookmarked Event Sourcing answer",
+        metadata: { loomId },
+      });
+
+      const graph = await scenario.fetchJson<ServiceGraphProjection>(
+        `/looms/${encodeURIComponent(loomId)}/graph?includeReferences=true&includeBookmarks=true`
+      );
+      expect(graph.loomId).toBe(loomId);
+      expect(graph.nodes.some((node) => node.id === `loom:${loomId}` && node.kind === "loom")).toBe(
+        true
+      );
+      expect(
+        graph.nodes.filter((node) => node.kind === "response").map((node) => node.responseId)
+      ).toEqual(expect.arrayContaining(detail.responses.map((response) => response.id)));
+      expect(graph.edges.some((edge) => edge.kind === "loom_response")).toBe(true);
+      expect(graph.edges.filter((edge) => edge.kind === "response_sequence").length).toBeGreaterThan(
+        1
+      );
+      expect(graph.nodes.some((node) => node.id === `loom:${weft.loomId}` && node.kind === "weft"))
+        .toBe(true);
+      expect(
+        graph.edges.some(
+          (edge) =>
+            edge.kind === "weft_origin" &&
+            edge.source === `response:${originResponse!.id}` &&
+            edge.target === `loom:${weft.loomId}`
+        )
+      ).toBe(true);
+      expect(graph.edges.some((edge) => edge.kind === "reference")).toBe(true);
+      const bookmarkedNode = graph.nodes.find((node) => node.id === `response:${originResponse!.id}`);
+      expect(JSON.stringify(bookmarkedNode?.metadata ?? {})).toContain("\"bookmarked\":true");
+      expectCleanGraphLabels(graph);
+      expectNoForbiddenGraphPayload(graph);
+
+      await page.getByRole("button", { name: "Toggle Graph View" }).click();
+      await expect(page.getByRole("heading", { name: "Weft-aware Loom graph" })).toBeVisible();
+      await expect(page.locator(".loom-graph-shell")).toBeVisible();
+      await expect(page.locator(".loom-graph-node--response").first()).toBeVisible();
+      await expect(page.locator(".loom-graph-node--response")).toHaveCount(
+        graph.nodes.filter((node) => node.kind === "response").length
+      );
+      await expect(page.locator(".loom-graph-node--weft").filter({ hasText: "Event Sourcing" }))
+        .toBeVisible();
+      await expect(page.locator(".loom-graph-shell")).not.toContainText("[[");
+      await expect(page.locator(".loom-graph-shell")).not.toContainText("Group 1");
+      await expect(page.locator(".loom-graph-shell")).not.toContainText("raw_thinking");
+
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+});
+
+test.describe("[legacy-typescript-local] Loom graph projection hierarchy", () => {
+  test("projects graph through the Loom Engine boundary", async () => {
+    const engine = createTypeScriptLocalLoomEngine();
+    const projection = await engine.getGraphProjection({
+      conversations: [loom("root", "Root Loom")],
+      responsesByConversation: {
+        root: [response("r1", "First question")],
+      },
+      forkRecords: [],
+      activeLoomId: "root",
+      bookmarkedResponseAddresses: [],
+    });
+
+    expect(projection.nodes.map((node) => node.id)).toContain(loomGraphRootNodeId("root"));
+    expect(projection.nodes.map((node) => node.id)).toContain(responseGraphNodeId("root", "r1"));
+    expect(projection.edges).toHaveLength(1);
+  });
+
   test("keeps root top-most and same-lineage responses ordered downward", () => {
     const projection = buildLoomGraphProjection({
       conversations: [loom("root", "Root Loom")],

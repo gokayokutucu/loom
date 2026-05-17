@@ -3,6 +3,12 @@ import type { CSSProperties } from "react";
 import type { LoomLink } from "../types";
 import { canonicalReferenceAddress, referenceCodeForLink } from "../services/referenceDisplay";
 
+function previewReferencedText(value: string) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= 500) return normalized;
+  return `${normalized.slice(0, 499).trim()}…`;
+}
+
 export function AddressHintPopover({
   link,
   style,
@@ -21,6 +27,10 @@ export function AddressHintPopover({
   const code = referenceCodeForLink(link);
   const address = canonicalReferenceAddress(link);
   const addressKind = link.canonicalUri ?? link.meta?.canonicalUri ? "canonical" : "temporary";
+  const selectedTextPreview =
+    link.type === "fragment" && link.selectedText
+      ? previewReferencedText(link.selectedText)
+      : "";
 
   return (
     <div
@@ -33,6 +43,14 @@ export function AddressHintPopover({
     >
       <span>{link.badge ?? link.type}</span>
       <strong>{link.title}</strong>
+      {selectedTextPreview && (
+        <div className="address-hint-fragment">
+          <span>Referenced text</span>
+          <p className="address-hint-fragment-preview">
+            {selectedTextPreview}
+          </p>
+        </div>
+      )}
       {code && <em>{code}</em>}
       <div
         className={`address-hint-address ${addressKind}`}

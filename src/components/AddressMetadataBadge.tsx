@@ -10,7 +10,8 @@ import { createPortal } from "react-dom";
 import type { LoomLink } from "../types";
 import { AddressHintPopover } from "./AddressHintPopover";
 
-const DEFAULT_HINT_AUTO_CLOSE_MS = 2000;
+const DEFAULT_HINT_DELAY_MS = 2000;
+const DEFAULT_HINT_AUTO_CLOSE_MS = 0;
 
 interface AddressMetadataBadgeProps {
   link: LoomLink;
@@ -35,7 +36,7 @@ export function AddressMetadataBadge({
   className,
   title,
   testId,
-  delayMs = 700,
+  delayMs = DEFAULT_HINT_DELAY_MS,
   autoCloseMs = DEFAULT_HINT_AUTO_CLOSE_MS,
   showHint = true,
   ariaLabel,
@@ -130,8 +131,9 @@ export function AddressMetadataBadge({
     timerRef.current = window.setTimeout(openPopover, delayMs);
   }
 
-  function ensurePopoverScheduled() {
-    if (popoverStyle || timerRef.current !== null) return;
+  function restartStillHoverTimer() {
+    if (!showHint) return;
+    closePopover(true);
     schedulePopover();
   }
 
@@ -166,10 +168,11 @@ export function AddressMetadataBadge({
   const triggerProps = {
     className,
     title,
+    "aria-label": ariaLabel,
     "data-testid": testId,
     tabIndex: showHint && as === "span" ? 0 : undefined,
     onMouseEnter: showHint ? schedulePopover : undefined,
-    onMouseMove: showHint ? ensurePopoverScheduled : undefined,
+    onMouseMove: showHint ? restartStillHoverTimer : undefined,
     onMouseLeave: (event: MouseEvent<HTMLElement>) => {
       if (!showHint) return;
       if (
@@ -201,7 +204,6 @@ export function AddressMetadataBadge({
             triggerRef.current = node;
           }}
           type="button"
-          aria-label={ariaLabel}
         >
           {children}
         </button>

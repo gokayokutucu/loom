@@ -1,0 +1,209 @@
+import { app, BrowserWindow, ipcMain } from "electron";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { LoomServiceSidecarManager } from "./sidecar-manager.mjs";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const repoRoot = path.resolve(__dirname, "..");
+const preloadPath = path.join(__dirname, "preload.cjs");
+const devServerUrl = process.env.LOOM_ELECTRON_DEV_SERVER_URL;
+
+let mainWindow;
+let sidecar;
+
+function loadingHtml() {
+  return `<!doctype html>
+  <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <title>Loom</title>
+      <style>
+        :root { color-scheme: dark; }
+        body {
+          margin: 0;
+          min-height: 100vh;
+          display: grid;
+          place-items: center;
+          background: #101112;
+          color: #f4f1eb;
+          font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        main {
+          width: min(440px, calc(100vw - 48px));
+          border: 1px solid rgba(255, 255, 255, 0.12);
+          background: rgba(255, 255, 255, 0.05);
+          border-radius: 12px;
+          padding: 24px;
+          box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+        }
+        h1 { margin: 0 0 8px; font-size: 20px; letter-spacing: 0; }
+        p { margin: 0; color: rgba(244, 241, 235, 0.72); line-height: 1.5; }
+      </style>
+    </head>
+    <body>
+      <main>
+        <h1>Starting Loom runtime</h1>
+        <p>The local loom-service sidecar is starting. The app will open when the runtime is ready.</p>
+      </main>
+    </body>
+  </html>`;
+}
+
+function errorHtml(message) {
+  const escaped = String(message)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+  return `<!doctype html>
+  <html lang="en">
+    <head>
+      <meta charset="utf-8" />
+      <title>Loom runtime error</title>
+      <style>
+        :root { color-scheme: dark; }
+        body {
+          margin: 0;
+          min-height: 100vh;
+          display: grid;
+          place-items: center;
+          background: #101112;
+          color: #f4f1eb;
+          font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        main {
+          width: min(560px, calc(100vw - 48px));
+          border: 1px solid rgba(255, 112, 72, 0.45);
+          background: rgba(255, 112, 72, 0.08);
+          border-radius: 12px;
+          padding: 24px;
+        }
+        h1 { margin: 0 0 8px; font-size: 20px; letter-spacing: 0; }
+        p { margin: 0; color: rgba(244, 241, 235, 0.78); line-height: 1.5; }
+        code { color: #ff8b61; }
+      </style>
+    </head>
+    <body>
+      <main>
+        <h1>Local runtime could not start</h1>
+        <p><code>${escaped}</code></p>
+      </main>
+    </body>
+  </html>`;
+}
+
+function createWindow(runtimeStatus) {
+  const serviceUrl = runtimeStatus.serviceUrl ?? "http://127.0.0.1:17633";
+  mainWindow = new BrowserWindow({
+    width: 1280,
+    height: 860,
+    minWidth: 980,
+    minHeight: 680,
+    title: "Loom",
+    titleBarStyle: "hiddenInset",
+    trafficLightPosition: { x: 14, y: 14 },
+    backgroundColor: "#101112",
+    show: false,
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      preload: preloadPath,
+      additionalArguments: [`--loom-service-url=${serviceUrl}`],
+    },
+  });
+
+  mainWindow.once("ready-to-show", () => {
+    mainWindow?.show();
+  });
+
+  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml())}`);
+  return mainWindow;
+}
+
+async function loadRenderer() {
+  if (!mainWindow) return;
+  if (devServerUrl) {
+    await mainWindow.loadURL(devServerUrl);
+    return;
+  }
+  await mainWindow.loadFile(path.join(repoRoot, "dist", "index.html"));
+}
+
+ipcMain.handle("loom:runtime-status", async () => {
+  if (!sidecar) return { state: "unavailable", startedByElectron: false };
+  return sidecar.refreshStatus();
+});
+
+ipcMain.handle("loom:runtime-restart", async () => {
+  if (!sidecar) return { state: "unavailable", startedByElectron: false };
+  const status = await sidecar.restart({
+    onRestarting: (restartStatus) => {
+      mainWindow?.webContents.send("loom:runtime-status-changed", restartStatus);
+    },
+  });
+  mainWindow?.webContents.send("loom:runtime-status-changed", status);
+  return status;
+});
+
+ipcMain.handle("loom:window-minimize", () => {
+  BrowserWindow.getFocusedWindow()?.minimize();
+});
+
+ipcMain.handle("loom:window-toggle-maximize", () => {
+  const window = BrowserWindow.getFocusedWindow();
+  if (!window) return;
+  if (window.isMaximized()) {
+    window.unmaximize();
+  } else {
+    window.maximize();
+  }
+});
+
+ipcMain.handle("loom:window-close", () => {
+  BrowserWindow.getFocusedWindow()?.close();
+});
+
+app.whenReady().then(async () => {
+  sidecar = new LoomServiceSidecarManager({ app, repoRoot });
+  try {
+    const runtimeStatus = await sidecar.start({
+      onStarting: (startingStatus) => {
+        createWindow(startingStatus);
+      },
+    });
+    if (mainWindow?.webContents) {
+      mainWindow.webContents.send("loom:runtime-ready", runtimeStatus);
+    }
+    await loadRenderer();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!mainWindow) createWindow({ serviceUrl: undefined });
+    await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(errorHtml(message))}`);
+    mainWindow.show();
+  }
+
+  app.on("activate", () => {
+    if (BrowserWindow.getAllWindows().length === 0 && sidecar) {
+      createWindow(sidecar.getStatus());
+      loadRenderer().catch((error) => {
+        console.error("failed to load Loom renderer", error);
+      });
+    }
+  });
+});
+
+app.on("before-quit", async (event) => {
+  if (!sidecar || sidecar.getStatus().state === "stopped") return;
+  event.preventDefault();
+  try {
+    await sidecar.stop();
+  } finally {
+    sidecar = null;
+    app.quit();
+  }
+});
+
+app.on("window-all-closed", () => {
+  if (process.platform !== "darwin") app.quit();
+});

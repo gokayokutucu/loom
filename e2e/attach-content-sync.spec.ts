@@ -1,3 +1,5 @@
+// E2E data authority classification: LEGACY_TYPESCRIPT_LOCAL.
+// This spec covers legacy UI reference sync over seeded local UI state until Attach Content is service-owned.
 import { expect, type Page, test } from "@playwright/test";
 
 async function openApp(page: Page) {
@@ -28,7 +30,7 @@ async function openResponsesTab(page: Page) {
   await expect(page.getByTestId("attach-content-row-response-r-address-bar")).toBeVisible();
 }
 
-test.describe("Attach Content reference sync", () => {
+test.describe("[legacy-typescript-local] Attach Content reference sync", () => {
   test("Response footer Link marks the Response selected in Attach Content", async ({ page }) => {
     await openApp(page);
     await openArchitectureLoom(page);

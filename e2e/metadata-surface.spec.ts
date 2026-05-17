@@ -1,3 +1,5 @@
+// E2E data authority classification: PURE_UI_RENDERING.
+// This spec validates metadata display behavior over seeded UI state, not product runtime authority.
 import { expect, type Page, test } from "@playwright/test";
 
 async function openApp(page: Page) {
@@ -15,7 +17,7 @@ async function openArchitectureLoom(page: Page) {
   );
 }
 
-test.describe("Loom metadata surface", () => {
+test.describe("[pure-ui-rendering] Loom metadata surface", () => {
   test("Loom header shows readable code without duplicate address", async ({ page }) => {
     await openApp(page);
     await openArchitectureLoom(page);
@@ -52,6 +54,8 @@ test.describe("Loom metadata surface", () => {
     await link.hover();
     await page.waitForTimeout(800);
     const hint = page.getByTestId("address-hint-popover");
+    await expect(hint).toHaveCount(0);
+    await page.waitForTimeout(1400);
     await expect(hint).toContainText(
       "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar"
     );
@@ -73,6 +77,8 @@ test.describe("Loom metadata surface", () => {
 
     await link.hover();
     await page.waitForTimeout(800);
+    await expect(page.getByTestId("address-hint-popover")).toHaveCount(0);
+    await page.waitForTimeout(1400);
     await expect(page.getByTestId("address-hint-popover")).toBeVisible();
     await expect(page.getByTestId("address-hint-popover")).toContainText(/R-[0-9A-Z]{5}/);
     await expect(page.getByTestId("address-hint-popover")).toContainText("loom://");
@@ -93,5 +99,23 @@ test.describe("Loom metadata surface", () => {
       /^R-[0-9A-Z]{5}$/
     );
     await expect(page.getByTestId("response-address-r-archive-delete")).toHaveCount(0);
+  });
+
+  test("hint popovers require still hover and hide on movement", async ({ page }) => {
+    await openApp(page);
+    await page.getByRole("button", { name: "Open Weft", exact: true }).click();
+    await expect(page.getByRole("tree", { name: "Conversation Loom lineage" })).toBeVisible();
+
+    const row = page.locator(".looms-log__row-hit[data-title]").first();
+    await row.hover();
+    await page.waitForTimeout(800);
+    await expect(row).not.toHaveClass(/hint-visible/);
+    await page.waitForTimeout(1400);
+    await expect(row).toHaveClass(/hint-visible/);
+
+    const box = await row.boundingBox();
+    expect(box).not.toBeNull();
+    await page.mouse.move(box!.x + box!.width / 2 + 2, box!.y + box!.height / 2);
+    await expect(row).not.toHaveClass(/hint-visible/);
   });
 });

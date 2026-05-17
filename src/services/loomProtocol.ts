@@ -1,3 +1,9 @@
+/*
+ * Address parsing helpers remain UI/client utilities, but local resolution
+ * runtime in this module is legacy/dev/test-only after the Rust-authoritative
+ * cutover. Product resolution must go through
+ * LoomEngineClient -> RustHttpLoomEngineClient -> loom-service.
+ */
 import type {
   BookmarkItem,
   Conversation,

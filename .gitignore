@@ -1,5 +1,6 @@
 node_modules/
 dist/
+dist-electron/
 .DS_Store
 *.log
 .env
@@ -7,3 +8,28 @@ dist/
 .playwright-mcp/
 playwright-report/
 test-results/
+services/loom-service/target/
+services/loom-service/.data/
+
+# Local investigation sources. Do not stage, commit, or push.
+*Chat/
+
+# Local-only architecture, migration, E2E, and service development notes.
+# These are working ledgers/audits for local implementation and should not be
+# published with user-facing product docs.
+docs/*_INVESTIGATION.md
+docs/*chat_*.md
+docs/capability/
+docs/context_continuity_architecture.md
+docs/e2e_data_authority.md
+docs/engine_migration_audit.md
+docs/loom_engine_contract.md
+docs/loom_service_api_and_module_boundaries.md
+docs/loom_service_architecture_ledger.md
+docs/loom_service_capability_ingestion.md
+docs/stability_baseline.md
+docs/typescript_runtime_deprecation_plan.md
+
+# Local source/tree dumps generated during development.
+loom_ai_all_source.txt
+tree_loom.txt

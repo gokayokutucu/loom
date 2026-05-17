@@ -19,6 +19,9 @@ export type ContextMenuAction =
   | "bookmark"
   | "copy-address"
   | "copy-markdown"
+  | "copy-answer-markdown"
+  | "copy-answer-rich"
+  | "copy-answer-plain"
   | "archive"
   | "delete"
   | "ask"
@@ -75,7 +78,10 @@ export function getContextMenuItems(payload: ContextMenuPayload): ContextMenuIte
       return [
         { id: "ask", label: "Ask" },
         { id: "copy-address", label: "Copy Loom Address" },
-        { id: "copy-markdown", label: "Copy as Loom Markdown" },
+        { id: "copy-markdown", label: "Copy Loom Markdown Link" },
+        { id: "copy-answer-rich", label: "Copy" },
+        { id: "copy-answer-markdown", label: "Copy as Markdown" },
+        { id: "copy-answer-plain", label: "Copy plain text" },
         {
           id: "bookmark-suggested",
           label: "Bookmark suggested links",
@@ -140,5 +146,7 @@ export function toLinkFromResponse(response: ResponseItem): LoomLink {
     canonicalUri: response.meta?.canonicalUri,
     meta: response.meta,
     referenceCode: response.meta?.code,
+    sourceResponseId: response.id,
+    sourceCanonicalUri: response.meta?.canonicalUri ?? response.address,
   };
 }
