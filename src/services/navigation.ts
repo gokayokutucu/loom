@@ -12,14 +12,15 @@ export function createHistoryEntry(
   destination: LoomLink,
   navigationDestination?: LoomNavigationDestination
 ): HistoryEntry {
+  const canonicalUri = destination.canonicalUri ?? destination.meta?.canonicalUri;
   return {
     id: `h-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
     type: destination.type,
     title: destination.title,
-    path: destination.path,
+    path: canonicalUri ?? destination.path,
     badge: destination.badge,
     targetObjectId: destination.targetObjectId,
-    canonicalUri: destination.canonicalUri,
+    canonicalUri,
     meta: destination.meta,
     referenceCode: destination.referenceCode ?? destination.meta?.code,
     visitedAt: "Now",

@@ -24,6 +24,7 @@ import type {
   ExportResponseInput,
   GetReferenceInput,
   DeleteBookmarkInput,
+  DeleteLoomInput,
   GetBookmarkForTargetInput,
   GetBookmarkInput,
   GraphProjectionInput,
@@ -31,6 +32,7 @@ import type {
   ListReferencesInput,
   ListReferencesResult,
   ListBookmarksResult,
+  ListHistoryResult,
   LoomDetail,
   LoomSummary,
   OpenReferenceInput,
@@ -39,15 +41,21 @@ import type {
   QuickAskInput,
   QuickAskResult,
   RegenerateFromResponseInput,
+  RecordHistoryInput,
   RemoveReferenceInput,
   RenameLoomInput,
   ResolveAddressInput,
   ResolveAddressResult,
+  LoomServiceRuntimeConfig,
+  ServiceConfigUpdateResult,
   ServiceConfigStatus,
+  SpeechProviderHealth,
   ServiceHealthStatus,
   SendMessageInput,
   SuggestReferencesInput,
   SuggestReferencesResult,
+  TranscribeSpeechInput,
+  TranscribeSpeechResult,
   TypeScriptLocalLoomEngineDependencies,
   UpdateLoomInput,
   UpdateResponseInput,
@@ -56,6 +64,7 @@ import type {
 import { buildLoomGraphProjection } from "../services/loomGraphProjection";
 import { resolveLoomAddress } from "../services/loomProtocol";
 import type { LoomNavigationDestination } from "../types";
+import type { HistoryEntry } from "../types";
 
 function notImplemented(method: string): Error {
   return new Error(`TypeScriptLocalLoomEngine.${method} is not implemented in this migration phase.`);
@@ -93,6 +102,23 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
     };
   }
 
+  async getServiceConfig(): Promise<LoomServiceRuntimeConfig> {
+    throw new Error("Speech-to-text provider configuration requires the Rust service runtime.");
+  }
+
+  async updateServiceConfig(): Promise<ServiceConfigUpdateResult> {
+    throw new Error("Speech-to-text provider configuration requires the Rust service runtime.");
+  }
+
+  async getSpeechProviderHealth(): Promise<SpeechProviderHealth> {
+    return {
+      status: "provider_unavailable",
+      providerKind: "typescript_local",
+      message: "Speech-to-text requires the Rust service runtime.",
+      checks: [],
+    };
+  }
+
   async getCapabilitySummary(): Promise<CapabilitySummary> {
     return {
       status: "unknown",
@@ -126,6 +152,13 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
     throw notImplemented("updateLoomMetadata");
   }
 
+  async deleteLoom(input: DeleteLoomInput): Promise<void> {
+    if (this.dependencies.deleteLoom) {
+      return this.dependencies.deleteLoom(input);
+    }
+    throw notImplemented("deleteLoom");
+  }
+
   sendMessage(_input: SendMessageInput): AsyncIterable<EngineResponseEvent> {
     if (this.dependencies.sendMessage) {
       return this.dependencies.sendMessage(_input);
@@ -154,6 +187,24 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
       return this.dependencies.quickAsk(input);
     }
     throw notImplemented("quickAsk");
+  }
+
+  async transcribeSpeech(_input: TranscribeSpeechInput): Promise<TranscribeSpeechResult> {
+    throw new Error("Speech-to-text requires the Rust service runtime.");
+  }
+
+  async listHistory(): Promise<ListHistoryResult> {
+    if (this.dependencies.listHistory) {
+      return this.dependencies.listHistory();
+    }
+    return { history: [] };
+  }
+
+  async recordHistory(input: RecordHistoryInput): Promise<HistoryEntry> {
+    if (this.dependencies.recordHistory) {
+      return this.dependencies.recordHistory(input);
+    }
+    return input.entry;
   }
 
   async createOrOpenWeft(_input: CreateOrOpenWeftInput): Promise<CreateOrOpenWeftResult> {

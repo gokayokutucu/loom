@@ -1,5 +1,6 @@
 use crate::{
     api::state::AppState,
+    display_code::{display_code, DisplayCodeKind},
     error::ServiceError,
     storage::repositories::{
         addresses::{AddressRepository, NewAddress, NewAddressAlias},
@@ -73,6 +74,7 @@ pub struct LoomDto {
     pub origin_response_id: Option<String>,
     pub canonical_uri: Option<String>,
     pub code: Option<String>,
+    pub display_code: String,
     pub created_at: String,
     pub updated_at: String,
     pub metadata: Option<Value>,
@@ -86,12 +88,15 @@ pub struct ResponseDto {
     pub response_id: String,
     pub loom_id: String,
     pub role: String,
+    pub content: String,
     pub title: Option<String>,
     pub code: Option<String>,
+    pub display_code: String,
     pub canonical_uri: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     pub sequence_index: i64,
+    pub metadata: Option<Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -124,6 +129,9 @@ pub async fn get_loom(
     let Some(loom) = looms.get_loom(&loom_id).await.map_err(storage_error)? else {
         return Err(not_found());
     };
+    if loom.is_deleted {
+        return Err(not_found());
+    }
     let responses = ResponseRepository::new(&state.database)
         .list_responses_for_loom(&loom_id)
         .await
@@ -208,6 +216,9 @@ pub async fn patch_loom(
     let Some(existing) = looms.get_loom(&loom_id).await.map_err(storage_error)? else {
         return Err(not_found());
     };
+    if existing.is_deleted {
+        return Err(not_found());
+    }
     let canonical_uri = input.canonical_uri.clone();
     let now = timestamp();
 
@@ -252,6 +263,21 @@ pub async fn patch_loom(
     Ok(Json(LoomResponse {
         loom: loom_to_dto(updated, Vec::new()),
     }))
+}
+
+pub async fn delete_loom(
+    State(state): State<AppState>,
+    Path(loom_id): Path<String>,
+) -> Result<StatusCode, (StatusCode, Json<LoomApiError>)> {
+    let deleted = LoomRepository::new(&state.database)
+        .soft_delete_loom_tree(&loom_id, "permanent_delete", &timestamp())
+        .await
+        .map_err(storage_error)?;
+    if deleted.is_empty() {
+        return Err(not_found());
+    }
+
+    Ok(StatusCode::NO_CONTENT)
 }
 
 async fn validate_canonical_address_available(
@@ -330,6 +356,14 @@ async fn insert_stale_alias(
 }
 
 fn loom_to_dto(loom: LoomRecord, responses: Vec<ResponseDto>) -> LoomDto {
+    let display_code = display_code(
+        if loom.kind == "weft" {
+            DisplayCodeKind::Weft
+        } else {
+            DisplayCodeKind::Loom
+        },
+        &loom.loom_id,
+    );
     LoomDto {
         loom_id: loom.loom_id,
         title: loom.title,
@@ -339,6 +373,7 @@ fn loom_to_dto(loom: LoomRecord, responses: Vec<ResponseDto>) -> LoomDto {
         origin_response_id: loom.origin_response_id,
         canonical_uri: loom.canonical_uri,
         code: loom.code,
+        display_code,
         created_at: loom.created_at,
         updated_at: loom.updated_at,
         metadata: loom
@@ -350,16 +385,23 @@ fn loom_to_dto(loom: LoomRecord, responses: Vec<ResponseDto>) -> LoomDto {
 }
 
 fn response_to_dto(response: ResponseRecord) -> ResponseDto {
+    let display_code = display_code(DisplayCodeKind::Response, &response.response_id);
     ResponseDto {
         response_id: response.response_id,
         loom_id: response.loom_id,
         role: response.role,
+        content: response.content,
         title: response.title,
         code: response.code,
+        display_code,
         canonical_uri: response.canonical_uri,
         created_at: response.created_at,
         updated_at: response.updated_at,
         sequence_index: response.sequence_index,
+        metadata: response
+            .metadata_json
+            .as_deref()
+            .and_then(|metadata| serde_json::from_str(metadata).ok()),
     }
 }
 
@@ -496,7 +538,8 @@ fn stable_suffix(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_loom, get_loom, list_looms, patch_loom, CreateLoomRequest, UpdateLoomRequest,
+        create_loom, delete_loom, get_loom, list_looms, patch_loom, CreateLoomRequest,
+        UpdateLoomRequest,
     };
     use crate::{
         api::{resolve::resolve_address, state::AppState},
@@ -570,10 +613,12 @@ mod tests {
             .expect("get Loom")
             .0;
         assert_eq!(detail.loom.loom_id, "loom-1");
+        assert!(detail.loom.display_code.starts_with("L-"));
 
         let list = list_looms(State(state)).await.expect("list Looms").0;
         assert_eq!(list.looms.len(), 1);
         assert_eq!(list.looms[0].loom_id, "loom-1");
+        assert_eq!(list.looms[0].display_code, detail.loom.display_code);
     }
 
     #[tokio::test]
@@ -587,6 +632,58 @@ mod tests {
             .await
             .expect("resolve address");
         assert_eq!(resolved.object_id.as_deref(), Some("loom-1"));
+    }
+
+    #[tokio::test]
+    async fn delete_loom_tombstones_loom_and_child_wefts() {
+        let state = test_state().await;
+        let _ = create_loom(State(state.clone()), Json(create_request("loom-1")))
+            .await
+            .expect("create Loom");
+        let _ = create_loom(
+            State(state.clone()),
+            Json(CreateLoomRequest {
+                loom_id: Some("weft-1".to_string()),
+                title: "Child Weft".to_string(),
+                summary: None,
+                kind: Some("weft".to_string()),
+                origin_loom_id: Some("loom-1".to_string()),
+                origin_response_id: Some("response-1".to_string()),
+                canonical_uri: Some("loom://service/weft-1".to_string()),
+                code: None,
+                metadata: None,
+            }),
+        )
+        .await
+        .expect("create child Weft");
+
+        let status = delete_loom(State(state.clone()), Path("loom-1".to_string()))
+            .await
+            .expect("delete Loom");
+        assert_eq!(status, StatusCode::NO_CONTENT);
+
+        let list = list_looms(State(state.clone()))
+            .await
+            .expect("list Looms")
+            .0;
+        assert!(list.looms.is_empty());
+        assert!(get_loom(State(state.clone()), Path("loom-1".to_string()))
+            .await
+            .is_err());
+
+        let resolved = resolve_address(&state.database, "loom://service/loom-1")
+            .await
+            .expect("resolve deleted Loom");
+        assert_eq!(
+            resolved.status,
+            crate::api::resolve::ResolveAddressStatus::Deleted
+        );
+
+        let wefts = crate::storage::repositories::looms::LoomRepository::new(&state.database)
+            .list_child_wefts_by_origin_loom("loom-1")
+            .await
+            .expect("list child Wefts");
+        assert!(wefts.is_empty());
     }
 
     #[tokio::test]

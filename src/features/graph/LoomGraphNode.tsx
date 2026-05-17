@@ -1,5 +1,6 @@
 import {
   Bookmark,
+  Bot,
   ExternalLink,
   GitFork,
   Link2,
@@ -9,8 +10,10 @@ import {
 } from "lucide-react";
 import type { CSSProperties } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
+import { formatBadgeCode } from "../../services/displayCode";
 import type { LoomGraphProjectionNode } from "../../services/loomGraphProjection";
 import type { ResponseItem } from "../../types";
+import { graphNodePreviewText } from "./graphNodePreview";
 
 export interface LoomGraphNodeData extends Record<string, unknown> {
   projectionNode: LoomGraphProjectionNode;
@@ -21,7 +24,10 @@ export interface LoomGraphNodeData extends Record<string, unknown> {
   onWeft: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
   onContinue: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
   hasExistingWeft?: boolean;
+  hasRevisionWeft?: boolean;
+  weftCount?: number;
   isTerminalResponse?: boolean;
+  isResponsePending?: boolean;
   continuationOpen?: boolean;
   viewportZoom?: number;
 }
@@ -61,7 +67,10 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
     onWeft,
     onContinue,
     hasExistingWeft,
+    hasRevisionWeft,
+    weftCount = 0,
     isTerminalResponse,
+    isResponsePending,
     continuationOpen,
     viewportZoom = 1,
   } = data;
@@ -70,9 +79,10 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
   const showContinuationButton =
     canActOnResponse && isTerminalResponse && !continuationOpen;
   const summaryText = normalizePreviewText(projectionNode.summary);
-  const previewText = normalizePreviewText(projectionNode.contentPreview);
+  const previewText = graphNodePreviewText(projectionNode, response);
   const showSummary = Boolean(summaryText) && projectionNode.kind !== "response";
-  const showPreview = Boolean(previewText) && previewText !== summaryText;
+  const showPreview = Boolean(previewText);
+  const showPending = projectionNode.kind === "response" && isResponsePending && !showPreview;
 
   return (
     <article className={nodeClassName(projectionNode)}>
@@ -108,12 +118,27 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
         <p className="loom-graph-summary">{projectionNode.summary}</p>
       )}
       {showPreview && (
-        <p className="loom-graph-preview">{projectionNode.contentPreview}</p>
+        <p className="loom-graph-preview">{previewText}</p>
+      )}
+      {showPending && (
+        <div className="loom-graph-preview-waiting" role="status" aria-live="polite">
+          <Bot size={15} />
+          <span>Waiting for answer</span>
+        </div>
       )}
       <div className="loom-graph-node-flags" aria-label="Node metadata">
         {projectionNode.isAddressable && <span>addressable</span>}
-        {projectionNode.code && (
-          <span className="loom-graph-code">{projectionNode.code}</span>
+        {(projectionNode.code || projectionNode.displayCode) && (
+          <span
+            className="loom-graph-code"
+            title={`Full code: ${projectionNode.code ?? projectionNode.displayCode}`}
+            aria-label={`Full code: ${projectionNode.code ?? projectionNode.displayCode}`}
+          >
+            {formatBadgeCode({
+              code: projectionNode.code,
+              displayCode: projectionNode.displayCode,
+            })}
+          </span>
         )}
       </div>
       {canActOnResponse && (
@@ -142,7 +167,11 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
           </button>
           <button
             type="button"
-            className={hasExistingWeft ? "loom-graph-node-weft is-wefted" : "loom-graph-node-weft"}
+            className={[
+              "loom-graph-node-weft",
+              hasExistingWeft ? "is-wefted" : "",
+              hasRevisionWeft ? "is-revision-wefted" : "",
+            ].filter(Boolean).join(" ")}
             aria-pressed={hasExistingWeft}
             aria-label={
               hasExistingWeft
@@ -153,6 +182,7 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
           >
             <GitFork size={13} />
             <span>Weft</span>
+            {weftCount > 1 && <span className="weft-count-badge">{weftCount}</span>}
           </button>
         </div>
       )}

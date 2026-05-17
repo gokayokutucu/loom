@@ -23,6 +23,9 @@ pub struct LoomRecord {
     pub created_at: String,
     pub updated_at: String,
     pub archived_at: Option<String>,
+    pub is_deleted: bool,
+    pub deleted_at: Option<String>,
+    pub deleted_reason: Option<String>,
     pub metadata_json: Option<String>,
 }
 
@@ -129,7 +132,7 @@ impl LoomRepository {
                  canonical_uri = COALESCE(?5, canonical_uri),
                  metadata_json = COALESCE(?6, metadata_json),
                  updated_at = ?7
-             WHERE loom_id = ?1 AND archived_at IS NULL",
+             WHERE loom_id = ?1 AND archived_at IS NULL AND is_deleted = 0",
         )
         .bind(loom_id)
         .bind(&update.title)
@@ -155,11 +158,75 @@ impl LoomRepository {
     }
 
     pub async fn list_looms(&self) -> Result<Vec<LoomRecord>, ServiceError> {
-        sqlx::query("SELECT * FROM looms WHERE archived_at IS NULL ORDER BY created_at DESC")
-            .fetch_all(&self.pool)
-            .await
-            .map(|rows| rows.into_iter().map(loom_from_row).collect())
-            .map_err(|error| ServiceError::storage(format!("failed to list Looms: {error}")))
+        sqlx::query(
+            "SELECT * FROM looms
+             WHERE archived_at IS NULL AND is_deleted = 0
+             ORDER BY created_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(loom_from_row).collect())
+        .map_err(|error| ServiceError::storage(format!("failed to list Looms: {error}")))
+    }
+
+    pub async fn soft_delete_loom_tree(
+        &self,
+        loom_id: &str,
+        deleted_reason: &str,
+        deleted_at: &str,
+    ) -> Result<Vec<String>, ServiceError> {
+        let rows = sqlx::query(
+            "WITH RECURSIVE target_looms(loom_id) AS (
+                 SELECT loom_id FROM looms WHERE loom_id = ?1
+                 UNION
+                 SELECT child.loom_id
+                   FROM looms child
+                   JOIN target_looms target ON child.origin_loom_id = target.loom_id
+             )
+             SELECT loom_id
+               FROM looms
+              WHERE loom_id IN (SELECT loom_id FROM target_looms)
+                AND is_deleted = 0",
+        )
+        .bind(loom_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to inspect Loom delete targets: {error}"))
+        })?;
+
+        let deleted_loom_ids = rows
+            .into_iter()
+            .map(|row| row.get::<String, _>("loom_id"))
+            .collect::<Vec<_>>();
+        if deleted_loom_ids.is_empty() {
+            return Ok(deleted_loom_ids);
+        }
+
+        sqlx::query(
+            "WITH RECURSIVE target_looms(loom_id) AS (
+                 SELECT loom_id FROM looms WHERE loom_id = ?1
+                 UNION
+                 SELECT child.loom_id
+                   FROM looms child
+                   JOIN target_looms target ON child.origin_loom_id = target.loom_id
+             )
+             UPDATE looms
+                SET is_deleted = 1,
+                    deleted_at = ?2,
+                    deleted_reason = ?3,
+                    updated_at = ?2
+              WHERE loom_id IN (SELECT loom_id FROM target_looms)
+                AND is_deleted = 0",
+        )
+        .bind(loom_id)
+        .bind(deleted_at)
+        .bind(deleted_reason)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| ServiceError::storage(format!("failed to delete Loom: {error}")))?;
+
+        Ok(deleted_loom_ids)
     }
 
     pub async fn list_child_wefts_by_origin_loom(
@@ -171,6 +238,7 @@ impl LoomRepository {
              WHERE kind = 'weft'
                AND origin_loom_id = ?1
                AND archived_at IS NULL
+               AND is_deleted = 0
              ORDER BY created_at ASC, loom_id ASC",
         )
         .bind(origin_loom_id)
@@ -193,6 +261,7 @@ impl LoomRepository {
                AND origin_loom_id = ?1
                AND origin_response_id = ?2
                AND archived_at IS NULL
+               AND is_deleted = 0
              ORDER BY created_at ASC, loom_id ASC
              LIMIT 1",
         )
@@ -213,6 +282,7 @@ impl LoomRepository {
              WHERE kind = 'weft'
                AND origin_response_id = ?1
                AND archived_at IS NULL
+               AND is_deleted = 0
              ORDER BY created_at ASC, loom_id ASC",
         )
         .bind(origin_response_id)
@@ -238,6 +308,9 @@ fn loom_from_row(row: sqlx::sqlite::SqliteRow) -> LoomRecord {
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         archived_at: row.get("archived_at"),
+        is_deleted: row.get::<i64, _>("is_deleted") != 0,
+        deleted_at: row.get("deleted_at"),
+        deleted_reason: row.get("deleted_reason"),
         metadata_json: row.get("metadata_json"),
     }
 }
@@ -395,5 +468,63 @@ mod tests {
             .await
             .expect("list by Response");
         assert_eq!(by_response.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn soft_delete_loom_tree_hides_loom_and_descendant_wefts() {
+        let database = test_database().await;
+        let repository = LoomRepository::new(&database);
+        repository
+            .insert_loom(&NewLoom {
+                loom_id: "loom-1".to_string(),
+                title: "Origin".to_string(),
+                summary: None,
+                code: None,
+                canonical_uri: None,
+                kind: "loom".to_string(),
+                origin_loom_id: None,
+                origin_response_id: None,
+                created_at: "2026-05-08T00:00:00Z".to_string(),
+                updated_at: "2026-05-08T00:00:00Z".to_string(),
+                metadata_json: None,
+            })
+            .await
+            .expect("insert Loom");
+        repository
+            .insert_loom(&NewLoom {
+                loom_id: "weft-1".to_string(),
+                title: "Child Weft".to_string(),
+                summary: None,
+                code: None,
+                canonical_uri: None,
+                kind: "weft".to_string(),
+                origin_loom_id: Some("loom-1".to_string()),
+                origin_response_id: Some("response-1".to_string()),
+                created_at: "2026-05-08T00:00:01Z".to_string(),
+                updated_at: "2026-05-08T00:00:01Z".to_string(),
+                metadata_json: None,
+            })
+            .await
+            .expect("insert Weft");
+
+        let deleted = repository
+            .soft_delete_loom_tree("loom-1", "permanent_delete", "2026-05-08T00:00:02Z")
+            .await
+            .expect("soft-delete Loom");
+        assert_eq!(deleted.len(), 2);
+
+        let looms = repository.list_looms().await.expect("list Looms");
+        assert!(looms.is_empty());
+        let wefts = repository
+            .list_child_wefts_by_origin_loom("loom-1")
+            .await
+            .expect("list Wefts");
+        assert!(wefts.is_empty());
+        let tombstone = repository
+            .get_loom("loom-1")
+            .await
+            .expect("get tombstone")
+            .expect("tombstone exists");
+        assert!(tombstone.is_deleted);
     }
 }

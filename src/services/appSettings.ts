@@ -42,6 +42,7 @@ export interface AppSettings {
   startup: StartupSettings;
   accessibility: AccessibilitySettings;
   showGenerationDebug: boolean;
+  mockDataEnabled: boolean;
   hasSeenFirstBookmarkFeedback: boolean;
   growthEventCount: number;
   shownGrowthMilestones: number[];
@@ -74,10 +75,27 @@ export const defaultAppSettings: AppSettings = {
     keyboardNavigationHints: false,
   },
   showGenerationDebug: true,
+  mockDataEnabled: false,
   hasSeenFirstBookmarkFeedback: false,
   growthEventCount: 0,
   shownGrowthMilestones: [],
 };
+
+function viteEnv() {
+  return (import.meta as ImportMeta & {
+    env?: {
+      VITE_ENABLE_MOCK_DATA?: string;
+    };
+  }).env;
+}
+
+export function isMockDataForced() {
+  return viteEnv()?.VITE_ENABLE_MOCK_DATA === "true";
+}
+
+export function isMockDataEnabled(settings: Pick<AppSettings, "mockDataEnabled">) {
+  return isMockDataForced() || Boolean(settings.mockDataEnabled);
+}
 
 function normalizeReferenceDisplayMode(value: unknown): ReferenceDisplayMode {
   return value === "code" ? "code" : "title";
@@ -175,6 +193,10 @@ export function readAppSettings(): AppSettings {
     accessibility: normalizeAccessibilitySettings(stored.accessibility),
     showGenerationDebug:
       stored.showGenerationDebug === undefined ? true : Boolean(stored.showGenerationDebug),
+    mockDataEnabled:
+      stored.mockDataEnabled === undefined
+        ? defaultAppSettings.mockDataEnabled
+        : Boolean(stored.mockDataEnabled),
     hasSeenFirstBookmarkFeedback: Boolean(stored.hasSeenFirstBookmarkFeedback),
     growthEventCount:
       typeof stored.growthEventCount === "number" && Number.isFinite(stored.growthEventCount)
@@ -201,6 +223,7 @@ export function writeAppSettings(settings: AppSettings) {
     startup: normalizeStartupSettings(settings.startup),
     accessibility: normalizeAccessibilitySettings(settings.accessibility),
     showGenerationDebug: Boolean(settings.showGenerationDebug),
+    mockDataEnabled: Boolean(settings.mockDataEnabled),
     hasSeenFirstBookmarkFeedback: Boolean(settings.hasSeenFirstBookmarkFeedback),
     growthEventCount: Math.max(0, Math.floor(settings.growthEventCount)),
     shownGrowthMilestones: settings.shownGrowthMilestones.filter(

@@ -42,6 +42,31 @@ test.describe("[pure-ui-rendering] Settings information architecture", () => {
     await expect(page.getByRole("button", { name: "Refresh service status" }).first()).toBeVisible();
   });
 
+  test("[pure-ui-rendering] shows local speech-to-text configuration guidance", async ({
+    page,
+  }) => {
+    await openApp(page);
+    await openSettings(page);
+
+    await page.getByRole("button", { name: /Capability/ }).click();
+    await expect(page.getByRole("heading", { name: "Local transcription provider" })).toBeVisible();
+    await expect(page.getByText("Local speech-to-text provider is not configured.")).toBeVisible();
+    await expect(page.getByText("Choose a local transcription command")).toBeVisible();
+    await expect(page.getByLabel("Local command path")).toBeVisible();
+    await expect(page.getByLabel("Command arguments")).toBeVisible();
+    await expect(page.getByLabel("Command timeout")).toBeVisible();
+    await expect(page.getByRole("combobox", { name: "Output mode" })).toBeVisible();
+    await expect(page.getByLabel("Transcript file extension")).toBeVisible();
+    await expect(page.getByLabel("Temporary audio directory")).toBeVisible();
+    await expect(page.getByText("whisper.cpp example")).toBeVisible();
+    await expect(page.getByText("Arguments, one per line: -m /path/to/ggml-base.en.bin")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Check Provider" })).toBeVisible();
+    await expect(page.getByText("Cloud STT is not enabled.")).toBeVisible();
+    await expect(page.getByText("Raw audio is not persisted by default.")).toBeVisible();
+    await expect(page.getByText("Transcripts are not persisted separately by default.")).toBeVisible();
+    await expect(page.getByText("mock_test")).toHaveCount(0);
+  });
+
   test("[pure-ui-rendering] shows provider, privacy, and deferred sections without active secret inputs", async ({
     page,
   }) => {

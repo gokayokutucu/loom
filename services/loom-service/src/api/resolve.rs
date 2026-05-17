@@ -142,7 +142,7 @@ async fn resolve_loom_record(
         return Ok(missing_target_response(record));
     };
 
-    if loom.archived_at.is_some() {
+    if loom.archived_at.is_some() || loom.is_deleted {
         return Ok(deleted_target_response(record));
     }
 
@@ -173,14 +173,20 @@ async fn resolve_response_record(
     else {
         return Ok(missing_target_response(record));
     };
+    if ResponseRepository::new(database)
+        .is_response_deleted(&response.response_id)
+        .await?
+    {
+        return Ok(deleted_target_response(record));
+    }
 
     let loom = LoomRepository::new(database)
         .get_loom(&response.loom_id)
         .await?;
     if loom
         .as_ref()
-        .and_then(|loom| loom.archived_at.as_ref())
-        .is_some()
+        .map(|loom| loom.archived_at.is_some() || loom.is_deleted)
+        .unwrap_or(false)
     {
         return Ok(deleted_target_response(record));
     }

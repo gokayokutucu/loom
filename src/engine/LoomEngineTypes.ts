@@ -1,6 +1,7 @@
 import type {
   BookmarkItem,
   Conversation,
+  HistoryEntry,
   LoomForkRecord,
   LoomGraphRepository,
   LoomLink,
@@ -58,6 +59,82 @@ export interface ServiceConfigStatus {
   lastCheckedAt?: string;
 }
 
+export type SpeechToTextProviderKind =
+  | "disabled"
+  | "mock_test"
+  | "local_command"
+  | "openai"
+  | "azure_openai";
+
+export type LocalCommandOutputMode = "stdout" | "file";
+
+export interface SpeechToTextRuntimeConfig {
+  enabled: boolean;
+  defaultProviderKind: SpeechToTextProviderKind;
+  allowCloudStt: boolean;
+  persistAudio: boolean;
+  persistTranscript: boolean;
+  maxAudioBytes: number;
+  allowedMimeTypes: string[];
+  defaultLanguage?: string | null;
+  providerProfileId?: string | null;
+  localCommandPath?: string | null;
+  localCommandArgs: string[];
+  localCommandTimeoutMs: number;
+  localTempDir?: string | null;
+  localCommandOutputMode: LocalCommandOutputMode;
+  localCommandTranscriptFileExtension: string;
+  warnings: string[];
+}
+
+export interface SpeechProviderHealth {
+  status:
+    | "configured"
+    | "missing_command"
+    | "command_not_found"
+    | "command_not_executable"
+    | "invalid_args"
+    | "temp_dir_unavailable"
+    | "provider_unavailable"
+    | "unavailable";
+  providerKind: string;
+  message: string;
+  checks: string[];
+}
+
+export interface LoomServiceRuntimeConfig {
+  speech: SpeechToTextRuntimeConfig;
+  database?: { path?: string };
+}
+
+export interface UpdateSpeechToTextConfigInput {
+  enabled?: boolean;
+  defaultProviderKind?: SpeechToTextProviderKind;
+  localCommandPath?: string | null;
+  localCommandArgs?: string[];
+  localCommandTimeoutMs?: number;
+  localTempDir?: string | null;
+  localCommandOutputMode?: LocalCommandOutputMode;
+  localCommandTranscriptFileExtension?: string;
+}
+
+export interface UpdateServiceConfigInput {
+  speech?: UpdateSpeechToTextConfigInput;
+}
+
+export interface ServiceConfigUpdateResult {
+  config: LoomServiceRuntimeConfig;
+  restartClassification?: {
+    restartRequired?: boolean;
+    reason?: string | null;
+    changedPaths?: string[];
+  };
+  restartStatus?: {
+    restartRequired?: boolean;
+    pendingRestart?: boolean;
+  };
+}
+
 export interface CapabilitySummary {
   status: "ready" | "unavailable" | "unknown";
   system?: {
@@ -84,9 +161,11 @@ export interface LoomSummary {
   summary?: string;
   canonicalUri?: string;
   code?: string;
+  displayCode?: string;
   kind?: "loom" | "weft";
   originLoomId?: string;
   originResponseId?: string;
+  weftKind?: "exploration" | "revision";
   createdAt?: string;
   updatedAt?: string;
   metadata?: JsonValue;
@@ -94,6 +173,14 @@ export interface LoomSummary {
 
 export interface LoomDetail extends LoomSummary {
   responses: ResponseItem[];
+}
+
+export interface ListHistoryResult {
+  history: HistoryEntry[];
+}
+
+export interface RecordHistoryInput {
+  entry: HistoryEntry;
 }
 
 export interface CreateLoomInput {
@@ -125,6 +212,10 @@ export interface UpdateLoomInput {
   canonicalUri?: string;
   code?: string;
   metadata?: JsonValue;
+}
+
+export interface DeleteLoomInput {
+  loomId: string;
 }
 
 export interface UpdateResponseInput {
@@ -220,6 +311,7 @@ export type QuickAskIntent =
 export interface QuickAskTurn {
   question: string;
   answer: string;
+  title?: string;
 }
 
 export interface QuickAskSourceContext {
@@ -264,6 +356,7 @@ export interface QuickAskInput {
 
 export interface QuickAskResult {
   answer: string;
+  title?: string;
   model?: string;
   warnings: string[];
   focusSubject?: string;
@@ -271,6 +364,28 @@ export interface QuickAskResult {
   resolvedIntent?: string;
   requestedTopic?: string;
   diagnostics?: JsonValue;
+}
+
+export interface TranscribeSpeechInput {
+  audioBytes: number[];
+  mimeType: string;
+  language?: string;
+  providerProfileId?: string;
+  mode: "preview";
+  metadata?: JsonValue;
+  signal?: AbortSignal;
+}
+
+export interface TranscribeSpeechResult {
+  transcript: string;
+  language?: string;
+  confidence?: number;
+  provider: string;
+  warnings: string[];
+  retention: {
+    audioPersisted: boolean;
+    transcriptPersisted: boolean;
+  };
 }
 
 export type EngineResponseEvent =
@@ -306,12 +421,13 @@ export type EngineResponseEvent =
 
 export interface CreateOrOpenWeftInput {
   originLoomId: string;
-  originResponseId: string;
+  originResponseId?: string;
+  weftKind?: "exploration" | "revision";
   title?: string;
   summary?: string;
   reuseExisting?: boolean;
   source?: "response_action" | "quick_ask_convert" | "graph_node" | "reference";
-  seedMode?: "none" | "origin_qa_pair" | "quick_ask_turns";
+  seedMode?: "none" | "origin_qa_pair" | "quick_ask_turns" | "revision_lineage";
   createOriginContextSnapshot?: boolean;
   metadata?: JsonValue;
 }
@@ -340,6 +456,7 @@ export interface PersistWeftTurnInput {
   id?: string;
   question: string;
   answer: string;
+  title?: string;
   createdAt?: string;
   metadata?: JsonValue;
 }
@@ -359,6 +476,7 @@ export interface PersistedWeftTurn {
   assistantResponseId: string;
   question: string;
   answer: string;
+  title?: string;
   sequenceIndex: number;
 }
 
@@ -509,6 +627,7 @@ export interface TypeScriptLocalLoomEngineDependencies {
   createOrOpenWeft?: (input: CreateOrOpenWeftInput) => Promise<CreateOrOpenWeftResult>;
   persistWeftTurns?: (input: PersistWeftTurnsInput) => Promise<PersistWeftTurnsResult>;
   updateResponse?: (input: UpdateResponseInput) => Promise<UpdateResponseResult>;
+  deleteLoom?: (input: DeleteLoomInput) => Promise<void>;
   addReference?: (input: AddReferenceInput) => Promise<AddReferenceResult>;
   removeReference?: (input: RemoveReferenceInput) => Promise<void>;
   getReference?: (input: GetReferenceInput) => Promise<AddReferenceResult>;
@@ -518,6 +637,8 @@ export interface TypeScriptLocalLoomEngineDependencies {
   deleteBookmark?: (input: DeleteBookmarkInput) => Promise<void>;
   getBookmark?: (input: GetBookmarkInput) => Promise<BookmarkResult>;
   listBookmarks?: () => Promise<ListBookmarksResult>;
+  listHistory?: () => Promise<ListHistoryResult>;
+  recordHistory?: (input: RecordHistoryInput) => Promise<HistoryEntry>;
   getBookmarkForTarget?: (input: GetBookmarkForTargetInput) => Promise<BookmarkResult>;
   bookmarkResponse?: (input: BookmarkResponseInput) => Promise<BookmarkResult>;
   exportLoom?: (input: ExportLoomInput) => Promise<ExportLoomResult>;

@@ -2,6 +2,7 @@ mod api;
 mod capabilities;
 mod config;
 mod context;
+mod display_code;
 mod domain;
 mod error;
 mod events;

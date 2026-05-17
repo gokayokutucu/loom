@@ -337,14 +337,18 @@ impl ResponseRepository {
         &self,
         loom_id: &str,
     ) -> Result<Vec<ResponseRecord>, ServiceError> {
-        sqlx::query("SELECT * FROM responses WHERE loom_id = ?1 ORDER BY sequence_index ASC")
-            .bind(loom_id)
-            .fetch_all(&self.pool)
-            .await
-            .map(|rows| rows.into_iter().map(response_from_row).collect())
-            .map_err(|error| {
-                ServiceError::storage(format!("failed to list Responses for Loom: {error}"))
-            })
+        sqlx::query(
+            "SELECT * FROM responses
+             WHERE loom_id = ?1 AND is_deleted = 0
+             ORDER BY sequence_index ASC",
+        )
+        .bind(loom_id)
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(response_from_row).collect())
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to list Responses for Loom: {error}"))
+        })
     }
 
     pub async fn get_response(
@@ -368,6 +372,7 @@ impl ResponseRepository {
             "SELECT * FROM responses
              WHERE loom_id = ?1
                AND role = 'assistant'
+               AND is_deleted = 0
                AND sequence_index > ?2
              ORDER BY sequence_index ASC
              LIMIT 1",
@@ -382,6 +387,76 @@ impl ResponseRepository {
                 "failed to get downstream assistant Response: {error}"
             ))
         })
+    }
+
+    pub async fn is_response_deleted(&self, response_id: &str) -> Result<bool, ServiceError> {
+        sqlx::query("SELECT is_deleted FROM responses WHERE response_id = ?1 LIMIT 1")
+            .bind(response_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map(|row| {
+                row.map(|row| row.get::<i64, _>("is_deleted") != 0)
+                    .unwrap_or(false)
+            })
+            .map_err(|error| {
+                ServiceError::storage(format!(
+                    "failed to inspect Response deletion state: {error}"
+                ))
+            })
+    }
+
+    pub async fn soft_delete_responses_after(
+        &self,
+        loom_id: &str,
+        sequence_index: i64,
+        reason: &str,
+        deleted_by_response_id: &str,
+    ) -> Result<Vec<ResponseRecord>, ServiceError> {
+        let deleted_at = timestamp();
+        let rows = sqlx::query(
+            "SELECT * FROM responses
+             WHERE loom_id = ?1
+               AND sequence_index > ?2
+               AND is_deleted = 0
+             ORDER BY sequence_index ASC",
+        )
+        .bind(loom_id)
+        .bind(sequence_index)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to list downstream Responses: {error}"))
+        })?;
+        let deleted = rows.into_iter().map(response_from_row).collect::<Vec<_>>();
+        if deleted.is_empty() {
+            return Ok(deleted);
+        }
+
+        sqlx::query(
+            "UPDATE responses
+             SET is_deleted = 1,
+                 deleted_at = ?3,
+                 deleted_reason = ?4,
+                 deleted_by_response_id = ?5,
+                 updated_at = ?3
+             WHERE loom_id = ?1
+               AND sequence_index > ?2
+               AND is_deleted = 0",
+        )
+        .bind(loom_id)
+        .bind(sequence_index)
+        .bind(deleted_at)
+        .bind(reason)
+        .bind(deleted_by_response_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!(
+                "failed to soft-delete downstream Responses: {error}"
+            ))
+        })?;
+
+        Ok(deleted)
     }
 
     pub async fn insert_response_pairs_if_missing_at_next_sequence(

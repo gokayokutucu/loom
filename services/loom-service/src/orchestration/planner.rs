@@ -62,14 +62,15 @@ impl DeterministicPlanner {
             _ => ContextStrategy::RecentTurns,
         };
 
-        let response_mode = if simple_factual {
-            ResponseMode::Instant
-        } else {
-            input.selected_response_mode.clone()
-        };
+        let response_mode =
+            if simple_factual && matches!(input.selected_response_mode, ResponseMode::Auto) {
+                ResponseMode::Instant
+            } else {
+                input.selected_response_mode.clone()
+            };
         let use_thinking = match input.selected_response_mode {
             ResponseMode::Instant => false,
-            ResponseMode::Thinking => !simple_factual && complexity >= EstimatedComplexity::Medium,
+            ResponseMode::Thinking => true,
             ResponseMode::Auto => false,
         };
 
@@ -498,7 +499,7 @@ mod tests {
     }
 
     #[test]
-    fn thinking_mode_blocks_simple_but_allows_complex() {
+    fn thinking_mode_enables_thinking_for_simple_and_complex() {
         let simple = DeterministicPlanner::plan(PlannerInput {
             clean_user_prompt: "nedir".to_string(),
             selected_response_mode: ResponseMode::Thinking,
@@ -511,8 +512,10 @@ mod tests {
             ..PlannerInput::default()
         });
 
-        assert!(!simple.use_thinking);
+        assert!(simple.use_thinking);
+        assert_eq!(simple.response_mode, ResponseMode::Thinking);
         assert!(complex.use_thinking);
+        assert_eq!(complex.response_mode, ResponseMode::Thinking);
         assert_eq!(complex.estimated_complexity, EstimatedComplexity::High);
     }
 

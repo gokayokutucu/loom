@@ -12,6 +12,7 @@ import type {
   CreateLoomResult,
   CreateOrOpenWeftInput,
   CreateOrOpenWeftResult,
+  DeleteLoomInput,
   EngineHealth,
   EngineResponseEvent,
   ExportLoomInput,
@@ -28,6 +29,7 @@ import type {
   LoomSummary,
   OpenReferenceInput,
   ListBookmarksResult,
+  ListHistoryResult,
   ListReferencesInput,
   ListReferencesResult,
   PersistedWeftTurn,
@@ -36,16 +38,25 @@ import type {
   QuickAskInput,
   QuickAskResult,
   RegenerateFromResponseInput,
+  RecordHistoryInput,
   RemoveReferenceInput,
   RenameLoomInput,
   ResolveAddressInput,
   ResolveAddressResult,
   RustHttpLoomEngineClientOptions,
+  LoomServiceRuntimeConfig,
+  ServiceConfigUpdateResult,
   ServiceConfigStatus,
   ServiceHealthStatus,
   SendMessageInput,
+  SpeechProviderHealth,
+  SpeechToTextProviderKind,
+  SpeechToTextRuntimeConfig,
   SuggestReferencesInput,
   SuggestReferencesResult,
+  TranscribeSpeechInput,
+  TranscribeSpeechResult,
+  UpdateServiceConfigInput,
   UpdateLoomInput,
   UpdateResponseInput,
   UpdateResponseResult,
@@ -53,11 +64,13 @@ import type {
 } from "./LoomEngineTypes";
 import type {
   BookmarkItem,
+  HistoryEntry,
   LoomNavigationDestination,
   LoomLink,
   LoomObjectKind,
   LoomObjectStatus,
   LoomResolutionStatus,
+  ResponseItem,
 } from "../types";
 import { parseLoomAddress } from "../services/loomProtocol";
 import {
@@ -327,6 +340,19 @@ function serviceGraphNodeId(node: Record<string, unknown>, activeLoomId: string 
   return loomGraphRootNodeId(loomId || activeLoomId || "");
 }
 
+function serviceGraphNodeIsBookmarked(
+  node: Record<string, unknown>,
+  input: GraphProjectionInput
+) {
+  const metadata = isRecord(node.metadata) ? node.metadata : {};
+  const bookmark = isRecord(metadata.bookmark) ? metadata.bookmark : undefined;
+  if (bookmark?.bookmarked === true) return true;
+
+  const bookmarkedAddresses = new Set(input.bookmarkedResponseAddresses ?? []);
+  const canonicalUri = graphString(node.canonicalUri);
+  return Boolean(canonicalUri && bookmarkedAddresses.has(canonicalUri));
+}
+
 function mapServiceGraphProjection(
   value: unknown,
   input: GraphProjectionInput
@@ -368,11 +394,13 @@ function mapServiceGraphProjection(
       responseId,
       title,
       code: graphString(rawNode.code),
+      displayCode: graphString(rawNode.displayCode),
       summary: graphString(rawNode.preview),
       contentPreview: graphString(rawNode.preview),
       fullContent: graphString(rawNode.preview),
       canonicalUri: graphString(rawNode.canonicalUri),
       isAddressable: Boolean(graphString(rawNode.canonicalUri)),
+      isBookmarked: serviceGraphNodeIsBookmarked(rawNode, input),
       isFocused,
       isExpanded: input.expandedNodeIds?.includes(nodeId),
       depth,
@@ -479,6 +507,11 @@ function loomKind(value: unknown): "loom" | "weft" | undefined {
   return value === "loom" || value === "weft" ? value : undefined;
 }
 
+function weftKindFromMetadata(metadata: unknown): "exploration" | "revision" | undefined {
+  if (!isRecord(metadata)) return undefined;
+  return metadata.weftKind === "revision" ? "revision" : metadata.weftKind === "exploration" ? "exploration" : undefined;
+}
+
 function validateLoomSummary(value: unknown, endpoint: string): LoomSummary {
   if (!isRecord(value)) {
     throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Loom.", {
@@ -492,18 +525,21 @@ function validateLoomSummary(value: unknown, endpoint: string): LoomSummary {
       endpoint,
     });
   }
+  const metadata = value.metadata as JsonValue | undefined;
   return {
     loomId,
     title,
     summary: stringValue(value, "summary"),
     canonicalUri: stringValue(value, "canonicalUri"),
     code: stringValue(value, "code"),
+    displayCode: stringValue(value, "displayCode"),
     kind: loomKind(value.kind),
     originLoomId: stringValue(value, "originLoomId"),
     originResponseId: stringValue(value, "originResponseId"),
+    weftKind: weftKindFromMetadata(metadata),
     createdAt: stringValue(value, "createdAt"),
     updatedAt: stringValue(value, "updatedAt"),
-    metadata: value.metadata as JsonValue | undefined,
+    metadata,
   };
 }
 
@@ -514,6 +550,142 @@ function validateLoomEnvelope(value: unknown, endpoint: string): CreateLoomResul
     });
   }
   return { loom: validateLoomSummary(value.loom, endpoint) };
+}
+
+interface ServiceResponseRow {
+  responseId: string;
+  role: "user" | "assistant";
+  content: string;
+  title?: string;
+  canonicalUri?: string;
+  code?: string;
+  displayCode?: string;
+  createdAt?: string;
+  sequenceIndex: number;
+  metadata?: JsonValue;
+}
+
+function validateServiceResponseRow(value: unknown, endpoint: string): ServiceResponseRow {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Response row.", {
+      endpoint,
+    });
+  }
+  const responseId = stringValue(value, "responseId");
+  const role = stringValue(value, "role");
+  const content = stringValue(value, "content");
+  if (!responseId || (role !== "user" && role !== "assistant") || content === undefined) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Response row.", {
+      endpoint,
+    });
+  }
+  return {
+    responseId,
+    role,
+    content,
+    title: stringValue(value, "title"),
+    canonicalUri: stringValue(value, "canonicalUri"),
+    code: stringValue(value, "code"),
+    displayCode: stringValue(value, "displayCode"),
+    createdAt: stringValue(value, "createdAt"),
+    sequenceIndex: numberValue(value, "sequenceIndex") ?? 0,
+    metadata: value.metadata as JsonValue | undefined,
+  };
+}
+
+function splitPersistedAnswer(content: string) {
+  const parts = content
+    .split(/\n{2,}/)
+    .map((part) => part.trim())
+    .filter(Boolean);
+  return parts.length ? parts : content.trim() ? [content.trim()] : [];
+}
+
+function isGenericQuickAskTitle(title?: string) {
+  return /^Ask(?: answer)? \d+$/i.test(title?.trim() ?? "");
+}
+
+function fallbackVisibleTitle(question: string, answer: string) {
+  const source = answer.trim() || question.trim();
+  const firstSentence = source.split(/(?<=[.!?])\s+/)[0] ?? source;
+  const normalized = firstSentence.replace(/\s+/g, " ").trim();
+  return normalized.slice(0, 72) || "Response";
+}
+
+function rowVisibleTitle(row: ServiceResponseRow, question: string) {
+  const title = row.title?.trim();
+  if (title && !isGenericQuickAskTitle(title)) return title;
+  return fallbackVisibleTitle(question, row.content);
+}
+
+function responseMetaFromRow(row: ServiceResponseRow, fallbackTitle: string) {
+  if (!row.displayCode && !row.code && !row.canonicalUri && !row.metadata) return undefined;
+  const metadata = isRecord(row.metadata) ? row.metadata : {};
+  return {
+    id: row.responseId,
+    title: row.title && !isGenericQuickAskTitle(row.title) ? row.title : fallbackTitle,
+    summary:
+      typeof metadata.summary === "string"
+        ? metadata.summary
+        : row.content.slice(0, 160),
+    keywords: Array.isArray(metadata.keywords)
+      ? metadata.keywords.filter((keyword): keyword is string => typeof keyword === "string")
+      : [],
+    usageCount: typeof metadata.usageCount === "number" ? metadata.usageCount : 0,
+    status: row.canonicalUri ? "addressable" as const : "draft" as const,
+    code: row.code,
+    displayCode: row.displayCode,
+    canonicalUri: row.canonicalUri,
+  };
+}
+
+function buildResponseItemsFromRows(rows: ServiceResponseRow[]): ResponseItem[] {
+  const responses = [...rows].sort((a, b) => a.sequenceIndex - b.sequenceIndex);
+  const items: ResponseItem[] = [];
+  let pendingUser: ServiceResponseRow | null = null;
+  for (const row of responses) {
+    if (row.role === "user") {
+      pendingUser = row;
+      continue;
+    }
+    const question = pendingUser?.content.trim() || row.title || "Question";
+    const title = rowVisibleTitle(row, question);
+    items.push({
+      id: row.responseId,
+      title,
+      address: row.canonicalUri ?? "",
+      question,
+      answer: splitPersistedAnswer(row.content),
+      finalContent: row.content,
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+      createdAt: row.createdAt,
+      serviceUserResponseId: pendingUser?.responseId,
+      meta: responseMetaFromRow(row, title),
+    });
+    pendingUser = null;
+  }
+  if (pendingUser) {
+    const question = pendingUser.content.trim();
+    const title =
+      pendingUser.title && !isGenericQuickAskTitle(pendingUser.title)
+        ? pendingUser.title
+        : question.slice(0, 72) || "Question";
+    items.push({
+      id: pendingUser.responseId,
+      title,
+      address: pendingUser.canonicalUri ?? "",
+      question,
+      answer: [],
+      finalContent: "",
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+      createdAt: pendingUser.createdAt,
+      serviceUserResponseId: pendingUser.responseId,
+      meta: responseMetaFromRow(pendingUser, title),
+    });
+  }
+  return items;
 }
 
 function validateWeftEnvelope(
@@ -585,19 +757,9 @@ function validateLoomDetail(value: unknown, endpoint: string): LoomDetail {
   const responses = Array.isArray(value.loom.responses) ? value.loom.responses : [];
   return {
     ...summary,
-    responses: responses
-      .filter(isRecord)
-      .map((response) => ({
-        id: stringValue(response, "responseId") ?? "",
-        title: stringValue(response, "title") ?? stringValue(response, "responseId") ?? "Response",
-        address: stringValue(response, "canonicalUri") ?? "",
-        question: stringValue(response, "role") ?? "",
-        answer: [],
-        suggestedLinks: [],
-        bookmarkedLinks: [],
-        createdAt: stringValue(response, "createdAt") ?? "",
-      }))
-      .filter((response) => response.id),
+    responses: buildResponseItemsFromRows(
+      responses.map((response) => validateServiceResponseRow(response, endpoint))
+    ),
   };
 }
 
@@ -620,6 +782,121 @@ function configStatusUnavailable(error: unknown): ServiceConfigStatus {
     status: "unavailable",
     lastCheckedAt: new Date().toISOString(),
     error: error instanceof Error ? error.message : "loom-service config is unavailable.",
+  };
+}
+
+function speechProviderKind(value: unknown): SpeechToTextProviderKind {
+  if (
+    value === "disabled" ||
+    value === "mock_test" ||
+    value === "local_command" ||
+    value === "openai" ||
+    value === "azure_openai"
+  ) {
+    return value;
+  }
+  return "disabled";
+}
+
+function nullableStringValue(record: Record<string, unknown>, key: string) {
+  const value = record[key];
+  if (value === null) return null;
+  return typeof value === "string" ? value : undefined;
+}
+
+function validateSpeechConfig(value: unknown): SpeechToTextRuntimeConfig {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid speech config.", {
+      endpoint: "/config",
+    });
+  }
+  return {
+    enabled: booleanValue(value, "enabled") ?? false,
+    defaultProviderKind: speechProviderKind(value.defaultProviderKind),
+    allowCloudStt: booleanValue(value, "allowCloudStt") ?? false,
+    persistAudio: booleanValue(value, "persistAudio") ?? false,
+    persistTranscript: booleanValue(value, "persistTranscript") ?? false,
+    maxAudioBytes: numberValue(value, "maxAudioBytes") ?? 0,
+    allowedMimeTypes: arrayOfStrings(value.allowedMimeTypes),
+    defaultLanguage: nullableStringValue(value, "defaultLanguage"),
+    providerProfileId: nullableStringValue(value, "providerProfileId"),
+    localCommandPath: nullableStringValue(value, "localCommandPath"),
+    localCommandArgs: arrayOfStrings(value.localCommandArgs),
+    localCommandTimeoutMs: numberValue(value, "localCommandTimeoutMs") ?? 0,
+    localTempDir: nullableStringValue(value, "localTempDir"),
+    localCommandOutputMode: value.localCommandOutputMode === "file" ? "file" : "stdout",
+    localCommandTranscriptFileExtension:
+      stringValue(value, "localCommandTranscriptFileExtension") ?? "txt",
+    warnings: arrayOfStrings(value.warnings),
+  };
+}
+
+function validateSpeechProviderHealth(value: unknown): SpeechProviderHealth {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid speech provider health.", {
+      endpoint: "/speech/provider/health",
+    });
+  }
+  const status = stringValue(value, "status") ?? "unavailable";
+  return {
+    status: (
+      [
+        "configured",
+        "missing_command",
+        "command_not_found",
+        "command_not_executable",
+        "invalid_args",
+        "temp_dir_unavailable",
+        "provider_unavailable",
+        "unavailable",
+      ] as const
+    ).includes(status as SpeechProviderHealth["status"])
+      ? (status as SpeechProviderHealth["status"])
+      : "unavailable",
+    providerKind: stringValue(value, "providerKind") ?? "unknown",
+    message: stringValue(value, "message") ?? "Speech-to-Text provider health is unavailable.",
+    checks: arrayOfStrings(value.checks),
+  };
+}
+
+function validateServiceConfig(value: unknown): LoomServiceRuntimeConfig {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid config.", {
+      endpoint: "/config",
+    });
+  }
+  const database = isRecord(value.database)
+    ? { path: stringValue(value.database, "path") }
+    : undefined;
+  return {
+    speech: validateSpeechConfig(value.speech),
+    database,
+  };
+}
+
+function validateConfigUpdateResult(value: unknown): ServiceConfigUpdateResult {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid config update result.", {
+      endpoint: "/config",
+    });
+  }
+  const restartClassification = isRecord(value.restartClassification)
+    ? {
+        restartRequired: booleanValue(value.restartClassification, "restartRequired"),
+        reason: nullableStringValue(value.restartClassification, "reason"),
+        changedPaths: arrayOfStrings(value.restartClassification.changedPaths),
+      }
+    : undefined;
+  const restartStatus = isRecord(value.restartStatus)
+    ? {
+        restartRequired: booleanValue(value.restartStatus, "restartRequired"),
+        pendingRestart: booleanValue(value.restartStatus, "pendingRestart"),
+      }
+    : undefined;
+  return {
+    config: validateServiceConfig(value.config),
+    restartClassification,
+    restartStatus,
   };
 }
 
@@ -740,6 +1017,7 @@ function createWeftPayload(input: CreateOrOpenWeftInput) {
   return {
     originLoomId: input.originLoomId,
     originResponseId: input.originResponseId,
+    weftKind: input.weftKind,
     title: input.title,
     summary: input.summary,
     reuseExisting: input.reuseExisting ?? true,
@@ -762,6 +1040,7 @@ function persistWeftTurnsPayload(input: PersistWeftTurnsInput) {
       id: turn.id,
       question: turn.question,
       answer: turn.answer,
+      title: turn.title,
       createdAt: turn.createdAt,
       metadata: sanitizeEnginePayload(turn.metadata),
     })),
@@ -842,7 +1121,7 @@ function validatePersistedWeftTurn(value: unknown, endpoint: string): PersistedW
       endpoint,
     });
   }
-  return { userResponseId, assistantResponseId, question, answer, sequenceIndex };
+  return { userResponseId, assistantResponseId, question, answer, title: stringValue(value, "title"), sequenceIndex };
 }
 
 function validatePersistWeftTurnsResponse(value: unknown, endpoint: string): PersistWeftTurnsResult {
@@ -879,6 +1158,7 @@ function validateQuickAskResponse(response: unknown): QuickAskResult {
   }
   const result: QuickAskResult = {
     answer,
+    title: stringValue(response, "title"),
     model: stringValue(response, "model"),
     warnings: Array.isArray(response.warnings)
       ? response.warnings.filter((warning): warning is string => typeof warning === "string")
@@ -892,6 +1172,51 @@ function validateQuickAskResponse(response: unknown): QuickAskResult {
     result.diagnostics = response.diagnostics as JsonValue;
   }
   return result;
+}
+
+function validateTranscribeSpeechResponse(
+  response: unknown,
+  endpoint: string
+): TranscribeSpeechResult {
+  if (!isRecord(response)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Speech-to-Text response.", {
+      endpoint,
+    });
+  }
+  const transcript = stringValue(response, "transcript");
+  const provider = stringValue(response, "provider");
+  const retention = isRecord(response.retention) ? response.retention : undefined;
+  const audioPersisted =
+    retention && typeof retention.audioPersisted === "boolean"
+      ? retention.audioPersisted
+      : undefined;
+  const transcriptPersisted =
+    retention && typeof retention.transcriptPersisted === "boolean"
+      ? retention.transcriptPersisted
+      : undefined;
+
+  if (
+    transcript === undefined ||
+    !provider ||
+    audioPersisted === undefined ||
+    transcriptPersisted === undefined
+  ) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an incomplete Speech-to-Text response.", {
+      endpoint,
+    });
+  }
+
+  return {
+    transcript,
+    language: stringValue(response, "language"),
+    confidence: typeof response.confidence === "number" ? response.confidence : undefined,
+    provider,
+    warnings: arrayOfStrings(response.warnings),
+    retention: {
+      audioPersisted,
+      transcriptPersisted,
+    },
+  };
 }
 
 function quickAskTransportDiagnostics(
@@ -1125,6 +1450,74 @@ function validateBookmarkList(value: unknown, endpoint: string): ListBookmarksRe
   return {
     bookmarks: value.bookmarks.map((bookmark) => validateServiceBookmark(bookmark, endpoint)),
   };
+}
+
+function loomLinkType(value: unknown): HistoryEntry["type"] {
+  if (
+    value === "conversation" ||
+    value === "response" ||
+    value === "recent" ||
+    value === "bookmark" ||
+    value === "fragment" ||
+    value === "loom"
+  ) {
+    return value;
+  }
+  return "conversation";
+}
+
+function validateServiceHistoryEntry(value: unknown, endpoint: string): HistoryEntry {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid History entry.", {
+      endpoint,
+    });
+  }
+  const id = stringValue(value, "id");
+  const title = stringValue(value, "title");
+  const path = stringValue(value, "path");
+  const visitedAt = stringValue(value, "visitedAt");
+  if (!id || !title || !path || !visitedAt) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid History entry.", {
+      endpoint,
+    });
+  }
+  return {
+    id,
+    type: loomLinkType(value.type),
+    title,
+    path,
+    badge: stringValue(value, "badge"),
+    targetObjectId: stringValue(value, "targetObjectId"),
+    canonicalUri: stringValue(value, "canonicalUri"),
+    referenceCode: stringValue(value, "referenceCode"),
+    visitedAt,
+    navigationDestination: validateNavigationDestination(value.navigationDestination)
+      ? value.navigationDestination
+      : undefined,
+    meta: isRecord(value.meta)
+      ? (sanitizeEnginePayload(value.meta) as unknown as HistoryEntry["meta"])
+      : undefined,
+  };
+}
+
+function validateHistoryList(value: unknown, endpoint: string): ListHistoryResult {
+  if (!isRecord(value) || !Array.isArray(value.history)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid History list.", {
+      endpoint,
+    });
+  }
+  return {
+    history: value.history.map((entry) => validateServiceHistoryEntry(entry, endpoint)),
+  };
+}
+
+function validateHistoryEnvelope(value: unknown, endpoint: string): HistoryEntry {
+  if (!isRecord(value) || !isRecord(value.entry)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid History response.", {
+      endpoint,
+    });
+  }
+  return validateServiceHistoryEntry(value.entry, endpoint);
 }
 
 function bookmarkPayload(input: CreateBookmarkInput) {
@@ -1484,6 +1877,24 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     }
   }
 
+  async getServiceConfig(): Promise<LoomServiceRuntimeConfig> {
+    const response = await this.requestJson<unknown>("/config");
+    return validateServiceConfig(response);
+  }
+
+  async updateServiceConfig(input: UpdateServiceConfigInput): Promise<ServiceConfigUpdateResult> {
+    const response = await this.requestJson<unknown>("/config", {
+      method: "PATCH",
+      body: JSON.stringify(input),
+    });
+    return validateConfigUpdateResult(response);
+  }
+
+  async getSpeechProviderHealth(): Promise<SpeechProviderHealth> {
+    const response = await this.requestJson<unknown>("/speech/provider/health");
+    return validateSpeechProviderHealth(response);
+  }
+
   async getCapabilitySummary(): Promise<CapabilitySummary> {
     try {
       const [system, models] = await Promise.all([
@@ -1623,6 +2034,11 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
       body: JSON.stringify(patch),
     });
     return validateLoomEnvelope(response, endpoint);
+  }
+
+  async deleteLoom(input: DeleteLoomInput): Promise<void> {
+    const endpoint = `/looms/${encodeURIComponent(input.loomId)}`;
+    await this.requestJson<unknown>(endpoint, { method: "DELETE" });
   }
 
   async *sendMessage(input: SendMessageInput): AsyncIterable<EngineResponseEvent> {
@@ -1938,6 +2354,23 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     }
   }
 
+  async transcribeSpeech(input: TranscribeSpeechInput): Promise<TranscribeSpeechResult> {
+    const response = await this.requestJson<unknown>("/speech/transcribe", {
+      method: "POST",
+      body: JSON.stringify({
+        audioBytes: input.audioBytes,
+        mimeType: input.mimeType,
+        language: input.language,
+        providerProfileId: input.providerProfileId,
+        mode: input.mode,
+        metadata: input.metadata,
+      }),
+      timeoutMs: 120_000,
+      signal: input.signal,
+    });
+    return validateTranscribeSpeechResponse(response, "/speech/transcribe");
+  }
+
   async createOrOpenWeft(input: CreateOrOpenWeftInput): Promise<CreateOrOpenWeftResult> {
     const response = await this.requestJson<unknown>("/wefts", {
       method: "POST",
@@ -2035,6 +2468,19 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     return validateBookmarkList(response, "/bookmarks");
   }
 
+  async listHistory(): Promise<ListHistoryResult> {
+    const response = await this.requestJson<unknown>("/history", { method: "GET" });
+    return validateHistoryList(response, "/history");
+  }
+
+  async recordHistory(input: RecordHistoryInput): Promise<HistoryEntry> {
+    const response = await this.requestJson<unknown>("/history", {
+      method: "POST",
+      body: JSON.stringify({ entry: sanitizeEnginePayload(input.entry) }),
+    });
+    return validateHistoryEnvelope(response, "/history");
+  }
+
   async getBookmarkForTarget(input: GetBookmarkForTargetInput): Promise<BookmarkResult> {
     const params = new URLSearchParams({ targetKind: input.targetKind });
     if (input.targetId) params.set("targetId", input.targetId);
@@ -2058,6 +2504,7 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     if (!loomId) throw unsupported("getGraphProjection");
     const params = new URLSearchParams();
     if (input.focusedResponseId) params.set("focusedResponseId", input.focusedResponseId);
+    params.set("includeBookmarks", "true");
     const query = params.toString();
     const path = `/looms/${encodeURIComponent(loomId)}/graph${query ? `?${query}` : ""}`;
     try {

@@ -168,6 +168,7 @@ export function AddressMetadataBadge({
   const triggerProps = {
     className,
     title,
+    "aria-label": ariaLabel,
     "data-testid": testId,
     tabIndex: showHint && as === "span" ? 0 : undefined,
     onMouseEnter: showHint ? schedulePopover : undefined,
@@ -203,7 +204,6 @@ export function AddressMetadataBadge({
             triggerRef.current = node;
           }}
           type="button"
-          aria-label={ariaLabel}
         >
           {children}
         </button>

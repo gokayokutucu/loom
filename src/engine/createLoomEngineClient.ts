@@ -2,6 +2,7 @@ import type { LoomEngineClient } from "./LoomEngineClient";
 import { RustHttpLoomEngineClient } from "./RustHttpLoomEngineClient";
 import { createTypeScriptLocalLoomEngine } from "./TypeScriptLocalLoomEngine";
 import type { CreateLoomEngineClientOptions, LoomEngineMode } from "./LoomEngineTypes";
+import { getElectronLoomServiceUrl } from "../electronRuntime";
 
 const defaultServiceUrl = "/__loom";
 
@@ -43,7 +44,7 @@ export function getConfiguredLoomEngineMode(): LoomEngineMode {
 }
 
 export function getConfiguredLoomServiceUrl() {
-  return viteEnv()?.VITE_LOOM_SERVICE_URL || defaultServiceUrl;
+  return viteEnv()?.VITE_LOOM_SERVICE_URL || getElectronLoomServiceUrl() || defaultServiceUrl;
 }
 
 export function getConfiguredServiceAddressStoreAuthoritative() {

@@ -20,6 +20,7 @@ export interface AskPopupState {
     id?: string;
     question: string;
     answer: string;
+    title?: string;
     createdAt?: number;
     capsuleSnapshot?: unknown;
     selectedText?: string;

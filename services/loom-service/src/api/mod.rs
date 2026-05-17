@@ -8,6 +8,7 @@ mod events;
 pub(crate) mod exports;
 pub(crate) mod graph;
 mod health;
+mod history;
 mod looms;
 mod ollama;
 mod orchestration;
@@ -62,9 +63,14 @@ pub fn router(
         .route("/dev/e2e-proof/:loom_id", get(dev::e2e_proof))
         .route("/ask/quick", post(ask::quick))
         .route("/speech/transcribe", post(speech::transcribe))
+        .route("/speech/provider/health", get(speech::provider_health))
         .route(
             "/bookmarks",
             get(bookmarks::list_bookmarks).post(bookmarks::create_bookmark),
+        )
+        .route(
+            "/history",
+            get(history::list_history).post(history::record_history),
         )
         .route("/bookmarks/target", get(bookmarks::get_bookmark_for_target))
         .route(
@@ -89,7 +95,9 @@ pub fn router(
         .route("/looms", get(looms::list_looms).post(looms::create_loom))
         .route(
             "/looms/:loom_id",
-            get(looms::get_loom).patch(looms::patch_loom),
+            get(looms::get_loom)
+                .patch(looms::patch_loom)
+                .delete(looms::delete_loom),
         )
         .route("/looms/:loom_id/wefts", get(wefts::list_wefts_for_loom))
         .route(
@@ -186,7 +194,7 @@ fn with_cors_headers(mut response: Response) -> Response {
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_METHODS,
-        HeaderValue::from_static("GET,POST,PATCH,OPTIONS"),
+        HeaderValue::from_static("GET,POST,PATCH,DELETE,OPTIONS"),
     );
     headers.insert(
         header::ACCESS_CONTROL_ALLOW_HEADERS,

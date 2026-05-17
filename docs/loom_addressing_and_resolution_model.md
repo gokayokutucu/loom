@@ -71,6 +71,32 @@ The Loom addressing system should satisfy all of the following:
 - **Projection safety**: addresses should identify objects first, not accidentally encode transient UI state.
 - **Promotion control**: not every temporary thing should automatically become a stable user-facing Loom object.
 
+## 3.1 Display Codes
+
+Canonical Loom, Weft, and Response IDs, persisted `code` values, canonical URIs, and resolver inputs are immutable identity/addressing data. They may remain long or implementation-shaped because their job is durable resolution, not compact display.
+
+User-visible badges should prefer additive `displayCode` values. A display code is a short stable label such as `L-P9Q3B`, `W-K7M2Q`, or `R-D8Z4X`. It is derived from canonical object identity for display and API payload convenience, but it is not the resolver authority.
+
+Rules:
+
+- `displayCode` is badge-friendly and may be shown in headers, Response badges, graph nodes, and split panels.
+- `displayCode` must not replace `loom_id`, `response_id`, persisted `code`, or `canonical_uri`.
+- Copy-address, navigation, and resolver behavior must continue to use canonical URI/path fields.
+- A display code may become an address alias only in a later explicit alias-mapping task.
+- Old payloads without `displayCode` may still use display-safe formatting as a fallback, but long timestamp-based IDs should not be the primary visible badge.
+
+## 3.2 Address Bar Omnibox
+
+The Address Bar is also a Loom omnibox. It has three explicit paths:
+
+- Real Loom addresses, including `loom://...`, keep resolver priority and navigate through the existing resolver.
+- Explicitly selected Loom or Weft suggestions navigate to that object. Suggestions are selected by click or by keyboard highlight plus Enter.
+- Free text with no selected suggestion starts a new Loom using that text as the initial prompt through the normal service-backed Main composer flow.
+
+Suggestion visibility alone must not imply selection. If a user types a prompt-like phrase and presses Enter without choosing a suggestion, Loom starts a new Loom prompt instead of navigating to the first visible match.
+
+Omnibox suggestions may show titles, object type, and short display codes. They must not use long canonical IDs or timestamp-shaped service codes as primary labels. Canonical URI and path fields remain the navigation and copy-address authority.
+
 ---
 
 ## 4. Addressing Layers
@@ -296,8 +322,9 @@ A Weft is addressable as a Loom.
 A Weft is:
 
 - an anchored exploration path
+- an edited revision path when `weftKind=revision`
 - a new Loom created from a specific Response
-- a Loom with `originLoomId` and `originResponseId`
+- a Loom with `originLoomId`, optional `originResponseId`, and persisted `weftKind`
 
 ### Rule
 
@@ -306,6 +333,8 @@ The stable object identity is the Weft Loom ID.
 ### Rule
 
 Origin linkage is metadata, not the address path.
+
+Revision Weft identity is still the Weft Loom ID. Prompt edit does not rewrite or alias the original Loom address; it creates a new addressable Weft Loom that points back to the original origin metadata.
 
 That means a Weft address should resolve the Loom object first, then apply any requested window/view projection.
 

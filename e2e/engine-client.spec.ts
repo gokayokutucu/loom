@@ -33,6 +33,8 @@ function createMockRustClient(
     getHealth: async () => ({ status: "ready", runtime: "rust-sidecar" }),
     getServiceHealth: async () => ({ status: "ready", runtime: "rust-service" }),
     getServiceConfigStatus: async () => ({ status: "ready" }),
+    getServiceConfig: async () => unsupportedMockMethod("getServiceConfig"),
+    updateServiceConfig: async () => unsupportedMockMethod("updateServiceConfig"),
     getCapabilitySummary: async () => ({ status: "unknown", strategyAvailable: false }),
     resolveAddress,
     getGraphProjection:
@@ -178,7 +180,7 @@ test.describe("[engine-contract] Loom engine client selection", () => {
       serviceUrl: "http://127.0.0.1:17633",
       fetch: async (input, init) => {
         expect(String(input)).toBe(
-          "http://127.0.0.1:17633/looms/L-1/graph?focusedResponseId=R-1"
+          "http://127.0.0.1:17633/looms/L-1/graph?focusedResponseId=R-1&includeBookmarks=true"
         );
         expect(init?.method).toBe("GET");
         return new Response(
@@ -191,6 +193,7 @@ test.describe("[engine-contract] Loom engine client selection", () => {
                 loomId: "L-1",
                 title: "Service Loom",
                 preview: "Service summary",
+                displayCode: "L-SVC01",
                 depth: 0,
                 lane: 0,
                 position: { x: 0, y: 0 },
@@ -202,7 +205,14 @@ test.describe("[engine-contract] Loom engine client selection", () => {
                 responseId: "R-1",
                 title: "Service Response",
                 preview: "Service answer",
+                displayCode: "R-SVC01",
                 canonicalUri: "loom://L-1/responses/R-1",
+                metadata: {
+                  bookmark: {
+                    bookmarked: true,
+                    bookmarkId: "bookmark-1",
+                  },
+                },
                 raw_thinking: "hidden",
                 depth: 1,
                 lane: 0,
@@ -231,13 +241,16 @@ test.describe("[engine-contract] Loom engine client selection", () => {
       "loom:L-1:response:R-1",
     ]);
     expect(projection.nodes[0].kind).toBe("root");
+    expect(projection.nodes[0].displayCode).toBe("L-SVC01");
     expect(projection.nodes[1]).toMatchObject({
       kind: "response",
       responseId: "R-1",
       title: "Service Response",
       contentPreview: "Service answer",
+      displayCode: "R-SVC01",
       canonicalUri: "loom://L-1/responses/R-1",
       isFocused: true,
+      isBookmarked: true,
     });
     expect(projection.edges[0]).toMatchObject({
       source: "loom:L-1:root",
@@ -2540,9 +2553,30 @@ test.describe("[engine-contract] Loom engine client selection", () => {
           );
         }
         if (url.endsWith("/config")) {
-          return new Response(JSON.stringify({ database: { path: "/tmp/loom.sqlite" } }), {
-            status: 200,
-          });
+          return new Response(
+            JSON.stringify({
+              database: { path: "/tmp/loom.sqlite" },
+              speech: {
+                enabled: true,
+                defaultProviderKind: "local_command",
+                allowCloudStt: false,
+                persistAudio: false,
+                persistTranscript: false,
+                maxAudioBytes: 10485760,
+                allowedMimeTypes: ["audio/webm"],
+                defaultLanguage: null,
+                providerProfileId: null,
+                localCommandPath: "",
+                localCommandArgs: ["-m", "/path/to/ggml-base.en.bin", "-f", "{input}", "-otxt", "-of", "{output}"],
+                localCommandTimeoutMs: 120000,
+                localTempDir: null,
+                localCommandOutputMode: "file",
+                localCommandTranscriptFileExtension: "txt",
+                warnings: [],
+              },
+            }),
+            { status: 200 }
+          );
         }
         if (url.endsWith("/runtime/restart-status")) {
           return new Response(
@@ -2605,6 +2639,21 @@ test.describe("[engine-contract] Loom engine client selection", () => {
       restartRequired: false,
       pendingRestart: false,
     });
+    await expect(client.getServiceConfig()).resolves.toMatchObject({
+      database: { path: "/tmp/loom.sqlite" },
+      speech: {
+        enabled: true,
+        defaultProviderKind: "local_command",
+        allowCloudStt: false,
+        persistAudio: false,
+        persistTranscript: false,
+        localCommandPath: "",
+        localCommandArgs: ["-m", "/path/to/ggml-base.en.bin", "-f", "{input}", "-otxt", "-of", "{output}"],
+        localCommandTimeoutMs: 120000,
+        localCommandOutputMode: "file",
+        localCommandTranscriptFileExtension: "txt",
+      },
+    });
     const capability = await client.getCapabilitySummary();
     expect(capability).toMatchObject({
       status: "ready",
@@ -2627,6 +2676,108 @@ test.describe("[engine-contract] Loom engine client selection", () => {
     await expect(client.getServiceHealth()).resolves.toMatchObject({ status: "unavailable" });
     await expect(client.getServiceConfigStatus()).resolves.toMatchObject({ status: "unavailable" });
     await expect(client.getCapabilitySummary()).resolves.toMatchObject({ status: "unavailable" });
+  });
+
+  test("Rust HTTP client patches speech config through the service config boundary", async () => {
+    let capturedBody: unknown;
+    const client = new RustHttpLoomEngineClient({
+      serviceUrl: "http://127.0.0.1:17633",
+      fetch: async (input, init) => {
+        const url = String(input);
+        if (url.endsWith("/config") && init?.method === "PATCH") {
+          capturedBody = init.body ? JSON.parse(String(init.body)) : undefined;
+          return new Response(
+            JSON.stringify({
+              config: {
+                database: { path: "/tmp/loom.sqlite" },
+                speech: {
+                  enabled: true,
+                  defaultProviderKind: "local_command",
+                  allowCloudStt: false,
+                  persistAudio: false,
+                  persistTranscript: false,
+                  maxAudioBytes: 10485760,
+                  allowedMimeTypes: ["audio/webm"],
+                  defaultLanguage: null,
+                  providerProfileId: null,
+                  localCommandPath: "/usr/local/bin/whisper-cli",
+                  localCommandArgs: ["-m", "/models/ggml-base.en.bin", "-f", "{input}", "-otxt", "-of", "{output}"],
+                  localCommandTimeoutMs: 120000,
+                  localTempDir: null,
+                  localCommandOutputMode: "file",
+                  localCommandTranscriptFileExtension: "txt",
+                  warnings: [],
+                },
+              },
+              restartClassification: {
+                restartRequired: false,
+                reason: null,
+                changedPaths: ["speech.localCommandPath"],
+              },
+              restartStatus: { restartRequired: false, pendingRestart: false },
+            }),
+            { status: 200 }
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    const result = await client.updateServiceConfig({
+      speech: {
+        enabled: true,
+        defaultProviderKind: "local_command",
+        localCommandPath: "/usr/local/bin/whisper-cli",
+        localCommandArgs: ["-m", "/models/ggml-base.en.bin", "-f", "{input}", "-otxt", "-of", "{output}"],
+        localCommandTimeoutMs: 120000,
+        localTempDir: null,
+        localCommandOutputMode: "file",
+        localCommandTranscriptFileExtension: "txt",
+      },
+    });
+
+    expect(capturedBody).toMatchObject({
+      speech: {
+        defaultProviderKind: "local_command",
+        localCommandPath: "/usr/local/bin/whisper-cli",
+      },
+    });
+    expect(JSON.stringify(capturedBody)).not.toContain("mock_test");
+    expect(result.config.speech).toMatchObject({
+      defaultProviderKind: "local_command",
+      localCommandPath: "/usr/local/bin/whisper-cli",
+      localCommandOutputMode: "file",
+      localCommandTranscriptFileExtension: "txt",
+      persistAudio: false,
+      persistTranscript: false,
+    });
+  });
+
+  test("Rust HTTP client reads speech provider health", async () => {
+    const client = new RustHttpLoomEngineClient({
+      serviceUrl: "http://127.0.0.1:17633",
+      fetch: async (input) => {
+        const url = String(input);
+        if (url.endsWith("/speech/provider/health")) {
+          return new Response(
+            JSON.stringify({
+              status: "missing_command",
+              providerKind: "local_command",
+              message: "Local speech-to-text provider is not configured.",
+              checks: [],
+            }),
+            { status: 200 }
+          );
+        }
+        return new Response("not found", { status: 404 });
+      },
+    });
+
+    await expect(client.getSpeechProviderHealth()).resolves.toMatchObject({
+      status: "missing_command",
+      providerKind: "local_command",
+      message: "Local speech-to-text provider is not configured.",
+    });
   });
 
   test("sanitizes raw thinking fields from engine events", () => {

@@ -618,6 +618,34 @@ fn serialize_config(config: &LoomServiceConfig) -> String {
         )
         .expect("write speech provider profile");
     }
+    if let Some(local_command_path) = &config.speech.local_command_path {
+        writeln!(
+            &mut output,
+            "localCommandPath = \"{}\"",
+            escape_toml_string(local_command_path)
+        )
+        .expect("write speech local command path");
+    }
+    writeln!(
+        &mut output,
+        "localCommandArgs = {}",
+        format_toml_string_array(&config.speech.local_command_args)
+    )
+    .expect("write speech local command args");
+    writeln!(
+        &mut output,
+        "localCommandTimeoutMs = {}",
+        config.speech.local_command_timeout_ms
+    )
+    .expect("write speech local command timeout");
+    if let Some(local_temp_dir) = &config.speech.local_temp_dir {
+        writeln!(
+            &mut output,
+            "localTempDir = \"{}\"",
+            escape_toml_string(local_temp_dir)
+        )
+        .expect("write speech local temp dir");
+    }
     writeln!(
         &mut output,
         "warnings = {}",
@@ -996,6 +1024,18 @@ fn set_config_value(
         }
         ("speech", "providerProfileId") => {
             config.speech.provider_profile_id = Some(parse_toml_string(value, line_number)?);
+        }
+        ("speech", "localCommandPath") => {
+            config.speech.local_command_path = Some(parse_toml_string(value, line_number)?);
+        }
+        ("speech", "localCommandArgs") => {
+            config.speech.local_command_args = parse_toml_string_array(value, line_number)?;
+        }
+        ("speech", "localCommandTimeoutMs") => {
+            config.speech.local_command_timeout_ms = parse_toml_u64(value, line_number)?;
+        }
+        ("speech", "localTempDir") => {
+            config.speech.local_temp_dir = Some(parse_toml_string(value, line_number)?);
         }
         ("speech", "warnings") => {
             config.speech.warnings = parse_toml_string_array(value, line_number)?;
@@ -1896,9 +1936,17 @@ mod tests {
     fn speech_config_parses_from_toml_and_defaults_to_disabled() {
         let mut config = LoomServiceConfig::default();
         config.speech.enabled = true;
-        config.speech.default_provider_kind = SpeechToTextProviderKind::MockTest;
+        config.speech.default_provider_kind = SpeechToTextProviderKind::LocalCommand;
         config.speech.default_language = Some("tr".to_string());
         config.speech.allowed_mime_types = vec!["audio/webm".to_string(), "audio/wav".to_string()];
+        config.speech.local_command_path = Some("/usr/local/bin/whisper".to_string());
+        config.speech.local_command_args = vec![
+            "--input".to_string(),
+            "{audio_file}".to_string(),
+            "--language".to_string(),
+            "{language}".to_string(),
+        ];
+        config.speech.local_command_timeout_ms = 60_000;
         let path = test_path("speech-config");
         write_config_atomic(&path, &config).expect("write config");
 
@@ -1906,13 +1954,27 @@ mod tests {
         assert!(loaded.speech.enabled);
         assert_eq!(
             loaded.speech.default_provider_kind,
-            SpeechToTextProviderKind::MockTest
+            SpeechToTextProviderKind::LocalCommand
         );
         assert_eq!(loaded.speech.default_language.as_deref(), Some("tr"));
         assert_eq!(
             loaded.speech.allowed_mime_types,
             vec!["audio/webm".to_string(), "audio/wav".to_string()]
         );
+        assert_eq!(
+            loaded.speech.local_command_path.as_deref(),
+            Some("/usr/local/bin/whisper")
+        );
+        assert_eq!(
+            loaded.speech.local_command_args,
+            vec![
+                "--input".to_string(),
+                "{audio_file}".to_string(),
+                "--language".to_string(),
+                "{language}".to_string()
+            ]
+        );
+        assert_eq!(loaded.speech.local_command_timeout_ms, 60_000);
     }
 
     #[test]
@@ -1922,6 +1984,8 @@ mod tests {
         assert!(serialized.contains("enabled = false"));
         assert!(serialized.contains("persistAudio = false"));
         assert!(serialized.contains("persistTranscript = false"));
+        assert!(serialized.contains("localCommandArgs = [\"{audio_file}\"]"));
+        assert!(serialized.contains("localCommandTimeoutMs = 120000"));
         for forbidden in [
             "apiKey",
             "bearerToken",

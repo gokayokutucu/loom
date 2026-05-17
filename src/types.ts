@@ -208,6 +208,7 @@ export interface LoomGraphMutationRepository extends LoomGraphRepository {
 export interface LoomMetadata {
   id: string;
   code?: string;
+  displayCode?: string;
   title: string;
   canonicalUri?: string;
   keywords: string[];
@@ -237,6 +238,7 @@ export interface LoomForkRecord {
   parentResponseId: string;
   childConversationId: string;
   title: string;
+  kind?: "exploration" | "revision";
 }
 
 export interface LoomLink {
@@ -252,6 +254,7 @@ export interface LoomLink {
   referenceCode?: string;
   referenceDisplayMode?: ReferenceDisplayMode;
   referenceCustomLabel?: string;
+  referenceOccurrenceIndex?: number;
   referenceMentionId?: string;
   resolutionStatus?: LoomResolutionStatus;
   sourceLoomId?: string;

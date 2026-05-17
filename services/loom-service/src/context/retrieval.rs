@@ -289,14 +289,18 @@ impl ContextRetriever {
         let Some(response_id) = response_id else {
             return Ok(None);
         };
-        sqlx::query("SELECT sequence_index FROM responses WHERE response_id = ?1 LIMIT 1")
-            .bind(response_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map(|row| row.map(|row| row.get("sequence_index")))
-            .map_err(|error| {
-                ServiceError::storage(format!("failed to load current Response sequence: {error}"))
-            })
+        sqlx::query(
+            "SELECT sequence_index FROM responses
+             WHERE response_id = ?1 AND is_deleted = 0
+             LIMIT 1",
+        )
+        .bind(response_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map(|row| row.map(|row| row.get("sequence_index")))
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to load current Response sequence: {error}"))
+        })
     }
 
     async fn score_tags(
@@ -592,7 +596,8 @@ impl ContextRetriever {
                     r.title AS source_title, r.code AS source_code
              FROM response_code_blocks cb
              LEFT JOIN responses r ON r.response_id = cb.response_id
-             WHERE cb.loom_id = ?1",
+             WHERE cb.loom_id = ?1
+               AND COALESCE(r.is_deleted, 0) = 0",
         )
         .bind(&input.loom_id)
         .fetch_all(&self.pool)
@@ -727,7 +732,7 @@ impl ContextRetriever {
         for candidate in candidates.iter_mut() {
             if let Some(response_id) = candidate.response_id.as_deref() {
                 if let Some(row) = sqlx::query(
-                    "SELECT role, content, sequence_index, metadata_json
+                    "SELECT role, content, sequence_index, metadata_json, is_deleted
                      FROM responses
                      WHERE response_id = ?1
                      LIMIT 1",
@@ -742,6 +747,14 @@ impl ContextRetriever {
                 })? {
                     let content: String = row.get("content");
                     reject_forbidden_payload(&content)?;
+                    if row.get::<i64, _>("is_deleted") != 0 {
+                        candidate.score = 0.0;
+                        candidate
+                            .reasons
+                            .push("deleted_response_excluded".to_string());
+                        candidate.include_mode = ContextRetrievalIncludeMode::ReferenceOnly;
+                        continue;
+                    }
                     let sequence_index: i64 = row.get("sequence_index");
                     if current_sequence.is_some_and(|current| sequence_index >= current) {
                         candidate.score = 0.0;

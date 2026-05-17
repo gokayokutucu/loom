@@ -1,4 +1,5 @@
 use crate::{
+    display_code::{display_code, DisplayCodeKind},
     error::ServiceError,
     storage::repositories::responses::{ResponseRecord, ResponseRepository},
 };
@@ -35,6 +36,7 @@ pub struct PatchResponseRequest {
 pub struct PatchResponseResponse {
     pub response: ResponseDto,
     pub stale_responses: Vec<StaleResponseDto>,
+    pub deleted_responses: Vec<DeletedResponseDto>,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -44,6 +46,7 @@ pub struct ResponseDto {
     pub loom_id: String,
     pub role: String,
     pub content: String,
+    pub display_code: String,
     pub updated_at: String,
     pub metadata: Option<Value>,
 }
@@ -55,6 +58,15 @@ pub struct StaleResponseDto {
     pub role: String,
     pub stale: bool,
     pub stale_reason: String,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DeletedResponseDto {
+    pub response_id: String,
+    pub role: String,
+    pub deleted: bool,
+    pub deleted_reason: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -115,26 +127,26 @@ pub async fn patch_response(
         .await
         .map_err(storage_error)?;
 
-    let mut stale_responses = Vec::new();
+    let stale_responses = Vec::new();
+    let mut deleted_responses = Vec::new();
     if input.mark_downstream_stale.unwrap_or(true) {
-        if let Some(assistant) = repository
-            .next_assistant_after(&existing.loom_id, existing.sequence_index)
+        deleted_responses = repository
+            .soft_delete_responses_after(
+                &existing.loom_id,
+                existing.sequence_index,
+                "prompt_edited",
+                &response_id,
+            )
             .await
             .map_err(storage_error)?
-        {
-            let stale_metadata =
-                stale_metadata_json(assistant.metadata_json.as_deref(), &response_id, &now)?;
-            repository
-                .update_response_metadata(&assistant.response_id, &stale_metadata)
-                .await
-                .map_err(storage_error)?;
-            stale_responses.push(StaleResponseDto {
-                response_id: assistant.response_id,
-                role: assistant.role,
-                stale: true,
-                stale_reason: "prompt_edited".to_string(),
-            });
-        }
+            .into_iter()
+            .map(|response| DeletedResponseDto {
+                response_id: response.response_id,
+                role: response.role,
+                deleted: true,
+                deleted_reason: "prompt_edited".to_string(),
+            })
+            .collect();
     }
 
     let updated = repository
@@ -146,15 +158,18 @@ pub async fn patch_response(
     Ok(Json(PatchResponseResponse {
         response: response_to_dto(updated),
         stale_responses,
+        deleted_responses,
     }))
 }
 
 fn response_to_dto(response: ResponseRecord) -> ResponseDto {
+    let display_code = display_code(DisplayCodeKind::Response, &response.response_id);
     ResponseDto {
         response_id: response.response_id,
         loom_id: response.loom_id,
         role: response.role,
         content: response.content,
+        display_code,
         updated_at: response.updated_at,
         metadata: response
             .metadata_json
@@ -184,25 +199,6 @@ fn edited_metadata_json(
         "editReason".to_string(),
         Value::String(edit_reason.to_string()),
     );
-    serialize_metadata(object)
-}
-
-fn stale_metadata_json(
-    existing_metadata_json: Option<&str>,
-    stale_source_response_id: &str,
-    stale_at: &str,
-) -> Result<String, (StatusCode, Json<ResponseApiError>)> {
-    let mut object = metadata_object(existing_metadata_json)?;
-    object.insert("stale".to_string(), Value::Bool(true));
-    object.insert(
-        "staleReason".to_string(),
-        Value::String("prompt_edited".to_string()),
-    );
-    object.insert(
-        "staleSourceResponseId".to_string(),
-        Value::String(stale_source_response_id.to_string()),
-    );
-    object.insert("staleAt".to_string(), Value::String(stale_at.to_string()));
     serialize_metadata(object)
 }
 
@@ -337,7 +333,7 @@ mod tests {
     use std::{path::PathBuf, time::Duration};
 
     #[tokio::test]
-    async fn patch_user_response_updates_content_and_marks_assistant_stale() {
+    async fn patch_user_response_updates_content_and_soft_deletes_downstream() {
         let state = seeded_state().await;
         let response = patch_response(
             State(state.clone()),
@@ -354,8 +350,13 @@ mod tests {
         .0;
 
         assert_eq!(response.response.content, "Edited prompt");
-        assert_eq!(response.stale_responses.len(), 1);
-        assert_eq!(response.stale_responses[0].response_id, "assistant-1");
+        assert!(response.stale_responses.is_empty());
+        assert_eq!(response.deleted_responses.len(), 1);
+        assert_eq!(response.deleted_responses[0].response_id, "assistant-1");
+        assert_eq!(
+            response.deleted_responses[0].deleted_reason,
+            "prompt_edited"
+        );
 
         let repository = ResponseRepository::new(&state.database);
         let user = repository
@@ -377,12 +378,21 @@ mod tests {
             .expect("get assistant")
             .expect("assistant exists");
         assert_eq!(assistant.content, "Original answer");
-        let assistant_metadata: serde_json::Value =
-            serde_json::from_str(assistant.metadata_json.as_deref().expect("metadata"))
-                .expect("metadata json");
-        assert_eq!(assistant_metadata["stale"], json!(true));
-        assert_eq!(assistant_metadata["staleReason"], json!("prompt_edited"));
-        assert_eq!(assistant_metadata["staleSourceResponseId"], json!("user-1"));
+        assert!(repository
+            .is_response_deleted("assistant-1")
+            .await
+            .expect("assistant deletion state"));
+        let active = repository
+            .list_responses_for_loom("loom-1")
+            .await
+            .expect("active responses");
+        assert_eq!(
+            active
+                .iter()
+                .map(|response| response.response_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user-1"]
+        );
     }
 
     #[tokio::test]

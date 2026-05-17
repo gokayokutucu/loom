@@ -375,7 +375,7 @@ For every task touching any of these paths or boundaries:
 - storage, migrations, and repositories
 - Rust API endpoints
 - Rust config
-- frontend code that calls `loom-service` and requires runtime validation
+- frontend engine/client code that changes the `loom-service` request/response contract, runtime routing, request lifecycle, or service-backed behavior
 
 Codex MUST treat the Rust service binary as an authority boundary:
 
@@ -404,7 +404,8 @@ Live dev service anti-stale rule:
 End-of-task browser/runtime sync gate:
 
 - For every task that changes Rust service code, service-calling frontend code, engine client code, Quick Ask, Main composer generation, provider/runtime behavior, or service-backed tests, and the user has the browser open on the local app, Codex MUST verify the service behind the browser's configured endpoint before the final response.
-- This gate applies even when the task's visible change is mostly frontend/UI, if that UI calls `loom-service` or is validated against `loom-service`.
+- This gate does not apply to UI-only or CSS-only changes that do not modify Rust code, engine clients, service DTOs, request lifecycle, generation behavior, Quick Ask semantics, Main composer service behavior, or service-backed tests.
+- A frontend change is service-gated only when it changes how the UI calls `loom-service`, interprets service responses/errors, or validates service-backed behavior. Presentational UI validation in the browser does not require restarting `loom-service`.
 - The check MUST resolve the browser app's service route, including Vite proxy routes such as `/__loom -> http://127.0.0.1:17633`.
 - Codex MUST compare the running process executable path/inode/start time with `services/loom-service/target/debug/loom-service` after the final build.
 - If the browser-backed process is stale, Codex MUST restart it from the fresh binary before finalizing, then call `/health` and report the new PID/port/binary path/DB/config.
@@ -458,18 +459,12 @@ If Playwright starts a service, it must use the fresh binary and must not silent
 
 Manual UI validation MUST report:
 
-- service URL used by the UI
-- running `loom-service` PID
-- executable path
-- process start time
-- binary modification time
-- whether the binary was rebuilt after the latest Rust source change
-- whether the running process started after the rebuilt binary
-- whether the browser was refreshed after service restart
+- service URL used by the UI, running `loom-service` PID, executable path, process start time, binary modification time, and DB/config path when the manual scenario validates service-backed behavior
+- whether the binary was rebuilt after the latest Rust source change and whether the running process started after the rebuilt binary when Rust/service code changed
+- whether the browser was refreshed after service restart when a service restart was required
 - whether stale Vite/app state could exist
-- DB path and config path
 
-Manual validation is invalid if the service binary path is unknown, PID is unknown, service was not restarted after Rust changes, the process start time is older than the rebuilt binary, the browser points to a stale service URL, or the UI bundle was not refreshed after frontend changes.
+Manual validation of service-backed behavior is invalid if the service binary path is unknown, PID is unknown, service was not restarted after Rust changes, the process start time is older than the rebuilt binary, the browser points to a stale service URL, or the UI bundle was not refreshed after frontend changes. Manual validation of UI-only/CSS-only changes only needs the latest frontend bundle/browser refresh; it does not require `loom-service` restart or binary proof.
 
 Codex MUST NOT say "live smoke passed", "real UI verified", "service-backed proof passed", or "manual scenario passed" unless it reports fresh binary path, service PID, service port, health result, DB/config path, and test command/output.
 

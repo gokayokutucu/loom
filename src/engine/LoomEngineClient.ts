@@ -10,6 +10,7 @@ import type {
   CreateLoomResult,
   CreateOrOpenWeftInput,
   CreateOrOpenWeftResult,
+  DeleteLoomInput,
   EngineHealth,
   EngineResponseEvent,
   ExportLoomInput,
@@ -24,6 +25,7 @@ import type {
   GraphProjectionResult,
   ListReferencesInput,
   ListReferencesResult,
+  ListHistoryResult,
   ListBookmarksResult,
   LoomDetail,
   LoomSummary,
@@ -35,33 +37,45 @@ import type {
   RegenerateFromResponseInput,
   RemoveReferenceInput,
   RenameLoomInput,
+  RecordHistoryInput,
   ResolveAddressInput,
   ResolveAddressResult,
+  LoomServiceRuntimeConfig,
+  ServiceConfigUpdateResult,
   ServiceConfigStatus,
+  SpeechProviderHealth,
   ServiceHealthStatus,
   SendMessageInput,
   SuggestReferencesInput,
   SuggestReferencesResult,
+  TranscribeSpeechInput,
+  TranscribeSpeechResult,
+  UpdateServiceConfigInput,
   UpdateResponseInput,
   UpdateResponseResult,
   UpdateLoomInput,
 } from "./LoomEngineTypes";
-import type { LoomNavigationDestination } from "../types";
+import type { HistoryEntry, LoomNavigationDestination } from "../types";
 
 export interface LoomEngineClient {
   getHealth(): Promise<EngineHealth>;
   getServiceHealth(): Promise<ServiceHealthStatus>;
   getServiceConfigStatus(): Promise<ServiceConfigStatus>;
+  getServiceConfig(): Promise<LoomServiceRuntimeConfig>;
+  updateServiceConfig(input: UpdateServiceConfigInput): Promise<ServiceConfigUpdateResult>;
+  getSpeechProviderHealth(): Promise<SpeechProviderHealth>;
   getCapabilitySummary(): Promise<CapabilitySummary>;
   listLooms(): Promise<LoomSummary[]>;
   getLoom(loomId: string): Promise<LoomDetail>;
   createLoom(input: CreateLoomInput): Promise<CreateLoomResult>;
   renameLoom(input: RenameLoomInput): Promise<void>;
   updateLoomMetadata(input: UpdateLoomInput): Promise<CreateLoomResult>;
+  deleteLoom(input: DeleteLoomInput): Promise<void>;
   sendMessage(input: SendMessageInput): AsyncIterable<EngineResponseEvent>;
   regenerateFromResponse(input: RegenerateFromResponseInput): AsyncIterable<EngineResponseEvent>;
   cancelMessage(input: CancelMessageInput): Promise<CancelMessageResult>;
   quickAsk(input: QuickAskInput): Promise<QuickAskResult>;
+  transcribeSpeech(input: TranscribeSpeechInput): Promise<TranscribeSpeechResult>;
   createOrOpenWeft(input: CreateOrOpenWeftInput): Promise<CreateOrOpenWeftResult>;
   persistWeftTurns(input: PersistWeftTurnsInput): Promise<PersistWeftTurnsResult>;
   updateResponse(input: UpdateResponseInput): Promise<UpdateResponseResult>;
@@ -75,6 +89,8 @@ export interface LoomEngineClient {
   deleteBookmark(input: DeleteBookmarkInput): Promise<void>;
   getBookmark(input: GetBookmarkInput): Promise<BookmarkResult>;
   listBookmarks(): Promise<ListBookmarksResult>;
+  listHistory(): Promise<ListHistoryResult>;
+  recordHistory(input: RecordHistoryInput): Promise<HistoryEntry>;
   getBookmarkForTarget(input: GetBookmarkForTargetInput): Promise<BookmarkResult>;
   bookmarkResponse(input: BookmarkResponseInput): Promise<BookmarkResult>;
   resolveAddress(input: ResolveAddressInput): Promise<ResolveAddressResult>;

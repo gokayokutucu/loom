@@ -111,7 +111,8 @@ impl ReferenceRepository {
             "SELECT * FROM \"references\"
              WHERE source_loom_id = ?1
                 OR source_response_id IN (
-                    SELECT response_id FROM responses WHERE loom_id = ?1
+                    SELECT response_id FROM responses
+                    WHERE loom_id = ?1 AND is_deleted = 0
                 )
              ORDER BY created_at ASC, reference_id ASC",
         )

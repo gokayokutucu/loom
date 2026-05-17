@@ -48,6 +48,21 @@ const MIGRATIONS: &[Migration] = &[
         name: "response_tags_graph",
         sql: include_str!("../../migrations/0008_response_tags_graph.sql"),
     },
+    Migration {
+        version: 9,
+        name: "navigation_history",
+        sql: include_str!("../../migrations/0009_navigation_history.sql"),
+    },
+    Migration {
+        version: 10,
+        name: "response_soft_delete",
+        sql: include_str!("../../migrations/0010_response_soft_delete.sql"),
+    },
+    Migration {
+        version: 11,
+        name: "loom_soft_delete",
+        sql: include_str!("../../migrations/0011_loom_soft_delete.sql"),
+    },
 ];
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
@@ -140,6 +155,7 @@ mod tests {
             "response_tags",
             "loom_topic_index",
             "context_graph_links",
+            "navigation_history",
         ] {
             columns.extend(
                 sqlx::query_scalar::<_, String>(&format!(

@@ -45,6 +45,7 @@ pub struct QuickAskActiveReference {
 pub struct QuickAskTurn {
     pub question: String,
     pub answer: String,
+    pub title: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -94,6 +95,7 @@ pub struct QuickAskRequest {
 #[serde(rename_all = "camelCase")]
 pub struct QuickAskResponse {
     pub answer: String,
+    pub title: String,
     pub model: String,
     pub warnings: Vec<String>,
     pub focus_subject: Option<String>,
@@ -357,12 +359,16 @@ pub async fn quick(
             let retry_validation = quick_answer_validation(&retry_answer, &focus, &input)
                 .with_attempt_metadata(true, true, true, "retry");
             if retry_validation.validation_passed {
+                let title =
+                    quick_title_from_model(&state, &input, &retry_answer, &model, &mut warnings)
+                        .await;
                 return Json(quick_response_with_validation(
                     retry_answer,
                     model,
                     warnings,
                     &input,
                     &focus,
+                    Some(title),
                     retry_validation,
                 ))
                 .into_response();
@@ -381,12 +387,14 @@ pub async fn quick(
         .into_response();
     }
 
+    let title = quick_title_from_model(&state, &input, &answer, &model, &mut warnings).await;
     Json(quick_response_with_validation(
         answer,
         model,
         warnings,
         &input,
         &focus,
+        Some(title),
         first_attempt_validation.with_attempt_metadata(false, false, false, "first_attempt"),
     ))
     .into_response()
@@ -415,7 +423,7 @@ fn quick_validated_response(
         ));
     }
     Json(quick_response_with_validation(
-        answer, model, warnings, input, focus, validation,
+        answer, model, warnings, input, focus, None, validation,
     ))
 }
 
@@ -425,12 +433,15 @@ fn quick_response_with_validation(
     warnings: Vec<String>,
     input: &QuickAskRequest,
     focus: &QuickAskFocus,
+    title: Option<String>,
     answer_validation: QuickAskAnswerValidation,
 ) -> QuickAskResponse {
     let answer = clean_quick_visible_answer(&answer, focus);
+    let title = title.unwrap_or_else(|| quick_fallback_title(input, &answer));
     QuickAskResponse {
         diagnostics: quick_diagnostics(input, focus, &answer, Some(answer_validation)),
         answer,
+        title,
         model,
         warnings,
         focus_subject: focus.focus_subject.clone(),
@@ -456,6 +467,7 @@ fn quick_validation_error_response(
         answer: format!(
             "Quick Ask could not produce an answer focused on {subject}. Please retry."
         ),
+        title: format!("Ask: {subject}"),
         model,
         warnings,
         focus_subject: focus.focus_subject.clone(),
@@ -474,6 +486,124 @@ fn quick_answer_from_ollama_body(body: &Value) -> Option<String> {
         .map(str::trim)
         .filter(|answer| !answer.is_empty())
         .map(ToString::to_string)
+}
+
+async fn quick_title_from_model(
+    state: &AppState,
+    input: &QuickAskRequest,
+    answer: &str,
+    model: &str,
+    warnings: &mut Vec<String>,
+) -> String {
+    let request = quick_title_ollama_request(
+        input,
+        answer,
+        model.to_string(),
+        format!("quick-title-{}", input.session_id),
+    );
+    let title = match state.ollama.post_chat(&request).await {
+        Ok(response) if response.status().is_success() => match response.json::<Value>().await {
+            Ok(body) => quick_title_from_ollama_body(&body),
+            Err(_) => None,
+        },
+        _ => None,
+    };
+    match title {
+        Some(title) => title,
+        None => {
+            warnings.push("quick_ask_title_fallback".to_string());
+            quick_fallback_title(input, answer)
+        }
+    }
+}
+
+fn quick_title_ollama_request(
+    input: &QuickAskRequest,
+    answer: &str,
+    model: String,
+    request_id: String,
+) -> OllamaChatRequest {
+    let previous_titles = input
+        .turns
+        .iter()
+        .filter_map(|turn| turn.title.as_deref())
+        .take(4)
+        .collect::<Vec<_>>()
+        .join(", ");
+    OllamaChatRequest {
+        model,
+        messages: vec![
+            OllamaMessage {
+                role: "system".to_string(),
+                content: [
+                    "Create a short visible title for a Loom Quick Ask answer.",
+                    "Use the same language as the user's question.",
+                    "Return only the title text, not JSON, markdown, bullets, quotes, or explanation.",
+                    "Never output raw thinking, chain-of-thought, or hidden reasoning.",
+                    "Keep it under 7 words.",
+                ]
+                .join(" "),
+            },
+            OllamaMessage {
+                role: "user".to_string(),
+                content: [
+                    format!("Question: {}", input.question.trim()),
+                    format!("Answer: {}", answer.trim()),
+                    format!(
+                        "Selected text: {}",
+                        input.selected_text.as_deref().unwrap_or("").trim()
+                    ),
+                    format!(
+                        "Source title: {}",
+                        input
+                            .source_context
+                            .as_ref()
+                            .and_then(|source| source.title.as_deref())
+                            .unwrap_or("")
+                    ),
+                    format!("Previous titles: {previous_titles}"),
+                ]
+                .join("\n"),
+            },
+        ],
+        stream: Some(false),
+        think: Some(false),
+        options: Some(OllamaOptions {
+            num_ctx: Some(768),
+            num_predict: Some(32),
+            temperature: Some(0.1),
+        }),
+        request_id: Some(request_id),
+    }
+}
+
+fn quick_title_from_ollama_body(body: &Value) -> Option<String> {
+    let visible = quick_answer_from_ollama_body(body)?;
+    clean_quick_title(&visible)
+}
+
+fn clean_quick_title(value: &str) -> Option<String> {
+    let title = value
+        .lines()
+        .find(|line| !line.trim().is_empty())
+        .unwrap_or("")
+        .trim()
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '*' | '#' | '-' | '•'))
+        .trim()
+        .replace(['\n', '\r', '\t'], " ");
+    let normalized = title.split_whitespace().collect::<Vec<_>>().join(" ");
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(normalized.chars().take(72).collect())
+}
+
+fn quick_fallback_title(input: &QuickAskRequest, answer: &str) -> String {
+    let source = answer
+        .split(['.', '!', '?'])
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or_else(|| input.question.trim());
+    clean_quick_title(source).unwrap_or_else(|| "Quick Ask".to_string())
 }
 
 fn deterministic_e2e_quick_answer(input: &QuickAskRequest) -> Option<String> {
@@ -2500,6 +2630,41 @@ mod tests {
     }
 
     #[test]
+    fn quick_title_cleaning_removes_markup_and_limits_length() {
+        assert_eq!(
+            clean_quick_title("  **Event Sourcing kısa özeti**  ").as_deref(),
+            Some("Event Sourcing kısa özeti")
+        );
+        assert_eq!(clean_quick_title(" \n\t ").as_deref(), None);
+        let long_title = clean_quick_title(
+            "Bu başlık küçük modelden gelse bile kullanıcı arayüzünde taşmayacak kadar kısaltılır",
+        )
+        .expect("title");
+        assert_eq!(long_title.chars().count(), 72);
+    }
+
+    #[test]
+    fn quick_fallback_title_uses_answer_before_question() {
+        let request = QuickAskRequest {
+            session_id: "quick-title-test".to_string(),
+            quick_ask_trace_id: None,
+            source_loom_id: None,
+            source_response_id: None,
+            selected_text: None,
+            source_context: None,
+            active_references: vec![],
+            turns: vec![],
+            question: "crud ne demek?".to_string(),
+            intent: QuickAskIntent::Definition,
+            options: QuickAskOptions::default(),
+        };
+        assert_eq!(
+            quick_fallback_title(&request, "CRUD = Kaydet, Okuma, Güncelleme, Silme."),
+            "CRUD = Kaydet, Okuma, Güncelleme, Silme"
+        );
+    }
+
+    #[test]
     fn quick_focus_label_normalization_removes_boundary_noise() {
         assert_eq!(
             normalize_quick_focus_label("Audit Trail)").as_deref(),
@@ -2616,6 +2781,7 @@ mod tests {
             turns: vec![QuickAskTurn {
                 question: "önceki soru".to_string(),
                 answer: "önceki cevap".to_string(),
+                title: None,
             }],
             question: "açılımı nedir?".to_string(),
             intent: QuickAskIntent::AcronymExpansion,
@@ -2884,6 +3050,7 @@ mod tests {
         request.turns = vec![QuickAskTurn {
             question: "event sourcing nedir?".to_string(),
             answer: "Event Sourcing temel açıklaması.".to_string(),
+            title: None,
         }];
         request.question = "ne anlama geliyor".to_string();
         request.intent = QuickAskIntent::Definition;
@@ -3183,6 +3350,7 @@ mod tests {
             answer:
                 "Event, Event Sourcing bağlamında bir durum değişikliğini kaydeder. Resultado burada sonuç anlamına gelen yabancı bir kelimedir."
                     .to_string(),
+            title: None,
         }];
         request.question = "resultado ne be".to_string();
         request.intent = QuickAskIntent::Definition;
@@ -3245,6 +3413,7 @@ mod tests {
             answer:
                 "event logging, Event Sourcing bağlamında domain eventleri kaydetme yaklaşımıdır."
                     .to_string(),
+            title: None,
         }];
         request.question = "nasıl kullanılıyor".to_string();
         request.intent = QuickAskIntent::Usage;
@@ -3292,6 +3461,7 @@ mod tests {
         request.turns = vec![QuickAskTurn {
             question: "bu ne".to_string(),
             answer: "event logging, Event Sourcing bağlamında domain eventleri kaydetme yaklaşımıdır. Bu kayıt audit ve geçmişi izleme için kullanılır.".to_string(),
+            title: None,
         }];
         request.question = "nasıl kullanılıyor".to_string();
         request.intent = QuickAskIntent::Usage;
@@ -3326,6 +3496,7 @@ mod tests {
         request.turns = vec![QuickAskTurn {
             question: "ne demek".to_string(),
             answer: "Resultado önceki yanıtta geçen terimdir.".to_string(),
+            title: None,
         }];
         request.question = "resultado ne be".to_string();
         request.intent = QuickAskIntent::Definition;
@@ -3527,6 +3698,7 @@ mod tests {
             turns: vec![QuickAskTurn {
                 question: "önceki soru".to_string(),
                 answer: "önceki cevap".to_string(),
+                title: None,
             }],
             question: "şimdi açıkla".to_string(),
             intent: QuickAskIntent::ExplainThis,

@@ -32,7 +32,12 @@ async function openGraphLoom(page: Page) {
 }
 
 async function editPrompt(page: Page, responseId: string, nextPrompt: string) {
-  await page.getByTestId(`edit-prompt-${responseId}`).click();
+  await page.getByTestId(`edit-prompt-${responseId}`).evaluate((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      throw new Error("Prompt edit trigger is not a button.");
+    }
+    button.click();
+  });
   const editor = page.getByLabel("Edit prompt text");
   await expect(editor).toBeVisible();
   await editor.fill(nextPrompt);
@@ -64,6 +69,25 @@ async function exportedLoomResponses(
   return exportedJson.responses;
 }
 
+async function waitForPersistedResponses(
+  scenario: Awaited<ReturnType<typeof createServiceTestHarness>>,
+  loomId: string,
+  expectedCount: number
+) {
+  const started = Date.now();
+  while (Date.now() - started < 30_000) {
+    const responses = await exportedLoomResponses(scenario, loomId);
+    const assistantResponsesComplete = responses
+      .filter((response) => response.role === "assistant")
+      .every((response) => response.content.trim().length > 0);
+    if (responses.length >= expectedCount && assistantResponsesComplete) {
+      return responses;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`Timed out waiting for ${expectedCount} persisted responses in ${loomId}.`);
+}
+
 function expectNoForbiddenPayload(value: unknown) {
   const serialized = JSON.stringify(value);
   expect(serialized).not.toContain("raw_thinking");
@@ -73,7 +97,7 @@ function expectNoForbiddenPayload(value: unknown) {
 }
 
 test.describe("[product-service-backed] prompt edit product proof", () => {
-  test("[product-service-backed] edits a persisted prompt through loom-service and marks the downstream assistant stale", async ({
+  test("[product-service-backed] editing Prompt B creates a Revision Weft and leaves the origin Loom unchanged", async ({
     page,
   }) => {
     test.setTimeout(120_000);
@@ -81,193 +105,96 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
       deterministicProvider: "event-sourcing",
       startApp: true,
     });
+    const forbiddenMutationUrls: string[] = [];
 
     try {
-      await page.goto(scenario.appUrl!);
-      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
-
-      const originalPrompt = "Event Sourcing nedir? Kısaca anlat.";
-      const editedPrompt = "Event Sourcing nedir? Avantajlarıyla birlikte anlat.";
-      await sendMainPrompt(page, originalPrompt);
-      await expect(page.getByText("Deterministic E2E provider").first()).toBeVisible({
-        timeout: 30_000,
-      });
-
-      const rootLoom = (await scenario.client.listLooms()).find((item) =>
-        item.title.includes("Event Sourcing")
-      );
-      expect(rootLoom).toBeTruthy();
-      const loomId = rootLoom!.loomId;
-      const beforeResponses = await exportedLoomResponses(scenario, loomId);
-      const userBefore = beforeResponses.find(
-        (response) => response.role === "user" && response.sequenceIndex === 0
-      );
-      const assistantBefore = beforeResponses.find(
-        (response) => response.role === "assistant" && response.sequenceIndex === 1
-      );
-      expect(userBefore).toBeTruthy();
-      expect(assistantBefore).toBeTruthy();
-      expect(userBefore!.content).toBe(originalPrompt);
-      const assistantContentBefore = assistantBefore!.content;
-
-      await editPrompt(page, assistantBefore!.responseId, editedPrompt);
-
-      const response = page.locator(`[data-response-id="${assistantBefore!.responseId}"]`);
-      await expect(response.locator(".user-message")).toContainText(editedPrompt);
-      await expect(response.locator(".stale-answer-notice")).toContainText(
-        "Answer may be outdated after prompt edit."
-      );
-
-      const afterResponses = await exportedLoomResponses(scenario, loomId);
-      const userAfter = afterResponses.find(
-        (item) => item.responseId === userBefore!.responseId
-      );
-      const assistantAfter = afterResponses.find(
-        (item) => item.responseId === assistantBefore!.responseId
-      );
-      expect(userAfter).toBeTruthy();
-      expect(assistantAfter).toBeTruthy();
-      expect(userAfter!.loomId).toBe(loomId);
-      expect(userAfter!.role).toBe("user");
-      expect(userAfter!.content).toBe(editedPrompt);
-      expect(userAfter!.sequenceIndex).toBe(userBefore!.sequenceIndex);
-      expect(userAfter!.metadata).toMatchObject({
-        edited: true,
-        editReason: "user_prompt_edit",
-      });
-      expect(userAfter!.metadata).toHaveProperty("editedAt");
-      expect(userAfter!.metadata).toHaveProperty("source");
-      expect(userAfter!.metadata).toHaveProperty("workflowRunId");
-
-      expect(assistantAfter!.role).toBe("assistant");
-      expect(assistantAfter!.content).toBe(assistantContentBefore);
-      expect(assistantAfter!.sequenceIndex).toBe(assistantBefore!.sequenceIndex);
-      expect(assistantAfter!.metadata).toMatchObject({
-        stale: true,
-        staleReason: "prompt_edited",
-        staleSourceResponseId: userBefore!.responseId,
-      });
-      expect(assistantAfter!.metadata).toHaveProperty("staleAt");
-
-      expectNoForbiddenPayload(afterResponses);
-      await expect(response).not.toContainText("raw_thinking");
-      expect(scenario.dbPath).toContain(scenario.tempDir);
-    } finally {
-      const cleanup = await scenario.cleanup();
-      expect(cleanup.serviceStopped).toBe(true);
-      expect(cleanup.appStopped).toBe(true);
-      expect(cleanup.tempDirRemoved).toBe(true);
-      expect(cleanup.warnings).toEqual([]);
-    }
-  });
-
-  test("[product-service-backed] regenerates from an edited prompt through loom-service and preserves stale answer", async ({
-    page,
-  }) => {
-    test.setTimeout(120_000);
-    const scenario = await createServiceTestHarness({
-      deterministicProvider: "event-sourcing",
-      startApp: true,
-    });
-    const regenerateUrls: string[] = [];
-
-    try {
-      await page.route(/\/responses\/[^/]+\/regenerate$/, async (route) => {
-        regenerateUrls.push(route.request().url());
+      await page.route(/\/responses\/[^/]+(?:\/regenerate)?$/, async (route) => {
+        forbiddenMutationUrls.push(route.request().url());
         await route.continue();
       });
-
       await page.goto(scenario.appUrl!);
       await expect(page.getByTestId("loom-sidebar")).toBeVisible();
 
-      const originalPrompt = "Event Sourcing nedir? Kısaca anlat.";
-      const editedPrompt = "Event Sourcing nedir? Avantajlarıyla birlikte anlat.";
-      await sendMainPrompt(page, originalPrompt);
+      const promptA = "Event Sourcing nedir? Kısaca anlat.";
+      const promptB = "Event Sourcing AWS üzerinde nasıl kurulur?";
+      const promptC = "Event Sourcing Azure üzerinde nasıl kurulur?";
+      const editedPrompt = "Event Sourcing GCP üzerinde nasıl kurulur?";
+      await sendMainPrompt(page, promptA);
       await expect(page.getByText("Deterministic E2E provider").first()).toBeVisible({
         timeout: 30_000,
       });
+      await sendMainPrompt(page, promptB);
+      await expect(page.getByText("AWS").first()).toBeVisible({ timeout: 30_000 });
+      await sendMainPrompt(page, promptC);
+      await expect(page.getByText("Azure").first()).toBeVisible({ timeout: 30_000 });
 
       const rootLoom = (await scenario.client.listLooms()).find((item) =>
         item.title.includes("Event Sourcing")
       );
       expect(rootLoom).toBeTruthy();
       const loomId = rootLoom!.loomId;
-      const beforeResponses = await exportedLoomResponses(scenario, loomId);
-      const userBefore = beforeResponses.find(
+      const beforeResponses = await waitForPersistedResponses(scenario, loomId, 6);
+      const userA = beforeResponses.find(
         (response) => response.role === "user" && response.sequenceIndex === 0
       );
-      const oldAssistantBefore = beforeResponses.find(
+      const assistantA = beforeResponses.find(
         (response) => response.role === "assistant" && response.sequenceIndex === 1
       );
-      expect(userBefore).toBeTruthy();
-      expect(oldAssistantBefore).toBeTruthy();
-      const oldAssistantContent = oldAssistantBefore!.content;
+      const userB = beforeResponses.find(
+        (response) => response.role === "user" && response.sequenceIndex === 2
+      );
+      const assistantB = beforeResponses.find(
+        (response) => response.role === "assistant" && response.sequenceIndex === 3
+      );
+      expect(userA).toBeTruthy();
+      expect(assistantA).toBeTruthy();
+      expect(userB).toBeTruthy();
+      expect(assistantB).toBeTruthy();
+      expect(userB!.content).toBe(promptB);
 
-      await editPrompt(page, oldAssistantBefore!.responseId, editedPrompt);
-      const staleResponse = page.locator(
-        `[data-response-id="${oldAssistantBefore!.responseId}"]`
-      );
-      await expect(staleResponse.locator(".stale-answer-notice")).toContainText(
-        "Answer may be outdated after prompt edit."
-      );
+      await editPrompt(page, assistantB!.responseId, editedPrompt);
+      await expect(page.getByText("Revision:").first()).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByText("GCP").first()).toBeVisible({ timeout: 30_000 });
 
-      await staleResponse.getByRole("button", { name: "Regenerate from here" }).click();
-      await expect(page.getByText("Avantajları audit edilebilirlik").first()).toBeVisible({
-        timeout: 30_000,
-      });
-      expect(regenerateUrls).toHaveLength(1);
-      expect(regenerateUrls[0]).toContain(
-        `/responses/${encodeURIComponent(userBefore!.responseId)}/regenerate`
-      );
+      expect(forbiddenMutationUrls).toEqual([]);
 
-      const afterResponses = await exportedLoomResponses(scenario, loomId);
-      const editedUser = afterResponses.find(
-        (response) => response.responseId === userBefore!.responseId
+      const originAfter = await exportedLoomResponses(scenario, loomId);
+      expect(originAfter.map((response) => response.content)).toEqual(
+        beforeResponses.map((response) => response.content)
       );
-      const oldAssistant = afterResponses.find(
-        (response) => response.responseId === oldAssistantBefore!.responseId
-      );
-      const regeneratedAssistant = afterResponses.find(
-        (response) =>
-          response.role === "assistant" &&
-          response.responseId !== oldAssistantBefore!.responseId &&
-          response.content.includes("Avantajları audit edilebilirlik")
+      expect(originAfter.map((response) => response.responseId)).toEqual(
+        beforeResponses.map((response) => response.responseId)
       );
 
-      expect(editedUser).toBeTruthy();
-      expect(oldAssistant).toBeTruthy();
-      expect(regeneratedAssistant).toBeTruthy();
-      expect(editedUser!.content).toBe(editedPrompt);
-      expect(editedUser!.sequenceIndex).toBe(userBefore!.sequenceIndex);
-      expect(oldAssistant!.content).toBe(oldAssistantContent);
-      expect(oldAssistant!.metadata).toMatchObject({
-        stale: true,
-        staleReason: "prompt_edited",
-        staleSourceResponseId: userBefore!.responseId,
-      });
-      expect(regeneratedAssistant!.loomId).toBe(loomId);
-      expect(regeneratedAssistant!.sequenceIndex).toBeGreaterThan(
-        oldAssistantBefore!.sequenceIndex
+      const revisionWeft = (await scenario.client.listLooms()).find(
+        (loom) =>
+          loom.kind === "weft" &&
+          loom.originLoomId === loomId &&
+          loom.originResponseId === assistantA!.responseId &&
+          loom.weftKind === "revision"
       );
-      expect(regeneratedAssistant!.metadata).toMatchObject({
-        source: "prompt_edit_regenerate",
-        regeneratedFromUserResponseId: userBefore!.responseId,
-        replacesStaleResponseId: oldAssistantBefore!.responseId,
-      });
-      expect(regeneratedAssistant!.metadata).toHaveProperty("workflowRunId");
-
-      await expect(staleResponse.locator(".stale-answer-notice")).toContainText(
-        "Answer may be outdated after prompt edit."
+      expect(revisionWeft).toBeTruthy();
+      const revisionResponses = await waitForPersistedResponses(scenario, revisionWeft!.loomId, 4);
+      expect(revisionResponses.map((response) => response.content)).toEqual(
+        expect.arrayContaining([promptA, userA!.content, assistantA!.content, editedPrompt])
       );
-      const regeneratedResponse = page.locator(
-        `[data-response-id="${regeneratedAssistant!.responseId}"]`
+      expect(
+        revisionResponses.some((response) => response.content.includes(promptB))
+      ).toBe(false);
+      expect(
+        revisionResponses.some((response) => response.content.includes(promptC))
+      ).toBe(false);
+      const editedPromptIndex = revisionResponses.findIndex(
+        (response) => response.content === editedPrompt
       );
-      await expect(regeneratedResponse).toContainText("Event Sourcing");
-      await expect(regeneratedResponse).toContainText("Avantajları");
-      await expect(regeneratedResponse.locator(".stale-answer-notice")).toHaveCount(0);
-
-      expectNoForbiddenPayload(afterResponses);
-      await expect(page.locator("body")).not.toContainText("raw_thinking");
+      expect(editedPromptIndex).toBeGreaterThanOrEqual(0);
+      expect(
+        revisionResponses
+          .slice(editedPromptIndex + 1)
+          .some((response) => response.role === "assistant" && response.content.trim().length > 0)
+      ).toBe(true);
+      expectNoForbiddenPayload(originAfter);
+      expectNoForbiddenPayload(revisionResponses);
       expect(scenario.dbPath).toContain(scenario.tempDir);
     } finally {
       const cleanup = await scenario.cleanup();

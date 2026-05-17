@@ -26,6 +26,7 @@ export interface LoomGraphProjectionNode {
   responseId?: string;
   title: string;
   code?: string;
+  displayCode?: string;
   summary?: string;
   contentPreview?: string;
   fullContent?: string;

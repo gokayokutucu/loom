@@ -46,6 +46,10 @@ function expectNoForbiddenPayload(value: unknown) {
 async function openGraphMapGraph(page: Page) {
   await page.addInitScript(() => {
     window.localStorage.clear();
+    window.localStorage.setItem(
+      "loom-ai-app-settings-v1",
+      JSON.stringify({ mockDataEnabled: true })
+    );
   });
   await page.goto("/");
   await expect(page.getByTestId("loom-sidebar")).toBeVisible();
@@ -83,7 +87,7 @@ test.describe("[product-service-backed][legacy-typescript-local] Graph bookmark 
       expect(rootLoom).toBeTruthy();
       const loomId = rootLoom!.loomId;
       const loomDetail = await scenario.client.getLoom(loomId);
-      const assistantResponse = loomDetail.responses[1];
+      const assistantResponse = loomDetail.responses[0];
       expect(assistantResponse).toBeTruthy();
 
       const bookmarkButton = page.locator(".response-bookmark-chip").last();
@@ -187,6 +191,73 @@ test.describe("[product-service-backed][legacy-typescript-local] Graph bookmark 
     }
   });
 
+  test("[product-service-backed] syncs Bookmark toggle color across Loom surface, graph node, and detail window", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(
+        page,
+        "Event Sourcing nedir? nasıl kullanılır? Detaylı olarak anlat"
+      );
+      await expect(page.getByText("Event Store").first()).toBeVisible({ timeout: 30_000 });
+
+      const surfaceBookmarkButton = page.locator(".response-bookmark-chip").last();
+      await expect(surfaceBookmarkButton).toBeVisible();
+      await expect(surfaceBookmarkButton).toHaveAttribute("aria-pressed", "false");
+      await surfaceBookmarkButton.click();
+      await expect(surfaceBookmarkButton).toHaveAttribute("aria-pressed", "true");
+      await expect(surfaceBookmarkButton).toHaveClass(/bookmarked/);
+
+      await page.getByRole("button", { name: "Toggle Graph View" }).click();
+      await expect(page.getByRole("heading", { name: "Weft-aware Loom graph" })).toBeVisible();
+
+      const graphNode = page.locator(".loom-graph-node--response").filter({
+        hasText: "Event Sourcing",
+      }).first();
+      await expect(graphNode).toBeVisible();
+
+      const graphBookmarkButton = graphNode.locator(".loom-graph-node-bookmark");
+      await expect(graphBookmarkButton).toHaveAttribute("aria-pressed", "true");
+      await expect(graphBookmarkButton).toHaveClass(/is-bookmarked/);
+
+      await graphNode.click();
+      const preview = page.locator(".graph-response-preview-modal");
+      await expect(preview).toBeVisible();
+      const previewBookmarkButton = preview.locator(".graph-response-preview-bookmark");
+      await expect(previewBookmarkButton).toHaveAttribute("aria-pressed", "true");
+      await expect(previewBookmarkButton).toHaveClass(/is-bookmarked/);
+
+      await previewBookmarkButton.click();
+      await expect(previewBookmarkButton).toHaveAttribute("aria-pressed", "false");
+      await expect(previewBookmarkButton).not.toHaveClass(/is-bookmarked/);
+
+      await expect
+        .poll(async () => {
+          const result = await scenario.fetchJson<BookmarkListResponse>("/bookmarks");
+          return result.bookmarks.length;
+        })
+        .toBe(0);
+      const afterDelete = await scenario.fetchJson<BookmarkListResponse>("/bookmarks");
+      expectNoForbiddenPayload(afterDelete);
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
   test("[product-service-backed] hydrates the Bookmark panel from service Bookmarks and syncs target state", async ({
     page,
   }) => {
@@ -212,7 +283,7 @@ test.describe("[product-service-backed][legacy-typescript-local] Graph bookmark 
       );
       expect(rootLoom).toBeTruthy();
       const loomDetail = await scenario.client.getLoom(rootLoom!.loomId);
-      const assistantResponse = loomDetail.responses[1];
+      const assistantResponse = loomDetail.responses[0];
       expect(assistantResponse).toBeTruthy();
 
       const serviceBookmark = await scenario.client.createBookmark({
@@ -258,10 +329,21 @@ test.describe("[product-service-backed][legacy-typescript-local] Graph bookmark 
       await expect(bookmarkButton).toHaveAttribute("aria-pressed", "true");
       await expect(bookmarkButton).toHaveClass(/bookmarked/);
 
+      await page.getByRole("button", { name: "Toggle Graph View" }).click();
+      await expect(page.getByRole("heading", { name: "Weft-aware Loom graph" })).toBeVisible();
+      const graphNode = page.locator(".loom-graph-node--response").filter({
+        hasText: "Event Sourcing",
+      }).first();
+      await expect(graphNode).toBeVisible();
+      const graphBookmarkButton = graphNode.locator(".loom-graph-node-bookmark");
+      await expect(graphBookmarkButton).toHaveAttribute("aria-pressed", "true");
+      await expect(graphBookmarkButton).toHaveClass(/is-bookmarked/);
+
       await bookmarkRow.hover();
       await bookmarkRow.locator(".bookmark-rail-button.danger").click();
       await expect(bookmarkRow).toHaveCount(0);
-      await expect(bookmarkButton).toHaveAttribute("aria-pressed", "false");
+      await expect(graphBookmarkButton).toHaveAttribute("aria-pressed", "false");
+      await expect(graphBookmarkButton).not.toHaveClass(/is-bookmarked/);
 
       const afterDelete = await scenario.fetchJson<BookmarkListResponse>("/bookmarks");
       expect(afterDelete.bookmarks).toHaveLength(0);

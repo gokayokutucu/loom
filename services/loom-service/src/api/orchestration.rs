@@ -1,5 +1,6 @@
 use crate::{
     capabilities::repository::NewModelRuntimeBenchmark,
+    config::LoomServiceConfig,
     context::{
         manager::ContextManager,
         readiness::{ContextReadinessGate, ContextReadinessInput},
@@ -53,6 +54,8 @@ const FORBIDDEN_CONTEXT_KEYS: [&str; 4] = [
     "chain_of_thought",
     "hidden_reasoning",
 ];
+const AUTO_ROUTER_NUM_CTX: u32 = 1_024;
+const AUTO_ROUTER_NUM_PREDICT: u32 = 128;
 
 pub async fn plan(Json(input): Json<PlannerInput>) -> Json<AnswerPlan> {
     Json(DeterministicPlanner::plan(input))
@@ -880,11 +883,52 @@ impl PersistedResponseLifecycle {
     }
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct AutoRouterDecision {
+    thinking_required: bool,
+    reason: String,
+    confidence: Option<f64>,
+    fallback_used: bool,
+    error_kind: Option<String>,
+    provider: String,
+    model: String,
+}
+
+impl AutoRouterDecision {
+    fn resolved_mode(&self) -> ResponseMode {
+        if self.thinking_required {
+            ResponseMode::Thinking
+        } else {
+            ResponseMode::Instant
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct ResponseModeResolution {
+    requested_response_mode: ResponseMode,
+    resolved_response_mode: ResponseMode,
+    auto_router: Option<AutoRouterDecision>,
+    capability_downgrade_reason: Option<String>,
+}
+
+impl ResponseModeResolution {
+    fn passthrough(mode: ResponseMode) -> Self {
+        Self {
+            requested_response_mode: mode.clone(),
+            resolved_response_mode: mode,
+            auto_router: None,
+            capability_downgrade_reason: None,
+        }
+    }
+}
+
 async fn create_persisted_response_lifecycle(
     database: &crate::storage::db::Database,
     input: &OrchestrationExecuteInput,
     run_id: &str,
     answer_plan: &AnswerPlan,
+    mode_resolution: &ResponseModeResolution,
 ) -> Result<Option<PersistedResponseLifecycle>, crate::error::ServiceError> {
     let Some(loom_id) = input.loom_id.clone() else {
         return Ok(None);
@@ -915,7 +959,11 @@ async fn create_persisted_response_lifecycle(
             "status": "streaming",
             "workflowRunId": run_id,
             "model": input.model,
-            "responseMode": input.response_mode,
+            "responseMode": mode_resolution.resolved_response_mode,
+            "requestedResponseMode": mode_resolution.requested_response_mode,
+            "resolvedResponseMode": mode_resolution.resolved_response_mode,
+            "autoRouter": auto_router_metadata(mode_resolution),
+            "capabilityDowngradeReason": mode_resolution.capability_downgrade_reason,
             "options": input.options,
             "regeneratedFromUserResponseId": user.response_id,
             "replacesStaleResponseId": input.stale_assistant_response_id,
@@ -961,7 +1009,11 @@ async fn create_persisted_response_lifecycle(
         "status": "streaming",
         "workflowRunId": run_id,
         "model": input.model,
-        "responseMode": input.response_mode,
+        "responseMode": mode_resolution.resolved_response_mode,
+        "requestedResponseMode": mode_resolution.requested_response_mode,
+        "resolvedResponseMode": mode_resolution.resolved_response_mode,
+        "autoRouter": auto_router_metadata(mode_resolution),
+        "capabilityDowngradeReason": mode_resolution.capability_downgrade_reason,
         "options": input.options,
     })
     .to_string();
@@ -1015,6 +1067,352 @@ fn answer_plan_summary(answer_plan: &AnswerPlan) -> Value {
         "answerStyle": answer_plan.answer_style,
         "estimatedComplexity": answer_plan.estimated_complexity,
     })
+}
+
+fn auto_router_metadata(mode_resolution: &ResponseModeResolution) -> Option<Value> {
+    let decision = mode_resolution.auto_router.as_ref()?;
+    Some(json!({
+        "provider": decision.provider,
+        "model": decision.model,
+        "decision": if decision.thinking_required { "thinking" } else { "instant" },
+        "reason": decision.reason,
+        "confidence": decision.confidence,
+        "fallbackUsed": decision.fallback_used,
+        "errorKind": decision.error_kind,
+    }))
+}
+
+async fn resolve_response_mode_for_execute(
+    state: &crate::api::state::AppState,
+    input: &OrchestrationExecuteInput,
+) -> Result<ResponseModeResolution, OrchestrationApiError> {
+    let config = state.config.current();
+    ensure_main_model_configured(&config, input)?;
+    match input.response_mode {
+        ResponseMode::Instant => Ok(ResponseModeResolution::passthrough(ResponseMode::Instant)),
+        ResponseMode::Thinking => Ok(apply_thinking_capability(
+            ResponseModeResolution::passthrough(ResponseMode::Thinking),
+            &config,
+            &input.model,
+        )),
+        ResponseMode::Auto => {
+            let quick_model = configured_quick_model(&config)?;
+            let decision = match run_auto_router(state, input, &quick_model).await {
+                Ok(decision) => decision,
+                Err(error_kind) => {
+                    fallback_auto_router_decision(input, &quick_model, Some(error_kind))
+                }
+            };
+            Ok(apply_thinking_capability(
+                ResponseModeResolution {
+                    requested_response_mode: ResponseMode::Auto,
+                    resolved_response_mode: decision.resolved_mode(),
+                    auto_router: Some(decision),
+                    capability_downgrade_reason: None,
+                },
+                &config,
+                &input.model,
+            ))
+        }
+    }
+}
+
+fn ensure_main_model_configured(
+    config: &LoomServiceConfig,
+    input: &OrchestrationExecuteInput,
+) -> Result<(), OrchestrationApiError> {
+    if config.providers.default_main_model.trim().is_empty() || input.model.trim().is_empty() {
+        return Err(OrchestrationApiError {
+            code: "main_model_required".to_string(),
+            message: "Answer generation requires a configured main model.".to_string(),
+        });
+    }
+    Ok(())
+}
+
+fn configured_quick_model(config: &LoomServiceConfig) -> Result<String, OrchestrationApiError> {
+    let model = config.providers.default_quick_model.trim();
+    if model.is_empty() {
+        return Err(OrchestrationApiError {
+            code: "quick_model_required".to_string(),
+            message: "Auto mode requires a configured quick model.".to_string(),
+        });
+    }
+    Ok(model.to_string())
+}
+
+fn apply_thinking_capability(
+    mut resolution: ResponseModeResolution,
+    config: &LoomServiceConfig,
+    model: &str,
+) -> ResponseModeResolution {
+    if resolution.resolved_response_mode != ResponseMode::Thinking {
+        return resolution;
+    }
+    if !ollama_profile_supports_thinking(config, model) {
+        resolution.resolved_response_mode = ResponseMode::Instant;
+        resolution.capability_downgrade_reason = Some("provider_thinking_unsupported".to_string());
+    }
+    resolution
+}
+
+fn ollama_profile_supports_thinking(config: &LoomServiceConfig, model: &str) -> bool {
+    let mut ollama_profiles = config.providers.profiles.iter().filter(|profile| {
+        profile.enabled
+            && matches!(
+                profile.provider_kind,
+                crate::providers::config::ProviderKind::Ollama
+            )
+    });
+    if let Some(profile) = ollama_profiles
+        .clone()
+        .find(|profile| profile.default_model.as_deref() == Some(model))
+    {
+        return profile.capabilities.supports_thinking;
+    }
+    ollama_profiles
+        .next()
+        .map(|profile| profile.capabilities.supports_thinking)
+        .unwrap_or(true)
+}
+
+async fn run_auto_router(
+    state: &crate::api::state::AppState,
+    input: &OrchestrationExecuteInput,
+    quick_model: &str,
+) -> Result<AutoRouterDecision, String> {
+    if std::env::var("LOOM_SERVICE_E2E_PROVIDER").ok().as_deref() == Some("event-sourcing") {
+        return Ok(fallback_auto_router_decision(input, quick_model, None));
+    }
+    let request_id = format!("auto-router-{}", unix_timestamp_millis());
+    let request = OllamaChatRequest {
+        model: quick_model.to_string(),
+        messages: auto_router_messages(input),
+        stream: Some(false),
+        think: Some(false),
+        options: Some(OllamaOptions {
+            num_ctx: Some(AUTO_ROUTER_NUM_CTX),
+            num_predict: Some(AUTO_ROUTER_NUM_PREDICT),
+            temperature: Some(0.0),
+        }),
+        request_id: Some(request_id),
+    };
+    let response = state
+        .ollama
+        .post_chat(&request)
+        .await
+        .map_err(|error| format!("{:?}", error.kind))?;
+    if !response.status().is_success() {
+        return Err(format!("router_http_{}", response.status().as_u16()));
+    }
+    let body = response
+        .json::<Value>()
+        .await
+        .map_err(|_| "router_invalid_json_body".to_string())?;
+    let visible = ollama_visible_router_content(&body)
+        .ok_or_else(|| "router_missing_visible_content".to_string())?;
+    parse_auto_router_decision(&visible, quick_model)
+        .ok_or_else(|| "router_invalid_contract".to_string())
+}
+
+fn auto_router_messages(input: &OrchestrationExecuteInput) -> Vec<OllamaMessage> {
+    vec![
+        OllamaMessage {
+            role: "system".to_string(),
+            content: [
+                "You are Loom's response mode router.",
+                "Return strict JSON only.",
+                "Decide whether the final answer requires thinking.",
+                "Do not answer the user.",
+                "Do not reveal reasoning.",
+                "Allowed reason labels: short_direct_prompt, translation_or_rewrite, grammar_or_phrase_help, simple_factual, multi_step_reasoning, code_or_architecture, debugging_or_diagnosis, long_context, document_or_file_analysis, planning_or_spec, ambiguous_low_confidence, fallback_heuristic.",
+            ]
+            .join(" "),
+        },
+        OllamaMessage {
+            role: "user".to_string(),
+            content: auto_router_user_prompt(input),
+        },
+    ]
+}
+
+fn auto_router_user_prompt(input: &OrchestrationExecuteInput) -> String {
+    let prompt = compact(&input.prompt, 1_200);
+    let reference_labels = input
+        .references
+        .iter()
+        .take(6)
+        .filter_map(|reference| reference.label.as_deref())
+        .map(|label| compact(label, 80))
+        .collect::<Vec<_>>();
+    let has_code_block = input.prompt.contains("```");
+    let language = if input.prompt.chars().any(|character| {
+        matches!(
+            character,
+            'ı' | 'İ' | 'ğ' | 'Ğ' | 'ü' | 'Ü' | 'ş' | 'Ş' | 'ö' | 'Ö' | 'ç' | 'Ç'
+        )
+    }) {
+        "tr"
+    } else {
+        "unknown"
+    };
+    format!(
+        concat!(
+            "Prompt:\n{prompt}\n\n",
+            "Safe metadata:\n",
+            "- promptLength: {prompt_length}\n",
+            "- referenceCount: {reference_count}\n",
+            "- referenceLabels: {reference_labels}\n",
+            "- hasCodeBlock: {has_code_block}\n",
+            "- language: {language}\n\n",
+            "Return JSON: {{\"thinking_required\":true|false,\"reason\":\"allowed_label\",\"confidence\":0.0-1.0}}"
+        ),
+        prompt = prompt,
+        prompt_length = input.prompt.chars().count(),
+        reference_count = input.references.len(),
+        reference_labels = reference_labels.join(", "),
+        has_code_block = has_code_block,
+        language = language,
+    )
+}
+
+fn ollama_visible_router_content(body: &Value) -> Option<String> {
+    body.get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        .or_else(|| body.get("response").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|content| !content.is_empty())
+        .map(ToString::to_string)
+}
+
+fn parse_auto_router_decision(content: &str, quick_model: &str) -> Option<AutoRouterDecision> {
+    let json_text = strip_json_code_fence(content);
+    let value = serde_json::from_str::<Value>(&json_text).ok()?;
+    let thinking_required = value.get("thinking_required")?.as_bool()?;
+    let reason = value
+        .get("reason")
+        .and_then(Value::as_str)
+        .filter(|reason| allowed_auto_router_reason(reason))
+        .unwrap_or("ambiguous_low_confidence")
+        .to_string();
+    let confidence = value
+        .get("confidence")
+        .and_then(Value::as_f64)
+        .map(|confidence| confidence.clamp(0.0, 1.0));
+    Some(AutoRouterDecision {
+        thinking_required,
+        reason,
+        confidence,
+        fallback_used: false,
+        error_kind: None,
+        provider: "ollama".to_string(),
+        model: quick_model.to_string(),
+    })
+}
+
+fn strip_json_code_fence(content: &str) -> String {
+    let trimmed = content.trim();
+    if !trimmed.starts_with("```") {
+        return trimmed.to_string();
+    }
+    trimmed
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim()
+        .to_string()
+}
+
+fn fallback_auto_router_decision(
+    input: &OrchestrationExecuteInput,
+    quick_model: &str,
+    error_kind: Option<String>,
+) -> AutoRouterDecision {
+    let prompt = input.prompt.to_lowercase();
+    let thinking_required = input.references.len() >= 3
+        || input.prompt.chars().count() > 1_200
+        || input.prompt.contains("```")
+        || contains_any_text(
+            &prompt,
+            &[
+                "debug",
+                "diagnos",
+                "architecture",
+                "mimari",
+                "tasarım",
+                "design",
+                "plan",
+                "spec",
+                "kod",
+                "code",
+                "implement",
+                "refactor",
+                "analyze",
+                "analiz",
+                "root cause",
+                "kök neden",
+            ],
+        );
+    let instant_direct = contains_any_text(
+        &prompt,
+        &[
+            "translate",
+            "çevir",
+            "grammar",
+            "dilbilgisi",
+            "rewrite",
+            "yeniden yaz",
+            "nedir",
+            "what is",
+        ],
+    ) && input.prompt.chars().count() < 180
+        && input.references.is_empty();
+    AutoRouterDecision {
+        thinking_required: if instant_direct {
+            false
+        } else {
+            thinking_required
+        },
+        reason: "fallback_heuristic".to_string(),
+        confidence: Some(if error_kind.is_some() { 0.45 } else { 0.65 }),
+        fallback_used: true,
+        error_kind,
+        provider: "ollama".to_string(),
+        model: quick_model.to_string(),
+    }
+}
+
+fn allowed_auto_router_reason(reason: &str) -> bool {
+    matches!(
+        reason,
+        "short_direct_prompt"
+            | "translation_or_rewrite"
+            | "grammar_or_phrase_help"
+            | "simple_factual"
+            | "multi_step_reasoning"
+            | "code_or_architecture"
+            | "debugging_or_diagnosis"
+            | "long_context"
+            | "document_or_file_analysis"
+            | "planning_or_spec"
+            | "ambiguous_low_confidence"
+            | "fallback_heuristic"
+    )
+}
+
+fn contains_any_text(value: &str, needles: &[&str]) -> bool {
+    needles.iter().any(|needle| value.contains(needle))
+}
+
+fn compact(value: &str, max_length: usize) -> String {
+    let mut chars = value.chars();
+    let clipped = chars.by_ref().take(max_length).collect::<String>();
+    if chars.next().is_some() {
+        format!("{clipped}...")
+    } else {
+        clipped
+    }
 }
 
 async fn update_persisted_assistant_content(
@@ -1739,12 +2137,27 @@ fn execute_stream(
         let started = Instant::now();
         let runner = RepositoryWorkflowRunner::new(&state.database);
 
+        let mode_resolution = match resolve_response_mode_for_execute(&state, &input).await {
+            Ok(resolution) => resolution,
+            Err(error) => {
+                yield Ok(to_sse_event(service_event(request_id.clone(), "response.error", json!({
+                    "runId": Value::Null,
+                    "stage": "orchestrate",
+                    "kind": error.code,
+                    "message": error.message
+                }))));
+                return;
+            }
+        };
+        let mut execution_input = input.clone();
+        execution_input.response_mode = mode_resolution.resolved_response_mode.clone();
+
         let planner_input = PlannerInput {
-            clean_user_prompt: input.prompt.clone(),
-            prompt_lines: input.prompt.lines().map(str::to_string).collect(),
-            attached_references: input.references.clone(),
-            selected_response_mode: input.response_mode.clone(),
-            loom_id: input.loom_id.clone(),
+            clean_user_prompt: execution_input.prompt.clone(),
+            prompt_lines: execution_input.prompt.lines().map(str::to_string).collect(),
+            attached_references: execution_input.references.clone(),
+            selected_response_mode: execution_input.response_mode.clone(),
+            loom_id: execution_input.loom_id.clone(),
             source: Some("orchestration_execute".to_string()),
         };
         let answer_plan = DeterministicPlanner::plan(planner_input);
@@ -1760,7 +2173,7 @@ fn execute_stream(
                 return;
             }
         };
-        let run = match runner.create_run(Some(workflow_loom_id.clone()), input.response_id.clone(), Some(plan_json)).await {
+        let run = match runner.create_run(Some(workflow_loom_id.clone()), execution_input.response_id.clone(), Some(plan_json)).await {
             Ok(run) => run,
             Err(error) => {
                 yield Ok(to_sse_event(service_event(request_id.clone(), "response.error", json!({
@@ -1773,7 +2186,7 @@ fn execute_stream(
             }
         };
         let run_id = run.run_id.clone();
-        let mut persisted_lifecycle = match create_persisted_response_lifecycle(&state.database, &input, &run_id, &answer_plan).await {
+        let mut persisted_lifecycle = match create_persisted_response_lifecycle(&state.database, &execution_input, &run_id, &answer_plan, &mode_resolution).await {
             Ok(lifecycle) => lifecycle,
             Err(error) => {
                 let _ = runner.mark_stage_failed(&run_id, "persist", &error.to_string()).await;
@@ -1827,7 +2240,7 @@ fn execute_stream(
             }
         }
 
-        let attached_references = attached_references(&input.references);
+        let attached_references = attached_references(&execution_input.references);
         let (is_weft, origin_loom_id, origin_response_id) = match resolve_context_scope(
             &state.database,
             &workflow_loom_id,
@@ -1846,14 +2259,14 @@ fn execute_stream(
             current_head_response_id: persisted_lifecycle
                 .as_ref()
                 .map(|lifecycle| lifecycle.user_response_id.clone())
-                .or_else(|| input.response_id.clone()),
+                .or_else(|| execution_input.response_id.clone()),
             attached_references: attached_references.clone(),
             is_weft,
             origin_loom_id: origin_loom_id.clone(),
             origin_response_id: origin_response_id.clone(),
             context_strategy: context_strategy_for_readiness(&answer_plan.context_strategy),
-            response_mode: context_response_mode(&input.response_mode),
-            resolved_num_ctx: input.options.as_ref().and_then(|options| options.num_ctx).unwrap_or(2_048),
+            response_mode: context_response_mode(&execution_input.response_mode),
+            resolved_num_ctx: execution_input.options.as_ref().and_then(|options| options.num_ctx).unwrap_or(2_048),
         };
         let gate = ContextReadinessGate::new(&state.database);
         let readiness = match gate.prepare(readiness_input).await {
@@ -1885,7 +2298,7 @@ fn execute_stream(
         let recent_messages = match recent_messages_for_execution(
             &state.database,
             &workflow_loom_id,
-            &input,
+            &execution_input,
             persisted_lifecycle.as_ref(),
         )
         .await
@@ -1913,11 +2326,11 @@ fn execute_stream(
             current_head_response_id: persisted_lifecycle
                 .as_ref()
                 .map(|lifecycle| lifecycle.user_response_id.clone())
-                .or_else(|| input.response_id.clone()),
-            user_prompt: input.prompt.clone(),
+                .or_else(|| execution_input.response_id.clone()),
+            user_prompt: execution_input.prompt.clone(),
             attached_references,
-            response_mode: context_response_mode(&input.response_mode),
-            resolved_num_ctx: input.options.as_ref().and_then(|options| options.num_ctx).unwrap_or(2_048),
+            response_mode: context_response_mode(&execution_input.response_mode),
+            resolved_num_ctx: execution_input.options.as_ref().and_then(|options| options.num_ctx).unwrap_or(2_048),
             answer_plan: None,
             source: if is_weft { ContextSource::Weft } else { ContextSource::Composer },
             weft_origin: None,
@@ -1926,7 +2339,7 @@ fn execute_stream(
         };
         let strategy_decision = match resolve_service_execution_strategy(
             &state.database,
-            strategy_input_from_execute(&input, &built_context_size_hint(&context_input)),
+            strategy_input_from_execute(&execution_input, &built_context_size_hint(&context_input)),
         )
         .await
         {
@@ -1982,7 +2395,7 @@ fn execute_stream(
             }
         }
 
-        if let Some(answer) = deterministic_e2e_answer(&input, &built_context) {
+        if let Some(answer) = deterministic_e2e_answer(&execution_input, &built_context) {
             if let Some(lifecycle) = persisted_lifecycle.as_mut() {
                 lifecycle.assistant_content.push_str(&answer);
                 let _ = update_persisted_assistant_content(&state.database, lifecycle).await;
@@ -2041,7 +2454,7 @@ fn execute_stream(
         let request_id_for_cancel = run_id.clone();
         let mut cancel_rx = state.ollama.register_cancellation(&request_id_for_cancel);
         let ollama_request = OllamaChatRequest {
-            model: input.model.clone(),
+            model: execution_input.model.clone(),
             messages: built_context.messages.into_iter().map(|message| OllamaMessage {
                 role: match message.role {
                     crate::context::types::ContextMessageRole::System => "system".to_string(),
@@ -2053,9 +2466,9 @@ fn execute_stream(
             stream: Some(true),
             think: Some(answer_plan.use_thinking),
             options: Some(OllamaOptions {
-                num_ctx: input.options.as_ref().and_then(|options| options.num_ctx),
-                num_predict: input.options.as_ref().and_then(|options| options.num_predict),
-                temperature: input.options.as_ref().and_then(|options| options.temperature),
+                num_ctx: execution_input.options.as_ref().and_then(|options| options.num_ctx),
+                num_predict: execution_input.options.as_ref().and_then(|options| options.num_predict),
+                temperature: execution_input.options.as_ref().and_then(|options| options.temperature),
             }),
             request_id: Some(request_id_for_cancel.clone()),
         };
@@ -2076,7 +2489,7 @@ fn execute_stream(
                     .await;
                 }
                 schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
-                yield Ok(ollama_error_event(&run_id, &input.model, &error, started.elapsed().as_millis(), persisted_lifecycle.as_ref()));
+                yield Ok(ollama_error_event(&run_id, &execution_input.model, &error, started.elapsed().as_millis(), persisted_lifecycle.as_ref()));
                 state.ollama.finish_request(&request_id_for_cancel);
                 return;
             }
@@ -2150,7 +2563,7 @@ fn execute_stream(
                         .await;
                     }
                     schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
-                    yield Ok(ollama_error_event(&run_id, &input.model, &error, started.elapsed().as_millis(), persisted_lifecycle.as_ref()));
+                    yield Ok(ollama_error_event(&run_id, &execution_input.model, &error, started.elapsed().as_millis(), persisted_lifecycle.as_ref()));
                     state.ollama.finish_request(&request_id_for_cancel);
                     return;
                 }
@@ -2215,7 +2628,7 @@ fn execute_stream(
                         .await;
                     }
                     schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
-                    yield Ok(ollama_error_event(&run_id, &input.model, &runtime_error, started.elapsed().as_millis(), persisted_lifecycle.as_ref()));
+                    yield Ok(ollama_error_event(&run_id, &execution_input.model, &runtime_error, started.elapsed().as_millis(), persisted_lifecycle.as_ref()));
                     state.ollama.finish_request(&request_id_for_cancel);
                     return;
                 }
@@ -2237,7 +2650,7 @@ fn execute_stream(
                         .await;
                     }
                     schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
-                    yield Ok(ollama_error_event(&run_id, &input.model, &error, started.elapsed().as_millis(), persisted_lifecycle.as_ref()));
+                    yield Ok(ollama_error_event(&run_id, &execution_input.model, &error, started.elapsed().as_millis(), persisted_lifecycle.as_ref()));
                     state.ollama.finish_request(&request_id_for_cancel);
                     return;
                 }
@@ -3131,16 +3544,20 @@ fn estimate_output_tokens(text: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        best_available_draft, build_generation_events, build_generation_response_state,
-        build_generation_status, context_built_event_payload, create_persisted_response_lifecycle,
-        eval_prompt, eval_strategy_decision, minimum_successful_drafts, parse_ndjson_bytes, plan,
-        recent_messages_before_response, recent_messages_for_execution,
+        apply_thinking_capability, best_available_draft, build_generation_events,
+        build_generation_response_state, build_generation_status, configured_quick_model,
+        context_built_event_payload, create_persisted_response_lifecycle,
+        ensure_main_model_configured, eval_prompt, eval_strategy_decision,
+        fallback_auto_router_decision, minimum_successful_drafts, parse_auto_router_decision,
+        parse_ndjson_bytes, plan, recent_messages_before_response, recent_messages_for_execution,
         references_from_response_metadata, resolve_context_scope, sanitize_generation_value,
         synthesis_prompt, update_persisted_assistant_content, update_persisted_assistant_status,
-        DeepSynthesisEvalPrompt, OrchestrationExecuteInput, MAX_RECENT_CONTEXT_MESSAGES,
+        DeepSynthesisEvalPrompt, OrchestrationExecuteInput, ResponseModeResolution,
+        MAX_RECENT_CONTEXT_MESSAGES,
     };
     use crate::{
         capabilities::strategy::{ExecutionStrategy, ExecutionStrategyDecision, RequestedMode},
+        config::LoomServiceConfig,
         context::{
             manager::ContextManager,
             types::{
@@ -3395,6 +3812,85 @@ mod tests {
     }
 
     #[test]
+    fn auto_router_parses_strict_json_decision_without_raw_completion() {
+        let decision = parse_auto_router_decision(
+            r#"{"thinking_required":true,"reason":"code_or_architecture","confidence":0.82}"#,
+            "quick-model",
+        )
+        .expect("router decision parses");
+
+        assert!(decision.thinking_required);
+        assert_eq!(decision.reason, "code_or_architecture");
+        assert_eq!(decision.confidence, Some(0.82));
+        assert!(!decision.fallback_used);
+        assert_eq!(decision.model, "quick-model");
+    }
+
+    #[test]
+    fn auto_router_invalid_json_uses_fallback_heuristic() {
+        let mut input = execute_input(Some("loom-1"));
+        input.prompt = "Bu mimari hatasını debug edip kök nedeni açıkla".to_string();
+
+        assert!(parse_auto_router_decision("not json", "quick-model").is_none());
+        let decision = fallback_auto_router_decision(
+            &input,
+            "quick-model",
+            Some("router_invalid_contract".to_string()),
+        );
+
+        assert!(decision.thinking_required);
+        assert!(decision.fallback_used);
+        assert_eq!(decision.reason, "fallback_heuristic");
+        assert_eq!(
+            decision.error_kind.as_deref(),
+            Some("router_invalid_contract")
+        );
+    }
+
+    #[test]
+    fn auto_router_fallback_prefers_instant_for_short_factual_prompt() {
+        let mut input = execute_input(Some("loom-1"));
+        input.prompt = "Event sourcing nedir?".to_string();
+
+        let decision = fallback_auto_router_decision(&input, "quick-model", None);
+
+        assert!(!decision.thinking_required);
+        assert_eq!(decision.resolved_mode(), ResponseMode::Instant);
+    }
+
+    #[test]
+    fn missing_model_roles_return_typed_configuration_errors() {
+        let mut config = LoomServiceConfig::default();
+        let input = execute_input(Some("loom-1"));
+
+        config.providers.default_quick_model = String::new();
+        let quick_error = configured_quick_model(&config).expect_err("quick model required");
+        assert_eq!(quick_error.code, "quick_model_required");
+
+        config.providers.default_main_model = String::new();
+        let main_error =
+            ensure_main_model_configured(&config, &input).expect_err("main model required");
+        assert_eq!(main_error.code, "main_model_required");
+    }
+
+    #[test]
+    fn unsupported_thinking_capability_downgrades_to_instant_with_reason() {
+        let mut config = LoomServiceConfig::default();
+        config.providers.profiles[0].capabilities.supports_thinking = false;
+        let resolution = apply_thinking_capability(
+            ResponseModeResolution::passthrough(ResponseMode::Thinking),
+            &config,
+            "qwen3.5:9b",
+        );
+
+        assert_eq!(resolution.resolved_response_mode, ResponseMode::Instant);
+        assert_eq!(
+            resolution.capability_downgrade_reason.as_deref(),
+            Some("provider_thinking_unsupported")
+        );
+    }
+
+    #[test]
     fn deep_synthesis_parallel_3_requires_two_successful_drafts() {
         let plan = deep_plan(ExecutionStrategy::Parallel3DraftSynthesize, 3);
         assert_eq!(minimum_successful_drafts(&plan), 2);
@@ -3470,11 +3966,16 @@ mod tests {
             ..PlannerInput::default()
         });
 
-        let lifecycle =
-            create_persisted_response_lifecycle(&database, &input, "workflow-1", &answer_plan)
-                .await
-                .expect("lifecycle persists")
-                .expect("lifecycle exists");
+        let lifecycle = create_persisted_response_lifecycle(
+            &database,
+            &input,
+            "workflow-1",
+            &answer_plan,
+            &ResponseModeResolution::passthrough(input.response_mode.clone()),
+        )
+        .await
+        .expect("lifecycle persists")
+        .expect("lifecycle exists");
 
         let responses = ResponseRepository::new(&database)
             .list_responses_for_loom("loom-1")
@@ -3505,11 +4006,16 @@ mod tests {
             selected_response_mode: input.response_mode.clone(),
             ..PlannerInput::default()
         });
-        let mut lifecycle =
-            create_persisted_response_lifecycle(&database, &input, "workflow-2", &answer_plan)
-                .await
-                .expect("lifecycle persists")
-                .expect("lifecycle exists");
+        let mut lifecycle = create_persisted_response_lifecycle(
+            &database,
+            &input,
+            "workflow-2",
+            &answer_plan,
+            &ResponseModeResolution::passthrough(input.response_mode.clone()),
+        )
+        .await
+        .expect("lifecycle persists")
+        .expect("lifecycle exists");
 
         lifecycle.assistant_content.push_str("Merhaba");
         update_persisted_assistant_content(&database, &lifecycle)
@@ -3549,10 +4055,15 @@ mod tests {
             ..PlannerInput::default()
         });
 
-        let lifecycle =
-            create_persisted_response_lifecycle(&database, &input, "workflow-3", &answer_plan)
-                .await
-                .expect("no lifecycle error");
+        let lifecycle = create_persisted_response_lifecycle(
+            &database,
+            &input,
+            "workflow-3",
+            &answer_plan,
+            &ResponseModeResolution::passthrough(input.response_mode.clone()),
+        )
+        .await
+        .expect("no lifecycle error");
 
         assert!(lifecycle.is_none());
     }
@@ -3633,11 +4144,16 @@ mod tests {
             ..PlannerInput::default()
         });
 
-        let lifecycle =
-            create_persisted_response_lifecycle(&database, &input, "workflow-regen", &answer_plan)
-                .await
-                .expect("lifecycle persists")
-                .expect("lifecycle exists");
+        let lifecycle = create_persisted_response_lifecycle(
+            &database,
+            &input,
+            "workflow-regen",
+            &answer_plan,
+            &ResponseModeResolution::passthrough(input.response_mode.clone()),
+        )
+        .await
+        .expect("lifecycle persists")
+        .expect("lifecycle exists");
 
         assert_eq!(lifecycle.user_response_id, "edited-user");
         let responses = repository
@@ -3759,6 +4275,7 @@ mod tests {
             &input,
             "workflow-followup",
             &answer_plan,
+            &ResponseModeResolution::passthrough(input.response_mode.clone()),
         )
         .await
         .expect("lifecycle persists")
@@ -3830,6 +4347,7 @@ mod tests {
             &input,
             "workflow-expand-followup",
             &answer_plan,
+            &ResponseModeResolution::passthrough(input.response_mode.clone()),
         )
         .await
         .expect("lifecycle persists")

@@ -155,6 +155,7 @@ export function createAddressableLoomMetadata(
   const meta: LoomMetadata = {
     ...fallbackMetadata({ ...input, id }, "addressable"),
     code,
+    displayCode: code,
   };
   return {
     ...meta,
@@ -175,6 +176,7 @@ export function createDraftResponseMetadata(
       "draft"
     ),
     code: createResponseCode(id),
+    displayCode: createResponseCode(id),
   };
 }
 
@@ -186,11 +188,13 @@ export function hydrateAddressableLoomMetadata(
 
   const id = existing.id || input.id || createMetadataUuid();
   const code = existing.code ?? createLoomCode(id);
+  const displayCode = existing.displayCode ?? code;
   const normalized: LoomMetadata = {
     ...fallbackMetadata({ ...input, id }, "addressable"),
     ...existing,
     id,
     code,
+    displayCode,
     status: "addressable",
     usageCount: existing.usageCount ?? 0,
   };
@@ -215,16 +219,20 @@ export function hydrateResponseMetadata(
     status,
     usageCount: existing.usageCount ?? 0,
   };
+  const responseCode = normalized.code ?? createResponseCode(id);
+  const responseDisplayCode = normalized.displayCode ?? responseCode;
   if (status === "addressable") {
     return {
       ...normalized,
-      code: normalized.code ?? createResponseCode(id),
+      code: responseCode,
+      displayCode: responseDisplayCode,
       canonicalUri: normalized.canonicalUri,
     };
   }
   return {
     ...normalized,
-    code: normalized.code ?? createResponseCode(id),
+    code: responseCode,
+    displayCode: responseDisplayCode,
     canonicalUri: undefined,
   };
 }
@@ -245,6 +253,7 @@ export function promoteResponseMetadata(
   );
   const id = responseMeta.id || createMetadataUuid();
   const code = responseMeta.code ?? createResponseCode(id);
+  const displayCode = responseMeta.displayCode ?? code;
   const loomMeta = hydrateAddressableLoomMetadata(
     {
       id: createMetadataUuid(),
@@ -257,6 +266,7 @@ export function promoteResponseMetadata(
     ...responseMeta,
     id,
     code,
+    displayCode,
     canonicalUri: responseMeta.canonicalUri ??
       metadataUriForResponse({ ...responseMeta, id, code }, loomMeta, loom.title),
     usageCount: responseMeta.usageCount + 1,

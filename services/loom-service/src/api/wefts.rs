@@ -1,5 +1,6 @@
 use crate::{
     api::{looms::LoomDto, state::AppState},
+    display_code::{display_code, DisplayCodeKind},
     error::ServiceError,
     storage::repositories::{
         addresses::{AddressRepository, NewAddress},
@@ -31,7 +32,8 @@ const FORBIDDEN_THINKING_KEYS: [&str; 8] = [
 #[serde(rename_all = "camelCase")]
 pub struct CreateWeftRequest {
     pub origin_loom_id: String,
-    pub origin_response_id: String,
+    pub origin_response_id: Option<String>,
+    pub weft_kind: Option<WeftKind>,
     pub title: Option<String>,
     pub summary: Option<String>,
     pub reuse_existing: Option<bool>,
@@ -63,10 +65,27 @@ impl WeftSource {
 
 #[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum WeftKind {
+    Exploration,
+    Revision,
+}
+
+impl WeftKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Exploration => "exploration",
+            Self::Revision => "revision",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum WeftSeedMode {
     None,
     OriginQaPair,
     QuickAskTurns,
+    RevisionLineage,
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -104,6 +123,7 @@ pub struct PersistWeftTurn {
     pub id: Option<String>,
     pub question: String,
     pub answer: String,
+    pub title: Option<String>,
     pub created_at: Option<String>,
     pub metadata: Option<Value>,
 }
@@ -124,6 +144,7 @@ pub struct PersistedWeftTurnResponse {
     pub assistant_response_id: String,
     pub question: String,
     pub answer: String,
+    pub title: Option<String>,
     pub sequence_index: i64,
 }
 
@@ -150,7 +171,18 @@ pub async fn create_weft(
     Json(input): Json<CreateWeftRequest>,
 ) -> Result<(StatusCode, Json<WeftResponse>), (StatusCode, Json<WeftApiError>)> {
     let origin_loom_id = required_trimmed("originLoomId", &input.origin_loom_id)?;
-    let origin_response_id = required_trimmed("originResponseId", &input.origin_response_id)?;
+    let weft_kind = input.weft_kind.unwrap_or(WeftKind::Exploration);
+    let origin_response_id = input
+        .origin_response_id
+        .as_deref()
+        .map(|value| required_trimmed("originResponseId", value))
+        .transpose()?;
+    if origin_response_id.is_none() && weft_kind != WeftKind::Revision {
+        return Err(bad_request(
+            "INVALID_WEFT_ORIGIN",
+            "Exploration Wefts require originResponseId.",
+        ));
+    }
     validate_metadata(input.metadata.as_ref())?;
 
     let loom_repository = LoomRepository::new(&state.database);
@@ -159,17 +191,26 @@ pub async fn create_weft(
         .await
         .map_err(storage_error)?
         .ok_or_else(|| not_found("ORIGIN_LOOM_NOT_FOUND", "Origin Loom was not found."))?;
-    let origin_response = ResponseRepository::new(&state.database)
-        .get_response(&origin_response_id)
-        .await
-        .map_err(storage_error)?
-        .ok_or_else(|| {
-            not_found(
-                "ORIGIN_RESPONSE_NOT_FOUND",
-                "Origin Response was not found.",
-            )
-        })?;
-    if origin_response.loom_id != origin_loom.loom_id {
+    let origin_response = if let Some(origin_response_id) = origin_response_id.as_deref() {
+        Some(
+            ResponseRepository::new(&state.database)
+                .get_response(origin_response_id)
+                .await
+                .map_err(storage_error)?
+                .ok_or_else(|| {
+                    not_found(
+                        "ORIGIN_RESPONSE_NOT_FOUND",
+                        "Origin Response was not found.",
+                    )
+                })?,
+        )
+    } else {
+        None
+    };
+    if origin_response
+        .as_ref()
+        .is_some_and(|response| response.loom_id != origin_loom.loom_id)
+    {
         return Err(bad_request(
             "ORIGIN_MISMATCH",
             "Origin Response must belong to the origin Loom.",
@@ -177,35 +218,48 @@ pub async fn create_weft(
     }
 
     let source = input.source.unwrap_or(WeftSource::ResponseAction);
-    let seed_mode = input.seed_mode.unwrap_or_else(|| default_seed_mode(source));
+    let seed_mode = input
+        .seed_mode
+        .unwrap_or_else(|| default_seed_mode(source, weft_kind));
     let create_origin_context_snapshot = input.create_origin_context_snapshot.unwrap_or(true);
-    if input.reuse_existing.unwrap_or(true) {
-        if let Some(existing) = loom_repository
-            .find_weft_by_origin(&origin_loom_id, &origin_response_id)
-            .await
-            .map_err(storage_error)?
+    let reuse_existing = input
+        .reuse_existing
+        .unwrap_or(weft_kind == WeftKind::Exploration);
+    if reuse_existing {
+        if let Some(existing) = matching_existing_weft(
+            &loom_repository,
+            &origin_loom_id,
+            origin_response_id.as_deref(),
+            weft_kind,
+        )
+        .await
+        .map_err(storage_error)?
         {
             let (visible_seed_responses, mut warnings) = ensure_visible_weft_seed(
                 &state.database,
                 &existing.loom_id,
                 &origin_loom_id,
-                &origin_response,
+                origin_response.as_ref(),
                 seed_mode,
                 &timestamp(),
             )
             .await?;
             let origin_context_snapshot_id = if create_origin_context_snapshot {
-                upsert_origin_context_snapshot(
-                    &state.database,
-                    &existing.loom_id,
-                    &origin_loom_id,
-                    &origin_response,
-                    None,
-                    None,
-                    input.metadata.as_ref(),
-                    &timestamp(),
-                )
-                .await?
+                if let Some(origin_response) = origin_response.as_ref() {
+                    upsert_origin_context_snapshot(
+                        &state.database,
+                        &existing.loom_id,
+                        &origin_loom_id,
+                        origin_response,
+                        None,
+                        None,
+                        input.metadata.as_ref(),
+                        &timestamp(),
+                    )
+                    .await?
+                } else {
+                    None
+                }
             } else {
                 None
             };
@@ -230,15 +284,24 @@ pub async fn create_weft(
     }
 
     let now = timestamp();
-    let loom_id = generate_weft_id(&origin_response_id);
+    let loom_id = generate_weft_id(
+        origin_response_id
+            .as_deref()
+            .unwrap_or(origin_loom_id.as_str()),
+    );
     let code = format!("W-{}", stable_suffix(&loom_id).to_ascii_uppercase());
     let canonical_uri = format!("loom://wefts/{loom_id}");
     let title = input
         .title
         .as_deref()
         .and_then(non_empty_trimmed)
-        .unwrap_or_else(|| derived_title(&origin_response));
-    let metadata_json = metadata_json(input.metadata, source)?;
+        .unwrap_or_else(|| {
+            origin_response
+                .as_ref()
+                .map(derived_title)
+                .unwrap_or_else(|| "Revision Weft".to_string())
+        });
+    let metadata_json = metadata_json(input.metadata, source, weft_kind)?;
     let new_weft = NewLoom {
         loom_id: loom_id.clone(),
         title,
@@ -249,7 +312,7 @@ pub async fn create_weft(
         canonical_uri: Some(canonical_uri.clone()),
         kind: "weft".to_string(),
         origin_loom_id: Some(origin_loom_id.clone()),
-        origin_response_id: Some(origin_response_id.clone()),
+        origin_response_id: origin_response_id.clone(),
         created_at: now.clone(),
         updated_at: now.clone(),
         metadata_json,
@@ -271,23 +334,27 @@ pub async fn create_weft(
         &state.database,
         &created.loom_id,
         &origin_loom_id,
-        &origin_response,
+        origin_response.as_ref(),
         seed_mode,
         &now,
     )
     .await?;
     let origin_context_snapshot_id = if create_origin_context_snapshot {
-        upsert_origin_context_snapshot(
-            &state.database,
-            &created.loom_id,
-            &origin_loom_id,
-            &origin_response,
-            None,
-            None,
-            None,
-            &now,
-        )
-        .await?
+        if let Some(origin_response) = origin_response.as_ref() {
+            upsert_origin_context_snapshot(
+                &state.database,
+                &created.loom_id,
+                &origin_loom_id,
+                origin_response,
+                None,
+                None,
+                None,
+                &now,
+            )
+            .await?
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -379,6 +446,13 @@ pub async fn persist_weft_responses(
     for (index, turn) in input.turns.iter().enumerate() {
         let question = required_trimmed("turn.question", &turn.question)?;
         let answer = required_trimmed("turn.answer", &turn.answer)?;
+        let title = turn
+            .title
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+            .unwrap_or_else(|| quick_ask_turn_title(&question, &answer));
         let turn_key = turn.id.clone().unwrap_or_else(|| {
             format!(
                 "{}-{}-{}-{}",
@@ -411,7 +485,7 @@ pub async fn persist_weft_responses(
                 loom_id: weft_loom_id.clone(),
                 role: "user".to_string(),
                 content: question,
-                title: Some(format!("Ask {}", index + 1)),
+                title: Some(title.clone()),
                 code: None,
                 canonical_uri: None,
                 created_at: created_at.clone(),
@@ -424,7 +498,7 @@ pub async fn persist_weft_responses(
                 loom_id: weft_loom_id.clone(),
                 role: "assistant".to_string(),
                 content: answer,
-                title: Some(format!("Ask answer {}", index + 1)),
+                title: Some(title),
                 code: None,
                 canonical_uri: None,
                 created_at,
@@ -469,6 +543,7 @@ pub async fn persist_weft_responses(
                 assistant_response_id: assistant.response_id,
                 question: user.content,
                 answer: assistant.content,
+                title: assistant.title,
                 sequence_index: user.sequence_index,
             })
             .collect(),
@@ -477,7 +552,49 @@ pub async fn persist_weft_responses(
     }))
 }
 
-fn default_seed_mode(source: WeftSource) -> WeftSeedMode {
+async fn matching_existing_weft(
+    repository: &LoomRepository,
+    origin_loom_id: &str,
+    origin_response_id: Option<&str>,
+    weft_kind: WeftKind,
+) -> Result<Option<LoomRecord>, ServiceError> {
+    let Some(origin_response_id) = origin_response_id else {
+        return Ok(None);
+    };
+    let wefts = repository
+        .list_wefts_by_origin_response(origin_response_id)
+        .await?;
+    Ok(wefts.into_iter().find(|weft| {
+        weft.origin_loom_id.as_deref() == Some(origin_loom_id)
+            && persisted_weft_kind(weft) == weft_kind
+    }))
+}
+
+fn persisted_weft_kind(loom: &LoomRecord) -> WeftKind {
+    loom.metadata_json
+        .as_deref()
+        .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
+        .and_then(|metadata| {
+            metadata
+                .get("weftKind")
+                .and_then(Value::as_str)
+                .map(ToString::to_string)
+        })
+        .as_deref()
+        .map(|kind| {
+            if kind == WeftKind::Revision.as_str() {
+                WeftKind::Revision
+            } else {
+                WeftKind::Exploration
+            }
+        })
+        .unwrap_or(WeftKind::Exploration)
+}
+
+fn default_seed_mode(source: WeftSource, weft_kind: WeftKind) -> WeftSeedMode {
+    if weft_kind == WeftKind::Revision {
+        return WeftSeedMode::RevisionLineage;
+    }
     match source {
         WeftSource::QuickAskConvert => WeftSeedMode::None,
         WeftSource::ResponseAction | WeftSource::GraphNode | WeftSource::Reference => {
@@ -490,49 +607,73 @@ async fn ensure_visible_weft_seed(
     database: &crate::storage::db::Database,
     weft_loom_id: &str,
     origin_loom_id: &str,
-    origin_response: &ResponseRecord,
+    origin_response: Option<&ResponseRecord>,
     seed_mode: WeftSeedMode,
     now: &str,
 ) -> Result<(Vec<VisibleWeftSeedResponse>, Vec<String>), (StatusCode, Json<WeftApiError>)> {
     match seed_mode {
         WeftSeedMode::None | WeftSeedMode::QuickAskTurns => Ok((Vec::new(), Vec::new())),
-        WeftSeedMode::OriginQaPair => {
+        WeftSeedMode::OriginQaPair | WeftSeedMode::RevisionLineage => {
+            let Some(origin_response) = origin_response else {
+                return Ok((
+                    Vec::new(),
+                    vec!["Revision Weft root origin has no previous Response seed.".to_string()],
+                ));
+            };
             let response_repository = ResponseRepository::new(database);
             let origin_responses = response_repository
                 .list_responses_for_loom(origin_loom_id)
                 .await
                 .map_err(storage_error)?;
-            let origin_user_response = origin_responses
-                .iter()
-                .filter(|response| {
-                    response.role == "user"
-                        && response.sequence_index < origin_response.sequence_index
-                })
-                .max_by_key(|response| response.sequence_index)
-                .cloned();
             let mut warnings = Vec::new();
             let mut seed_responses = Vec::new();
-            if let Some(user_response) = origin_user_response {
+            if seed_mode == WeftSeedMode::RevisionLineage {
+                for copied_response in origin_responses
+                    .iter()
+                    .filter(|response| response.sequence_index <= origin_response.sequence_index)
+                {
+                    seed_responses.push(visible_seed_response_from_origin(
+                        weft_loom_id,
+                        origin_loom_id,
+                        origin_response,
+                        copied_response,
+                        "revision_lineage",
+                        now,
+                    )?);
+                }
+            } else {
+                let origin_user_response = origin_responses
+                    .iter()
+                    .filter(|response| {
+                        response.role == "user"
+                            && response.sequence_index < origin_response.sequence_index
+                    })
+                    .max_by_key(|response| response.sequence_index)
+                    .cloned();
+                if let Some(user_response) = origin_user_response {
+                    seed_responses.push(visible_seed_response_from_origin(
+                        weft_loom_id,
+                        origin_loom_id,
+                        origin_response,
+                        &user_response,
+                        "origin_qa_pair",
+                        now,
+                    )?);
+                } else {
+                    warnings.push(
+                        "Origin user Response was unavailable; visible seed contains only the assistant Response."
+                            .to_string(),
+                    );
+                }
                 seed_responses.push(visible_seed_response_from_origin(
                     weft_loom_id,
                     origin_loom_id,
                     origin_response,
-                    &user_response,
+                    origin_response,
+                    "origin_qa_pair",
                     now,
                 )?);
-            } else {
-                warnings.push(
-                    "Origin user Response was unavailable; visible seed contains only the assistant Response."
-                        .to_string(),
-                );
             }
-            seed_responses.push(visible_seed_response_from_origin(
-                weft_loom_id,
-                origin_loom_id,
-                origin_response,
-                origin_response,
-                now,
-            )?);
             let persisted = response_repository
                 .insert_responses_if_missing_at_next_sequence(seed_responses)
                 .await
@@ -553,6 +694,7 @@ fn visible_seed_response_from_origin(
     origin_loom_id: &str,
     origin_response: &ResponseRecord,
     copied_response: &ResponseRecord,
+    seed_kind: &str,
     now: &str,
 ) -> Result<NewResponse, (StatusCode, Json<WeftApiError>)> {
     let role_suffix = if copied_response.role == "user" {
@@ -579,6 +721,7 @@ fn visible_seed_response_from_origin(
             origin_loom_id,
             &origin_response.response_id,
             &copied_response.response_id,
+            seed_kind,
         )?,
     })
 }
@@ -587,10 +730,11 @@ fn visible_seed_metadata_json(
     origin_loom_id: &str,
     origin_response_id: &str,
     copied_from_response_id: &str,
+    seed_kind: &str,
 ) -> Result<Option<String>, (StatusCode, Json<WeftApiError>)> {
     let value = serde_json::json!({
         "source": "weft_visible_seed",
-        "seedKind": "origin_qa_pair",
+        "seedKind": seed_kind,
         "originLoomId": origin_loom_id,
         "originResponseId": origin_response_id,
         "copiedFromResponseId": copied_from_response_id,
@@ -745,6 +889,7 @@ async fn insert_canonical_address(
 }
 
 fn loom_to_dto(loom: LoomRecord) -> LoomDto {
+    let display_code = display_code(DisplayCodeKind::Weft, &loom.loom_id);
     LoomDto {
         loom_id: loom.loom_id,
         title: loom.title,
@@ -754,6 +899,7 @@ fn loom_to_dto(loom: LoomRecord) -> LoomDto {
         origin_response_id: loom.origin_response_id,
         canonical_uri: loom.canonical_uri,
         code: loom.code,
+        display_code,
         created_at: loom.created_at,
         updated_at: loom.updated_at,
         metadata: loom
@@ -772,6 +918,21 @@ fn derived_title(response: &ResponseRecord) -> String {
         .or_else(|| response.code.as_deref().and_then(non_empty_trimmed))
         .map(|label| format!("Weft from {label}"))
         .unwrap_or_else(|| format!("Weft from {}", response.response_id))
+}
+
+fn quick_ask_turn_title(question: &str, answer: &str) -> String {
+    let source = answer
+        .split(['.', '!', '?'])
+        .find(|part| !part.trim().is_empty())
+        .unwrap_or(question);
+    let normalized = source.split_whitespace().collect::<Vec<_>>().join(" ");
+    let title = normalized
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '*' | '#' | '-' | '•'))
+        .trim();
+    if title.is_empty() {
+        return "Quick Ask".to_string();
+    }
+    title.chars().take(72).collect()
 }
 
 fn required_trimmed(
@@ -823,6 +984,7 @@ fn contains_forbidden_key(value: &Value) -> bool {
 fn metadata_json(
     metadata: Option<Value>,
     source: WeftSource,
+    weft_kind: WeftKind,
 ) -> Result<Option<String>, (StatusCode, Json<WeftApiError>)> {
     let mut object = match metadata {
         Some(Value::Object(map)) => map,
@@ -837,6 +999,10 @@ fn metadata_json(
     object.insert(
         "source".to_string(),
         Value::String(source.as_str().to_string()),
+    );
+    object.insert(
+        "weftKind".to_string(),
+        Value::String(weft_kind.as_str().to_string()),
     );
     serde_json::to_string(&Value::Object(object))
         .map(Some)
@@ -996,7 +1162,8 @@ fn stable_hash(value: &str) -> String {
 mod tests {
     use super::{
         create_weft, list_wefts_for_loom, list_wefts_for_response, persist_weft_responses,
-        CreateWeftRequest, PersistWeftTurn, PersistWeftTurnsRequest, WeftSource,
+        CreateWeftRequest, PersistWeftTurn, PersistWeftTurnsRequest, WeftKind, WeftSeedMode,
+        WeftSource,
     };
     use crate::{
         api::{graph::build_graph_projection, resolve::resolve_address, state::AppState},
@@ -1126,6 +1293,91 @@ mod tests {
         let summary = context.origin_summary.expect("origin summary");
         assert!(summary.contains("weft_origin_context_snapshot"));
         assert!(!summary.contains("raw_thinking"));
+    }
+
+    #[tokio::test]
+    async fn revision_weft_persists_kind_and_seeds_lineage_without_deleting_origin() {
+        let state = seeded_state().await;
+        let response_repository = ResponseRepository::new(&state.database);
+        response_repository
+            .insert_response(&NewResponse {
+                response_id: "prompt-b".to_string(),
+                loom_id: "origin-loom".to_string(),
+                role: "user".to_string(),
+                content: "Prompt B".to_string(),
+                title: Some("Prompt B".to_string()),
+                code: None,
+                canonical_uri: None,
+                created_at: "2026-05-08T00:00:03Z".to_string(),
+                updated_at: "2026-05-08T00:00:03Z".to_string(),
+                sequence_index: 2,
+                metadata_json: None,
+            })
+            .await
+            .expect("insert prompt b");
+        response_repository
+            .insert_response(&NewResponse {
+                response_id: "response-b".to_string(),
+                loom_id: "origin-loom".to_string(),
+                role: "assistant".to_string(),
+                content: "Response B".to_string(),
+                title: Some("Response B".to_string()),
+                code: None,
+                canonical_uri: None,
+                created_at: "2026-05-08T00:00:04Z".to_string(),
+                updated_at: "2026-05-08T00:00:04Z".to_string(),
+                sequence_index: 3,
+                metadata_json: None,
+            })
+            .await
+            .expect("insert response b");
+
+        let mut request = response_action_request(false);
+        request.weft_kind = Some(WeftKind::Revision);
+        request.seed_mode = Some(WeftSeedMode::RevisionLineage);
+        request.title = Some("Revision Weft".to_string());
+        let response = create_weft(State(state.clone()), Json(request))
+            .await
+            .expect("create revision Weft")
+            .1
+             .0;
+
+        assert_eq!(
+            response.weft.origin_response_id.as_deref(),
+            Some("origin-response")
+        );
+        assert_eq!(
+            response
+                .weft
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("weftKind")),
+            Some(&json!("revision"))
+        );
+        assert_eq!(
+            response
+                .visible_seed_responses
+                .iter()
+                .map(|response| response.content.as_str())
+                .collect::<Vec<_>>(),
+            vec!["Origin question", "Origin content"]
+        );
+        let origin_responses = response_repository
+            .list_responses_for_loom("origin-loom")
+            .await
+            .expect("list origin responses");
+        assert_eq!(
+            origin_responses
+                .iter()
+                .map(|response| response.content.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                "Origin question",
+                "Origin content",
+                "Prompt B",
+                "Response B"
+            ]
+        );
     }
 
     #[tokio::test]
@@ -1276,8 +1528,20 @@ mod tests {
         assert_eq!(persisted.len(), 2);
         assert_eq!(persisted[0].role, "user");
         assert_eq!(persisted[0].content, "What is MCP?");
+        assert_eq!(
+            persisted[0].title.as_deref(),
+            Some("Model Context Protocol")
+        );
         assert_eq!(persisted[1].role, "assistant");
         assert_eq!(persisted[1].content, "Model Context Protocol.");
+        assert_eq!(
+            persisted[1].title.as_deref(),
+            Some("Model Context Protocol")
+        );
+        assert_eq!(
+            response.responses[0].title.as_deref(),
+            Some("Model Context Protocol")
+        );
         let metadata: serde_json::Value =
             serde_json::from_str(persisted[0].metadata_json.as_deref().expect("metadata"))
                 .expect("metadata json");
@@ -1505,7 +1769,8 @@ mod tests {
     fn create_request(reuse_existing: bool) -> CreateWeftRequest {
         CreateWeftRequest {
             origin_loom_id: "origin-loom".to_string(),
-            origin_response_id: "origin-response".to_string(),
+            origin_response_id: Some("origin-response".to_string()),
+            weft_kind: None,
             title: Some("Service Weft".to_string()),
             summary: Some("Created through service Weft endpoint".to_string()),
             reuse_existing: Some(reuse_existing),
@@ -1548,6 +1813,7 @@ mod tests {
             id: Some(id.to_string()),
             question: question.to_string(),
             answer: answer.to_string(),
+            title: None,
             created_at: Some("2026-05-08T00:00:03Z".to_string()),
             metadata: Some(json!({ "askSessionTurnId": id })),
         }

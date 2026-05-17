@@ -2,7 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { RustHttpLoomEngineClient } from "../../src/engine";
 import type { EngineResponseEvent } from "../../src/engine/LoomEngineTypes";
 
@@ -73,11 +73,21 @@ export async function createServiceTestHarness(
   const tempDir = await mkdtemp(join(tmpdir(), "loom-e2e-"));
   const dbPath = join(tempDir, "loom-e2e.sqlite");
   const configPath = join(tempDir, "loom-service.toml");
+  const serviceBinaryPath = resolve(
+    process.cwd(),
+    "services/loom-service/target/debug/loom-service"
+  );
   assertTempPath(tempDir, dbPath);
   assertTempPath(tempDir, configPath);
+  if (!(await pathExists(serviceBinaryPath))) {
+    await rm(tempDir, { recursive: true, force: true });
+    throw new Error(
+      `loom-service binary is missing at ${serviceBinaryPath}. Build it before running product-mode E2E.`
+    );
+  }
 
   const serviceUrl = `http://127.0.0.1:${port}`;
-  const service = spawn("cargo", ["run", "--manifest-path", "services/loom-service/Cargo.toml"], {
+  const service = spawn(serviceBinaryPath, [], {
     cwd: process.cwd(),
     env: {
       ...process.env,

@@ -22,7 +22,16 @@ import {
   type NodeTypes,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
-import { GitBranch, GitFork, LocateFixed, X } from "lucide-react";
+import {
+  Bookmark,
+  Bot,
+  ExternalLink,
+  GitBranch,
+  GitFork,
+  Link2,
+  LocateFixed,
+  X,
+} from "lucide-react";
 import {
   loomGraphRootNodeId,
   responseGraphNodeId,
@@ -33,6 +42,11 @@ import type { Conversation, LoomForkRecord, ResponseItem } from "../../types";
 import type { LoomEngineClient } from "../../engine";
 import { AssistantMarkdownContent } from "../../components/AssistantMarkdownContent";
 import { GraphControls } from "./GraphControls";
+import {
+  responseForGraphNode,
+  responsePairIdsForGraphNode,
+} from "./graphResponsePairing";
+import { graphResponsePreviewForNode } from "./graphNodePreview";
 import { LoomGraphEdge, type LoomGraphFlowEdge } from "./LoomGraphEdge";
 import { LoomGraphNode, type LoomGraphFlowNode } from "./LoomGraphNode";
 
@@ -47,7 +61,11 @@ export interface GraphViewProps {
   bookmarkedResponseAddresses: ReadonlySet<string>;
   onOpenLoom: (loomId: string) => void;
   onOpenResponse: (loomId: string, response: ResponseItem) => void;
-  onBookmarkResponse: (loomId: string, response: ResponseItem) => void;
+  onBookmarkResponse: (
+    loomId: string,
+    response: ResponseItem,
+    currentlyBookmarked?: boolean
+  ) => void;
   onLinkResponse: (loomId: string, response: ResponseItem) => void;
   onWeftResponse: (loomId: string, response: ResponseItem) => void;
   renderContinuationComposer: (props: {
@@ -81,9 +99,10 @@ type LoomGraphComposerFlowNode = Node<
 
 type LoomGraphAnyNode = LoomGraphFlowNode | LoomGraphComposerFlowNode;
 
-interface GraphResponsePreview {
-  question: string;
-  answerMarkdown: string;
+interface GraphContinuationTarget {
+  loomId: string;
+  response: ResponseItem;
+  nodeId: string;
 }
 
 function LoomGraphComposerNode({ data }: NodeProps<LoomGraphComposerFlowNode>) {
@@ -141,18 +160,33 @@ const nodeTypes: NodeTypes = {
   loomGraphComposerNode: LoomGraphComposerNode,
 };
 
-function responseForNode(
-  node: LoomGraphProjectionNode,
-  responsesByConversation: Record<string, ResponseItem[]>
-) {
-  if (!node.responseId) return undefined;
-  return (responsesByConversation[node.loomId] ?? []).find(
-    (response) => response.id === node.responseId
-  );
-}
-
 function selectedNodeIdForProjection(projection: LoomGraphProjection) {
   return projection.focusedNodeId ?? projection.lastNodeId ?? projection.firstNodeId;
+}
+
+function responseBookmarkCandidates(
+  response: ResponseItem | undefined,
+  node?: LoomGraphProjectionNode
+) {
+  return [
+    response?.id,
+    response?.serviceUserResponseId,
+    response?.meta?.id,
+    response?.address,
+    response?.meta?.canonicalUri,
+    node?.responseId,
+    node?.canonicalUri,
+  ].filter((value): value is string => Boolean(value));
+}
+
+function responseIsBookmarkedBySet(
+  response: ResponseItem | undefined,
+  node: LoomGraphProjectionNode,
+  bookmarkedResponseAddresses: ReadonlySet<string>
+) {
+  return responseBookmarkCandidates(response, node).some((candidate) =>
+    bookmarkedResponseAddresses.has(candidate)
+  );
 }
 
 function GraphViewInner({
@@ -177,7 +211,10 @@ function GraphViewInner({
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
   const [followLoomScroll, setFollowLoomScroll] = useState(true);
   const [continuationNodeId, setContinuationNodeId] = useState<string | undefined>(undefined);
+  const [continuationTarget, setContinuationTarget] =
+    useState<GraphContinuationTarget | null>(null);
   const [continuationOpen, setContinuationOpen] = useState(false);
+  const [bookmarkStateOverrides, setBookmarkStateOverrides] = useState<Record<string, boolean>>({});
   const [pendingContinuationFocusNodeId, setPendingContinuationFocusNodeId] = useState<
     string | undefined
   >(undefined);
@@ -190,7 +227,7 @@ function GraphViewInner({
     y: 0,
   });
   const [projectionError, setProjectionError] = useState<string | null>(null);
-  const [responsePreview, setResponsePreview] = useState<GraphResponsePreview | null>(null);
+  const [responsePreviewNodeId, setResponsePreviewNodeId] = useState<string | null>(null);
   const initializedViewportKey = useRef<string | undefined>(undefined);
   const skipNextFollowAfterWeftFocusRef = useRef(false);
   const skipNextFollowAfterContinuationFocusRef = useRef(false);
@@ -305,16 +342,30 @@ function GraphViewInner({
     };
   }, [activeLoomId, responsesByConversation]);
 
+  const latestActiveResponseNodeIds = useMemo(
+    () => responsePairIdsForGraphNode(latestActiveResponse?.response),
+    [latestActiveResponse]
+  );
+
   useEffect(() => {
     const nextNodeId = selectedNodeIdForProjection(projection);
     setSelectedNodeId((current) => current ?? nextNodeId);
   }, [projection]);
 
   useEffect(() => {
-    const viewportKey = activeLoomId ?? projection.firstNodeId;
+    const nextNodeId = selectedNodeIdForProjection(projection);
+    const viewportKey = [
+      activeLoomId ?? "no-active-loom",
+      projection.firstNodeId ?? "no-first-node",
+      projection.lastNodeId ?? "no-last-node",
+      projection.focusedNodeId ?? "no-focused-node",
+    ].join(":");
     if (!viewportKey || initializedViewportKey.current === viewportKey) return;
     initializedViewportKey.current = viewportKey;
-    window.requestAnimationFrame(() => centerNode(selectedNodeIdForProjection(projection)));
+    setSelectedNodeId(nextNodeId);
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => centerNode(nextNodeId));
+    });
   }, [activeLoomId, centerNode, projection]);
 
   useEffect(() => {
@@ -423,52 +474,174 @@ function GraphViewInner({
   useEffect(() => {
     setContinuationOpen(false);
     setContinuationNodeId(undefined);
+    setContinuationTarget(null);
     setPendingContinuationFocusNodeId(undefined);
     setPendingWeftFocusNodeId(undefined);
-    setResponsePreview(null);
+    setResponsePreviewNodeId(null);
+    setBookmarkStateOverrides({});
   }, [activeLoomId]);
 
+  const bookmarkOverrideForResponse = useCallback(
+    (response: ResponseItem | undefined) => {
+      if (!response) return undefined;
+      for (const responseId of responsePairIdsForGraphNode(response)) {
+        const override = bookmarkStateOverrides[responseId];
+        if (override !== undefined) return override;
+      }
+      return undefined;
+    },
+    [bookmarkStateOverrides]
+  );
+
+  const setBookmarkOverrideForResponse = useCallback(
+    (response: ResponseItem, bookmarked: boolean) => {
+      const updates = Object.fromEntries(
+        Array.from(responsePairIdsForGraphNode(response)).map((responseId) => [
+          responseId,
+          bookmarked,
+        ])
+      );
+      setBookmarkStateOverrides((current) => ({ ...current, ...updates }));
+    },
+    []
+  );
+
   useEffect(() => {
-    if (!responsePreview) return;
+    if (!responsePreviewNodeId) return;
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setResponsePreview(null);
+      if (event.key === "Escape") setResponsePreviewNodeId(null);
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [responsePreview]);
+  }, [responsePreviewNodeId]);
+
+  const responsePreview = useMemo(() => {
+    if (!responsePreviewNodeId) return null;
+    const node = projection.nodes.find((item) => item.id === responsePreviewNodeId);
+    if (!node) return null;
+    const response = responseForGraphNode(node, responsesByConversation);
+    return graphResponsePreviewForNode(node, response);
+  }, [projection.nodes, responsePreviewNodeId, responsesByConversation]);
+
+  const responsePreviewTarget = useMemo(() => {
+    if (!responsePreviewNodeId) return null;
+    const node = projection.nodes.find((item) => item.id === responsePreviewNodeId);
+    if (!node || node.kind !== "response") return null;
+    const response = responseForGraphNode(node, responsesByConversation);
+    if (!response) return null;
+    const isBookmarked =
+      bookmarkOverrideForResponse(response) ??
+      (Boolean(node.isBookmarked) ||
+      Boolean(response.bookmarked) ||
+      responseIsBookmarkedBySet(response, node, bookmarkedResponseAddresses));
+    const responsePairIds = responsePairIdsForGraphNode(response);
+    const responseForkRecords = forkRecords.filter(
+      (record) =>
+        record.parentConversationId === node.loomId &&
+        Boolean(node.responseId) &&
+        (record.parentResponseId === node.responseId ||
+          responsePairIds.has(record.parentResponseId))
+    );
+    const hasExistingWeft =
+      responseForkRecords.length > 0 ||
+      projection.edges.some((edge) => edge.kind === "weft" && edge.source === node.id);
+    const hasRevisionWeft = responseForkRecords.some((record) => record.kind === "revision");
+    return {
+      node: { ...node, isBookmarked },
+      response,
+      hasExistingWeft,
+      hasRevisionWeft,
+      weftCount: responseForkRecords.length,
+    };
+  }, [
+    bookmarkedResponseAddresses,
+    bookmarkOverrideForResponse,
+    forkRecords,
+    projection.edges,
+    projection.nodes,
+    responsePreviewNodeId,
+    responsesByConversation,
+  ]);
+
+  const responsePreviewPending = useMemo(() => {
+    if (!responsePreviewNodeId) return false;
+    const node = projection.nodes.find((item) => item.id === responsePreviewNodeId);
+    if (!node) return false;
+    const response = responseForGraphNode(node, responsesByConversation);
+    return Boolean(response?.visibleProgress) && !responsePreview?.answerMarkdown.trim();
+  }, [projection.nodes, responsePreview, responsePreviewNodeId, responsesByConversation]);
 
   const handleContinuationResponseCreated = useCallback(
     (response: ResponseItem) => {
-      if (!latestActiveResponse) return;
-      const nextNodeId = responseGraphNodeId(latestActiveResponse.loomId, response.id);
+      if (!continuationTarget) return;
+      const nextNodeId = responseGraphNodeId(continuationTarget.loomId, response.id);
       setContinuationOpen(false);
-      setContinuationNodeId(nextNodeId);
-    },
-    [latestActiveResponse]
-  );
-
-  const handleContinuationResponseCompleted = useCallback(
-    (response: ResponseItem) => {
-      if (!latestActiveResponse) return;
-      const nextNodeId = responseGraphNodeId(latestActiveResponse.loomId, response.id);
       setContinuationNodeId(nextNodeId);
       setSelectedNodeId(nextNodeId);
       setPendingContinuationFocusNodeId(nextNodeId);
     },
-    [latestActiveResponse]
+    [continuationTarget]
+  );
+
+  const handleContinuationResponseCompleted = useCallback(
+    (response: ResponseItem) => {
+      if (!continuationTarget) return;
+      const nextNodeId = responseGraphNodeId(continuationTarget.loomId, response.id);
+      setContinuationNodeId(nextNodeId);
+      setSelectedNodeId(nextNodeId);
+      setPendingContinuationFocusNodeId(nextNodeId);
+    },
+    [continuationTarget]
+  );
+
+  const openContinuationForResponse = useCallback(
+    (node: LoomGraphProjectionNode, response: ResponseItem) => {
+      const target = {
+        loomId: node.loomId,
+        response,
+        nodeId: node.id,
+      };
+      setContinuationTarget(target);
+      setContinuationNodeId(node.id);
+      setSelectedNodeId(node.id);
+      setContinuationOpen(true);
+      positionContinuationComposer(node.id);
+      window.requestAnimationFrame(() => {
+        focusNodeNearTop(node.id, 520);
+        window.requestAnimationFrame(() => positionContinuationComposer(node.id));
+      });
+    },
+    [focusNodeNearTop, positionContinuationComposer]
   );
 
   const flowNodes = useMemo<LoomGraphAnyNode[]>(
     () => {
       const nodes: LoomGraphAnyNode[] = projection.nodes.map((projectionNode) => {
-        const response = responseForNode(projectionNode, responsesByConversation);
+        const response = responseForGraphNode(projectionNode, responsesByConversation);
+        const isResponsePending =
+          Boolean(response?.visibleProgress) &&
+          !graphResponsePreviewForNode(projectionNode, response)?.answerMarkdown.trim();
+        const isBookmarked =
+          bookmarkOverrideForResponse(response) ??
+          (Boolean(projectionNode.isBookmarked) ||
+          Boolean(response?.bookmarked) ||
+          responseIsBookmarkedBySet(response, projectionNode, bookmarkedResponseAddresses));
+        const responsePairIds = responsePairIdsForGraphNode(response);
+        const responseForkRecords = forkRecords.filter(
+          (record) =>
+            record.parentConversationId === projectionNode.loomId &&
+            Boolean(projectionNode.responseId) &&
+            (record.parentResponseId === projectionNode.responseId ||
+              responsePairIds.has(record.parentResponseId))
+        );
         const hasExistingWeft =
           projectionNode.kind === "response" &&
-          forkRecords.some(
-            (record) =>
-              record.parentConversationId === projectionNode.loomId &&
-              record.parentResponseId === projectionNode.responseId
-          );
+          (responseForkRecords.length > 0 ||
+            projection.edges.some(
+              (edge) => edge.kind === "weft" && edge.source === projectionNode.id
+            ));
+        const hasRevisionWeft = responseForkRecords.some((record) => record.kind === "revision");
+        const weftCount = responseForkRecords.length;
         return {
           id: projectionNode.id,
           type: "loomGraphNode",
@@ -476,6 +649,7 @@ function GraphViewInner({
           data: {
             projectionNode: {
               ...projectionNode,
+              isBookmarked,
               isFocused: projectionNode.id === selectedNodeId || projectionNode.isFocused,
             },
             response,
@@ -487,33 +661,36 @@ function GraphViewInner({
               onOpenLoom(node.loomId);
             },
             onBookmark: (node, nodeResponse) => {
-              if (nodeResponse) onBookmarkResponse(node.loomId, nodeResponse);
+              if (nodeResponse) {
+                onBookmarkResponse(node.loomId, nodeResponse, Boolean(node.isBookmarked));
+              }
             },
             onLink: (node, nodeResponse) => {
-              if (nodeResponse) onLinkResponse(node.loomId, nodeResponse);
+              if (!nodeResponse) return;
+              openContinuationForResponse(node, nodeResponse);
+              onLinkResponse(node.loomId, nodeResponse);
             },
             onWeft: (node, nodeResponse) => {
               if (nodeResponse) onWeftResponse(node.loomId, nodeResponse);
             },
-            onContinue: (node) => {
-              setContinuationNodeId(node.id);
-              setSelectedNodeId(node.id);
-              setContinuationOpen(true);
-              positionContinuationComposer(node.id);
-              window.requestAnimationFrame(() => {
-                focusNodeNearTop(node.id, 520);
-                window.requestAnimationFrame(() => positionContinuationComposer(node.id));
-              });
+            onContinue: (node, nodeResponse) => {
+              if (nodeResponse) openContinuationForResponse(node, nodeResponse);
             },
             hasExistingWeft,
-            isTerminalResponse: projectionNode.id === latestActiveResponse?.nodeId,
+            hasRevisionWeft,
+            weftCount,
+            isTerminalResponse:
+              projectionNode.kind === "response" && projectionNode.responseId
+                ? latestActiveResponseNodeIds.has(projectionNode.responseId)
+                : false,
+            isResponsePending,
             continuationOpen:
               continuationOpen && continuationNodeId === projectionNode.id,
             viewportZoom: graphZoom,
           },
         };
       });
-      if (continuationOpen && latestActiveResponse) {
+      if (continuationOpen && continuationTarget) {
         nodes.push({
           id: "loom-graph-continuation-composer",
           type: "loomGraphComposerNode",
@@ -521,9 +698,12 @@ function GraphViewInner({
           draggable: false,
           selectable: false,
           data: {
-            onClose: () => setContinuationOpen(false),
+            onClose: () => {
+              setContinuationOpen(false);
+              setContinuationTarget(null);
+            },
             content: renderContinuationComposer({
-              loomId: latestActiveResponse.loomId,
+              loomId: continuationTarget.loomId,
               onSubmitStart: () => setContinuationOpen(false),
               onResponseCreated: handleContinuationResponseCreated,
               onResponseCompleted: handleContinuationResponseCompleted,
@@ -539,16 +719,22 @@ function GraphViewInner({
       onOpenLoom,
       onOpenResponse,
       onWeftResponse,
+      bookmarkedResponseAddresses,
+      bookmarkOverrideForResponse,
       forkRecords,
+      projection.edges,
       projection.nodes,
       responsesByConversation,
       selectedNodeId,
       continuationComposerPosition,
       continuationOpen,
       continuationNodeId,
+      continuationTarget,
       graphZoom,
       handleContinuationResponseCreated,
+      openContinuationForResponse,
       latestActiveResponse,
+      latestActiveResponseNodeIds,
       renderContinuationComposer,
       focusNodeNearTop,
       positionContinuationComposer,
@@ -610,12 +796,13 @@ function GraphViewInner({
       ) {
         return;
       }
-      const nodeResponse = responseForNode(node.data.projectionNode, responsesByConversation);
-      if (!nodeResponse) return;
-      setResponsePreview({
-        question: nodeResponse.question,
-        answerMarkdown: nodeResponse.answer.join("\n\n"),
-      });
+      const nodeResponse = responseForGraphNode(
+        node.data.projectionNode,
+        responsesByConversation
+      );
+      const preview = graphResponsePreviewForNode(node.data.projectionNode, nodeResponse);
+      if (!preview) return;
+      setResponsePreviewNodeId(node.id);
     },
     [responsesByConversation]
   );
@@ -640,17 +827,19 @@ function GraphViewInner({
 
   const openContinuationComposer = useCallback(() => {
     if (!latestActiveResponse) return;
-    setContinuationNodeId(latestActiveResponse.nodeId);
-    setSelectedNodeId(latestActiveResponse.nodeId);
-    setContinuationOpen(true);
-    positionContinuationComposer(latestActiveResponse.nodeId);
-    window.requestAnimationFrame(() => {
-      focusNodeNearTop(latestActiveResponse.nodeId, 520);
-      window.requestAnimationFrame(() =>
-        positionContinuationComposer(latestActiveResponse.nodeId)
-      );
-    });
-  }, [focusNodeNearTop, latestActiveResponse, positionContinuationComposer]);
+    openContinuationForResponse(
+      {
+        id: latestActiveResponse.nodeId,
+        kind: "response",
+        loomId: latestActiveResponse.loomId,
+        responseId: latestActiveResponse.response.id,
+        title: latestActiveResponse.response.title,
+        depth: 0,
+        position: { x: 0, y: 0 },
+      },
+      latestActiveResponse.response
+    );
+  }, [latestActiveResponse, openContinuationForResponse]);
 
   const selectedNode = projection.nodes.find((node) => node.id === selectedNodeId);
 
@@ -732,40 +921,152 @@ function GraphViewInner({
             <span>{projectionError}</span>
           </div>
         )}
-      </div>
-      {responsePreview && (
-        <div
-          className="graph-response-preview-backdrop"
-          role="presentation"
-          onMouseDown={(event) => {
-            if (event.target === event.currentTarget) setResponsePreview(null);
-          }}
-        >
-          <section
-            className="graph-response-preview-modal"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Response question and answer"
+        {responsePreview && (
+          <div
+            className="graph-response-preview-backdrop"
+            role="presentation"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setResponsePreviewNodeId(null);
+            }}
           >
             <button
               type="button"
               className="graph-response-preview-close"
               aria-label="Close response preview"
-              onClick={() => setResponsePreview(null)}
+              onClick={() => setResponsePreviewNodeId(null)}
             >
               <X size={18} />
             </button>
-            <div className="graph-response-preview-block">
-              <span>Soru</span>
-              <p>{responsePreview.question}</p>
-            </div>
-            <div className="graph-response-preview-block graph-response-preview-answer">
-              <span>Cevap</span>
-              <AssistantMarkdownContent markdown={responsePreview.answerMarkdown} />
-            </div>
-          </section>
-        </div>
-      )}
+            <section
+              className="graph-response-preview-modal"
+              role="dialog"
+              aria-modal="true"
+              aria-label="Response question and answer"
+            >
+              <div className="graph-response-preview-header">
+                <div className="graph-response-preview-block graph-response-preview-question">
+                  <span>Question</span>
+                  <p>{responsePreview.question}</p>
+                </div>
+                {responsePreviewTarget && (
+                  <div className="graph-response-preview-actions" aria-label="Response actions">
+                    <div className="graph-response-preview-action-group">
+                      <button
+                        type="button"
+                        className={
+                          responsePreviewTarget.node.isBookmarked
+                            ? "graph-response-preview-bookmark is-bookmarked"
+                            : "graph-response-preview-bookmark"
+                        }
+                        title="Bookmark"
+                        aria-pressed={responsePreviewTarget.node.isBookmarked}
+                        aria-label={
+                          responsePreviewTarget.node.isBookmarked
+                            ? `Remove bookmark for ${responsePreviewTarget.node.title}`
+                            : `Bookmark ${responsePreviewTarget.node.title}`
+                        }
+                        onClick={() =>
+                          {
+                            setBookmarkOverrideForResponse(
+                              responsePreviewTarget.response,
+                              !responsePreviewTarget.node.isBookmarked
+                            );
+                            onBookmarkResponse(
+                              responsePreviewTarget.node.loomId,
+                              responsePreviewTarget.response,
+                              Boolean(responsePreviewTarget.node.isBookmarked)
+                            );
+                          }
+                        }
+                      >
+                        <Bookmark
+                          size={14}
+                          fill={responsePreviewTarget.node.isBookmarked ? "currentColor" : "none"}
+                        />
+                      </button>
+                      <button
+                        type="button"
+                        title="Link"
+                        aria-label={`Link ${responsePreviewTarget.node.title}`}
+                        onClick={() => {
+                          openContinuationForResponse(
+                            responsePreviewTarget.node,
+                            responsePreviewTarget.response
+                          );
+                          onLinkResponse(
+                            responsePreviewTarget.node.loomId,
+                            responsePreviewTarget.response
+                          );
+                        }}
+                      >
+                        <Link2 size={14} />
+                      </button>
+                      <button
+                        type="button"
+                        className={
+                          [
+                            "graph-response-preview-weft",
+                            responsePreviewTarget.hasExistingWeft ? "is-wefted" : "",
+                            responsePreviewTarget.hasRevisionWeft ? "is-revision-wefted" : "",
+                          ].filter(Boolean).join(" ")
+                        }
+                        title={responsePreviewTarget.hasExistingWeft ? "Open Weft" : "Start Weft"}
+                        aria-pressed={responsePreviewTarget.hasExistingWeft}
+                        aria-label={
+                          responsePreviewTarget.hasExistingWeft
+                            ? `Open Weft from ${responsePreviewTarget.node.title}`
+                            : `Start Weft from ${responsePreviewTarget.node.title}`
+                        }
+                        onClick={() =>
+                          onWeftResponse(
+                            responsePreviewTarget.node.loomId,
+                            responsePreviewTarget.response
+                          )
+                        }
+                      >
+                        <GitFork size={14} />
+                        {responsePreviewTarget.weftCount > 1 && (
+                          <span className="weft-count-badge">{responsePreviewTarget.weftCount}</span>
+                        )}
+                      </button>
+                    </div>
+                    <span className="graph-response-preview-action-separator" aria-hidden="true" />
+                    <div className="graph-response-preview-action-group">
+                      <button
+                        type="button"
+                        title="Open"
+                        aria-label={`Open ${responsePreviewTarget.node.title}`}
+                        onClick={() => {
+                          onOpenResponse(
+                            responsePreviewTarget.node.loomId,
+                            responsePreviewTarget.response
+                          );
+                          setResponsePreviewNodeId(null);
+                        }}
+                      >
+                        <ExternalLink size={14} />
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="graph-response-preview-scroll">
+                <div className="graph-response-preview-block graph-response-preview-answer">
+                  <span>Answer</span>
+                  {responsePreviewPending ? (
+                    <div className="graph-response-preview-waiting" role="status" aria-live="polite">
+                      <Bot size={16} />
+                      <p>Waiting for answer</p>
+                    </div>
+                  ) : (
+                    <AssistantMarkdownContent markdown={responsePreview.answerMarkdown} />
+                  )}
+                </div>
+              </div>
+            </section>
+          </div>
+        )}
+      </div>
     </section>
   );
 }

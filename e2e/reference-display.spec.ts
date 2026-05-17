@@ -1,7 +1,7 @@
 // E2E data authority classification:
 // - PRODUCT_SERVICE_BACKED for the rust-service Reference proof.
 // - LEGACY_TYPESCRIPT_LOCAL for seeded Reference token rendering tests below.
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 import { createServiceTestHarness } from "./helpers/serviceTestHarness";
 
 interface ReferenceDto {
@@ -102,7 +102,173 @@ async function renameReferenceToken(page: Page, label: string) {
   return token;
 }
 
+async function transcriptBottomGap(page: Page) {
+  return page.locator(".chat-transcript").evaluate((element) => {
+    const transcript = element as HTMLElement;
+    return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight;
+  });
+}
+
+async function tokenOccurrenceMarker(token: Locator) {
+  return token.evaluate((element) => {
+    const content = window.getComputedStyle(element, "::after").content;
+    if (!content || content === "none" || content === "normal") return "";
+    return content.replace(/^["']|["']$/g, "");
+  });
+}
+
 test.describe("[product-service-backed] Reference product proof", () => {
+  test("[product-service-backed] allows repeated Response Link insertions in the active composer", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(
+        page,
+        "Event Sourcing nedir? nasil kullanilir? Detayli olarak anlat"
+      );
+      await expect(page.getByText("Event Store").first()).toBeVisible({ timeout: 30_000 });
+      const rootLoom = (await scenario.client.listLooms()).find((item) =>
+        item.title.includes("Event Sourcing")
+      );
+      expect(rootLoom).toBeTruthy();
+
+      const linkButton = page.locator(".response-link-chip").last();
+      await expect(linkButton).toBeVisible();
+      const tokenCountBefore = await page.getByTestId("inline-loom-token").count();
+
+      await linkButton.click();
+      await expect(page.getByTestId("inline-loom-token")).toHaveCount(tokenCountBefore + 1);
+      await expect(page.locator(".prompt-editor")).toBeFocused();
+
+      const firstToken = page.getByTestId("inline-loom-token").last();
+      const sourceResponseId = await firstToken.getAttribute("data-loom-source-response-id");
+      const sourceCanonicalUri = await firstToken.getAttribute("data-loom-source-canonical-uri");
+      const responsePath = await firstToken.getAttribute("data-loom-path");
+      const canonicalUri = await firstToken.getAttribute("data-loom-canonical-uri");
+      expect(sourceResponseId).toBeTruthy();
+      expect(sourceCanonicalUri).toBeTruthy();
+      expect(responsePath).toBeTruthy();
+      expect(canonicalUri).toBe(responsePath);
+      expect(sourceCanonicalUri).toBe(responsePath);
+      await expect(firstToken).not.toHaveAttribute("data-loom-occurrence-index", /.+/);
+      await expect.poll(() => tokenOccurrenceMarker(firstToken)).toBe("");
+
+      await linkButton.click();
+      await expect(page.getByTestId("inline-loom-token")).toHaveCount(tokenCountBefore + 2);
+      const secondToken = page.getByTestId("inline-loom-token").last();
+      await expect(secondToken).toHaveAttribute("data-loom-path", responsePath!);
+      await expect(secondToken).toHaveAttribute("data-loom-canonical-uri", responsePath!);
+      await expect(secondToken).toHaveAttribute("data-loom-source-response-id", sourceResponseId!);
+      await expect(secondToken).toHaveAttribute("data-loom-source-canonical-uri", sourceCanonicalUri!);
+      await expect(secondToken).toHaveAttribute(
+        "data-loom-occurrence-index",
+        "2"
+      );
+      await expect.poll(() => tokenOccurrenceMarker(secondToken)).toBe(" #2");
+      await expect(page.locator(".prompt-editor")).toBeFocused();
+
+      await linkButton.click();
+      await expect(page.getByTestId("inline-loom-token")).toHaveCount(tokenCountBefore + 3);
+      const thirdToken = page.getByTestId("inline-loom-token").last();
+      await expect(thirdToken).toHaveAttribute("data-loom-path", responsePath!);
+      await expect(thirdToken).toHaveAttribute("data-loom-canonical-uri", responsePath!);
+      await expect(thirdToken).toHaveAttribute("data-loom-source-response-id", sourceResponseId!);
+      await expect(thirdToken).toHaveAttribute("data-loom-source-canonical-uri", sourceCanonicalUri!);
+      await expect(thirdToken).toHaveAttribute(
+        "data-loom-occurrence-index",
+        "3"
+      );
+      await expect.poll(() => tokenOccurrenceMarker(thirdToken)).toBe(" #3");
+      await expect(page.locator(".prompt-editor")).toBeFocused();
+
+      const matchingTokens = await page.getByTestId("inline-loom-token").evaluateAll(
+        (tokens, expected) =>
+          tokens.filter(
+            (item) =>
+              item instanceof HTMLElement &&
+              item.dataset.loomSourceResponseId === expected.sourceResponseId &&
+              item.dataset.loomSourceCanonicalUri === expected.sourceCanonicalUri
+          ).length,
+        { sourceResponseId, sourceCanonicalUri }
+      );
+      expect(matchingTokens).toBe(3);
+      await expect.poll(() => transcriptBottomGap(page)).toBeLessThanOrEqual(96);
+
+      await page.keyboard.insertText(
+        "\nScroll follow proof ".repeat(80).trim()
+      );
+      await expect(page.locator(".prompt-editor")).toBeFocused();
+      await expect.poll(() => transcriptBottomGap(page)).toBeLessThanOrEqual(96);
+
+      await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+      await page.keyboard.press("Backspace");
+      await expect(page.getByTestId("inline-loom-token")).toHaveCount(0);
+      await expect(page.locator(".prompt-editor")).toBeFocused();
+      await linkButton.click();
+      await expect(page.getByTestId("inline-loom-token")).toHaveCount(1);
+      const afterImmediateDeleteToken = page.getByTestId("inline-loom-token").last();
+      await expect(afterImmediateDeleteToken).toHaveAttribute(
+        "data-loom-path",
+        responsePath!
+      );
+      await expect(page.locator(".prompt-editor")).toBeFocused();
+      await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+      await page.keyboard.press("Backspace");
+      await expect(page.getByTestId("inline-loom-token")).toHaveCount(0);
+
+      await page.evaluate((loomId) => {
+        window.localStorage.setItem(
+          "loom:composer-drafts-v1",
+          JSON.stringify({
+            [loomId]: {
+              html: "",
+              links: [
+                {
+                  id: "stale-smoke-response",
+                  type: "response",
+                  title: 'The "Smoke" effect in Focus Composer is a post-processing feature design',
+                  path: "loom://focus-composer-smoke/L-HN05W/r/R-00000?id=stale-smoke-response",
+                },
+                {
+                  id: "stale-greece-response",
+                  type: "response",
+                  title: "Yunanistan'in tam anlamiyla kurulusu tek bir tarihe sigmaz",
+                  path: "loom://yunanistan-ne-zaman-kuruldu/L-B26Y8/r/R-00000?id=stale-greece-response",
+                },
+              ],
+            },
+          })
+        );
+      }, rootLoom!.loomId);
+      await page.reload();
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+      await page.getByRole("button", { name: `Open ${rootLoom!.title}` }).click();
+      await expect(page.getByText("Event Store").first()).toBeVisible({ timeout: 30_000 });
+      await page.locator(".response-link-chip").last().click();
+      await expect(page.getByTestId("inline-loom-token")).toHaveCount(1);
+      const migratedToken = page.getByTestId("inline-loom-token").last();
+      await expect(migratedToken).not.toContainText("Smoke");
+      await expect(migratedToken).not.toContainText("Yunanistan");
+      await expect(migratedToken).toHaveAttribute("data-loom-source-canonical-uri", /event-sourcing/i);
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
   test("[product-service-backed] creates, reuses, renders, sends, suggests, graphs, and exports Fragment References through loom-service", async ({
     page,
   }) => {

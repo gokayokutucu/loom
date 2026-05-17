@@ -27,17 +27,34 @@ import {
   type ModelProfileId,
   type RuntimeHealthState,
 } from "../services/modelProviders";
-import type {
-  AccessibilitySettings,
-  AppSettings,
-  NotificationSettings,
-  StartupSettings,
+import {
+  isMockDataForced,
+  type AccessibilitySettings,
+  type AppSettings,
+  type NotificationSettings,
+  type StartupSettings,
 } from "../services/appSettings";
+import {
+  displayKeyLabel,
+  keyboardShortcutDefinitions,
+  shortcutKeysForPlatform,
+  type ShortcutPlatform,
+  type KeyboardShortcutDefinition,
+} from "../services/keyboardShortcuts";
+import {
+  getElectronRuntimeBridge,
+  getElectronRuntimeInfo,
+  type LoomDesktopRuntimeStatus,
+} from "../electronRuntime";
 import type {
   CapabilitySummary,
   LoomEngineClient,
+  LoomServiceRuntimeConfig,
   ServiceConfigStatus,
   ServiceHealthStatus,
+  SpeechProviderHealth,
+  SpeechToTextProviderKind,
+  SpeechToTextRuntimeConfig,
 } from "../engine";
 
 const provider = new OllamaProvider();
@@ -52,6 +69,7 @@ type SettingsCategoryId =
   | "data-storage"
   | "export-import"
   | "ui-preferences"
+  | "shortcuts"
   | "advanced";
 
 const settingsCategories: Array<{
@@ -69,10 +87,41 @@ const settingsCategories: Array<{
   { id: "data-storage", label: "Data & Storage", description: "SQLite and local data", icon: Database },
   { id: "export-import", label: "Export / Import", description: "Portable Loom data", icon: Download },
   { id: "ui-preferences", label: "UI Preferences", description: "Display and comfort", icon: Palette },
+  { id: "shortcuts", label: "Shortcuts", description: "Browser-style keyboard commands", icon: Search },
   { id: "advanced", label: "Advanced", description: "Diagnostics, config, developer plans", icon: Info },
 ];
 
 const futureProviders = ["OpenAI", "Anthropic Claude", "Google Gemini", "OpenAI-compatible"];
+
+const defaultSpeechConfigDraft: SpeechToTextRuntimeConfig = {
+  enabled: true,
+  defaultProviderKind: "local_command",
+  allowCloudStt: false,
+  persistAudio: false,
+  persistTranscript: false,
+  maxAudioBytes: 10 * 1024 * 1024,
+  allowedMimeTypes: ["audio/webm", "audio/wav", "audio/mpeg", "audio/mp4", "audio/ogg"],
+  defaultLanguage: null,
+  providerProfileId: null,
+  localCommandPath: null,
+  localCommandArgs: ["-m", "/path/to/ggml-base.en.bin", "-f", "{input}", "-otxt", "-of", "{output}"],
+  localCommandTimeoutMs: 120_000,
+  localTempDir: null,
+  localCommandOutputMode: "file",
+  localCommandTranscriptFileExtension: "txt",
+  warnings: [],
+};
+
+function speechArgsText(args: string[]) {
+  return args.join("\n");
+}
+
+function parseSpeechArgs(value: string) {
+  return value
+    .split(/\n+/)
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
 
 export function AIProviderSettingsModal({
   settings,
@@ -97,14 +146,29 @@ export function AIProviderSettingsModal({
   const [draft, setDraft] = useState(settings);
   const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>("runtime");
   const [query, setQuery] = useState("");
+  const [shortcutQuery, setShortcutQuery] = useState("");
   const [working, setWorking] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
   const [serviceStatus, setServiceStatus] = useState<{
     health?: ServiceHealthStatus;
     config?: ServiceConfigStatus;
+    serviceConfig?: LoomServiceRuntimeConfig;
+    configError?: string;
+    speechHealth?: SpeechProviderHealth;
+    speechHealthError?: string;
     capability?: CapabilitySummary;
     loading: boolean;
   }>({ loading: false });
+  const [desktopRuntimeStatus, setDesktopRuntimeStatus] =
+    useState<LoomDesktopRuntimeStatus | null>(null);
+  const [desktopRuntimeWorking, setDesktopRuntimeWorking] = useState(false);
+  const [desktopRuntimeMessage, setDesktopRuntimeMessage] = useState<string | null>(null);
+  const [speechDraft, setSpeechDraft] = useState<SpeechToTextRuntimeConfig>(
+    defaultSpeechConfigDraft
+  );
+
+  const desktopRuntimeInfo = getElectronRuntimeInfo();
+  const desktopRuntimeBridge = getElectronRuntimeBridge();
 
   useEffect(() => {
     setDraft(settings);
@@ -112,13 +176,74 @@ export function AIProviderSettingsModal({
 
   async function refreshServiceStatus() {
     setServiceStatus((current) => ({ ...current, loading: true }));
-    const [health, config, capability] = await Promise.all([
+    const [health, config, capability, speechHealthResult, serviceConfigResult] = await Promise.all([
       engineClient.getServiceHealth(),
       engineClient.getServiceConfigStatus(),
       engineClient.getCapabilitySummary(),
+      engineClient
+        .getSpeechProviderHealth()
+        .then((speechHealth) => ({ speechHealth }))
+        .catch((error: unknown) => ({
+          speechHealthError:
+            error instanceof Error ? error.message : "speech provider health is unavailable.",
+        })),
+      engineClient
+        .getServiceConfig()
+        .then((serviceConfig) => ({ serviceConfig }))
+        .catch((error: unknown) => ({
+          configError:
+            error instanceof Error ? error.message : "loom-service config is unavailable.",
+        })),
     ]);
-    setServiceStatus({ health, config, capability, loading: false });
+    setServiceStatus({
+      health,
+      config,
+      capability,
+      serviceConfig: "serviceConfig" in serviceConfigResult ? serviceConfigResult.serviceConfig : undefined,
+      configError: "configError" in serviceConfigResult ? serviceConfigResult.configError : undefined,
+      speechHealth: "speechHealth" in speechHealthResult ? speechHealthResult.speechHealth : undefined,
+      speechHealthError:
+        "speechHealthError" in speechHealthResult ? speechHealthResult.speechHealthError : undefined,
+      loading: false,
+    });
   }
+
+  async function refreshDesktopRuntimeStatus() {
+    if (!desktopRuntimeBridge) {
+      setDesktopRuntimeStatus({
+        state: "unavailable",
+        startedByElectron: false,
+        error: "Runtime restart is available in the desktop app.",
+      });
+      return;
+    }
+    const status = await desktopRuntimeBridge.status();
+    setDesktopRuntimeStatus(status);
+  }
+
+  async function restartDesktopRuntime() {
+    if (!desktopRuntimeBridge) return;
+    setDesktopRuntimeWorking(true);
+    setDesktopRuntimeMessage("Restarting local runtime...");
+    try {
+      const status = await desktopRuntimeBridge.restart();
+      setDesktopRuntimeStatus(status);
+      setDesktopRuntimeMessage("Local runtime restarted.");
+      await refreshServiceStatus();
+    } catch (error) {
+      setDesktopRuntimeMessage(
+        error instanceof Error ? error.message : "Local runtime restart failed."
+      );
+    } finally {
+      setDesktopRuntimeWorking(false);
+    }
+  }
+
+  useEffect(() => {
+    if (serviceStatus.serviceConfig?.speech) {
+      setSpeechDraft(serviceStatus.serviceConfig.speech);
+    }
+  }, [serviceStatus.serviceConfig]);
 
   useEffect(() => {
     if (
@@ -129,6 +254,11 @@ export function AIProviderSettingsModal({
       void refreshServiceStatus();
     }
   }, [activeCategory, serviceStatus.health, serviceStatus.loading]);
+
+  useEffect(() => {
+    if (activeCategory !== "runtime" && activeCategory !== "advanced") return;
+    void refreshDesktopRuntimeStatus();
+  }, [activeCategory]);
 
   const filteredModels = useMemo(() => {
     const value = query.trim().toLowerCase();
@@ -234,6 +364,54 @@ export function AIProviderSettingsModal({
   function resetDefaults() {
     update(defaultAIProviderSettings);
     setMessage("Provider settings reset.");
+  }
+
+  async function saveSpeechConfig() {
+    setWorking("speech-config");
+    setMessage(null);
+    try {
+      const localCommandPath = speechDraft.localCommandPath?.trim() || null;
+      const localTempDir = speechDraft.localTempDir?.trim() || null;
+      const localCommandArgs =
+        speechDraft.localCommandArgs.length > 0
+          ? speechDraft.localCommandArgs
+          : defaultSpeechConfigDraft.localCommandArgs;
+      const result = await engineClient.updateServiceConfig({
+        speech: {
+          enabled: speechDraft.defaultProviderKind !== "disabled",
+          defaultProviderKind: speechDraft.defaultProviderKind,
+          localCommandPath,
+          localCommandArgs,
+          localCommandTimeoutMs: speechDraft.localCommandTimeoutMs,
+          localTempDir,
+          localCommandOutputMode: speechDraft.localCommandOutputMode,
+          localCommandTranscriptFileExtension:
+            speechDraft.localCommandTranscriptFileExtension,
+        },
+      });
+      setSpeechDraft(result.config.speech);
+      setServiceStatus((current) => ({
+        ...current,
+        serviceConfig: result.config,
+        configError: undefined,
+        config: current.config
+          ? {
+              ...current.config,
+              restartRequired: result.restartStatus?.restartRequired,
+              pendingRestart: result.restartStatus?.pendingRestart,
+            }
+          : current.config,
+      }));
+      setMessage("Speech-to-text settings saved.");
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Speech-to-text settings could not be saved."
+      );
+    } finally {
+      setWorking(null);
+    }
   }
 
   const activeCategoryLabel =
@@ -821,6 +999,92 @@ export function AIProviderSettingsModal({
     );
   }
 
+  function shortcutMatchesQuery(shortcut: KeyboardShortcutDefinition, value: string) {
+    const queryValue = value.trim().toLowerCase();
+    if (!queryValue) return true;
+    return [
+      shortcut.title,
+      shortcut.description,
+      shortcut.category,
+      shortcut.mac.join(" "),
+      shortcut.windows.join(" "),
+    ]
+      .join(" ")
+      .toLowerCase()
+      .includes(queryValue);
+  }
+
+  function renderShortcutKeys(keys: string[], platform: ShortcutPlatform) {
+    const labels = keys.map((key) => displayKeyLabel(key, platform));
+    return (
+      <span className="shortcut-key-sequence" aria-label={labels.join(" ")}>
+        {keys.map((key) => (
+          <kbd key={key}>{displayKeyLabel(key, platform)}</kbd>
+        ))}
+      </span>
+    );
+  }
+
+  function renderShortcutSettings() {
+    const shortcuts = keyboardShortcutDefinitions.filter((shortcut) =>
+      shortcutMatchesQuery(shortcut, shortcutQuery)
+    );
+    return (
+      <section className="provider-section shortcuts-section">
+        <div className="provider-section-heading">
+          <div>
+            <span>Keyboard</span>
+            <h3>Browser-style shortcuts</h3>
+          </div>
+        </div>
+        <label className="shortcut-search">
+          <Search size={16} aria-hidden="true" />
+          <input
+            value={shortcutQuery}
+            onChange={(event) => setShortcutQuery(event.target.value)}
+            placeholder="Search for a command or shortcut"
+            aria-label="Search keyboard shortcuts"
+          />
+        </label>
+        <div className="settings-placeholder">
+          <strong>Default behavior</strong>
+          <span>These shortcuts are fixed Loom defaults for now and follow browser conventions where they fit Loom navigation.</span>
+          <span>macOS uses Command/Option. Windows and Linux use Ctrl/Alt equivalents.</span>
+        </div>
+        <div className="shortcut-list">
+          {shortcuts.map((shortcut) => {
+            const Icon = shortcut.Icon;
+            return (
+              <div className="shortcut-row" key={shortcut.id}>
+                <span className="shortcut-command-icon">
+                  <Icon size={16} aria-hidden="true" />
+                </span>
+                <span className="shortcut-command-copy">
+                  <strong>{shortcut.title}</strong>
+                  <small>{shortcut.description}</small>
+                </span>
+                <span className="shortcut-platform">
+                  <em>macOS</em>
+                  {renderShortcutKeys(shortcutKeysForPlatform(shortcut, "apple"), "apple")}
+                </span>
+                <span className="shortcut-platform">
+                  <em>Windows/Linux</em>
+                  {renderShortcutKeys(shortcutKeysForPlatform(shortcut, "windows"), "windows")}
+                </span>
+              </div>
+            );
+          })}
+          {shortcuts.length === 0 && (
+            <div className="settings-placeholder">
+              <strong>No matching shortcuts</strong>
+              <span>Try a command name such as Address Bar, New Loom, Back, or Reload.</span>
+            </div>
+          )}
+        </div>
+      </section>
+    );
+  }
+
   function formatBytes(value?: number) {
     if (!value || value <= 0) return "Unknown";
     const gib = value / (1024 ** 3);
@@ -838,6 +1102,8 @@ export function AIProviderSettingsModal({
   function renderRuntimeSettings() {
     const health = serviceStatus.health;
     const config = serviceStatus.config;
+    const desktopMode = desktopRuntimeInfo?.isElectron ? "Electron sidecar" : "Web";
+    const desktopStatus = desktopRuntimeStatus?.state ?? (desktopRuntimeInfo?.isElectron ? "unknown" : "unavailable");
     return (
       <>
         <section className="provider-section">
@@ -851,9 +1117,10 @@ export function AIProviderSettingsModal({
               className="download-model-button"
               onClick={() => void refreshServiceStatus()}
               disabled={serviceStatus.loading}
+              aria-label={serviceStatus.loading ? "Refreshing service status" : "Refresh service status"}
+              title={serviceStatus.loading ? "Refreshing service status" : "Refresh service status"}
             >
               <RefreshCw size={13} />
-              <span>{serviceStatus.loading ? "Refreshing" : "Refresh service status"}</span>
             </button>
           </div>
 
@@ -894,6 +1161,72 @@ export function AIProviderSettingsModal({
         <section className="provider-section">
           <div className="provider-section-heading">
             <div>
+              <span>Desktop runtime</span>
+              <h3>Electron sidecar lifecycle</h3>
+            </div>
+            <button
+              type="button"
+              className="download-model-button"
+              onClick={() => void refreshDesktopRuntimeStatus()}
+              disabled={!desktopRuntimeBridge || desktopRuntimeWorking}
+              aria-label="Refresh runtime"
+              title="Refresh runtime"
+            >
+              <RefreshCw size={13} />
+            </button>
+          </div>
+
+          <div className={`runtime-health-card ${desktopStatus === "ready" ? "ready" : "degraded"}`}>
+            <strong>
+              Runtime: loom-service · {statusLabel(desktopStatus)}
+            </strong>
+            <span>Mode: {desktopMode}</span>
+            {desktopRuntimeStatus?.dataMode && (
+              <span>Data mode: {statusLabel(desktopRuntimeStatus.dataMode)}</span>
+            )}
+            {desktopRuntimeStatus?.serviceUrl && (
+              <span>Service URL: {desktopRuntimeStatus.serviceUrl}</span>
+            )}
+            {desktopRuntimeStatus?.pid && <span>PID: {desktopRuntimeStatus.pid}</span>}
+            {desktopRuntimeStatus?.port && <span>Port: {desktopRuntimeStatus.port}</span>}
+            {desktopRuntimeStatus?.binaryPath && (
+              <span>Binary: {desktopRuntimeStatus.binaryPath}</span>
+            )}
+            {desktopRuntimeStatus?.dbPath && <span>Database: {desktopRuntimeStatus.dbPath}</span>}
+            {desktopRuntimeStatus?.configPath && (
+              <span>Config: {desktopRuntimeStatus.configPath}</span>
+            )}
+            {desktopRuntimeStatus?.lastCheckedAt && (
+              <span>
+                Last checked: {new Date(desktopRuntimeStatus.lastCheckedAt).toLocaleTimeString()}
+              </span>
+            )}
+            {desktopRuntimeStatus?.error && <span>{desktopRuntimeStatus.error}</span>}
+            {!desktopRuntimeBridge && (
+              <span>Runtime restart is available in the desktop app.</span>
+            )}
+          </div>
+
+          <div className="settings-actions">
+            <button
+              type="button"
+              onClick={() => void restartDesktopRuntime()}
+              disabled={!desktopRuntimeBridge || desktopRuntimeWorking}
+            >
+              <RotateCcw size={14} />
+              {desktopRuntimeWorking ? "Restarting local runtime" : "Restart local runtime"}
+            </button>
+          </div>
+          <small>
+            Restarts only the local loom-service sidecar started by Electron. Web mode and
+            unrelated dev services are not controlled from here.
+          </small>
+          {desktopRuntimeMessage && <p className="settings-status">{desktopRuntimeMessage}</p>}
+        </section>
+
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
               <span>Configuration</span>
               <h3>Restart and config status</h3>
             </div>
@@ -922,12 +1255,209 @@ export function AIProviderSettingsModal({
     );
   }
 
+  function renderSpeechToTextSettings() {
+    const hasConfig = Boolean(serviceStatus.serviceConfig?.speech);
+    const pathConfigured = Boolean(speechDraft.localCommandPath?.trim());
+    const providerStatus =
+      speechDraft.defaultProviderKind === "disabled"
+        ? "Disabled"
+        : pathConfigured
+          ? "Configured"
+          : "Local speech-to-text provider is not configured.";
+    const unavailable = serviceStatus.configError ?? (!hasConfig ? "Service config is not loaded." : null);
+    const canSave = hasConfig && !serviceStatus.configError && working !== "speech-config";
+    const speechHealth = serviceStatus.speechHealth;
+    const providerOptions: Array<{ value: SpeechToTextProviderKind; label: string }> = [
+      { value: "local_command", label: "Local command" },
+      { value: "disabled", label: "Disabled" },
+    ];
+
+    return (
+      <section className="provider-section" data-testid="speech-settings-section">
+        <div className="provider-section-heading">
+          <div>
+            <span>Speech-to-Text</span>
+            <h3>Local transcription provider</h3>
+          </div>
+          <span className={`connection-pill ${pathConfigured ? "connected" : "disconnected"}`}>
+            {pathConfigured ? "configured" : "not configured"}
+          </span>
+        </div>
+
+        <div className="settings-placeholder">
+          <strong>{providerStatus}</strong>
+          <span>
+            Choose a local transcription command, such as a local Whisper-compatible binary.
+            Microphone input will work after the local command is configured.
+          </span>
+          <span>
+            Loom does not install Whisper automatically. Install a local binary first, then configure
+            its path and arguments here.
+          </span>
+          {unavailable && <span>{unavailable}</span>}
+          {serviceStatus.speechHealthError && <span>{serviceStatus.speechHealthError}</span>}
+          {speechHealth && (
+            <span>
+              Provider check: {speechHealth.status} · {speechHealth.message}
+            </span>
+          )}
+        </div>
+
+        <div className="settings-two-column settings-field-grid">
+          <label className="settings-field">
+            <span>Provider kind</span>
+            <select
+              value={speechDraft.defaultProviderKind}
+              onChange={(event) =>
+                setSpeechDraft({
+                  ...speechDraft,
+                  defaultProviderKind: event.target.value as SpeechToTextProviderKind,
+                })
+              }
+            >
+              {providerOptions.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+            <small>Cloud providers and test-only providers are not user-facing options.</small>
+          </label>
+
+          <label className="settings-field">
+            <span>Command timeout</span>
+            <input
+              type="number"
+              min={1_000}
+              step={1_000}
+              value={speechDraft.localCommandTimeoutMs}
+              onChange={(event) =>
+                setSpeechDraft({
+                  ...speechDraft,
+                  localCommandTimeoutMs: Math.max(1_000, Number(event.target.value) || 1_000),
+                })
+              }
+            />
+            <small>Milliseconds before the local provider is treated as timed out.</small>
+          </label>
+        </div>
+
+        <div className="settings-two-column settings-field-grid">
+          <label className="settings-field">
+            <span>Output mode</span>
+            <select
+              value={speechDraft.localCommandOutputMode}
+              onChange={(event) =>
+                setSpeechDraft({
+                  ...speechDraft,
+                  localCommandOutputMode: event.target.value === "file" ? "file" : "stdout",
+                })
+              }
+            >
+              <option value="file">Transcript file</option>
+              <option value="stdout">Standard output</option>
+            </select>
+            <small>whisper.cpp usually writes transcript files. Other commands may print to stdout.</small>
+          </label>
+
+          <label className="settings-field">
+            <span>Transcript file extension</span>
+            <input
+              value={speechDraft.localCommandTranscriptFileExtension}
+              placeholder="txt"
+              onChange={(event) =>
+                setSpeechDraft({
+                  ...speechDraft,
+                  localCommandTranscriptFileExtension: event.target.value || "txt",
+                })
+              }
+            />
+            <small>Used in file output mode. whisper.cpp with -otxt writes {"{output}"}.txt.</small>
+          </label>
+        </div>
+
+        <label className="settings-field">
+          <span>Local command path</span>
+          <input
+            value={speechDraft.localCommandPath ?? ""}
+            placeholder="/usr/local/bin/whisper-cli"
+            onChange={(event) =>
+              setSpeechDraft({ ...speechDraft, localCommandPath: event.target.value })
+            }
+          />
+          <small>Path to a local executable. Loom does not install STT binaries.</small>
+        </label>
+
+        <label className="settings-field">
+          <span>Command arguments</span>
+          <textarea
+            rows={4}
+            value={speechArgsText(speechDraft.localCommandArgs)}
+            onChange={(event) =>
+              setSpeechDraft({
+                ...speechDraft,
+                localCommandArgs: parseSpeechArgs(event.target.value),
+              })
+            }
+          />
+          <small>
+            One argument per line. Supported placeholders: {"{input}"}, {"{audio_file}"}, {"{output}"}, {"{mime_type}"}, {"{language}"}.
+          </small>
+        </label>
+
+        <div className="settings-placeholder">
+          <strong>whisper.cpp example</strong>
+          <span>Command path: /path/to/whisper-cli</span>
+          <span>Arguments, one per line: -m /path/to/ggml-base.en.bin -f {"{input}"} -otxt -of {"{output}"}</span>
+          <span>Output mode: Transcript file · Extension: txt</span>
+        </div>
+
+        <label className="settings-field">
+          <span>Temporary audio directory</span>
+          <input
+            value={speechDraft.localTempDir ?? ""}
+            placeholder="System temporary directory"
+            onChange={(event) =>
+              setSpeechDraft({ ...speechDraft, localTempDir: event.target.value })
+            }
+          />
+          <small>Optional directory for temporary provider input files. Files are cleaned up.</small>
+        </label>
+
+        <div className="settings-placeholder">
+          <strong>Privacy posture</strong>
+          <span>Local-only STT configuration. Cloud STT is not enabled.</span>
+          <span>Raw audio is not persisted by default.</span>
+          <span>Transcripts are not persisted separately by default.</span>
+          <span>Transcribed text is inserted into the composer draft and is never auto-sent.</span>
+        </div>
+
+        <div className="settings-actions">
+          <button type="button" onClick={() => void saveSpeechConfig()} disabled={!canSave}>
+            <CheckCircle2 size={14} />
+            {working === "speech-config" ? "Saving" : "Save Speech Settings"}
+          </button>
+          <button
+            type="button"
+            onClick={() => void refreshServiceStatus()}
+            disabled={serviceStatus.loading}
+          >
+            <RefreshCw size={14} />
+            Check Provider
+          </button>
+        </div>
+      </section>
+    );
+  }
+
   function renderCapabilitySettings() {
     const capability = serviceStatus.capability;
     const models = capability?.models ?? [];
     const compactModels = models.slice(0, 3).map((model) => model.modelName).join(", ");
     return (
       <>
+        {renderSpeechToTextSettings()}
+
         <section className="provider-section">
           <div className="provider-section-heading">
             <div>
@@ -1214,6 +1744,25 @@ export function AIProviderSettingsModal({
             Shows safe generation metadata during active responses. It does not expose or store raw
             model thinking.
           </small>
+          <label className="settings-toggle">
+            <input
+              type="checkbox"
+              checked={appSettings.mockDataEnabled || isMockDataForced()}
+              disabled={isMockDataForced()}
+              onChange={(event) =>
+                updateAppSettings({
+                  ...appSettings,
+                  mockDataEnabled: event.target.checked,
+                })
+              }
+            />
+            <span>Show mock Loom data in debug mode</span>
+          </label>
+          <small>
+            When off, Loom starts as a clean first-run app with no built-in demo Looms,
+            Responses, graph branches, history, or demo bookmarks. Mock data can still be forced
+            for development with VITE_ENABLE_MOCK_DATA=true.
+          </small>
           <div className="settings-actions">
             <button disabled>Documentation</button>
             <button disabled>Release notes</button>
@@ -1232,9 +1781,10 @@ export function AIProviderSettingsModal({
               className="download-model-button"
               onClick={() => void refreshServiceStatus()}
               disabled={serviceStatus.loading}
+              aria-label={serviceStatus.loading ? "Refreshing service status" : "Refresh service status"}
+              title={serviceStatus.loading ? "Refreshing service status" : "Refresh service status"}
             >
               <RefreshCw size={13} />
-              <span>{serviceStatus.loading ? "Refreshing" : "Refresh service status"}</span>
             </button>
           </div>
 
@@ -1344,6 +1894,8 @@ export function AIProviderSettingsModal({
         return renderExportImportSettings();
       case "ui-preferences":
         return renderUiPreferencesSettings();
+      case "shortcuts":
+        return renderShortcutSettings();
       case "advanced":
         return renderAdvancedSettings();
     }

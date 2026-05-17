@@ -146,5 +146,7 @@ export function toLinkFromResponse(response: ResponseItem): LoomLink {
     canonicalUri: response.meta?.canonicalUri,
     meta: response.meta,
     referenceCode: response.meta?.code,
+    sourceResponseId: response.id,
+    sourceCanonicalUri: response.meta?.canonicalUri ?? response.address,
   };
 }

@@ -3,6 +3,7 @@ pub mod bookmarks;
 pub mod code_blocks;
 pub mod context_artifacts;
 pub mod looms;
+pub mod navigation_history;
 pub mod orchestration;
 pub mod parts;
 pub mod references;

@@ -1,5 +1,6 @@
 use crate::{
     api::state::AppState,
+    display_code::{display_code, DisplayCodeKind},
     error::ServiceError,
     storage::{
         db::Database,
@@ -61,6 +62,7 @@ pub struct GraphNode {
     pub title: String,
     pub preview: Option<String>,
     pub code: Option<String>,
+    pub display_code: String,
     pub canonical_uri: Option<String>,
     pub depth: i64,
     pub lane: i64,
@@ -101,6 +103,12 @@ pub(crate) enum GraphProjectionError {
     Storage(ServiceError),
 }
 
+#[derive(Debug, Clone)]
+struct ProjectedResponseNode<'a> {
+    response: &'a ResponseRecord,
+    prompt: Option<&'a ResponseRecord>,
+}
+
 pub async fn get_graph(
     State(state): State<AppState>,
     Path(loom_id): Path<String>,
@@ -129,7 +137,7 @@ pub(crate) async fn build_graph_projection(
         return Err(GraphProjectionError::NotFound);
     };
 
-    if root.archived_at.is_some() {
+    if root.archived_at.is_some() || root.is_deleted {
         return Err(GraphProjectionError::Archived);
     }
 
@@ -151,12 +159,24 @@ pub(crate) async fn build_graph_projection(
     let mut response_node_ids = HashMap::new();
     let mut loom_node_ids = HashMap::from([(root.loom_id.clone(), root_node_id.clone())]);
 
-    for (index, response) in responses.iter().enumerate() {
+    let projected_responses = project_response_nodes(&responses);
+    for (index, projected_response) in projected_responses.iter().enumerate() {
+        let response = projected_response.response;
         let depth = (index as i64) + 1;
         let node_id = response_node_id(&response.response_id);
         response_depths.insert(response.response_id.clone(), depth);
         response_node_ids.insert(response.response_id.clone(), node_id.clone());
-        nodes.push(response_node(response, &node_id, depth, 0));
+        if let Some(prompt) = projected_response.prompt {
+            response_depths.insert(prompt.response_id.clone(), depth);
+            response_node_ids.insert(prompt.response_id.clone(), node_id.clone());
+        }
+        nodes.push(response_node(
+            response,
+            projected_response.prompt,
+            &node_id,
+            depth,
+            0,
+        ));
 
         if index == 0 {
             edges.push(GraphEdge {
@@ -169,7 +189,7 @@ pub(crate) async fn build_graph_projection(
                 metadata: None,
             });
         } else {
-            let previous = &responses[index - 1];
+            let previous = projected_responses[index - 1].response;
             let source = response_node_id(&previous.response_id);
             edges.push(GraphEdge {
                 id: format!("edge:{}:{}", source, node_id),
@@ -190,7 +210,7 @@ pub(crate) async fn build_graph_projection(
             .as_ref()
             .and_then(|response_id| response_depths.get(response_id))
             .map(|depth| depth + 1)
-            .unwrap_or((responses.len() as i64) + 1);
+            .unwrap_or((projected_responses.len() as i64) + 1);
         let weft_node_id = loom_node_id(&weft.loom_id);
         loom_node_ids.insert(weft.loom_id.clone(), weft_node_id.clone());
         nodes.push(loom_node(weft, &weft_node_id, depth, lane));
@@ -226,13 +246,20 @@ pub(crate) async fn build_graph_projection(
             .list_responses_for_loom(&weft.loom_id)
             .await
             .map_err(GraphProjectionError::Storage)?;
-        for (response_index, response) in weft_responses.iter().enumerate() {
+        let projected_weft_responses = project_response_nodes(&weft_responses);
+        for (response_index, projected_response) in projected_weft_responses.iter().enumerate() {
+            let response = projected_response.response;
             let response_depth = depth + (response_index as i64) + 1;
             let weft_response_node_id = response_node_id(&response.response_id);
             response_depths.insert(response.response_id.clone(), response_depth);
             response_node_ids.insert(response.response_id.clone(), weft_response_node_id.clone());
+            if let Some(prompt) = projected_response.prompt {
+                response_depths.insert(prompt.response_id.clone(), response_depth);
+                response_node_ids.insert(prompt.response_id.clone(), weft_response_node_id.clone());
+            }
             nodes.push(response_node(
                 response,
+                projected_response.prompt,
                 &weft_response_node_id,
                 response_depth,
                 lane,
@@ -249,7 +276,7 @@ pub(crate) async fn build_graph_projection(
                     metadata: None,
                 });
             } else {
-                let previous = &weft_responses[response_index - 1];
+                let previous = projected_weft_responses[response_index - 1].response;
                 let source = response_node_id(&previous.response_id);
                 edges.push(GraphEdge {
                     id: format!("edge:{}:{}", source, weft_response_node_id),
@@ -295,11 +322,9 @@ pub(crate) async fn build_graph_projection(
         );
     }
 
-    let focused_node_id = query.focused_response_id.and_then(|response_id| {
-        response_node_ids
-            .contains_key(&response_id)
-            .then(|| response_node_id(&response_id))
-    });
+    let focused_node_id = query
+        .focused_response_id
+        .and_then(|response_id| response_node_ids.get(&response_id).cloned());
 
     Ok(GraphProjectionResult {
         loom_id: loom_id.to_string(),
@@ -308,6 +333,78 @@ pub(crate) async fn build_graph_projection(
         focused_node_id,
         warnings,
     })
+}
+
+fn project_response_nodes(responses: &[ResponseRecord]) -> Vec<ProjectedResponseNode<'_>> {
+    let mut regenerated_response_indexes_by_user_id = HashMap::new();
+    for (index, response) in responses.iter().enumerate() {
+        if response.role == "assistant" {
+            if let Some(user_response_id) = regenerated_from_user_response_id(response) {
+                regenerated_response_indexes_by_user_id.insert(user_response_id, index);
+            }
+        }
+    }
+
+    let mut projected = Vec::new();
+    let mut consumed_response_ids = HashSet::new();
+
+    for (index, response) in responses.iter().enumerate() {
+        if consumed_response_ids.contains(&response.response_id) {
+            continue;
+        }
+
+        if response.role == "user" {
+            if let Some(regenerated_response_index) =
+                regenerated_response_indexes_by_user_id.get(&response.response_id)
+            {
+                let regenerated_response = &responses[*regenerated_response_index];
+                if !consumed_response_ids.contains(&regenerated_response.response_id) {
+                    consumed_response_ids.insert(response.response_id.clone());
+                    consumed_response_ids.insert(regenerated_response.response_id.clone());
+                    projected.push(ProjectedResponseNode {
+                        response: regenerated_response,
+                        prompt: Some(response),
+                    });
+                    continue;
+                }
+            }
+
+            if let Some(next_response) = responses.get(index + 1) {
+                if next_response.role == "assistant"
+                    && !consumed_response_ids.contains(&next_response.response_id)
+                {
+                    consumed_response_ids.insert(response.response_id.clone());
+                    consumed_response_ids.insert(next_response.response_id.clone());
+                    projected.push(ProjectedResponseNode {
+                        response: next_response,
+                        prompt: Some(response),
+                    });
+                    continue;
+                }
+            }
+        }
+
+        consumed_response_ids.insert(response.response_id.clone());
+        projected.push(ProjectedResponseNode {
+            response,
+            prompt: None,
+        });
+    }
+
+    projected
+}
+
+fn regenerated_from_user_response_id(response: &ResponseRecord) -> Option<String> {
+    response
+        .metadata_json
+        .as_deref()
+        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+        .and_then(|metadata| {
+            metadata
+                .get("regeneratedFromUserResponseId")
+                .and_then(|value| value.as_str())
+                .map(str::to_string)
+        })
 }
 
 pub(crate) async fn graph_projection_for_export(
@@ -634,6 +731,14 @@ fn loom_node(loom: &LoomRecord, id: &str, depth: i64, lane: i64) -> GraphNode {
         title: sanitize_graph_text(&loom.title).unwrap_or_else(|| "Untitled Loom".to_string()),
         preview: loom.summary.as_deref().and_then(sanitize_graph_text),
         code: loom.code.clone(),
+        display_code: display_code(
+            if loom.kind == "weft" {
+                DisplayCodeKind::Weft
+            } else {
+                DisplayCodeKind::Loom
+            },
+            &loom.loom_id,
+        ),
         canonical_uri: loom.canonical_uri.clone(),
         depth,
         lane,
@@ -642,11 +747,16 @@ fn loom_node(loom: &LoomRecord, id: &str, depth: i64, lane: i64) -> GraphNode {
     }
 }
 
-fn response_node(response: &ResponseRecord, id: &str, depth: i64, lane: i64) -> GraphNode {
-    let title = response
-        .title
-        .as_deref()
-        .and_then(sanitize_graph_text)
+fn response_node(
+    response: &ResponseRecord,
+    prompt: Option<&ResponseRecord>,
+    id: &str,
+    depth: i64,
+    lane: i64,
+) -> GraphNode {
+    let title = prompt
+        .and_then(|prompt| first_meaningful_phrase(&prompt.content))
+        .or_else(|| response.title.as_deref().and_then(sanitize_graph_text))
         .or_else(|| first_meaningful_phrase(&response.content))
         .unwrap_or_else(|| format!("{} Response", title_case(&response.role)));
 
@@ -658,6 +768,7 @@ fn response_node(response: &ResponseRecord, id: &str, depth: i64, lane: i64) -> 
         title,
         preview: preview(&response.content),
         code: response.code.clone(),
+        display_code: display_code(DisplayCodeKind::Response, &response.response_id),
         canonical_uri: response.canonical_uri.clone(),
         depth,
         lane,
@@ -780,7 +891,7 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn loom_with_responses_returns_root_and_response_nodes() {
+    async fn loom_with_responses_returns_root_and_turn_response_node() {
         let database = test_database().await;
         insert_loom(&database, "loom-1", "Trip Loom", "loom", None, None).await;
         insert_response(&database, "loom-1", "response-1", "user", "Plan Greece", 0).await;
@@ -799,16 +910,27 @@ mod tests {
             .expect("graph projection");
 
         assert_eq!(graph.loom_id, "loom-1");
-        assert_eq!(graph.nodes.len(), 3);
+        assert_eq!(graph.nodes.len(), 2);
         assert!(graph.nodes.iter().any(|node| node.id == "loom:loom-1"));
         assert!(graph
             .nodes
             .iter()
-            .any(|node| node.id == "response:response-1"));
-        assert!(graph
+            .any(|node| node.id == "loom:loom-1" && node.display_code.starts_with("L-")));
+        assert!(!graph
             .nodes
             .iter()
-            .any(|node| node.id == "response:response-2"));
+            .any(|node| node.id == "response:response-1"));
+        let response = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "response:response-2")
+            .expect("turn response node");
+        assert_eq!(response.title, "Plan Greece");
+        assert_eq!(
+            response.preview.as_deref(),
+            Some("Visit Athens and Santorini.")
+        );
+        assert!(response.display_code.starts_with("R-"));
     }
 
     #[tokio::test]
@@ -836,11 +958,115 @@ mod tests {
             .iter()
             .filter(|edge| edge.kind == "response_sequence")
             .collect();
-        assert_eq!(sequence_edges.len(), 2);
-        assert_eq!(sequence_edges[0].source, "response:response-early");
-        assert_eq!(sequence_edges[0].target, "response:response-middle");
-        assert_eq!(sequence_edges[1].source, "response:response-middle");
-        assert_eq!(sequence_edges[1].target, "response:response-late");
+        assert_eq!(sequence_edges.len(), 1);
+        assert_eq!(sequence_edges[0].source, "response:response-middle");
+        assert_eq!(sequence_edges[0].target, "response:response-late");
+    }
+
+    #[tokio::test]
+    async fn regenerated_assistant_pairs_with_edited_user_prompt() {
+        let database = test_database().await;
+        insert_loom(&database, "loom-1", "Edit Loom", "loom", None, None).await;
+        insert_response(
+            &database,
+            "loom-1",
+            "response-user-1",
+            "user",
+            "Original question",
+            0,
+        )
+        .await;
+        insert_response(
+            &database,
+            "loom-1",
+            "response-assistant-1",
+            "assistant",
+            "Original answer",
+            1,
+        )
+        .await;
+        insert_response(
+            &database,
+            "loom-1",
+            "response-user-2",
+            "user",
+            "AWS uzerinde nasil entegre edilir",
+            2,
+        )
+        .await;
+        insert_response_with_metadata(
+            &database,
+            "loom-1",
+            "response-assistant-2",
+            "assistant",
+            "AWS uzerinde Event Sourcing entegrasyonu birden fazla yolla yapilir.",
+            3,
+            r#"{"regeneratedFromUserResponseId":"response-user-2"}"#,
+        )
+        .await;
+
+        let graph = build_graph_projection(&database, "loom-1", GraphQuery::default())
+            .await
+            .expect("graph projection");
+
+        assert!(!graph
+            .nodes
+            .iter()
+            .any(|node| node.id == "response:response-user-2"));
+        let regenerated = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "response:response-assistant-2")
+            .expect("regenerated assistant node");
+        assert_eq!(regenerated.title, "AWS uzerinde nasil entegre edilir");
+        assert_eq!(
+            regenerated.preview.as_deref(),
+            Some("AWS uzerinde Event Sourcing entegrasyonu birden fazla yolla yapilir.")
+        );
+        assert_eq!(
+            graph.focused_node_id, None,
+            "default graph should not set focus"
+        );
+    }
+
+    #[tokio::test]
+    async fn focused_user_response_id_resolves_to_paired_assistant_node() {
+        let database = test_database().await;
+        insert_loom(&database, "loom-1", "Focus Pair Loom", "loom", None, None).await;
+        insert_response(
+            &database,
+            "loom-1",
+            "response-user",
+            "user",
+            "Focus prompt",
+            0,
+        )
+        .await;
+        insert_response(
+            &database,
+            "loom-1",
+            "response-assistant",
+            "assistant",
+            "Focus answer",
+            1,
+        )
+        .await;
+
+        let graph = build_graph_projection(
+            &database,
+            "loom-1",
+            GraphQuery {
+                focused_response_id: Some("response-user".to_string()),
+                ..GraphQuery::default()
+            },
+        )
+        .await
+        .expect("graph projection");
+
+        assert_eq!(
+            graph.focused_node_id.as_deref(),
+            Some("response:response-assistant")
+        );
     }
 
     #[tokio::test]
@@ -1760,6 +1986,27 @@ mod tests {
         content: &str,
         sequence_index: i64,
     ) {
+        insert_response_with_metadata(
+            database,
+            loom_id,
+            response_id,
+            role,
+            content,
+            sequence_index,
+            "{}",
+        )
+        .await;
+    }
+
+    async fn insert_response_with_metadata(
+        database: &crate::storage::db::Database,
+        loom_id: &str,
+        response_id: &str,
+        role: &str,
+        content: &str,
+        sequence_index: i64,
+        metadata_json: &str,
+    ) {
         ResponseRepository::new(database)
             .insert_response(&NewResponse {
                 response_id: response_id.to_string(),
@@ -1772,7 +2019,7 @@ mod tests {
                 created_at: "2026-05-10T00:00:00Z".to_string(),
                 updated_at: "2026-05-10T00:00:00Z".to_string(),
                 sequence_index,
-                metadata_json: Some("{}".to_string()),
+                metadata_json: Some(metadata_json.to_string()),
             })
             .await
             .expect("insert Response");
