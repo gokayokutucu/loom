@@ -942,9 +942,9 @@ export function AIProviderSettingsModal({
         </div>
         {[
           ["launchAtLogin", "Launch Loom at login"],
-          ["reopenLastLooms", "Reopen last Looms on startup"],
+          ["continueFromLastLoom", "Continue from where you left off"],
           ["runtimeCheckOnLaunch", "Start local runtime check on launch"],
-          ["showNewLoomIfNoSession", "Show New Loom on startup if no session restored"],
+          ["showNewLoomIfNoSession", "Show New Loom when no previous Loom is restored"],
         ].map(([key, label]) => (
           <label className="settings-toggle" key={key}>
             <input
@@ -960,7 +960,7 @@ export function AIProviderSettingsModal({
             <span>{label}</span>
           </label>
         ))}
-        <small>OS-level login integration is not enabled in this prototype.</small>
+        <small>By default Loom opens the New Loom screen. Enable continuation to restore the last active Loom on launch.</small>
       </section>
     );
   }

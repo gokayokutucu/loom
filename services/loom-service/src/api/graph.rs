@@ -671,7 +671,7 @@ fn reference_target_id_node(
             .as_ref()
             .and_then(|target_id| loom_node_ids.get(target_id))
             .cloned(),
-        "fragment" | "response_fragment" => reference
+        "fragment" | "response_fragment" | "code_block" => reference
             .target_id
             .as_ref()
             .and_then(|target_id| response_node_ids.get(target_id))
@@ -698,7 +698,7 @@ fn reference_target_warning(reference: &ReferenceRecord) -> &'static str {
     } else if reference.target_uri.is_some()
         || matches!(
             reference.target_kind.as_str(),
-            "response" | "loom" | "weft" | "fragment" | "response_fragment"
+            "response" | "loom" | "weft" | "fragment" | "response_fragment" | "code_block"
         )
     {
         "reference_target_unresolved"

@@ -404,6 +404,84 @@ test.describe("[product-service-backed] Reference product proof", () => {
       expect(cleanup.warnings).toEqual([]);
     }
   });
+
+  test("[product-service-backed] adds a persisted code block as a Reference from the response code block action", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(
+        page,
+        "Event Sourcing nedir? nasıl kullanılır? Detaylı olarak anlat"
+      );
+      await expect(page.locator(".assistant-code-block").first()).toBeVisible({
+        timeout: 30_000,
+      });
+
+      const rootLoom = (await scenario.client.listLooms()).find((item) =>
+        item.title.includes("Event Sourcing")
+      );
+      expect(rootLoom).toBeTruthy();
+      const loomId = rootLoom!.loomId;
+      const proof = await scenario.getProof(loomId);
+      expect(proof.codeBlocks.length).toBeGreaterThan(0);
+      const persistedCodeBlock = proof.codeBlocks[0];
+      expect(persistedCodeBlock.language).toBe("ts");
+      expect(persistedCodeBlock.code).toContain("const stream = eventStore.load");
+
+      const codeBlock = page.locator(".assistant-code-block").first();
+      await codeBlock.getByRole("button", { name: /Add ts code block as Reference/ }).click();
+      await expect(page.getByText("Code Reference added")).toBeVisible();
+
+      const token = page.getByTestId("inline-loom-token").last();
+      await expect(token).toBeVisible();
+      await expect(token).toContainText("[[ts code from");
+      await expect(token).toHaveAttribute("data-loom-selected-text", persistedCodeBlock.code);
+      await expect(token).toHaveAttribute("data-loom-target-object-id", persistedCodeBlock.codeBlockId);
+      await expect(token).toHaveAttribute("data-loom-badge", "Code");
+      await expect(token).toHaveAttribute("data-loom-canonical-uri", /#code-block=/);
+      await expect(token).toHaveAttribute("data-loom-reference-mention-id", /reference-/);
+
+      await page.getByRole("button", { name: "Attach" }).click();
+      await page.getByRole("tab", { name: "Code Snippets" }).click();
+      const snippetRow = page.getByTestId(`attach-content-row-codeSnippet-${persistedCodeBlock.codeBlockId}`);
+      await expect(snippetRow).toBeVisible();
+      await expect(snippetRow).toContainText("ts code from");
+      await expect(snippetRow).toContainText("const stream = eventStore.load");
+      await expect(snippetRow).toHaveAttribute("data-attach-selected", "true");
+      await page.keyboard.press("Escape");
+
+      const listed = await scenario.fetchJson<ReferenceListResponse>(
+        `/looms/${encodeURIComponent(loomId)}/references`
+      );
+      expect(listed.references).toHaveLength(1);
+      const reference = listed.references[0];
+      expect(reference).toMatchObject({
+        sourceLoomId: loomId,
+        targetKind: "code_block",
+        targetId: persistedCodeBlock.codeBlockId,
+        selectedText: persistedCodeBlock.code,
+      });
+      expect(reference.sourceResponseId).toBe(persistedCodeBlock.responseId);
+      expect(reference.targetUri).toContain("#code-block=");
+      expect(JSON.stringify(reference)).not.toContain("raw_thinking");
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
 });
 
 test.describe("[legacy-typescript-local] Reference display tokens", () => {

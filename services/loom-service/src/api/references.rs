@@ -520,6 +520,10 @@ fn collect_json_strings(value: &Value, output: &mut Vec<String>) {
 
 fn capsule_response_id(reference: &ReferenceDto) -> Option<String> {
     match reference.target_kind.as_str() {
+        "code_block" => reference
+            .source_response_id
+            .clone()
+            .or_else(|| reference.target_id.clone()),
         "response" | "fragment" => reference
             .target_id
             .clone()
@@ -652,10 +656,10 @@ fn parse_metadata(metadata_json: Option<&str>) -> Option<Value> {
 
 fn validate_target_kind(kind: &str) -> Result<(), (StatusCode, Json<ReferenceApiError>)> {
     match kind {
-        "loom" | "response" | "weft" | "fragment" | "external" => Ok(()),
+        "loom" | "response" | "weft" | "fragment" | "code_block" | "external" => Ok(()),
         _ => Err(bad_request(
             "INVALID_TARGET_KIND",
-            "Reference targetKind must be loom, response, weft, fragment, or external.",
+            "Reference targetKind must be loom, response, weft, fragment, code_block, or external.",
         )),
     }
 }

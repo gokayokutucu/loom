@@ -27,6 +27,8 @@ import type {
   GraphProjectionResult,
   ListReferencesInput,
   ListReferencesResult,
+  ListCodeSnippetsInput,
+  ListCodeSnippetsResult,
   ListHistoryResult,
   ListBookmarksResult,
   LoomDetail,
@@ -58,6 +60,7 @@ import type {
   UpdateResponseResult,
   UpdateLoomInput,
   UiStateRecord,
+  GenerationResponseStateResult,
 } from "./LoomEngineTypes";
 import type { HistoryEntry, LoomNavigationDestination } from "../types";
 
@@ -78,6 +81,7 @@ export interface LoomEngineClient {
   sendMessage(input: SendMessageInput): AsyncIterable<EngineResponseEvent>;
   regenerateFromResponse(input: RegenerateFromResponseInput): AsyncIterable<EngineResponseEvent>;
   cancelMessage(input: CancelMessageInput): Promise<CancelMessageResult>;
+  getGenerationResponseState(workflowRunId: string): Promise<GenerationResponseStateResult>;
   quickAsk(input: QuickAskInput): Promise<QuickAskResult>;
   transcribeSpeech(input: TranscribeSpeechInput): Promise<TranscribeSpeechResult>;
   createOrOpenWeft(input: CreateOrOpenWeftInput): Promise<CreateOrOpenWeftResult>;
@@ -87,6 +91,7 @@ export interface LoomEngineClient {
   removeReference(input: RemoveReferenceInput): Promise<void>;
   getReference(input: GetReferenceInput): Promise<AddReferenceResult>;
   listReferences(input: ListReferencesInput): Promise<ListReferencesResult>;
+  listCodeSnippets(input: ListCodeSnippetsInput): Promise<ListCodeSnippetsResult>;
   suggestReferences(input: SuggestReferencesInput): Promise<SuggestReferencesResult>;
   openReference(input: OpenReferenceInput): Promise<LoomNavigationDestination>;
   createBookmark(input: CreateBookmarkInput): Promise<BookmarkResult>;

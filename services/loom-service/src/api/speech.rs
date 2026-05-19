@@ -33,6 +33,14 @@ pub async fn transcribe(
     State(state): State<AppState>,
     Json(input): Json<SpeechTranscribeRequest>,
 ) -> Result<Json<SpeechToTextResult>, (StatusCode, Json<SpeechTranscribeErrorPayload>)> {
+    if state.restart.is_draining() {
+        let mut error = SpeechToTextError::new(
+            SpeechToTextErrorKind::ProviderUnavailable,
+            "loom-service is draining and is not accepting new speech transcription requests.",
+        );
+        error.warnings.push("runtime_draining".to_string());
+        return Err(speech_error(error));
+    }
     let config = state.config.current().speech;
     let request = SpeechToTextProviderRequest {
         audio_bytes: input.audio_bytes,

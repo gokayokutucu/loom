@@ -109,8 +109,9 @@ export interface LoomNavigationDestination {
   mode: "full" | "split";
   originLoomId?: string;
   originResponseId?: string;
+  preserveOriginScroll?: boolean;
   scrollTargetResponseId?: string;
-  scrollMode?: "origin" | "lastResponse" | "exact";
+  scrollMode?: "origin" | "lastResponse" | "exact" | "top";
   source:
     | "userNavigation"
     | "addressBar"
@@ -240,6 +241,8 @@ export interface LoomForkRecord {
   title: string;
   kind?: "exploration" | "revision";
   revisionSourceResponseId?: string;
+  revisionPrompt?: string;
+  originalPrompt?: string;
 }
 
 export interface LoomLink {
@@ -250,6 +253,7 @@ export interface LoomLink {
   badge?: string;
   selectedAt?: number;
   targetObjectId?: string;
+  targetKind?: "loom" | "response" | "weft" | "fragment" | "code_block" | "external";
   canonicalUri?: string;
   meta?: LoomMetadata;
   referenceCode?: string;
@@ -356,6 +360,7 @@ export interface ResponseItem {
   outputBudget?: "short" | "medium" | "long" | "extended";
   numPredict?: number;
   workflowRunId?: string;
+  serviceGenerationStatus?: string;
   serviceUserResponseId?: string;
   thinkingGuardTimedOut?: boolean;
   thinkingStalled?: boolean;
@@ -364,6 +369,7 @@ export interface ResponseItem {
   thinkingStopped?: boolean;
   visiblePlan?: VisibleAnswerPlan;
   visibleProgress?: VisibleAnswerProgress;
+  codeBlocks?: ResponseCodeBlock[];
   askContextCapsuleSnapshot?: unknown;
   askSelectedText?: string;
   askSourceLoomId?: string;
@@ -373,6 +379,15 @@ export interface ResponseItem {
   bookmarkedLinks: LoomLink[];
   bookmarked?: boolean;
   meta?: LoomMetadata;
+}
+
+export interface ResponseCodeBlock {
+  codeBlockId?: string;
+  blockIndex: number;
+  language?: string;
+  code: string;
+  exactHash?: string;
+  fence?: string;
 }
 
 export interface BookmarkItem extends LoomLink {

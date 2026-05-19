@@ -248,6 +248,17 @@ pub async fn quick(
     State(state): State<AppState>,
     Json(input): Json<QuickAskRequest>,
 ) -> impl IntoResponse {
+    if state.restart.is_draining() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({
+                "error": "runtime_draining",
+                "kind": "runtime_draining",
+                "message": "loom-service is draining and is not accepting new quick Ask requests."
+            })),
+        )
+            .into_response();
+    }
     let config = state.config.current();
     let model = input
         .options

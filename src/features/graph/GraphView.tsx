@@ -105,6 +105,68 @@ interface GraphContinuationTarget {
   nodeId: string;
 }
 
+interface GraphRevisionVariant {
+  id: string;
+  loomId?: string;
+  title: string;
+  response?: ResponseItem;
+}
+
+function graphRevisionSelectionKey(node: LoomGraphProjectionNode) {
+  return node.responseId ?? node.id;
+}
+
+function revisionDisplayResponse(
+  record: LoomForkRecord,
+  responsesByConversation: Record<string, ResponseItem[]>
+) {
+  const responses = responsesByConversation[record.childConversationId] ?? [];
+  const response =
+    responses.find(
+      (item) =>
+        item.finalContent?.trim() ||
+        item.answer.some((part) => part.trim()) ||
+        item.question.trim()
+    ) ?? responses[0];
+  if (!response) return undefined;
+  const revisionPrompt = record.revisionPrompt?.trim();
+  if (!revisionPrompt) return response;
+  return {
+    ...response,
+    question: revisionPrompt,
+    title: revisionPrompt,
+  };
+}
+
+function graphRevisionVariantsForResponse(
+  node: LoomGraphProjectionNode,
+  response: ResponseItem | undefined,
+  revisionRecords: LoomForkRecord[],
+  responsesByConversation: Record<string, ResponseItem[]>
+): GraphRevisionVariant[] {
+  if (node.kind !== "response") return [];
+  const originalTitle = response?.question?.trim() || node.title;
+  return [
+    {
+      id: "original",
+      title: originalTitle,
+      response,
+    },
+    ...revisionRecords.map((record) => {
+      const revisionResponse = revisionDisplayResponse(record, responsesByConversation);
+      return {
+        id: record.childConversationId,
+        loomId: record.childConversationId,
+        title:
+          record.revisionPrompt?.trim() ||
+          revisionResponse?.question?.trim() ||
+          record.title,
+        response: revisionResponse,
+      };
+    }),
+  ];
+}
+
 function LoomGraphComposerNode({ data }: NodeProps<LoomGraphComposerFlowNode>) {
   const composerNodeRef = useRef<HTMLElement | null>(null);
 
@@ -228,6 +290,9 @@ function GraphViewInner({
   });
   const [projectionError, setProjectionError] = useState<string | null>(null);
   const [responsePreviewNodeId, setResponsePreviewNodeId] = useState<string | null>(null);
+  const [responsePreviewWeftPickerOpen, setResponsePreviewWeftPickerOpen] = useState(false);
+  const [selectedGraphRevisionByResponseId, setSelectedGraphRevisionByResponseId] =
+    useState<Record<string, number>>({});
   const initializedViewportKey = useRef<string | undefined>(undefined);
   const skipNextFollowAfterWeftFocusRef = useRef(false);
   const skipNextFollowAfterContinuationFocusRef = useRef(false);
@@ -478,6 +543,7 @@ function GraphViewInner({
     setPendingContinuationFocusNodeId(undefined);
     setPendingWeftFocusNodeId(undefined);
     setResponsePreviewNodeId(null);
+    setResponsePreviewWeftPickerOpen(false);
     setBookmarkStateOverrides({});
   }, [activeLoomId]);
 
@@ -515,13 +581,51 @@ function GraphViewInner({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [responsePreviewNodeId]);
 
+  useEffect(() => {
+    setResponsePreviewWeftPickerOpen(false);
+  }, [responsePreviewNodeId]);
+
   const responsePreview = useMemo(() => {
     if (!responsePreviewNodeId) return null;
     const node = projection.nodes.find((item) => item.id === responsePreviewNodeId);
     if (!node) return null;
     const response = responseForGraphNode(node, responsesByConversation);
-    return graphResponsePreviewForNode(node, response);
-  }, [projection.nodes, responsePreviewNodeId, responsesByConversation]);
+    const responsePairIds = responsePairIdsForGraphNode(response);
+    const revisionRecords = forkRecords.filter(
+      (record) =>
+        record.kind === "revision" &&
+        record.parentConversationId === node.loomId &&
+        Boolean(node.responseId) &&
+        (record.parentResponseId === node.responseId ||
+          responsePairIds.has(record.parentResponseId))
+    );
+    const revisionVariants = graphRevisionVariantsForResponse(
+      node,
+      response,
+      revisionRecords,
+      responsesByConversation
+    );
+    const selectedRevisionIndex = Math.min(
+      selectedGraphRevisionByResponseId[node.responseId ?? ""] ?? 0,
+      Math.max(0, revisionVariants.length - 1)
+    );
+    const activeVariant = revisionVariants[selectedRevisionIndex];
+    return graphResponsePreviewForNode(
+      activeVariant
+        ? {
+            ...node,
+            title: activeVariant.title,
+          }
+        : node,
+      activeVariant?.response ?? response
+    );
+  }, [
+    forkRecords,
+    projection.nodes,
+    responsePreviewNodeId,
+    responsesByConversation,
+    selectedGraphRevisionByResponseId,
+  ]);
 
   const responsePreviewTarget = useMemo(() => {
     if (!responsePreviewNodeId) return null;
@@ -542,25 +646,49 @@ function GraphViewInner({
         (record.parentResponseId === node.responseId ||
           responsePairIds.has(record.parentResponseId))
     );
-    const hasExistingWeft =
-      responseForkRecords.length > 0 ||
-      projection.edges.some((edge) => edge.kind === "weft" && edge.source === node.id);
-    const hasRevisionWeft = responseForkRecords.some((record) => record.kind === "revision");
-    return {
-      node: { ...node, isBookmarked },
+    const explorationForkRecords = responseForkRecords.filter(
+      (record) => record.kind !== "revision"
+    );
+    const revisionForkRecords = responseForkRecords.filter(
+      (record) => record.kind === "revision"
+    );
+    const revisionVariants = graphRevisionVariantsForResponse(
+      node,
       response,
+      revisionForkRecords,
+      responsesByConversation
+    );
+    const selectedRevisionIndex = Math.min(
+      selectedGraphRevisionByResponseId[graphRevisionSelectionKey(node)] ?? 0,
+      Math.max(0, revisionVariants.length - 1)
+    );
+    const activeRevisionVariant = revisionVariants[selectedRevisionIndex];
+    const activeResponse = activeRevisionVariant?.response ?? response;
+    const activeNode = activeRevisionVariant
+      ? {
+          ...node,
+          loomId: activeRevisionVariant.loomId ?? node.loomId,
+          title: activeRevisionVariant.title,
+        }
+      : node;
+    const hasExistingWeft = explorationForkRecords.length > 0;
+    const hasRevisionWeft = revisionForkRecords.length > 0;
+    return {
+      node: { ...activeNode, isBookmarked },
+      response: activeResponse,
       hasExistingWeft,
       hasRevisionWeft,
-      weftCount: responseForkRecords.length,
+      weftCount: explorationForkRecords.length,
+      explorationForkRecords,
     };
   }, [
     bookmarkedResponseAddresses,
     bookmarkOverrideForResponse,
     forkRecords,
-    projection.edges,
     projection.nodes,
     responsePreviewNodeId,
     responsesByConversation,
+    selectedGraphRevisionByResponseId,
   ]);
 
   const responsePreviewPending = useMemo(() => {
@@ -618,9 +746,6 @@ function GraphViewInner({
     () => {
       const nodes: LoomGraphAnyNode[] = projection.nodes.map((projectionNode) => {
         const response = responseForGraphNode(projectionNode, responsesByConversation);
-        const isResponsePending =
-          Boolean(response?.visibleProgress) &&
-          !graphResponsePreviewForNode(projectionNode, response)?.answerMarkdown.trim();
         const isBookmarked =
           bookmarkOverrideForResponse(response) ??
           (Boolean(projectionNode.isBookmarked) ||
@@ -634,25 +759,52 @@ function GraphViewInner({
             (record.parentResponseId === projectionNode.responseId ||
               responsePairIds.has(record.parentResponseId))
         );
+        const explorationForkRecords = responseForkRecords.filter(
+          (record) => record.kind !== "revision"
+        );
+        const revisionForkRecords = responseForkRecords.filter(
+          (record) => record.kind === "revision"
+        );
         const hasExistingWeft =
-          projectionNode.kind === "response" &&
-          (responseForkRecords.length > 0 ||
-            projection.edges.some(
-              (edge) => edge.kind === "weft" && edge.source === projectionNode.id
-            ));
-        const hasRevisionWeft = responseForkRecords.some((record) => record.kind === "revision");
-        const weftCount = responseForkRecords.length;
+          projectionNode.kind === "response" && explorationForkRecords.length > 0;
+        const hasRevisionWeft = revisionForkRecords.length > 0;
+        const weftCount = explorationForkRecords.length;
+        const revisionVariants = graphRevisionVariantsForResponse(
+          projectionNode,
+          response,
+          revisionForkRecords,
+          responsesByConversation
+        );
+        const selectedRevisionIndex = Math.min(
+          selectedGraphRevisionByResponseId[graphRevisionSelectionKey(projectionNode)] ?? 0,
+          Math.max(0, revisionVariants.length - 1)
+        );
+        const activeRevisionVariant = revisionVariants[selectedRevisionIndex];
+        const visibleProjectionNode = activeRevisionVariant
+          ? {
+              ...projectionNode,
+              loomId: activeRevisionVariant.loomId ?? projectionNode.loomId,
+              title: activeRevisionVariant.title,
+            }
+          : projectionNode;
+        const visibleResponse = activeRevisionVariant?.response ?? response;
+        const isResponsePending =
+          Boolean(visibleResponse?.visibleProgress) &&
+          !graphResponsePreviewForNode(
+            visibleProjectionNode,
+            visibleResponse
+          )?.answerMarkdown.trim();
         return {
           id: projectionNode.id,
           type: "loomGraphNode",
           position: projectionNode.position,
           data: {
             projectionNode: {
-              ...projectionNode,
+              ...visibleProjectionNode,
               isBookmarked,
               isFocused: projectionNode.id === selectedNodeId || projectionNode.isFocused,
             },
-            response,
+            response: visibleResponse,
             onOpen: (node, nodeResponse) => {
               if (nodeResponse) {
                 onOpenResponse(node.loomId, nodeResponse);
@@ -679,6 +831,14 @@ function GraphViewInner({
             hasExistingWeft,
             hasRevisionWeft,
             weftCount,
+            revisionVariantCount: revisionVariants.length,
+            revisionVariantIndex: selectedRevisionIndex,
+            onRevisionNavigate: (nextIndex) => {
+              setSelectedGraphRevisionByResponseId((current) => ({
+                ...current,
+                [graphRevisionSelectionKey(projectionNode)]: nextIndex,
+              }));
+            },
             isTerminalResponse:
               projectionNode.kind === "response" && projectionNode.responseId
                 ? latestActiveResponseNodeIds.has(projectionNode.responseId)
@@ -725,6 +885,7 @@ function GraphViewInner({
       projection.edges,
       projection.nodes,
       responsesByConversation,
+      selectedGraphRevisionByResponseId,
       selectedNodeId,
       continuationComposerPosition,
       continuationOpen,
@@ -1001,34 +1162,80 @@ function GraphViewInner({
                       >
                         <Link2 size={14} />
                       </button>
-                      <button
-                        type="button"
-                        className={
-                          [
-                            "graph-response-preview-weft",
-                            responsePreviewTarget.hasExistingWeft ? "is-wefted" : "",
-                            responsePreviewTarget.hasRevisionWeft ? "is-revision-wefted" : "",
-                          ].filter(Boolean).join(" ")
-                        }
-                        title={responsePreviewTarget.hasExistingWeft ? "Open Weft" : "Start Weft"}
-                        aria-pressed={responsePreviewTarget.hasExistingWeft}
-                        aria-label={
-                          responsePreviewTarget.hasExistingWeft
-                            ? `Open Weft from ${responsePreviewTarget.node.title}`
-                            : `Start Weft from ${responsePreviewTarget.node.title}`
-                        }
-                        onClick={() =>
-                          onWeftResponse(
-                            responsePreviewTarget.node.loomId,
-                            responsePreviewTarget.response
-                          )
-                        }
-                      >
-                        <GitFork size={14} />
-                        {responsePreviewTarget.weftCount > 1 && (
-                          <span className="weft-count-badge">{responsePreviewTarget.weftCount}</span>
+                      <span className="graph-response-preview-weft-cluster">
+                        <button
+                          type="button"
+                          className={
+                            [
+                              "graph-response-preview-weft",
+                              responsePreviewTarget.hasExistingWeft ? "is-wefted" : "",
+                              responsePreviewTarget.hasRevisionWeft ? "is-revision-wefted" : "",
+                            ].filter(Boolean).join(" ")
+                          }
+                          title={
+                            responsePreviewTarget.hasExistingWeft ? "Open Weft list" : "Start Weft"
+                          }
+                          aria-pressed={responsePreviewTarget.hasExistingWeft}
+                          aria-haspopup={
+                            responsePreviewTarget.weftCount > 0 ? "menu" : undefined
+                          }
+                          aria-expanded={
+                            responsePreviewTarget.weftCount > 0
+                              ? responsePreviewWeftPickerOpen
+                              : undefined
+                          }
+                          aria-label={
+                            responsePreviewTarget.hasExistingWeft
+                              ? `Open Weft list from ${responsePreviewTarget.node.title}`
+                              : `Start Weft from ${responsePreviewTarget.node.title}`
+                          }
+                          onClick={() => {
+                            if (responsePreviewTarget.weftCount > 0) {
+                              setResponsePreviewWeftPickerOpen((current) => !current);
+                              return;
+                            }
+                            onWeftResponse(
+                              responsePreviewTarget.node.loomId,
+                              responsePreviewTarget.response
+                            );
+                          }}
+                        >
+                          <GitFork size={14} />
+                          {responsePreviewTarget.weftCount > 0 && (
+                            <span className="weft-count-badge">{responsePreviewTarget.weftCount}</span>
+                          )}
+                        </button>
+                        {responsePreviewWeftPickerOpen && responsePreviewTarget.weftCount > 0 && (
+                          <div
+                            className="weft-branch-picker graph-response-preview-weft-picker"
+                            role="menu"
+                            aria-label="Weft branches"
+                          >
+                            {responsePreviewTarget.explorationForkRecords.map(
+                              (record, branchIndex) => (
+                                <button
+                                  key={record.id}
+                                  type="button"
+                                  role="menuitem"
+                                  onClick={() => {
+                                    setResponsePreviewWeftPickerOpen(false);
+                                    setResponsePreviewNodeId(null);
+                                    onOpenLoom(record.childConversationId);
+                                  }}
+                                >
+                                  <GitFork size={13} />
+                                  <span>
+                                    <strong>{record.title}</strong>
+                                    <em>
+                                      {branchIndex + 1} of {responsePreviewTarget.weftCount}
+                                    </em>
+                                  </span>
+                                </button>
+                              )
+                            )}
+                          </div>
                         )}
-                      </button>
+                      </span>
                     </div>
                     <span className="graph-response-preview-action-separator" aria-hidden="true" />
                     <div className="graph-response-preview-action-group">

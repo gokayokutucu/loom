@@ -23,6 +23,7 @@ import {
   Brain,
   Check,
   ChevronDown,
+  ChevronsUpDown,
   Clock3,
   Compass,
   Copy,
@@ -31,6 +32,7 @@ import {
   Cpu,
   Database,
   Edit3,
+  ExternalLink,
   FileText,
   FlaskConical,
   Folder,
@@ -231,8 +233,10 @@ import { isSimpleAutoAnswerCandidate } from "./services/thinkingGuard";
 import {
   createLoomEngineClient,
   getConfiguredLoomEngineMode,
+  type CodeSnippetReferenceItem,
   type CreateBookmarkInput,
   type CreateOrOpenWeftResult,
+  type GenerationResponseStateResult,
   type JsonValue,
   type LoomEngineClient,
   type LoomDetail,
@@ -280,6 +284,7 @@ import type {
   LoomObjectType,
   ReferenceDisplayMode,
   LoomResolutionResult,
+  ResponseCodeBlock,
   ResponseItem,
   TabGroup,
   VisibleAnswerPlan,
@@ -499,7 +504,7 @@ interface MeasuredLoomRow {
   centerY: number;
 }
 
-type ComposerReferenceGroup = "Open Looms" | "Responses" | "Bookmarks" | "History";
+type ComposerReferenceGroup = "Open Looms" | "Responses" | "Code Snippets" | "Bookmarks" | "History";
 
 interface ComposerReferenceOption extends LoomLink {
   group: ComposerReferenceGroup;
@@ -509,9 +514,9 @@ interface ComposerReferenceOption extends LoomLink {
   suggestionMatchReason?: string;
 }
 
-type AttachContentTab = "all" | "bookmarks" | "history" | "openLooms" | "responses" | "files";
+type AttachContentTab = "all" | "bookmarks" | "history" | "openLooms" | "responses" | "codeSnippets" | "files";
 
-type AttachContentSource = "bookmark" | "history" | "openLoom" | "response";
+type AttachContentSource = "bookmark" | "history" | "openLoom" | "response" | "codeSnippet";
 
 interface AttachContentItem extends LoomLink {
   source: AttachContentSource;
@@ -701,6 +706,7 @@ const attachContentTabs: Array<{
   { id: "history", label: "History", Icon: History },
   { id: "openLooms", label: "Open Looms", Icon: Globe2 },
   { id: "responses", label: "Responses", Icon: FileText },
+  { id: "codeSnippets", label: "Code Snippets", Icon: Code2 },
   { id: "files", label: "Files", Icon: Paperclip },
 ];
 
@@ -989,6 +995,69 @@ function sortAttachContentItemsBySelection(
     .map(({ item }) => item);
 }
 
+function codeSnippetFirstLine(code: string) {
+  return code
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find(Boolean) ?? "Code block";
+}
+
+function codeSnippetLanguageLabel(language?: string) {
+  return language?.trim() || "text";
+}
+
+function codeSnippetAttachItemFromService(
+  snippet: CodeSnippetReferenceItem
+): AttachContentItem {
+  const language = codeSnippetLanguageLabel(snippet.language);
+  const sourceTitle =
+    cleanMarkdownDisplayText(snippet.sourceResponseTitle ?? snippet.sourceResponseCode ?? "") ||
+    "Response";
+  const firstLine = codeSnippetFirstLine(snippet.code);
+  const sourceUri = snippet.sourceCanonicalUri ?? `loom://responses/${snippet.responseId}`;
+  return {
+    id: snippet.codeBlockId,
+    type: "fragment",
+    title: `${language} code from ${sourceTitle}`,
+    path: `${sourceUri}#code-block=${encodeURIComponent(snippet.codeBlockId)}`,
+    badge: "Code",
+    targetKind: "code_block",
+    targetObjectId: snippet.codeBlockId,
+    canonicalUri: `${sourceUri}#code-block=${encodeURIComponent(snippet.codeBlockId)}`,
+    referenceDisplayMode: "title",
+    referenceCustomLabel: `${language} code from ${sourceTitle}`,
+    sourceLoomId: snippet.loomId,
+    sourceResponseId: snippet.responseId,
+    selectedText: snippet.code,
+    sourceResponseCode: snippet.sourceResponseCode,
+    sourceResponseTitle: snippet.sourceResponseTitle,
+    sourceCanonicalUri: sourceUri,
+    fragmentHash: snippet.exactHash,
+    source: "codeSnippet",
+    subtitle: `${language} · ${snippet.loomTitle ?? "Loom"} · ${firstLine}`,
+    keywords: [
+      "Code Snippet",
+      language,
+      snippet.loomTitle ?? "",
+      sourceTitle,
+      firstLine,
+      snippet.code,
+    ],
+  };
+}
+
+function dedupeAttachContentItems(items: AttachContentItem[]) {
+  const seen = new Set<string>();
+  return items.filter((item) => {
+    const key = item.targetKind === "code_block"
+      ? `code:${item.targetObjectId ?? item.id}`
+      : referenceIdentityKey(item);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
 function sortAttachmentsBySelection(attachments: ComposerAttachment[]) {
   return [...attachments].sort(
     (a, b) =>
@@ -1245,7 +1314,9 @@ const seedComposerLink: LoomLink = {
   badge: "Linked",
 };
 
-const restoredInitialLoomId = readLastActiveLoomId(initialSeedConversations);
+const restoredInitialLoomId = initialAppSettingsSnapshot.startup.continueFromLastLoom
+  ? readLastActiveLoomId(initialSeedConversations)
+  : null;
 const restoredInitialLoom = restoredInitialLoomId
   ? initialSeedConversations.find((conversation) => conversation.id === restoredInitialLoomId)
   : undefined;
@@ -1448,6 +1519,29 @@ function cleanMarkdownDisplayTitle(value?: string) {
   return cleaned || normalized;
 }
 
+function compactLoomTitle(value: string, maxLength = 96) {
+  const normalized = normalizeLoomTitle(value);
+  if (normalized.length <= maxLength) return normalized;
+  const ellipsis = "…";
+  const hardLimit = Math.max(1, maxLength - ellipsis.length);
+  const candidate = normalized.slice(0, hardLimit).trim();
+  const lastWhitespace = candidate.search(/\s+\S*$/);
+  const wordSafe =
+    lastWhitespace > Math.floor(hardLimit * 0.55)
+      ? candidate.slice(0, lastWhitespace).trim()
+      : candidate;
+  return `${wordSafe.replace(/[.,;:!?-]+$/g, "").trim()}${ellipsis}`;
+}
+
+function normalizePromptEditText(value: string) {
+  return value
+    .replace(/\u00a0/g, " ")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n[ \t]+/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function formatAddressBarTitle(activeLoom?: Pick<Conversation, "title"> | null, destinationTitle?: string) {
   const loomTitle = cleanMarkdownDisplayTitle(activeLoom?.title);
   const targetTitle = cleanMarkdownDisplayTitle(destinationTitle);
@@ -1508,6 +1602,7 @@ function inlineReferenceTokenHtml(
     ["data-loom-occurrence-index", displayLink.referenceOccurrenceIndex],
     ["data-loom-selected-at", displayLink.selectedAt],
     ["data-loom-target-object-id", displayLink.targetObjectId],
+    ["data-loom-target-kind", displayLink.targetKind],
     ["data-loom-canonical-uri", displayLink.canonicalUri],
     ["data-loom-custom-label", displayLink.referenceCustomLabel],
     ["data-loom-reference-mention-id", displayLink.referenceMentionId],
@@ -1565,6 +1660,7 @@ function linkFromInlineTokenElement(token: HTMLElement): LoomLink | null {
       ? Number(token.dataset.loomSelectedAt)
       : undefined,
     targetObjectId: token.dataset.loomTargetObjectId,
+    targetKind: token.dataset.loomTargetKind as LoomLink["targetKind"],
     canonicalUri: token.dataset.loomCanonicalUri,
     referenceCode: token.dataset.loomCode,
     referenceDisplayMode:
@@ -1791,6 +1887,12 @@ function conversationFromServiceLoom(loom: LoomSummary): Conversation {
     (loom.kind === "weft"
       ? canonicalLoomUri("conversation", loom.loomId)
       : canonicalLoomUri("conversation", loom.loomId));
+  const revisionPrompt =
+    loom.weftKind === "revision" &&
+    typeof metadataValue(loom.metadata, "revisionPrompt") === "string"
+      ? String(metadataValue(loom.metadata, "revisionPrompt"))
+      : undefined;
+  const title = revisionPrompt ? compactLoomTitle(`Revision: ${revisionPrompt}`) : loom.title;
   const summary =
     loom.summary ??
     (typeof metadataValue(loom.metadata, "summary") === "string"
@@ -1798,12 +1900,12 @@ function conversationFromServiceLoom(loom: LoomSummary): Conversation {
       : "");
   const baseMeta = createAddressableLoomMetadata({
     id: loom.loomId,
-    title: loom.title,
-    text: summary || loom.title,
+    title,
+    text: summary || title,
   });
   return {
     id: loom.loomId,
-    title: loom.title,
+    title,
     path: canonicalUri,
     folder: loom.kind === "weft" ? "Wefts" : "Looms",
     summary,
@@ -1830,18 +1932,37 @@ function serviceLoomDetailsToState(details: LoomDetail[]) {
         Boolean(detail.originLoomId) &&
         Boolean(detail.originResponseId)
     )
-    .map((detail) => ({
-      id: `fork-${detail.originLoomId}-${detail.originResponseId}-${detail.loomId}`,
-      parentConversationId: detail.originLoomId!,
-      parentResponseId: detail.originResponseId!,
-      childConversationId: detail.loomId,
-      title: detail.title,
-      kind: detail.weftKind ?? "exploration",
-      revisionSourceResponseId:
-        detail.weftKind === "revision" && typeof metadataValue(detail.metadata, "editedResponseId") === "string"
+    .map((detail) => {
+      const revisionSourceResponseId =
+        detail.weftKind === "revision" &&
+        typeof metadataValue(detail.metadata, "editedResponseId") === "string"
           ? String(metadataValue(detail.metadata, "editedResponseId"))
-          : undefined,
-    }));
+          : undefined;
+      const revisionPrompt =
+        detail.weftKind === "revision" &&
+        typeof metadataValue(detail.metadata, "revisionPrompt") === "string"
+          ? String(metadataValue(detail.metadata, "revisionPrompt"))
+          : undefined;
+      const originalPrompt =
+        detail.weftKind === "revision" &&
+        typeof metadataValue(detail.metadata, "originalPrompt") === "string"
+          ? String(metadataValue(detail.metadata, "originalPrompt"))
+          : undefined;
+      const visualParentResponseId = revisionSourceResponseId ?? detail.originResponseId!;
+      return {
+        id: `fork-${detail.originLoomId}-${visualParentResponseId}-${detail.loomId}`,
+        parentConversationId: detail.originLoomId!,
+        parentResponseId: visualParentResponseId,
+        childConversationId: detail.loomId,
+        title: revisionPrompt
+          ? compactLoomTitle(`Revision: ${revisionPrompt}`)
+          : detail.title,
+        kind: detail.weftKind ?? "exploration",
+        revisionSourceResponseId,
+        revisionPrompt,
+        originalPrompt,
+      };
+    });
   return { conversations, responses, forkRecords };
 }
 
@@ -1896,6 +2017,8 @@ function App() {
       : {}
   );
   const [forkRecords, setForkRecords] = useState<ForkRecord[]>(initialForkRecords);
+  const [selectedPromptRevisionByResponseId, setSelectedPromptRevisionByResponseId] =
+    useState<Record<string, string | null>>({});
   const [initialSidebarLayout] = useState<SidebarLayoutState>(() =>
     readSidebarLayoutState(
       {
@@ -1972,6 +2095,7 @@ function App() {
   const [history, setHistory] = useState<HistoryEntry[]>(
     initialMockDataEnabled ? initialHistory : []
   );
+  const [serviceCodeSnippetItems, setServiceCodeSnippetItems] = useState<AttachContentItem[]>([]);
   const [navigationStack, setNavigationStack] = useState<HistoryEntry[]>([
     createHistoryEntry(initialNavigationDestination, initialResolvedNavigationDestination),
   ]);
@@ -2167,9 +2291,8 @@ function App() {
   );
 
   useEffect(() => {
-    writeLastActiveLoomId(
-      activeConversationId === EPHEMERAL_DRAFT_ID ? null : activeConversationId
-    );
+    if (activeConversationId === EPHEMERAL_DRAFT_ID) return;
+    writeLastActiveLoomId(activeConversationId);
   }, [activeConversationId]);
 
   useEffect(() => {
@@ -2216,6 +2339,14 @@ function App() {
     Boolean(activeWeftOrigin && originConversation) &&
     (currentNavigationDestination.mode === "split" || Boolean(activeTemporaryWeft)) &&
     canShowWeftSplit;
+
+  useEffect(() => {
+    if (activeWeftOrigin) return;
+    setSelectedPromptRevisionByResponseId((current) =>
+      Object.keys(current).length > 0 ? {} : current
+    );
+  }, [activeConversationId, activeWeftOrigin]);
+
   const focusedSplitConversation =
     showWeftSplit && activeSplitPanel === "origin" && originConversation
       ? originConversation
@@ -2407,9 +2538,20 @@ function App() {
       keywords: ["Loom History", entry.visitedAt, ...(entry.meta?.keywords ?? [])],
       searchText: [entry.visitedAt, entry.meta?.summary ?? ""],
     }));
+    const codeSnippetOptions = serviceCodeSnippetItems.map((item) => ({
+      ...item,
+      group: "Code Snippets" as const,
+      searchText: [item.subtitle, item.path, item.selectedText ?? "", ...item.keywords],
+    }));
 
-    return [...conversationOptions, ...loomOptions, ...bookmarkOptions, ...historyOptions];
-  }, [bookmarks, conversationResponses, conversations, forkRecords, history]);
+    return [
+      ...conversationOptions,
+      ...loomOptions,
+      ...codeSnippetOptions,
+      ...bookmarkOptions,
+      ...historyOptions,
+    ];
+  }, [bookmarks, conversationResponses, conversations, forkRecords, history, serviceCodeSnippetItems]);
 
   const attachContentItems = useMemo<AttachContentItem[]>(() => {
     const bookmarkItems = bookmarks.map((bookmark) => ({
@@ -2470,9 +2612,37 @@ function App() {
         };
       })
     );
+    const loadedCodeSnippetItems = Object.entries(conversationResponses).flatMap(([conversationId, responses]) => {
+      const conversation = conversations.find((item) => item.id === conversationId);
+      return responses.flatMap((response) =>
+        (response.codeBlocks ?? []).map((codeBlock) =>
+          codeSnippetAttachItemFromService({
+            codeBlockId: codeBlock.codeBlockId ?? `${response.id}-code-${codeBlock.blockIndex}`,
+            responseId: response.id,
+            loomId: conversationId,
+            loomTitle: conversation?.title,
+            sourceResponseTitle: response.title,
+            sourceResponseCode: response.meta?.displayCode ?? response.meta?.code,
+            sourceCanonicalUri: response.meta?.canonicalUri ?? response.address,
+            blockIndex: codeBlock.blockIndex,
+            language: codeBlock.language,
+            code: codeBlock.code,
+            exactHash: codeBlock.exactHash,
+            fence: codeBlock.fence,
+          })
+        )
+      );
+    });
 
-    return [...bookmarkItems, ...historyItems, ...openLoomItems, ...responseItems];
-  }, [bookmarks, conversationResponses, conversations, forkRecords, history]);
+    return dedupeAttachContentItems([
+      ...bookmarkItems,
+      ...historyItems,
+      ...openLoomItems,
+      ...responseItems,
+      ...serviceCodeSnippetItems,
+      ...loadedCodeSnippetItems,
+    ]);
+  }, [bookmarks, conversationResponses, conversations, forkRecords, history, serviceCodeSnippetItems]);
 
   const loomGraphRepository = useMemo(
     () =>
@@ -2584,6 +2754,34 @@ function App() {
     loomEngineClientRef.current = loomEngineClient;
   }, [loomEngineClient]);
 
+  useEffect(() => {
+    if (getConfiguredLoomEngineMode() !== "rust-service" || mockDataEnabled) {
+      setServiceCodeSnippetItems([]);
+      return;
+    }
+    const loomId =
+      activeAddressableConversation?.id &&
+      activeAddressableConversation.id !== EPHEMERAL_DRAFT_ID &&
+      !temporaryWefts[activeAddressableConversation.id]
+        ? activeAddressableConversation.id
+        : undefined;
+    let cancelled = false;
+    void loomEngineClientRef.current
+      .listCodeSnippets({ loomId, limit: 200 })
+      .then((result) => {
+        if (cancelled) return;
+        setServiceCodeSnippetItems(result.codeSnippets.map(codeSnippetAttachItemFromService));
+      })
+      .catch((error) => {
+        if (cancelled) return;
+        console.warn("Code Snippet listing requires loom-service.", error);
+        setServiceCodeSnippetItems([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeAddressableConversation?.id, conversationResponses, mockDataEnabled, temporaryWefts]);
+
   const refreshServiceLooms = useCallback(async () => {
     if (getConfiguredLoomEngineMode() !== "rust-service" || mockDataEnabled) return;
     setServiceLoomsLoading(true);
@@ -2626,6 +2824,37 @@ function App() {
       serviceSidebarLayoutHydratedRef.current = true;
       lastPersistedSidebarLayoutJsonRef.current = JSON.stringify(nextLayout);
       serviceLoomsHydratedRef.current = true;
+      if (
+        appSettings.startup.continueFromLastLoom &&
+        activeConversationIdRef.current === EPHEMERAL_DRAFT_ID
+      ) {
+        const restoredLoomId = readLastActiveLoomId(next.conversations);
+        const restoredLoom = restoredLoomId
+          ? next.conversations.find((conversation) => conversation.id === restoredLoomId)
+          : undefined;
+        if (restoredLoom) {
+          const restoredDestination: LoomLink = {
+            id: restoredLoom.id,
+            type: "conversation",
+            title: restoredLoom.title,
+            path: restoredLoom.path,
+            badge: restoredLoom.folder === "Wefts" ? "Weft" : "Loom",
+            canonicalUri: restoredLoom.meta?.canonicalUri,
+            meta: restoredLoom.meta,
+          };
+          const restoredNavigationDestination: LoomNavigationDestination = {
+            loomId: restoredLoom.id,
+            mode: "full",
+            source: "userNavigation",
+          };
+          setActiveConversationId(restoredLoom.id);
+          setActiveObjectTitle(restoredLoom.title);
+          setNavigationStack([
+            createHistoryEntry(restoredDestination, restoredNavigationDestination),
+          ]);
+          setNavigationIndex(0);
+        }
+      }
       const activeStillExists = next.conversations.some(
         (conversation) => conversation.id === activeConversationIdRef.current
       );
@@ -2648,7 +2877,7 @@ function App() {
     } finally {
       setServiceLoomsLoading(false);
     }
-  }, [mockDataEnabled]);
+  }, [appSettings.startup.continueFromLastLoom, mockDataEnabled]);
 
   const refreshServiceHistory = useCallback(async () => {
     if (getConfiguredLoomEngineMode() !== "rust-service" || mockDataEnabled) return;
@@ -2671,6 +2900,60 @@ function App() {
   useEffect(() => {
     void refreshServiceHistory();
   }, [refreshServiceHistory]);
+
+  const liveServiceGenerationRunIds = useMemo(() => {
+    if (getConfiguredLoomEngineMode() !== "rust-service" || mockDataEnabled) return [];
+    const runIds = new Set<string>();
+    for (const responses of Object.values(conversationResponses)) {
+      for (const response of responses) {
+        if (
+          response.workflowRunId &&
+          isLiveServiceGenerationStatus(response.serviceGenerationStatus)
+        ) {
+          runIds.add(response.workflowRunId);
+        }
+      }
+    }
+    return Array.from(runIds).sort();
+  }, [conversationResponses, mockDataEnabled]);
+
+  const liveServiceGenerationRunKey = liveServiceGenerationRunIds.join("|");
+
+  useEffect(() => {
+    if (
+      getConfiguredLoomEngineMode() !== "rust-service" ||
+      mockDataEnabled ||
+      liveServiceGenerationRunIds.length === 0
+    ) {
+      return;
+    }
+    let cancelled = false;
+    let timeoutId: number | undefined;
+    const poll = async () => {
+      const runIds = liveServiceGenerationRunKey
+        .split("|")
+        .map((runId) => runId.trim())
+        .filter(Boolean);
+      for (const workflowRunId of runIds) {
+        if (cancelled) return;
+        try {
+          const state =
+            await loomEngineClientRef.current.getGenerationResponseState(workflowRunId);
+          if (!cancelled) applyGenerationResponseState(state);
+        } catch (error) {
+          console.warn("Generation response state polling failed.", error);
+        }
+      }
+      if (!cancelled) {
+        timeoutId = window.setTimeout(poll, 500);
+      }
+    };
+    void poll();
+    return () => {
+      cancelled = true;
+      if (timeoutId !== undefined) window.clearTimeout(timeoutId);
+    };
+  }, [liveServiceGenerationRunKey, liveServiceGenerationRunIds.length, mockDataEnabled]);
 
   useEffect(() => {
     if (
@@ -3053,6 +3336,55 @@ function App() {
     }));
   }
 
+  function isLiveServiceGenerationStatus(status?: string) {
+    return status === "streaming" || status === "pending" || status === "running";
+  }
+
+  function applyGenerationResponseState(state: GenerationResponseStateResult) {
+    const assistant = state.assistantResponse;
+    if (!assistant) return;
+    const sanitized = sanitizeModelAnswer(assistant.content);
+    const serviceGenerationStatus = assistant.status ?? state.status;
+    setConversationResponses((current) => {
+      const existingResponses = current[assistant.loomId] ?? [];
+      let updated = false;
+      const nextResponses = existingResponses.map((response) => {
+        if (response.id !== assistant.responseId) return response;
+        updated = true;
+        return {
+          ...response,
+          answer: answerParagraphs(sanitized),
+          finalContent: sanitized,
+          workflowRunId: state.workflowRunId,
+          serviceGenerationStatus,
+          serviceUserResponseId:
+            response.serviceUserResponseId ?? state.userResponse?.responseId,
+          visibleProgress: isLiveServiceGenerationStatus(serviceGenerationStatus)
+            ? response.visibleProgress
+            : undefined,
+          doneReason:
+            state.status === "completed" || state.status === "truncated"
+              ? response.doneReason ?? "stop"
+              : response.doneReason,
+          truncated: state.status === "truncated" ? true : response.truncated,
+        };
+      });
+      if (!updated) return current;
+      return {
+        ...current,
+        [assistant.loomId]: nextResponses,
+      };
+    });
+    if (!isLiveServiceGenerationStatus(serviceGenerationStatus)) {
+      setGeneratingResponseId((current) =>
+        current === assistant.responseId ? null : current
+      );
+      if (mainServiceCancellationRef.current?.workflowRunId === state.workflowRunId) {
+        mainServiceCancellationRef.current = null;
+      }
+    }
+  }
+
   function withVisibleProgress(
     response: ResponseItem,
     visibleProgress: VisibleAnswerProgress | undefined
@@ -3398,12 +3730,7 @@ function App() {
               progress.finalStartedAt || progress.finalContent.trim()
             );
             if (finalContentStarted && answerNowProgress.statusText !== "Writing final response...") {
-              answerNowProgress = activateVisibleAnswerStage(
-                answerNowProgress,
-                "finalizing",
-                "Writing final response..."
-              );
-              updateResponseVisibleProgress(currentRequest.loomId, responseId, answerNowProgress);
+              updateResponseVisibleProgress(currentRequest.loomId, responseId, undefined);
             }
             updateResponseMarkdown(currentRequest.loomId, responseId, progress.finalContent);
           }
@@ -3590,12 +3917,7 @@ function App() {
             progress.finalStartedAt || progress.finalContent?.trim()
           );
           if (finalContentStarted && continuationProgress.statusText !== "Writing final response...") {
-            continuationProgress = activateVisibleAnswerStage(
-              continuationProgress,
-              "finalizing",
-              "Writing final response..."
-            );
-            updateResponseVisibleProgress(match.loomId, responseId, continuationProgress);
+            updateResponseVisibleProgress(match.loomId, responseId, undefined);
           }
           const combined = [previousAnswer, sanitizeModelAnswer(progress.finalContent ?? "")]
             .filter(Boolean)
@@ -4870,12 +5192,15 @@ function App() {
         transcript: HTMLElement | null,
         responseId?: string,
         path?: string,
-        highlight = false
+        highlight = false,
+        targetPrompt = false
       ) => {
         if (!transcript) return false;
         const target = responseId
           ? transcript.querySelector<HTMLElement>(
-              `[data-response-id="${CSS.escape(responseId)}"]`
+              targetPrompt
+                ? `[data-prompt-response-id="${CSS.escape(responseId)}"]`
+                : `[data-response-id="${CSS.escape(responseId)}"]`
             )
           : path
             ? transcript.querySelector<HTMLElement>(
@@ -4883,7 +5208,12 @@ function App() {
               )
             : null;
         if (!target) return false;
-        target.scrollIntoView({ behavior: "smooth", block: "start" });
+        scrollElementIntoViewFromCurrent(
+          transcript,
+          target,
+          targetPrompt ? "start" : "center",
+          targetPrompt
+        );
         if (highlight) {
           target.classList.remove("response-scroll-highlight");
           void target.offsetWidth;
@@ -4912,10 +5242,17 @@ function App() {
         return true;
       };
 
-      if (pendingDestination?.mode === "split" && pendingDestination.originResponseId) {
+      if (
+        pendingDestination?.mode === "split" &&
+        pendingDestination.originResponseId &&
+        !pendingDestination.preserveOriginScroll
+      ) {
         scrollToResponse(
           originTranscriptRef.current,
-          pendingDestination.originResponseId
+          pendingDestination.originResponseId,
+          undefined,
+          false,
+          true
         );
       }
 
@@ -4934,13 +5271,23 @@ function App() {
         }
       }
 
+      if (pendingDestination?.scrollMode === "top") {
+        const transcript = transcriptForLoom(pendingDestination.loomId);
+        if (transcript) {
+          transcript.scrollTo({ top: 0, behavior: "smooth" });
+          completePendingScroll();
+          return;
+        }
+      }
+
       if (
         pendingDestination?.scrollTargetResponseId &&
         scrollToResponse(
           transcriptForLoom(pendingDestination.loomId),
           pendingDestination.scrollTargetResponseId,
           undefined,
-          shouldHighlightPendingScroll
+          shouldHighlightPendingScroll,
+          pendingDestination.scrollMode === "origin"
         )
       ) {
         return;
@@ -5558,6 +5905,141 @@ function App() {
     }
   }
 
+  async function addCodeBlockAsReference(
+    conversation: Conversation,
+    response: ResponseItem,
+    codeBlock: ResponseCodeBlock
+  ) {
+    let resolvedCodeBlock = codeBlock;
+    if (getConfiguredLoomEngineMode() === "rust-service" && !resolvedCodeBlock.codeBlockId) {
+      try {
+        const latestLoom = await loomEngineClient.getLoom(conversation.id);
+        const latestResponse = latestLoom.responses.find((item) => item.id === response.id);
+        const persistedCodeBlock = latestResponse?.codeBlocks?.find(
+          (item) =>
+            item.blockIndex === codeBlock.blockIndex ||
+            item.code.trimEnd() === codeBlock.code.trimEnd()
+        );
+        if (persistedCodeBlock) {
+          resolvedCodeBlock = persistedCodeBlock;
+        }
+      } catch (error) {
+        console.warn("Could not hydrate persisted code block before Reference creation.", error);
+      }
+    }
+
+    const code = resolvedCodeBlock.code;
+    if (!code.trim()) return false;
+
+    const responseCode = response.meta?.code;
+    const sourceCanonicalUri = response.meta?.canonicalUri ?? response.address;
+    const codeBlockHash = resolvedCodeBlock.exactHash ?? fragmentTextHash(code);
+    const codeBlockAnchor =
+      resolvedCodeBlock.codeBlockId ?? `block-${resolvedCodeBlock.blockIndex}-${codeBlockHash}`;
+    const language = resolvedCodeBlock.language?.trim() || "code";
+    const title = `${language} code from ${
+      cleanMarkdownDisplayTitle(response.title) || response.title
+    }`;
+    const codeBlockUri = `${sourceCanonicalUri}#code-block=${encodeURIComponent(
+      codeBlockAnchor
+    )}`;
+    const codeReference: LoomLink = {
+      id: `codeblock:${conversation.id}:${response.id}:${resolvedCodeBlock.blockIndex}:${codeBlockHash}`,
+      type: "fragment",
+      title,
+      path: codeBlockUri,
+      badge: "Code",
+      targetKind: "code_block",
+      selectedAt: Date.now(),
+      canonicalUri: codeBlockUri,
+      referenceCode: responseCode,
+      referenceDisplayMode: "title",
+      sourceLoomId: conversation.id,
+      sourceResponseId: response.id,
+      selectedText: code,
+      sourceResponseCode: responseCode,
+      sourceResponseTitle: response.title,
+      sourceCanonicalUri,
+      fragmentHash: codeBlockHash,
+      createdAt: Date.now(),
+      referenceCustomLabel: title,
+      targetObjectId: resolvedCodeBlock.codeBlockId ?? response.id,
+    };
+    const draft = composerDrafts[conversation.id] ?? EMPTY_COMPOSER_DRAFT;
+    if (draft.links.some((link) => referencesShareIdentity(link, codeReference))) {
+      showToast({ message: "Already referenced", icon: "copy" });
+      window.requestAnimationFrame(() => composerFocusRef.current?.());
+      return true;
+    }
+
+    let referenceToInsert = codeReference;
+    if (getConfiguredLoomEngineMode() === "rust-service") {
+      try {
+        const metadata: Record<string, JsonValue> = {
+          targetKind: "code_block",
+          codeBlockId: resolvedCodeBlock.codeBlockId ?? codeReference.id,
+          blockIndex: resolvedCodeBlock.blockIndex,
+          language,
+          exactHash: codeBlockHash,
+          referenceDisplayMode: "title",
+        };
+        if (responseCode) metadata.sourceResponseCode = responseCode;
+        if (response.title) metadata.sourceResponseTitle = response.title;
+        if (sourceCanonicalUri) metadata.sourceCanonicalUri = sourceCanonicalUri;
+        const result = await loomEngineClient.addReference({
+          loomId: conversation.id,
+          sourceResponseId: response.id,
+          reference: codeReference,
+          metadata,
+        });
+        referenceToInsert = {
+          ...codeReference,
+          ...result.reference,
+          badge: codeReference.badge,
+          selectedText: codeReference.selectedText,
+          sourceResponseCode: codeReference.sourceResponseCode,
+          sourceResponseTitle: codeReference.sourceResponseTitle,
+          sourceCanonicalUri: codeReference.sourceCanonicalUri,
+          fragmentHash: codeReference.fragmentHash,
+          referenceDisplayMode: "title",
+          targetKind: "code_block",
+          referenceCustomLabel:
+            result.reference.referenceCustomLabel ?? codeReference.referenceCustomLabel,
+          targetObjectId: codeReference.targetObjectId,
+        };
+      } catch (error) {
+        console.warn("Code block reference creation requires loom-service.", error);
+        showToast({ message: "Reference requires loom-service" });
+        return false;
+      }
+    }
+
+    if (resolvedCodeBlock.codeBlockId) {
+      const snippetItem = codeSnippetAttachItemFromService({
+        codeBlockId: resolvedCodeBlock.codeBlockId,
+        responseId: response.id,
+        loomId: conversation.id,
+        loomTitle: conversation.title,
+        sourceResponseTitle: response.title,
+        sourceResponseCode: responseCode,
+        sourceCanonicalUri,
+        blockIndex: resolvedCodeBlock.blockIndex,
+        language: resolvedCodeBlock.language,
+        code,
+        exactHash: codeBlockHash,
+        fence: resolvedCodeBlock.fence,
+      });
+      setServiceCodeSnippetItems((current) =>
+        dedupeAttachContentItems([snippetItem, ...current])
+      );
+    }
+
+    linkObjectForDraft(referenceToInsert, conversation.id);
+    showToast({ message: "Code Reference added", icon: "copy" });
+    window.requestAnimationFrame(() => composerFocusRef.current?.());
+    return true;
+  }
+
   function insertStarterPrompt(text: string) {
     starterPromptRequestIdRef.current += 1;
     setStarterPromptRequest({
@@ -5612,13 +6094,10 @@ function App() {
         );
         visitDestination(destination, {
           source: "userNavigation",
-          navigationDestination: {
-            loomId: located.loomId,
-            mode: "full",
+          navigationDestination: navigationDestinationForLink(destination, "userNavigation", {
             scrollTargetResponseId: located.response.id,
             scrollMode: "exact",
-            source: "userNavigation",
-          },
+          }),
         });
         return;
       }
@@ -5663,21 +6142,21 @@ function App() {
     if (link.type === "fragment" && link.sourceLoomId && link.sourceResponseId) {
       const sourceResponse = findResponseInLoom(link.sourceLoomId, link.sourceResponseId);
       if (!sourceResponse) return "This Fragment Reference source cannot be opened.";
-      visitDestination(responseLinkForNavigation(link.sourceLoomId, sourceResponse), {
+      const destination = responseLinkForNavigation(link.sourceLoomId, sourceResponse);
+      visitDestination(destination, {
         source: "userNavigation",
-        navigationDestination: {
-          loomId: link.sourceLoomId,
-          mode: "full",
+        navigationDestination: navigationDestinationForLink(destination, "userNavigation", {
           scrollTargetResponseId: link.sourceResponseId,
           scrollMode: "exact",
-          source: "userNavigation",
-        },
+        }),
       });
+      focusComposerAfterNavigation();
       return null;
     }
     const resolution = resolveLoomAddress(link.path, loomGraphRepository);
     if (resolution.status === "resolved") {
       visitResolvedReference(link, resolution);
+      focusComposerAfterNavigation();
       return null;
     }
     if (resolution.status === "alias_stale" && resolution.object) {
@@ -5692,6 +6171,7 @@ function App() {
           resolution.object.canonicalUri,
       };
       visitResolvedReference(nextLink, resolution);
+      focusComposerAfterNavigation();
       return null;
     }
     if (resolution.status === "broken_reference") {
@@ -6018,7 +6498,7 @@ function App() {
         const serviceResult = await loomEngineClient.createOrOpenWeft({
           originLoomId: temporaryTargetWeft.originLoomId,
           originResponseId: temporaryTargetWeft.originResponseId,
-          title: temporaryTargetWeft.title,
+          initialPrompt: prompt,
           summary: `Branched from ${originConversationForPromotion.title}.`,
           reuseExisting: false,
           source: "response_action",
@@ -6415,7 +6895,9 @@ function App() {
         setConversationResponses((current) => ({
           ...current,
           [targetConversation.id]: (current[targetConversation.id] ?? []).map((item) =>
-            item.id === serviceResponseId ? { ...item, workflowRunId } : item
+            item.id === serviceResponseId
+              ? { ...item, workflowRunId, serviceGenerationStatus: "streaming" }
+              : item
           ),
         }));
       };
@@ -6451,6 +6933,29 @@ function App() {
           id: nextResponseId,
           serviceUserResponseId: persistedUserResponseId,
         });
+      };
+      const applyServiceLoomTitle = (nextTitle?: string) => {
+        const normalizedTitle = nextTitle ? normalizeLoomTitle(nextTitle) : "";
+        if (!normalizedTitle) return;
+        setConversations((current) =>
+          current.map((item) =>
+            item.id === targetConversation.id
+              ? {
+                  ...item,
+                  title: normalizedTitle,
+                  meta: item.meta
+                    ? {
+                        ...item.meta,
+                        title: normalizedTitle,
+                      }
+                    : item.meta,
+                }
+              : item
+          )
+        );
+        if (targetConversation.id === activeConversationIdRef.current) {
+          setActiveObjectTitle(normalizedTitle);
+        }
       };
 
       try {
@@ -6518,6 +7023,7 @@ function App() {
 
           if (event.type === "assistant_placeholder_created") {
             serviceAccepted = true;
+            applyServiceLoomTitle(event.payload.loomTitle);
             retainServiceWorkflowRunId(event.payload.workflowRunId);
             replaceServiceResponseId(event.payload.responseId);
             markDebugEvent(
@@ -6528,6 +7034,7 @@ function App() {
           }
           if (event.type === "user_message_created") {
             serviceAccepted = true;
+            applyServiceLoomTitle(event.payload.loomTitle);
             persistedUserResponseId = event.payload.responseId;
             retainServiceWorkflowRunId(event.payload.workflowRunId);
             setConversationResponses((current) => ({
@@ -6578,18 +7085,13 @@ function App() {
               finalStartedAt: firstFinalStartedAt,
               thinkingEndedAt: firstFinalStartedAt,
             });
-            setResponseProgress(
-              activateVisibleAnswerStage(
-                visibleProgress,
-                "finalizing",
-                "Writing final response..."
-              )
-            );
+            setResponseProgress(undefined);
             updateResponseMarkdown(targetConversation.id, serviceResponseId, serviceFinalContent);
             continue;
           }
           if (event.type === "response_completed" || event.type === "response_truncated") {
             serviceAccepted = true;
+            applyServiceLoomTitle(event.payload.loomTitle);
             replaceServiceResponseId(event.payload.responseId);
             const sanitizedFinalContent = sanitizeModelAnswer(serviceFinalContent);
             const answer = answerParagraphs(sanitizedFinalContent);
@@ -6599,9 +7101,11 @@ function App() {
               answer,
               finalContent: sanitizedFinalContent,
               doneReason: event.payload.doneReason,
-              truncated: event.type === "response_truncated",
-              workflowRunId: mainServiceCancellationRef.current?.workflowRunId,
-              visiblePlan: undefined,
+                      truncated: event.type === "response_truncated",
+                      serviceGenerationStatus:
+                        event.type === "response_truncated" ? "truncated" : "completed",
+                      workflowRunId: mainServiceCancellationRef.current?.workflowRunId,
+                      visiblePlan: undefined,
               visibleProgress: undefined,
               meta: createDraftResponseMetadata({
                 id: createMetadataUuid(),
@@ -6669,6 +7173,14 @@ function App() {
               undefined
             );
             updateResponseThinking(targetConversation.id, serviceResponseId, { done: true });
+            setConversationResponses((current) => ({
+              ...current,
+              [targetConversation.id]: (current[targetConversation.id] ?? []).map((item) =>
+                item.id === serviceResponseId
+                  ? { ...item, serviceGenerationStatus: "error" }
+                  : item
+              ),
+            }));
             updateResponseAnswer(targetConversation.id, serviceResponseId, [errorMessage]);
             showResponseCompletionActions(serviceResponseId);
             if (mainAbortRef.current === controller) mainAbortRef.current = null;
@@ -6680,6 +7192,14 @@ function App() {
             serviceAccepted = true;
             retainServiceWorkflowRunId(event.payload.workflowRunId);
             updateResponseThinking(targetConversation.id, serviceResponseId, { done: true });
+            setConversationResponses((current) => ({
+              ...current,
+              [targetConversation.id]: (current[targetConversation.id] ?? []).map((item) =>
+                item.id === serviceResponseId
+                  ? { ...item, serviceGenerationStatus: "cancelled" }
+                  : item
+              ),
+            }));
             setComposerRuntimeState({ running: false, message: "Response stopped." });
             showResponseCompletionActions(serviceResponseId);
             if (mainAbortRef.current === controller) mainAbortRef.current = null;
@@ -6993,17 +7513,11 @@ function App() {
             );
             if (finalContentStarted && !finalWritingProgressSet) {
               finalWritingProgressSet = true;
-              setResponseProgress(
-                activateVisibleAnswerStage(
-                  visibleProgress,
-                  "finalizing",
-                  "Writing final response..."
-                )
-              );
               markDebugEvent("Final content started", `Writing answer into ${response.id}`);
+              setResponseProgress(undefined);
             }
             receivedStreamingContent = progress.finalContent.length > 0;
-            if (progress.finalContent.length !== lastFinalCharCount) {
+            if (!finalContentStarted && progress.finalContent.length !== lastFinalCharCount) {
               finalChunkCount += 1;
               lastFinalCharCount = progress.finalContent.length;
               updateProgress((currentProgress) =>
@@ -7693,7 +8207,93 @@ function App() {
     focusActiveComposerSoon();
   }
 
-  function openPersistedWeftBranch(record: ForkRecord) {
+  function scrollTranscriptResponseIntoView(
+    transcript: HTMLElement | null,
+    responseId: string,
+    block: ScrollLogicalPosition = "center"
+  ) {
+    if (!transcript) return false;
+    const target = Array.from(
+      transcript.querySelectorAll<HTMLElement>("[data-response-id]")
+    ).find((element) => element.dataset.responseId === responseId);
+    if (!target) return false;
+    scrollElementIntoViewFromCurrent(transcript, target, block);
+    return true;
+  }
+
+  function scrollTranscriptPromptToStart(
+    transcript: HTMLElement | null,
+    responseId: string
+  ) {
+    if (!transcript) return false;
+    const target = transcript.querySelector<HTMLElement>(
+      `[data-prompt-response-id="${CSS.escape(responseId)}"]`
+    );
+    if (!target) return false;
+    scrollElementIntoViewFromCurrent(transcript, target, "start", true);
+    return true;
+  }
+
+  function scrollElementIntoViewFromCurrent(
+    transcript: HTMLElement,
+    target: HTMLElement,
+    block: ScrollLogicalPosition = "center",
+    forceBlock = false
+  ) {
+    if (forceBlock && block === "start") {
+      const alignToTranscriptStart = () => {
+        const transcriptRect = transcript.getBoundingClientRect();
+        const targetRect = target.getBoundingClientRect();
+        const nextTop = Math.max(
+          0,
+          transcript.scrollTop + targetRect.top - transcriptRect.top - 16
+        );
+        transcript.scrollTop = nextTop;
+      };
+      alignToTranscriptStart();
+      window.requestAnimationFrame(() => alignToTranscriptStart());
+      window.setTimeout(() => alignToTranscriptStart(), 120);
+      window.setTimeout(() => alignToTranscriptStart(), 320);
+      window.setTimeout(() => alignToTranscriptStart(), 640);
+      return;
+    }
+    const transcriptRect = transcript.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const visibleMargin = 24;
+    const targetAlreadyVisible =
+      targetRect.top >= transcriptRect.top + visibleMargin &&
+      targetRect.bottom <= transcriptRect.bottom - visibleMargin;
+    target.scrollIntoView({
+      behavior: "smooth",
+      block: targetAlreadyVisible && !forceBlock ? "nearest" : block,
+    });
+  }
+
+  function anchorBranchCounterNavigation(
+    loomId: string,
+    responseId: string,
+    panel: "origin" | "weft" | "full"
+  ) {
+    const transcript =
+      panel === "origin" ? originTranscriptRef.current : transcriptRef.current;
+    const mode = showWeftSplit ? "split" : "full";
+    pendingScrollDestinationRef.current = {
+      loomId,
+      mode,
+      scrollTargetResponseId: responseId,
+      scrollMode: panel === "origin" ? "origin" : "exact",
+      source: "userNavigation",
+    };
+    pendingScrollHighlightRef.current = false;
+    window.requestAnimationFrame(() => {
+      scrollTranscriptResponseIntoView(transcript, responseId, "center");
+    });
+  }
+
+  function openPersistedWeftBranch(
+    record: ForkRecord,
+    options: { preserveOriginScroll?: boolean; scrollMode?: "lastResponse" | "top" } = {}
+  ) {
     const weftConversation = conversations.find(
       (conversation) => conversation.id === record.childConversationId
     );
@@ -7712,16 +8312,19 @@ function App() {
       meta: weftConversation.meta,
     };
     const latestResponse = lastResponseInLoom(weftConversation.id);
+    const originFocusResponseId = record.revisionSourceResponseId ?? record.parentResponseId;
     const destination: LoomNavigationDestination = {
       loomId: weftConversation.id,
       mode: canShowWeftSplit ? "split" : "full",
       originLoomId: record.parentConversationId,
-      originResponseId: record.parentResponseId,
-      scrollTargetResponseId: latestResponse?.id,
-      scrollMode: "lastResponse",
+      originResponseId: originFocusResponseId,
+      preserveOriginScroll: options.preserveOriginScroll,
+      scrollTargetResponseId: options.scrollMode === "top" ? undefined : latestResponse?.id,
+      scrollMode: options.scrollMode ?? "lastResponse",
       source: "userNavigation",
     };
     restoreDestination(link, destination);
+    setActiveSplitPanel("weft");
     pushNavigationEntry(link, destination);
     setHistory((current) => [
       createHistoryEntry(link, destination),
@@ -7841,11 +8444,13 @@ function App() {
     const sourceResponses = conversationResponses[sourceConversation.id] ?? [];
     const responseIndex = sourceResponses.findIndex((item) => item.id === response.id);
     if (responseIndex < 0) return false;
-    const existingFork = forkRecords.find(
-      (record) =>
-        record.parentConversationId === sourceConversation.id &&
-        record.parentResponseId === response.id
-    );
+    const existingFork = initialExchange
+      ? undefined
+      : forkRecords.find(
+          (record) =>
+            record.parentConversationId === sourceConversation.id &&
+            record.parentResponseId === response.id
+        );
     const existingWeft = existingFork
       ? conversations.find((conversation) => conversation.id === existingFork.childConversationId)
       : undefined;
@@ -8027,6 +8632,16 @@ function App() {
       return items;
     };
     const useRustServiceWeft = getConfiguredLoomEngineMode() === "rust-service";
+    const convertedAskTitle =
+      askTurnsToPersist.length > 0
+        ? normalizeLoomTitle(
+            `Loom: ${
+              askTurnsToPersist[0]?.question?.trim() ||
+              askTurnsToPersist[0]?.title ||
+              response.question
+            }`
+          )
+        : normalizeLoomTitle(`Loom: ${response.title}`);
     if (askTurnsToPersist.length === 0) {
       const activeOriginMatchesResponse =
         activeWeftOrigin?.originLoomId === sourceConversation.id &&
@@ -8050,9 +8665,9 @@ function App() {
         const serviceResult = await loomEngineClient.createOrOpenWeft({
           originLoomId: sourceConversation.id,
           originResponseId: response.id,
-          title: normalizeLoomTitle(`Loom: ${response.title}`),
+          title: convertedAskTitle,
           summary: `Branched from ${sourceConversation.title}.`,
-          reuseExisting: true,
+          reuseExisting: askTurnsToPersist.length === 0,
           source: initialExchange ? "quick_ask_convert" : "response_action",
           seedMode: initialExchange ? "none" : "origin_qa_pair",
           createOriginContextSnapshot: true,
@@ -8062,16 +8677,16 @@ function App() {
           ? materializeServiceWeftConversation(serviceResult.weft)
           : {
               id: serviceResult.loomId,
-              title: normalizeLoomTitle(`Loom: ${response.title}`),
+              title: convertedAskTitle,
               path: `${sourceConversation.path}/loom/${serviceResult.loomId}`,
               folder: sourceConversation.folder,
               summary: `Branched from ${sourceConversation.title}.`,
               iconKey: "workflow",
               meta: createAddressableLoomMetadata({
                 id: createMetadataUuid(),
-                title: normalizeLoomTitle(`Loom: ${response.title}`),
+                title: convertedAskTitle,
                 text: metadataTextForLoom({
-                  title: normalizeLoomTitle(`Loom: ${response.title}`),
+                  title: convertedAskTitle,
                   summary: `Branched from ${sourceConversation.title}.`,
                 }),
               }),
@@ -8200,7 +8815,14 @@ function App() {
             title: `Loom from ${response.title}`,
             kind: serviceResult.weft?.weftKind ?? "exploration",
           };
-          if (existingIndex < 0) return [...current, nextRecord];
+          if (
+            existingIndex >= 0 &&
+            current[existingIndex]?.childConversationId === serviceWeftConversation.id
+          ) {
+            return current.map((record, index) => (index === existingIndex ? nextRecord : record));
+          }
+          if (current.some((record) => record.id === nextRecord.id)) return current;
+          if (existingIndex < 0 || askTurnsToPersist.length > 0) return [...current, nextRecord];
           return current.map((record, index) => (index === existingIndex ? nextRecord : record));
         });
         setComposerDrafts((current) =>
@@ -8250,7 +8872,7 @@ function App() {
         return false;
       }
     }
-    if (existingWeft) {
+    if (existingWeft && askTurnsToPersist.length === 0) {
       if (askTurnsToPersist.length > 0) {
         const askResponses = askTurnsToPersist.map((turn, index) =>
           askResponseFromTurn(turn, existingWeft.path, index + 1)
@@ -8284,7 +8906,7 @@ function App() {
     }
     const id = `c-loom-${Date.now()}`;
     const path = `${sourceConversation.path}/loom/${id}`;
-    const title = normalizeLoomTitle(`Loom: ${response.title}`);
+    const title = convertedAskTitle;
     const conversation: Conversation = {
       id,
       title,
@@ -8383,14 +9005,25 @@ function App() {
     return true;
   }
 
-  function returnToOrigin() {
+  function returnToOrigin(options: { keepPromptRevisionSelection?: boolean } = {}) {
     const origin = getWeftOrigin(activeConversationId);
     if (!origin) return;
-    const originResponse = findResponseInLoom(origin.originLoomId, origin.originResponseId);
+    const activeRevisionRecord = forkRecords.find(
+      (record) => record.kind === "revision" && record.childConversationId === activeConversationId
+    );
+    const originResponseId =
+      activeRevisionRecord?.revisionSourceResponseId ?? origin.originResponseId;
+    if (activeRevisionRecord?.revisionSourceResponseId && options.keepPromptRevisionSelection !== false) {
+      setSelectedPromptRevisionByResponseId((current) => ({
+        ...current,
+        [activeRevisionRecord.revisionSourceResponseId!]: activeRevisionRecord.childConversationId,
+      }));
+    }
+    const originResponse = findResponseInLoom(origin.originLoomId, originResponseId);
     const destination: LoomNavigationDestination = {
       loomId: origin.originLoomId,
       mode: canShowWeftSplit ? "split" : "full",
-      scrollTargetResponseId: origin.originResponseId,
+      scrollTargetResponseId: originResponseId,
       scrollMode: "origin",
       source: "returnToOrigin",
     };
@@ -8402,6 +9035,13 @@ function App() {
       setActiveSplitPanel("origin");
       pendingScrollDestinationRef.current = destination;
       pendingScrollHighlightRef.current = true;
+      focusComposerAfterNavigation();
+      window.requestAnimationFrame(() => {
+        scrollTranscriptPromptToStart(originTranscriptRef.current, originResponseId);
+        window.setTimeout(() => {
+          scrollTranscriptPromptToStart(originTranscriptRef.current, originResponseId);
+        }, 160);
+      });
     } else {
       restoreDestination(link, destination);
     }
@@ -8499,13 +9139,15 @@ function App() {
       });
       return false;
     }
+    const revisionWeftTitle = compactLoomTitle(`Revision: ${normalizedPrompt}`);
+    const revisionResponseTitle = compactLoomTitle(normalizedPrompt);
 
     let serviceResult: CreateOrOpenWeftResult;
     try {
       serviceResult = await loomEngineClient.createOrOpenWeft({
         originLoomId: sourceConversation.id,
         originResponseId: anchorResponse.id,
-        title: normalizeLoomTitle(`Revision: ${normalizedPrompt.slice(0, 64)}`),
+        title: revisionWeftTitle,
         summary: `Edited continuation from ${sourceConversation.title}.`,
         reuseExisting: false,
         source: "response_action",
@@ -8533,7 +9175,7 @@ function App() {
     const serviceWeft = serviceResult.weft;
     const weftConversation: Conversation = {
       id: serviceResult.loomId,
-      title: serviceWeft?.title ?? normalizeLoomTitle(`Revision: ${normalizedPrompt.slice(0, 64)}`),
+      title: serviceWeft?.title ?? revisionWeftTitle,
       path: serviceWeft?.canonicalUri ?? `${sourceConversation.path}/revision/${serviceResult.loomId}`,
       folder: "Wefts",
       summary: serviceWeft?.summary ?? `Edited continuation from ${sourceConversation.title}.`,
@@ -8541,7 +9183,7 @@ function App() {
       meta: {
         ...createAddressableLoomMetadata({
           id: serviceResult.loomId,
-          title: serviceWeft?.title ?? normalizeLoomTitle(`Revision: ${normalizedPrompt.slice(0, 64)}`),
+          title: serviceWeft?.title ?? revisionWeftTitle,
           text: serviceWeft?.summary ?? `Edited continuation from ${sourceConversation.title}.`,
         }),
         code: serviceWeft?.code,
@@ -8553,7 +9195,7 @@ function App() {
     const localResponseId = `revision-${sourceResponse.id}-${Date.now()}`;
     const revisionResponse: ResponseItem = {
       id: localResponseId,
-      title: normalizeLoomTitle(normalizedPrompt.slice(0, 64)),
+      title: revisionResponseTitle,
       address: `${weftConversation.path}/responses/${localResponseId}`,
       question: normalizedPrompt,
       createdAt: new Date().toISOString(),
@@ -8564,7 +9206,7 @@ function App() {
       bookmarkedLinks: [],
       meta: createDraftResponseMetadata({
         id: createMetadataUuid(),
-        title: normalizeLoomTitle(normalizedPrompt.slice(0, 64)),
+        title: revisionResponseTitle,
         text: normalizedPrompt,
       }),
     };
@@ -8588,20 +9230,26 @@ function App() {
         (record) =>
           !(
             record.parentConversationId === sourceConversation.id &&
-            record.parentResponseId === anchorResponse.id &&
+            record.parentResponseId === sourceResponse.id &&
             record.childConversationId === weftConversation.id
           )
       ),
       {
-        id: `fork-${sourceConversation.id}-${anchorResponse.id}-${weftConversation.id}`,
+        id: `fork-${sourceConversation.id}-${sourceResponse.id}-${weftConversation.id}`,
         parentConversationId: sourceConversation.id,
-        parentResponseId: anchorResponse.id,
+        parentResponseId: sourceResponse.id,
         childConversationId: weftConversation.id,
         title: weftConversation.title,
         kind: "revision",
         revisionSourceResponseId: sourceResponse.id,
+        revisionPrompt: normalizedPrompt,
+        originalPrompt: sourceResponse.question,
       },
     ]);
+    setSelectedPromptRevisionByResponseId((current) => ({
+      ...current,
+      [sourceResponse.id]: weftConversation.id,
+    }));
     setComposerDrafts((current) => ({
       ...current,
       [weftConversation.id]: current[weftConversation.id] ?? { html: "", links: [] },
@@ -8611,7 +9259,7 @@ function App() {
       loomId: weftConversation.id,
       mode: canShowWeftSplit ? "split" : "full",
       originLoomId: sourceConversation.id,
-      originResponseId: anchorResponse.id,
+      originResponseId: sourceResponse.id,
       scrollTargetResponseId: sourceResponse.id,
       scrollMode: "origin",
       source: "weftCreate",
@@ -8629,6 +9277,7 @@ function App() {
     setActiveSplitPanel("weft");
     setActiveObjectTitle(weftConversation.title);
     restoreDestination(link, destination);
+    setActiveSplitPanel("weft");
     pushNavigationEntry(link, destination);
     pendingScrollDestinationRef.current = destination;
     pendingScrollHighlightRef.current = false;
@@ -8701,6 +9350,7 @@ function App() {
             finalStartedAt: firstFinalStartedAt,
             thinkingEndedAt: firstFinalStartedAt,
           });
+          updateResponseVisiblePlanAndProgress(weftConversation.id, activeResponseId, undefined, undefined);
           updateResponseMarkdown(weftConversation.id, activeResponseId, finalContent);
           continue;
         }
@@ -8743,14 +9393,12 @@ function App() {
   }
 
   async function updateResponsePrompt(loomId: string, responseId: string, nextPrompt: string) {
-    const normalizedPrompt = nextPrompt
-      .replace(/\u00a0/g, " ")
-      .replace(/[ \t]+\n/g, "\n")
-      .replace(/\n[ \t]+/g, "\n")
-      .replace(/\n{3,}/g, "\n\n")
-      .trim();
+    const normalizedPrompt = normalizePromptEditText(nextPrompt);
     if (!normalizedPrompt) return false;
     const currentResponse = conversationResponses[loomId]?.find((response) => response.id === responseId);
+    if (currentResponse && normalizePromptEditText(currentResponse.question) === normalizedPrompt) {
+      return false;
+    }
     const serviceUserResponseId = currentResponse?.serviceUserResponseId;
     let shouldRegenerateFromServiceEdit = false;
     let editedServiceResponse: ResponseItem | undefined;
@@ -8916,6 +9564,7 @@ function App() {
             finalStartedAt: firstFinalStartedAt,
             thinkingEndedAt: firstFinalStartedAt,
           });
+          updateResponseVisiblePlanAndProgress(loomId, activeResponseId, undefined, undefined);
           updateResponseMarkdown(loomId, activeResponseId, finalContent);
           continue;
         }
@@ -9996,6 +10645,7 @@ function App() {
       discardTemporaryWeft(activeTemporaryWeft.temporaryId);
       setActiveConversationId(originId);
       setActiveSplitPanel("origin");
+      focusComposerAfterNavigation();
       pendingScrollDestinationRef.current = {
         loomId: originId,
         mode: "full",
@@ -10031,6 +10681,7 @@ function App() {
       pushNavigationEntry(link, destination);
       pendingScrollDestinationRef.current = destination;
       pendingScrollHighlightRef.current = true;
+      focusComposerAfterNavigation();
       return;
     }
     focusSplitPanel("origin");
@@ -10441,16 +11092,36 @@ function App() {
                             }}
                             conversation={originConversation}
                             responses={originResponses}
-                            activeLoomId={activeConversation?.id}
+                            activeLoomId={
+                              activeSplitPanel === "weft"
+                                ? activeConversation?.id
+                                : originConversation.id
+                            }
                             onLink={(link) => {
                               markSplitPanelActive("origin");
                               linkObjectForDraft(link, originConversation.id);
                             }}
                             onLoom={(response) => forkResponseLoom(response, originConversation.id)}
+                            promptRevisionSelections={selectedPromptRevisionByResponseId}
+                            onPromptRevisionSelect={(responseId, revisionLoomId) => {
+                              setSelectedPromptRevisionByResponseId((current) => ({
+                                ...current,
+                                [responseId]: revisionLoomId,
+                              }));
+                            }}
+                            onPromptBranchNavigate={(responseId) => {
+                              markSplitPanelActive("origin");
+                              anchorBranchCounterNavigation(
+                                originConversation.id,
+                                responseId,
+                                "origin"
+                              );
+                            }}
                             onSelectWeft={openPersistedWeftBranch}
                             onToggleSuggestedBookmark={toggleSuggestedBookmark}
                             bookmarkedPaths={bookmarkedResponseAddresses}
                             forkRecords={forkRecords}
+                            temporaryWefts={Object.values(temporaryWefts)}
                             onSelectionAsk={(response) => {
                               markSplitPanelActive("origin");
                               onSelectionAsk(response, originConversation.id);
@@ -10464,7 +11135,9 @@ function App() {
                             onCopyResponse={copyResponseAnswerWithToast}
                             onCopyPrompt={copyPromptTextWithToast}
                             onCopyCode={copyCodeBlockWithToast}
+                            onAddCodeReference={addCodeBlockAsReference}
                             onOpenReference={openComposerReference}
+                            onReturnToOrigin={returnToOrigin}
                             highlightedResponseId={recentResponseFeedbackId}
                             onTranscriptScroll={(event) => {
                               markSplitPanelActive("origin");
@@ -10508,10 +11181,26 @@ function App() {
                               linkObjectForDraft(link, activeConversation.id);
                             }}
                             onLoom={(response) => forkResponseLoom(response, activeConversation.id)}
+                            promptRevisionSelections={selectedPromptRevisionByResponseId}
+                            onPromptRevisionSelect={(responseId, revisionLoomId) => {
+                              setSelectedPromptRevisionByResponseId((current) => ({
+                                ...current,
+                                [responseId]: revisionLoomId,
+                              }));
+                            }}
+                            onPromptBranchNavigate={(responseId) => {
+                              markSplitPanelActive("weft");
+                              anchorBranchCounterNavigation(
+                                activeConversation.id,
+                                responseId,
+                                "weft"
+                              );
+                            }}
                             onSelectWeft={openPersistedWeftBranch}
                             onToggleSuggestedBookmark={toggleSuggestedBookmark}
                             bookmarkedPaths={bookmarkedResponseAddresses}
                             forkRecords={forkRecords}
+                            temporaryWefts={Object.values(temporaryWefts)}
                             onSelectionAsk={(response) => {
                               markSplitPanelActive("weft");
                               onSelectionAsk(response, activeConversation.id);
@@ -10525,6 +11214,7 @@ function App() {
                             onCopyResponse={copyResponseAnswerWithToast}
                             onCopyPrompt={copyPromptTextWithToast}
                             onCopyCode={copyCodeBlockWithToast}
+                            onAddCodeReference={addCodeBlockAsReference}
                             onOpenReference={openComposerReference}
                             onReturnToOrigin={returnToOrigin}
                             highlightedResponseId={recentResponseFeedbackId}
@@ -10608,10 +11298,22 @@ function App() {
                     activeLoomId={activeConversation?.id}
                     onLink={linkObject}
                     onLoom={forkResponseLoom}
+                    promptRevisionSelections={selectedPromptRevisionByResponseId}
+                    onPromptRevisionSelect={(responseId, revisionLoomId) => {
+                      setSelectedPromptRevisionByResponseId((current) => ({
+                        ...current,
+                        [responseId]: revisionLoomId,
+                      }));
+                    }}
+                    onPromptBranchNavigate={(responseId) => {
+                      if (!activeConversation) return;
+                      anchorBranchCounterNavigation(activeConversation.id, responseId, "full");
+                    }}
                     onSelectWeft={openPersistedWeftBranch}
                     onToggleSuggestedBookmark={toggleSuggestedBookmark}
                     bookmarkedPaths={bookmarkedResponseAddresses}
                     forkRecords={forkRecords}
+                    temporaryWefts={Object.values(temporaryWefts)}
                     onSelectionAsk={onSelectionAsk}
                     responseTitleOverrides={responseTitleOverrides}
                     onOpenContextMenu={(event, response) =>
@@ -10622,6 +11324,7 @@ function App() {
                     onCopyResponse={copyResponseAnswerWithToast}
                     onCopyPrompt={copyPromptTextWithToast}
                     onCopyCode={copyCodeBlockWithToast}
+                    onAddCodeReference={addCodeBlockAsReference}
                     onOpenReference={openComposerReference}
                     onReturnToOrigin={activeWeftOrigin ? returnToOrigin : undefined}
                     highlightedResponseId={recentResponseFeedbackId}
@@ -12250,9 +12953,11 @@ function AnimatedProgressText({ text }: { text: string }) {
 function ResponseProgressChecklist({
   progress,
   showDebug,
+  compact = false,
 }: {
   progress: VisibleAnswerProgress;
   showDebug: boolean;
+  compact?: boolean;
 }) {
   const activeTask = progress.tasks.find((task) => task.id === progress.activeTaskId);
   const statusText = progress.statusText || (activeTask ? `${activeTask.title}...` : "Preparing response...");
@@ -12285,7 +12990,15 @@ function ResponseProgressChecklist({
   ].filter(Boolean);
 
   return (
-    <section className="assistant-response-progress" role="status" aria-live="polite" aria-label={statusText}>
+    <section
+      className={[
+        "assistant-response-progress",
+        compact ? "assistant-response-progress--compact" : "",
+      ].filter(Boolean).join(" ")}
+      role="status"
+      aria-live="polite"
+      aria-label={statusText}
+    >
       <ol className="assistant-progress-task-list">
         {taskList.map((task) => {
           const running = task.status === "running";
@@ -12370,11 +13083,15 @@ function ResponseProgressChecklist({
 
 function ThinkingPanel({
   response,
+  visibleProgress,
+  showDebug,
   onAnswerNow,
   onContinueThinking,
   onStop,
 }: {
   response: ResponseItem;
+  visibleProgress?: VisibleAnswerProgress;
+  showDebug: boolean;
   onAnswerNow: (responseId: string) => void;
   onContinueThinking: (responseId: string) => void;
   onStop: (responseId: string) => void;
@@ -12450,7 +13167,18 @@ function ThinkingPanel({
       </button>
       {expanded && !showGuardControls && !response.thinkingStopped && (
         <div className="thinking-panel-detail">
-          Thinking is active. Raw model thinking is private, so Loom only shows safe timing status here.
+          {visibleProgress ? (
+            <ResponseProgressChecklist
+              progress={visibleProgress}
+              showDebug={showDebug}
+              compact
+            />
+          ) : (
+            <span>
+              Thinking is active. Raw model thinking is private, so Loom only shows safe timing
+              status here.
+            </span>
+          )}
         </div>
       )}
       {showGuardControls && (
@@ -12501,12 +13229,23 @@ function ResponseTruncationNotice({ onContinue }: { onContinue: () => void }) {
 
 function ResponseContent({
   markdown,
+  codeBlocks,
   onCopyCode,
+  onAddCodeReference,
 }: {
   markdown: string;
+  codeBlocks?: ResponseCodeBlock[];
   onCopyCode: (code: string) => Promise<boolean>;
+  onAddCodeReference: (codeBlock: ResponseCodeBlock) => Promise<boolean>;
 }) {
-  return <AssistantMarkdownContent markdown={markdown} onCopyCode={onCopyCode} />;
+  return (
+    <AssistantMarkdownContent
+      markdown={markdown}
+      codeBlocks={codeBlocks}
+      onCopyCode={onCopyCode}
+      onAddCodeReference={onAddCodeReference}
+    />
+  );
 }
 
 function UserPromptContent({
@@ -12739,10 +13478,14 @@ function ChatTranscript({
   activeLoomId,
   onLink,
   onLoom,
+  promptRevisionSelections,
+  onPromptRevisionSelect,
+  onPromptBranchNavigate,
   onSelectWeft,
   onToggleSuggestedBookmark,
   bookmarkedPaths,
   forkRecords,
+  temporaryWefts,
   onSelectionAsk,
   responseTitleOverrides,
   onOpenContextMenu,
@@ -12751,6 +13494,7 @@ function ChatTranscript({
   onCopyResponse,
   onCopyPrompt,
   onCopyCode,
+  onAddCodeReference,
   onOpenReference,
   onReturnToOrigin,
   highlightedResponseId,
@@ -12772,10 +13516,17 @@ function ChatTranscript({
   activeLoomId?: string;
   onLink: (link: LoomLink) => void;
   onLoom: (response: ResponseItem) => void;
-  onSelectWeft: (record: ForkRecord) => void;
+  promptRevisionSelections?: Record<string, string | null>;
+  onPromptRevisionSelect?: (responseId: string, revisionLoomId: string | null) => void;
+  onPromptBranchNavigate?: (responseId: string) => void;
+  onSelectWeft: (
+    record: ForkRecord,
+    options?: { preserveOriginScroll?: boolean; scrollMode?: "lastResponse" | "top" }
+  ) => void;
   onToggleSuggestedBookmark: (link: LoomLink, currentlyBookmarked?: boolean) => void;
   bookmarkedPaths: Set<string>;
   forkRecords: ForkRecord[];
+  temporaryWefts: TemporaryWeftWorkspace[];
   onSelectionAsk: (response: ResponseItem) => void;
   responseTitleOverrides: Record<string, string>;
   onOpenContextMenu: (event: React.MouseEvent, response: ResponseItem) => void;
@@ -12784,8 +13535,13 @@ function ChatTranscript({
   onCopyResponse: (response: ResponseItem) => void;
   onCopyPrompt: (promptText: string) => void;
   onCopyCode: (code: string) => Promise<boolean>;
+  onAddCodeReference: (
+    conversation: Conversation,
+    response: ResponseItem,
+    codeBlock: ResponseCodeBlock
+  ) => Promise<boolean>;
   onOpenReference: (link: LoomLink) => string | null;
-  onReturnToOrigin?: () => void;
+  onReturnToOrigin?: (options?: { keepPromptRevisionSelection?: boolean }) => void;
   highlightedResponseId?: string | null;
   onTranscriptScroll?: (event: React.UIEvent<HTMLElement>) => void;
   onScrollToBottom?: () => void;
@@ -12806,7 +13562,11 @@ function ChatTranscript({
   } | null>(null);
   const [editingPromptId, setEditingPromptId] = useState<string | null>(null);
   const [promptEditDraft, setPromptEditDraft] = useState("");
+  const [weftBranchPickerResponseId, setWeftBranchPickerResponseId] =
+    useState<string | null>(null);
   const sentReferenceHintCloseTimerRef = useRef<number | null>(null);
+  const weftBranchLongPressTimerRef = useRef<number | null>(null);
+  const suppressNextWeftClickRef = useRef(false);
   const transcriptNodeRef = useRef<HTMLElement | null>(null);
   const {
     visible: scrollToBottomVisible,
@@ -12835,6 +13595,31 @@ function ChatTranscript({
     scheduleVisibilityUpdate();
   }, [conversation?.id, responses, scheduleVisibilityUpdate]);
 
+  useEffect(() => {
+    function handleDocumentPointerDown(event: PointerEvent) {
+      const target = event.target as Element | null;
+      if (
+        target?.closest(".weft-branch-picker") ||
+        target?.closest(".response-weft-action-cluster")
+      ) {
+        return;
+      }
+      setWeftBranchPickerResponseId(null);
+    }
+    document.addEventListener("pointerdown", handleDocumentPointerDown);
+    return () => {
+      document.removeEventListener("pointerdown", handleDocumentPointerDown);
+    };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (weftBranchLongPressTimerRef.current !== null) {
+        window.clearTimeout(weftBranchLongPressTimerRef.current);
+      }
+    };
+  }, []);
+
   function clearSentReferenceHintCloseTimer() {
     if (sentReferenceHintCloseTimerRef.current === null) return;
     window.clearTimeout(sentReferenceHintCloseTimerRef.current);
@@ -12859,6 +13644,24 @@ function ChatTranscript({
       sentReferenceHintCloseTimerRef.current = null;
       setSentReferenceHint(null);
     }, 140);
+  }
+
+  function clearWeftBranchLongPressTimer() {
+    if (weftBranchLongPressTimerRef.current === null) return;
+    window.clearTimeout(weftBranchLongPressTimerRef.current);
+    weftBranchLongPressTimerRef.current = null;
+  }
+
+  function preserveTranscriptScrollAfterRevisionAction() {
+    const transcript = transcriptNodeRef.current;
+    if (!transcript) return;
+    const scrollTop = transcript.scrollTop;
+    window.requestAnimationFrame(() => {
+      transcript.scrollTop = scrollTop;
+      window.requestAnimationFrame(() => {
+        transcript.scrollTop = scrollTop;
+      });
+    });
   }
 
   if (!conversation) {
@@ -12920,7 +13723,7 @@ function ChatTranscript({
             <Tooltip label="Return to Origin">
               <button
                 className="link-chip return-origin-chip"
-                onClick={onReturnToOrigin}
+                onClick={() => onReturnToOrigin()}
                 aria-label="Return to Origin"
               >
                 <CornerDownLeft size={13} />
@@ -12950,35 +13753,87 @@ function ChatTranscript({
           Boolean(currentDayKey) &&
           (index === 0 || currentDayKey !== previousDayKey);
         const responseWeftRecords = forkRecords.filter(
-          (record) => forkRecordMatchesResponse(record, conversation.id, displayResponse)
+          (record) =>
+            record.kind !== "revision" &&
+            forkRecordMatchesResponse(record, conversation.id, displayResponse)
         );
+        const temporaryWeft = temporaryWefts.find(
+          (workspace) =>
+            workspace.status !== "persisted" &&
+            workspace.originLoomId === conversation.id &&
+            (workspace.originResponseId === displayResponse.id ||
+              workspace.originResponseId === displayResponse.serviceUserResponseId)
+        );
+        const hasTemporaryWeft = Boolean(temporaryWeft);
         const promptRevisionRecords = forkRecords.filter(
           (record) =>
             record.kind === "revision" &&
             record.parentConversationId === conversation.id &&
             record.revisionSourceResponseId === displayResponse.id
         );
-        const hasExistingWeft = responseWeftRecords.length > 0;
-        const hasRevisionWeft = responseWeftRecords.some((record) => record.kind === "revision");
-        const activeWeftBranchIndex = responseWeftRecords.findIndex(
-          (record) => record.childConversationId === activeLoomId
+        const hasExplicitRevisionSelection = Object.prototype.hasOwnProperty.call(
+          promptRevisionSelections ?? {},
+          displayResponse.id
         );
-        const selectedWeftBranchIndex =
-          activeWeftBranchIndex >= 0 ? activeWeftBranchIndex : 0;
-        const weftBranchCount = responseWeftRecords.length;
-        const previousWeftBranch =
-          weftBranchCount > 1
-            ? responseWeftRecords[
-                (selectedWeftBranchIndex - 1 + weftBranchCount) % weftBranchCount
-              ]
+        const selectedRevisionLoomId = promptRevisionSelections?.[displayResponse.id];
+        const activePromptRevisionIndex = promptRevisionRecords.findIndex(
+          (record) =>
+            record.childConversationId ===
+            (hasExplicitRevisionSelection ? selectedRevisionLoomId : activeLoomId)
+        );
+        const activePromptRevision =
+          hasExplicitRevisionSelection && selectedRevisionLoomId === null
+            ? undefined
+            : activePromptRevisionIndex >= 0
+            ? promptRevisionRecords[activePromptRevisionIndex]
             : undefined;
-        const nextWeftBranch =
-          weftBranchCount > 1
-            ? responseWeftRecords[(selectedWeftBranchIndex + 1) % weftBranchCount]
+        const displayPromptText = activePromptRevision?.revisionPrompt ?? cleanPromptText;
+        const normalizedPromptEditDraft = normalizePromptEditText(promptEditDraft);
+        const promptEditHasChanges =
+          normalizedPromptEditDraft.length > 0 &&
+          normalizedPromptEditDraft !== normalizePromptEditText(displayPromptText);
+        const responseBranchRecords = responseWeftRecords;
+        const explorationWeftCount = responseBranchRecords.length;
+        const hasExistingWeft = explorationWeftCount > 0;
+        const hasRevisionWeft = promptRevisionRecords.length > 0;
+        const hasRevisionCounter = promptRevisionRecords.length > 0;
+        const revisionCounterTotal = hasRevisionCounter ? promptRevisionRecords.length + 1 : 0;
+        const selectedRevisionIndex =
+          activePromptRevisionIndex >= 0 ? activePromptRevisionIndex + 1 : 0;
+        const previousRevisionIndex =
+          revisionCounterTotal > 1 && selectedRevisionIndex > 0
+            ? selectedRevisionIndex - 1
             : undefined;
+        const nextRevisionIndex =
+          revisionCounterTotal > 1 && selectedRevisionIndex < revisionCounterTotal - 1
+            ? selectedRevisionIndex + 1
+            : undefined;
+        const openPromptRevisionIndex = (revisionIndex: number) => {
+          preserveTranscriptScrollAfterRevisionAction();
+          if (revisionIndex === 0) {
+            onPromptRevisionSelect?.(displayResponse.id, null);
+            return;
+          }
+          const revisionRecord = promptRevisionRecords[revisionIndex - 1];
+          if (revisionRecord) {
+            onPromptRevisionSelect?.(displayResponse.id, revisionRecord.childConversationId);
+            onSelectWeft(revisionRecord, {
+              preserveOriginScroll: true,
+              scrollMode: "top",
+            });
+          }
+        };
+        const openExplorationWeft = (record?: ForkRecord) => {
+          if (!record) return;
+          setWeftBranchPickerResponseId(null);
+          onSelectWeft(record, { preserveOriginScroll: true, scrollMode: "top" });
+        };
+        const hasWeftBranchPicker = explorationWeftCount > 1;
+        const isWeftBranchPickerOpen = weftBranchPickerResponseId === displayResponse.id;
         const weftButtonClassName = [
           "link-chip response-action-chip response-weft-chip",
           hasExistingWeft ? "is-wefted" : "",
+          hasTemporaryWeft ? "is-temporary-wefted" : "",
           hasRevisionWeft ? "is-revision-wefted" : "",
         ]
           .filter(Boolean)
@@ -12989,14 +13844,19 @@ function ChatTranscript({
         const displayResponseTitle =
           cleanMarkdownDisplayTitle(displayResponse.title) || displayResponse.title;
         const responseAnswerText = displayResponse.answer.join("\n\n").trim();
+        const responseFinalText = displayResponse.finalContent?.trim() ?? "";
         const thinkingBeforeFinalAnswer =
           displayResponse.thinkingStartedAt &&
           !displayResponse.finalStartedAt &&
-          !responseAnswerText;
+          !responseAnswerText &&
+          !responseFinalText;
         const showResponseProgress =
           isGeneratingResponse &&
           Boolean(displayResponse.visibleProgress) &&
-          !thinkingBeforeFinalAnswer;
+          !thinkingBeforeFinalAnswer &&
+          !displayResponse.finalStartedAt &&
+          !responseAnswerText &&
+          !responseFinalText;
         const responseUrl = responseAddressForConversation(conversation, displayResponse);
         const responseLink: LoomLink = {
           id: displayResponse.id,
@@ -13046,7 +13906,15 @@ function ChatTranscript({
             onMouseUp={() => onSelectionAsk(displayResponse)}
             onContextMenu={(event) => onOpenContextMenu(event, displayResponse)}
           >
-            <div className="user-turn">
+            <div
+              className={[
+                "user-turn",
+                isEditingPrompt ? "is-editing-prompt" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+              data-prompt-response-id={displayResponse.id}
+            >
               <div className="user-message">
                 <AttachedPromptReferences
                   references={attachedPromptReferences}
@@ -13082,15 +13950,13 @@ function ChatTranscript({
                       <button
                         type="button"
                         onClick={() => {
-                          void onEditPrompt(conversation.id, displayResponse.id, promptEditDraft).then(
-                            (updated) => {
-                              if (!updated) return;
-                              setEditingPromptId(null);
-                              setPromptEditDraft("");
-                            }
-                          );
+                          const draftToSave = promptEditDraft;
+                          if (!promptEditHasChanges) return;
+                          setEditingPromptId(null);
+                          setPromptEditDraft("");
+                          void onEditPrompt(conversation.id, displayResponse.id, draftToSave);
                         }}
-                        disabled={!promptEditDraft.trim()}
+                        disabled={!promptEditHasChanges}
                       >
                         Save
                       </button>
@@ -13108,7 +13974,7 @@ function ChatTranscript({
                 ) : (
                   <p>
                     <UserPromptContent
-                      text={cleanPromptText}
+                      text={displayPromptText}
                       references={inlinePromptReferences}
                       onOpenReference={onOpenReference}
                       onReferenceHint={showSentReferenceHint}
@@ -13119,13 +13985,50 @@ function ChatTranscript({
               </div>
               {!isEditingPrompt && (
                 <div className="user-prompt-actions" aria-label="Prompt actions">
+                  {hasRevisionCounter && (
+                    <div
+                      className="prompt-action-button prompt-revision-action-counter"
+                      aria-label={`Message revisions ${selectedRevisionIndex + 1} of ${revisionCounterTotal}`}
+                      title="Message revisions"
+                    >
+                      <button
+                        type="button"
+                        aria-label="Previous message revision"
+                        title="Previous message revision"
+                        disabled={previousRevisionIndex === undefined}
+                        onClick={() => {
+                          if (previousRevisionIndex !== undefined) {
+                            openPromptRevisionIndex(previousRevisionIndex);
+                          }
+                        }}
+                      >
+                        {"<"}
+                      </button>
+                      <span>
+                        {selectedRevisionIndex + 1}/{revisionCounterTotal}
+                      </span>
+                      <button
+                        type="button"
+                        aria-label="Next message revision"
+                        title="Next message revision"
+                        disabled={nextRevisionIndex === undefined}
+                        onClick={() => {
+                          if (nextRevisionIndex !== undefined) {
+                            openPromptRevisionIndex(nextRevisionIndex);
+                          }
+                        }}
+                      >
+                        {">"}
+                      </button>
+                    </div>
+                  )}
                   <Tooltip label="Copy prompt" placement="bottom-right">
                     <button
                       type="button"
                       className="prompt-action-button prompt-copy-trigger"
                       aria-label={`Copy prompt: ${displayResponse.title}`}
                       data-testid={`copy-prompt-${displayResponse.id}`}
-                      onClick={() => onCopyPrompt(cleanPromptText)}
+                      onClick={() => onCopyPrompt(displayPromptText)}
                     >
                       <Copy size={16} />
                     </button>
@@ -13138,7 +14041,7 @@ function ChatTranscript({
                       data-testid={`edit-prompt-${displayResponse.id}`}
                       onClick={() => {
                         setEditingPromptId(displayResponse.id);
-                        setPromptEditDraft(cleanPromptText);
+                        setPromptEditDraft(displayPromptText);
                       }}
                     >
                       <Edit3 size={16} />
@@ -13147,14 +14050,6 @@ function ChatTranscript({
                 </div>
               )}
             </div>
-            {promptRevisionRecords.length > 0 && (
-              <div className="prompt-revision-branch-indicator" aria-label="Revision branch created">
-                <GitFork size={13} />
-                <span>Revision created</span>
-                <span className="prompt-revision-count">{promptRevisionRecords.length}</span>
-              </div>
-            )}
-
             <div className="assistant-message">
               {(displayResponse.meta?.code || displayResponse.meta?.displayCode) && !isGeneratingResponse && (
                 <div className="response-metadata-row">
@@ -13187,7 +14082,6 @@ function ChatTranscript({
                 <ResponseActions
                   response={displayResponse}
                   onOpenContextMenu={onOpenContextMenu}
-                  reveal={revealCompletionActions}
                 />
               )}
               <div className="assistant-body">
@@ -13199,13 +14093,19 @@ function ChatTranscript({
                 )}
                 <ThinkingPanel
                   response={displayResponse}
+                  visibleProgress={displayResponse.visibleProgress}
+                  showDebug={showGenerationDebug}
                   onAnswerNow={onAnswerNowFromThinking}
                   onContinueThinking={onContinueThinking}
                   onStop={onStopThinking}
                 />
                 <ResponseContent
                   markdown={responseMarkdownSource(displayResponse)}
+                  codeBlocks={displayResponse.codeBlocks}
                   onCopyCode={onCopyCode}
+                  onAddCodeReference={(codeBlock) =>
+                    onAddCodeReference(conversation, displayResponse, codeBlock)
+                  }
                 />
                 {displayResponse.answerStale && !isGeneratingResponse && (
                   <div className="stale-answer-notice">
@@ -13266,68 +14166,122 @@ function ChatTranscript({
                     <Bookmark size={13} fill={isBookmarkedResponse ? "currentColor" : "none"} />
                   </button>
                 </Tooltip>
-                <AddressMetadataBadge
-                  as="button"
-                  link={responseLink}
-                  className="link-chip response-action-chip response-link-chip"
-                  title="Link"
-                  showHint={false}
-                  onClick={() => onLink(responseLink)}
-                  testId={`response-link-${displayResponse.id}`}
-                  ariaLabel={`Link ${displayResponseTitle}`}
-                  onCopy={onCopyAddress}
-                >
-                  <Link2 size={13} />
-                </AddressMetadataBadge>
-                <Tooltip label={hasExistingWeft ? "Open Weft" : "Start Weft"} placement="bottom-right">
-                  <button
-                    className={weftButtonClassName}
-                    onClick={() => onLoom(displayResponse)}
-                    aria-pressed={hasExistingWeft}
-                    aria-label={
-                      hasExistingWeft
-                        ? `Open Weft from ${displayResponseTitle}`
-                        : `Start Weft from ${displayResponseTitle}`
-                    }
+                <Tooltip label="Link" placement="bottom-right">
+                  <AddressMetadataBadge
+                    as="button"
+                    link={responseLink}
+                    className="link-chip response-action-chip response-link-chip"
+                    title="Link"
+                    showHint={false}
+                    onClick={() => onLink(responseLink)}
+                    testId={`response-link-${displayResponse.id}`}
+                    ariaLabel={`Link ${displayResponseTitle}`}
+                    onCopy={onCopyAddress}
                   >
-                    <GitFork size={13} />
-                  </button>
+                    <Link2 size={13} />
+                  </AddressMetadataBadge>
                 </Tooltip>
-                {(weftBranchCount > 1 || hasRevisionWeft) && (
-                  <div
-                    className={[
-                      "response-weft-branch-counter",
-                      hasRevisionWeft ? "has-revision-branch" : "",
-                    ]
-                      .filter(Boolean)
-                      .join(" ")}
-                    aria-label={`Weft branches ${selectedWeftBranchIndex + 1} of ${weftBranchCount}`}
-                  >
+                <span className="response-weft-action-cluster">
+                  <Tooltip label={hasExistingWeft ? "Open Weft" : "Start Weft"} placement="bottom-right">
+                    <button
+                      className={weftButtonClassName}
+                      onPointerDown={() => {
+                        if (!hasWeftBranchPicker) return;
+                        suppressNextWeftClickRef.current = false;
+                        clearWeftBranchLongPressTimer();
+                        weftBranchLongPressTimerRef.current = window.setTimeout(() => {
+                          weftBranchLongPressTimerRef.current = null;
+                          suppressNextWeftClickRef.current = true;
+                          setWeftBranchPickerResponseId(displayResponse.id);
+                        }, 420);
+                      }}
+                      onPointerUp={clearWeftBranchLongPressTimer}
+                      onPointerCancel={clearWeftBranchLongPressTimer}
+                      onPointerLeave={clearWeftBranchLongPressTimer}
+                      onContextMenu={(event) => {
+                        if (!hasWeftBranchPicker) return;
+                        event.preventDefault();
+                        setWeftBranchPickerResponseId(displayResponse.id);
+                      }}
+                      onClick={(event) => {
+                        if (suppressNextWeftClickRef.current) {
+                          suppressNextWeftClickRef.current = false;
+                          event.preventDefault();
+                          return;
+                        }
+                        setWeftBranchPickerResponseId(null);
+                        onLoom(displayResponse);
+                      }}
+                      aria-pressed={hasExistingWeft || hasTemporaryWeft}
+                      aria-haspopup={hasWeftBranchPicker ? "menu" : undefined}
+                      aria-expanded={hasWeftBranchPicker ? isWeftBranchPickerOpen : undefined}
+                      aria-label={
+                        hasTemporaryWeft
+                          ? `Focus temporary Flow from ${displayResponseTitle}`
+                          : hasExistingWeft
+                          ? `Open Weft from ${displayResponseTitle}`
+                          : `Start Weft from ${displayResponseTitle}`
+                      }
+                      title={
+                        explorationWeftCount > 0
+                          ? `${explorationWeftCount} Weft${
+                              explorationWeftCount === 1 ? "" : "s"
+                            } from this response`
+                          : undefined
+                      }
+                    >
+                      <GitFork size={13} />
+                    </button>
+                  </Tooltip>
+                  {explorationWeftCount > 0 && (
                     <button
                       type="button"
-                      aria-label="Previous Weft branch"
-                      title="Previous Weft branch"
-                      disabled={!previousWeftBranch}
-                      onClick={() => {
-                        if (previousWeftBranch) onSelectWeft(previousWeftBranch);
+                      className="response-weft-count-trigger"
+                      aria-label={`${explorationWeftCount} Wefts from this response`}
+                      aria-haspopup="menu"
+                      aria-expanded={isWeftBranchPickerOpen}
+                      title={`${explorationWeftCount} Weft${
+                        explorationWeftCount === 1 ? "" : "s"
+                      } from this response`}
+                      onPointerDown={(event) => {
+                        event.stopPropagation();
+                        clearWeftBranchLongPressTimer();
+                        suppressNextWeftClickRef.current = false;
+                      }}
+                      onClick={(event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        setWeftBranchPickerResponseId((current) =>
+                          current === displayResponse.id ? null : displayResponse.id
+                        );
                       }}
                     >
-                      <ArrowLeft size={12} />
+                      <span className="response-weft-chip-count">{explorationWeftCount}</span>
+                      <ChevronsUpDown size={11} aria-hidden="true" />
                     </button>
-                    <span>{selectedWeftBranchIndex + 1}/{weftBranchCount}</span>
-                    <button
-                      type="button"
-                      aria-label="Next Weft branch"
-                      title="Next Weft branch"
-                      disabled={!nextWeftBranch}
-                      onClick={() => {
-                        if (nextWeftBranch) onSelectWeft(nextWeftBranch);
-                      }}
-                    >
-                      <ArrowRight size={12} />
-                    </button>
-                  </div>
-                )}
+                  )}
+                  {isWeftBranchPickerOpen && (
+                    <div className="weft-branch-picker" role="menu" aria-label="Weft branches">
+                      {responseBranchRecords.map((record, branchIndex) => (
+                        <button
+                          key={record.id}
+                          type="button"
+                          role="menuitem"
+                          className={
+                            record.childConversationId === activeLoomId ? "active" : undefined
+                          }
+                          onClick={() => openExplorationWeft(record)}
+                        >
+                          <GitFork size={13} />
+                          <span>
+                            <strong>{record.title}</strong>
+                            <em>{branchIndex + 1} of {explorationWeftCount}</em>
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </span>
               </div>
               )}
             </div>
@@ -13362,15 +14316,13 @@ function ChatTranscript({
 function ResponseActions({
   response,
   onOpenContextMenu,
-  reveal = false,
 }: {
   response: ResponseItem;
   onOpenContextMenu: (event: React.MouseEvent, response: ResponseItem) => void;
-  reveal?: boolean;
 }) {
   return (
     <div
-      className={reveal ? "response-actions response-completion-reveal" : "response-actions"}
+      className="response-actions"
       aria-label={`Actions for ${response.title}`}
     >
       <button
@@ -13647,7 +14599,7 @@ function PromptComposer({
   }, [mention?.query, referenceOptions]);
 
   const groupedMentionOptions = useMemo(() => {
-    const groups: ComposerReferenceGroup[] = ["Open Looms", "Responses", "Bookmarks", "History"];
+    const groups: ComposerReferenceGroup[] = ["Open Looms", "Responses", "Code Snippets", "Bookmarks", "History"];
     return groups
       .map((group) => ({
         group,
@@ -13717,6 +14669,7 @@ function PromptComposer({
       if (attachTab === "history" && item.source !== "history") return false;
       if (attachTab === "openLooms" && item.source !== "openLoom") return false;
       if (attachTab === "responses" && item.source !== "response") return false;
+      if (attachTab === "codeSnippets" && item.source !== "codeSnippet") return false;
       if (attachTab === "files") return false;
       if (!query) return true;
       return [item.title, item.subtitle, item.path, item.badge, item.source, ...item.keywords]
@@ -13749,6 +14702,11 @@ function PromptComposer({
         id: "response" as const,
         title: "Responses",
         items: filteredAttachItems.filter((item) => item.source === "response"),
+      },
+      {
+        id: "codeSnippet" as const,
+        title: "Code Snippets",
+        items: filteredAttachItems.filter((item) => item.source === "codeSnippet"),
       },
     ],
     [filteredAttachItems]
@@ -14600,6 +15558,7 @@ function PromptComposer({
     }
     if (displayLink.selectedAt) token.dataset.loomSelectedAt = String(displayLink.selectedAt);
     if (displayLink.targetObjectId) token.dataset.loomTargetObjectId = displayLink.targetObjectId;
+    if (displayLink.targetKind) token.dataset.loomTargetKind = displayLink.targetKind;
     if (displayLink.canonicalUri) token.dataset.loomCanonicalUri = displayLink.canonicalUri;
     if (displayLink.referenceCustomLabel) {
       token.dataset.loomCustomLabel = displayLink.referenceCustomLabel;
@@ -14660,6 +15619,8 @@ function PromptComposer({
     }
     if (displayLink.targetObjectId) token.dataset.loomTargetObjectId = displayLink.targetObjectId;
     else delete token.dataset.loomTargetObjectId;
+    if (displayLink.targetKind) token.dataset.loomTargetKind = displayLink.targetKind;
+    else delete token.dataset.loomTargetKind;
     if (displayLink.canonicalUri) token.dataset.loomCanonicalUri = displayLink.canonicalUri;
     else delete token.dataset.loomCanonicalUri;
     if (displayLink.sourceResponseId) {
@@ -15878,11 +16839,19 @@ function PromptComposer({
                 setAttachTab(nextTab);
                 setAttachFeedback(null);
               }}
-              onQueryChange={setAttachSearch}
-              onToggleReference={toggleAttachReference}
-              onAddFiles={addAttachments}
-              onRemoveAttachment={removeAttachment}
-            />,
+                onQueryChange={setAttachSearch}
+                onToggleReference={toggleAttachReference}
+                onOpenReference={(item) => {
+                  const error = onOpenReference(item);
+                  setAttachFeedback(error);
+                  if (!error) {
+                    setAttachPickerOpen(false);
+                    setAttachPopoverStyle(null);
+                  }
+                }}
+                onAddFiles={addAttachments}
+                onRemoveAttachment={removeAttachment}
+              />,
             document.body
           )}
           <div className="linked-reference-anchor">
@@ -16404,6 +17373,7 @@ function AttachContentDropdown({
   onTabChange,
   onQueryChange,
   onToggleReference,
+  onOpenReference,
   onAddFiles,
   onRemoveAttachment,
 }: {
@@ -16420,6 +17390,7 @@ function AttachContentDropdown({
   onTabChange: (tab: AttachContentTab) => void;
   onQueryChange: (query: string) => void;
   onToggleReference: (item: AttachContentItem) => void;
+  onOpenReference: (item: AttachContentItem) => void;
   onAddFiles: (files: FileList | null) => void;
   onRemoveAttachment: (attachmentId: string) => void;
 }) {
@@ -16428,25 +17399,39 @@ function AttachContentDropdown({
   }
 
   function renderItem(item: AttachContentItem) {
-    const Icon = iconForType[item.type];
+    const Icon = item.source === "codeSnippet" ? Code2 : iconForType[item.type];
     const selected = itemSelected(item);
     return (
-      <button
-        type="button"
+      <div
         key={`${item.source}-${item.id}-${item.path}`}
         className={selected ? "attach-content-row selected" : "attach-content-row"}
-        onClick={() => onToggleReference(item)}
         data-testid={`attach-content-row-${item.source}-${item.id}`}
         data-attach-selected={selected ? "true" : "false"}
       >
-        <Icon size={15} />
-        <span>
-          <strong>{item.title}</strong>
-          <small>{item.subtitle || item.path}</small>
-        </span>
-        <em>{displayObjectTypeLabel(item.badge ?? attachSourceLabel(item.source))}</em>
-        <i aria-hidden="true">{selected ? <Check size={13} /> : null}</i>
-      </button>
+        <button
+          type="button"
+          className="attach-content-row-main"
+          onClick={() => onToggleReference(item)}
+        >
+          <Icon size={15} />
+          <span>
+            <strong>{item.title}</strong>
+            <small>{item.subtitle || item.path}</small>
+          </span>
+          <em>{displayObjectTypeLabel(item.badge ?? attachSourceLabel(item.source))}</em>
+          <i aria-hidden="true">{selected ? <Check size={13} /> : null}</i>
+        </button>
+        <span className="attach-content-row-separator" aria-hidden="true" />
+        <button
+          type="button"
+          className="attach-content-row-open"
+          aria-label={`Open ${item.title}`}
+          title="Open"
+          onClick={() => onOpenReference(item)}
+        >
+          <ExternalLink size={13} />
+        </button>
+      </div>
     );
   }
 
@@ -16467,7 +17452,7 @@ function AttachContentDropdown({
         <input
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
-          placeholder="Search Looms, Bookmarks, History, Responses..."
+          placeholder="Search Looms, Bookmarks, History, Responses, Code Snippets..."
           aria-label="Search attach content"
         />
       </label>
@@ -16586,6 +17571,7 @@ function attachSourceLabel(source: AttachContentSource) {
   if (source === "bookmark") return "Bookmark";
   if (source === "history") return "History";
   if (source === "openLoom") return "Loom";
+  if (source === "codeSnippet") return "Code";
   return "Response";
 }
 

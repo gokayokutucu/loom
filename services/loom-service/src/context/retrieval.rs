@@ -217,10 +217,9 @@ impl ContextRetriever {
                     .reasons
                     .iter()
                     .any(|reason| reason == "explicit_code_reference")
-                    || candidate
-                        .response_id
-                        .as_deref()
-                        .is_some_and(|response_id| is_explicit_code_reference(input, response_id));
+                    || candidate.response_id.as_deref().is_some_and(|response_id| {
+                        is_explicit_response_code_reference(input, response_id)
+                    });
                 if !query.code_relevant && !explicit {
                     candidate.include_mode = ContextRetrievalIncludeMode::CodeSummary;
                     candidate.text_preview = code_summary_from_metadata(&candidate);
@@ -591,18 +590,28 @@ impl ContextRetriever {
         query: &QueryTerms,
         accumulator: &mut CandidateAccumulator,
     ) -> Result<(), ServiceError> {
-        let rows = sqlx::query(
+        let explicit_code_block_ids: Vec<&str> = input
+            .attached_references
+            .iter()
+            .filter(|attached| attached.reference.target_kind == "code_block")
+            .filter_map(|attached| attached.reference.target_id.as_deref())
+            .collect();
+        let mut sql = String::from(
             "SELECT cb.code_block_id, cb.response_id, cb.language, cb.code, cb.exact_hash,
                     r.title AS source_title, r.code AS source_code
              FROM response_code_blocks cb
              LEFT JOIN responses r ON r.response_id = cb.response_id
-             WHERE cb.loom_id = ?1
-               AND COALESCE(r.is_deleted, 0) = 0",
-        )
-        .bind(&input.loom_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|error| {
+             WHERE (cb.loom_id = ?1",
+        );
+        for index in 0..explicit_code_block_ids.len() {
+            sql.push_str(&format!(" OR cb.code_block_id = ?{}", index + 2));
+        }
+        sql.push_str(") AND COALESCE(r.is_deleted, 0) = 0");
+        let mut statement = sqlx::query(&sql).bind(&input.loom_id);
+        for code_block_id in explicit_code_block_ids {
+            statement = statement.bind(code_block_id);
+        }
+        let rows = statement.fetch_all(&self.pool).await.map_err(|error| {
             ServiceError::storage(format!("failed to retrieve code blocks: {error}"))
         })?;
 
@@ -620,7 +629,8 @@ impl ContextRetriever {
                 language.clone().unwrap_or_default(),
                 code
             ));
-            let explicit_code_reference = is_explicit_code_reference(input, &response_id);
+            let explicit_code_reference =
+                is_explicit_code_reference(input, &response_id, &code_block_id);
             if overlap <= 0.0 && !query.code_relevant && !explicit_code_reference {
                 continue;
             }
@@ -1138,13 +1148,22 @@ fn include_mode_priority(mode: &ContextRetrievalIncludeMode) -> u8 {
     }
 }
 
-fn is_explicit_code_reference(input: &BuildContextInput, response_id: &str) -> bool {
+fn is_explicit_code_reference(
+    input: &BuildContextInput,
+    response_id: &str,
+    code_block_id: &str,
+) -> bool {
     input.attached_references.iter().any(|attached| {
-        attached.reference.target_id.as_deref() == Some(response_id)
-            && (attached
-                .response_capsule
-                .as_ref()
-                .is_some_and(|capsule| !capsule.code_blocks.is_empty())
+        let target_id = attached.reference.target_id.as_deref();
+        let targets_code_block = matches!(attached.reference.target_kind.as_str(), "code_block")
+            && target_id == Some(code_block_id);
+        let targets_source_response = target_id == Some(response_id);
+        (targets_code_block || targets_source_response)
+            && (targets_code_block
+                || attached
+                    .response_capsule
+                    .as_ref()
+                    .is_some_and(|capsule| !capsule.code_blocks.is_empty())
                 || attached
                     .reference
                     .label
@@ -1162,6 +1181,35 @@ fn is_explicit_code_reference(input: &BuildContextInput, response_id: &str) -> b
                     "code" | "code_block" | "response"
                 ))
     })
+}
+
+fn is_explicit_response_code_reference(input: &BuildContextInput, response_id: &str) -> bool {
+    input.attached_references.iter().any(|attached| {
+        attached.reference.target_id.as_deref() == Some(response_id)
+            && (attached
+                .response_capsule
+                .as_ref()
+                .is_some_and(|capsule| !capsule.code_blocks.is_empty())
+                || attached
+                    .reference
+                    .label
+                    .as_deref()
+                    .is_some_and(contains_code_signal)
+                || attached
+                    .reference
+                    .selected_text
+                    .as_deref()
+                    .is_some_and(contains_code_signal))
+    })
+}
+
+fn contains_code_signal(value: &str) -> bool {
+    let lower = value.to_lowercase();
+    lower.contains("```")
+        || CODE_RELEVANCE_TERMS
+            .iter()
+            .chain(CODE_LANGUAGE_TERMS.iter())
+            .any(|needle| lower.contains(needle))
 }
 
 fn exact_code_context(
@@ -1497,6 +1545,58 @@ mod tests {
             .expect("code candidate");
         assert_eq!(code.include_mode, ContextRetrievalIncludeMode::CodeExact);
         assert!(code.text_preview.contains("export function replay()"));
+        assert!(code
+            .reasons
+            .iter()
+            .any(|reason| reason == "explicit_code_reference"));
+    }
+
+    #[tokio::test]
+    async fn explicit_code_block_reference_promotes_exact_code_by_code_block_id() {
+        let fixture = Fixture::new().await;
+        fixture
+            .insert_response(
+                "r-code",
+                "assistant",
+                "```sql\nSELECT *\nFROM orders\nWHERE status = 'open';\n```",
+                1,
+                None,
+            )
+            .await;
+        fixture
+            .insert_response("r-current", "user", "Bu snippet'i açıkla", 9, None)
+            .await;
+        let code_block_id = fixture.code_block_id_for_response("r-code").await;
+
+        let input = BuildContextInput {
+            attached_references: vec![AttachedReferenceInput {
+                reference: ReferenceContext {
+                    reference_id: "ref-code-block".to_string(),
+                    target_kind: "code_block".to_string(),
+                    target_id: Some(code_block_id.clone()),
+                    target_uri: Some("loom://responses/r-code#code-block=0".to_string()),
+                    label: Some("SQL code snippet".to_string()),
+                    selected_text: None,
+                    capsule_summary: None,
+                },
+                response_capsule: None,
+            }],
+            ..fixture.input("Bu snippet'i açıkla", Some("r-current"))
+        };
+        let result = fixture
+            .retriever()
+            .retrieve_with_strategy(&input, Some(&strong_strategy()))
+            .await
+            .expect("retrieve");
+
+        let code = result
+            .selected
+            .iter()
+            .find(|candidate| candidate.candidate_id == code_block_id)
+            .expect("code candidate");
+        assert_eq!(code.include_mode, ContextRetrievalIncludeMode::CodeExact);
+        assert!(code.text_preview.contains("SELECT *"));
+        assert!(code.text_preview.contains("WHERE status = 'open';"));
         assert!(code
             .reasons
             .iter()
@@ -1908,6 +2008,16 @@ mod tests {
                 })
                 .await
                 .expect("insert Response");
+        }
+
+        async fn code_block_id_for_response(&self, response_id: &str) -> String {
+            sqlx::query_scalar::<_, String>(
+                "SELECT code_block_id FROM response_code_blocks WHERE response_id = ?1 ORDER BY block_index LIMIT 1",
+            )
+            .bind(response_id)
+            .fetch_one(self.database.pool())
+            .await
+            .expect("code block id")
         }
 
         async fn insert_capsule(

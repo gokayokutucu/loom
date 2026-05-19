@@ -137,11 +137,16 @@ test.describe("[product-service-backed] Quick Ask product proof", () => {
       startApp: true,
     });
     const quickAskUrls: string[] = [];
+    const createWeftBodies: unknown[] = [];
     await page.route(/\/ask\/quick$/, async (route) => {
       quickAskUrls.push(route.request().url());
       if (quickAskUrls.length === 1) {
         await page.waitForTimeout(300);
       }
+      await route.continue();
+    });
+    await page.route(/\/wefts$/, async (route) => {
+      createWeftBodies.push(route.request().postDataJSON());
       await route.continue();
     });
 
@@ -201,6 +206,7 @@ test.describe("[product-service-backed] Quick Ask product proof", () => {
       expect(quickAskUrls).toHaveLength(2);
 
       await popup.getByRole("button", { name: "Convert to Weft" }).click();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
       const weftPanel = page.locator(".weft-split-panel").last();
       await expect(weftPanel).toBeVisible();
       await expect(weftPanel).toContainText("açılımı nedir");
@@ -213,11 +219,42 @@ test.describe("[product-service-backed] Quick Ask product proof", () => {
         `/responses/${encodeURIComponent(assistant!.responseId)}/wefts`
       );
       expect(wefts.wefts.length).toBeGreaterThan(0);
+      expect(createWeftBodies).toHaveLength(1);
+      expect(createWeftBodies[0]).toMatchObject({
+        source: "quick_ask_convert",
+        reuseExisting: false,
+        seedMode: "none",
+      });
       const weftResponses = await exportedLoomResponses(scenario, wefts.wefts[0].loomId);
       expect(weftResponses.map((response) => response.content).join("\n")).toContain(
         "Event Sourcing ile ilişkisi ne?"
       );
+
+      await selectResponseText(page, assistant!.responseId, "MCP");
+      await expect(selectionToolbar).toBeVisible();
+      await selectionToolbar.getByRole("button", { name: "Quick Question" }).click();
+      const secondPopup = page.getByRole("dialog");
+      await secondPopup.getByLabel("Ask question").fill("başka açıdan açıkla");
+      await secondPopup.getByRole("button", { name: /^Ask$/ }).click();
+      await expect(secondPopup.getByTestId("ask-answer")).toContainText("başka açıdan açıkla");
+      await secondPopup.getByRole("button", { name: "Convert to Weft" }).click();
+      await expect(page.getByRole("dialog")).toHaveCount(0);
+
+      const weftsAfterSecondConvert = await scenario.fetchJson<{ wefts: Array<{ loomId: string }> }>(
+        `/responses/${encodeURIComponent(assistant!.responseId)}/wefts`
+      );
+      expect(weftsAfterSecondConvert.wefts).toHaveLength(wefts.wefts.length + 1);
+      expect(new Set(weftsAfterSecondConvert.wefts.map((weft) => weft.loomId)).size).toBe(
+        weftsAfterSecondConvert.wefts.length
+      );
+      expect(createWeftBodies).toHaveLength(2);
+      expect(createWeftBodies[1]).toMatchObject({
+        source: "quick_ask_convert",
+        reuseExisting: false,
+        seedMode: "none",
+      });
       expectNoForbiddenPayload(wefts);
+      expectNoForbiddenPayload(weftsAfterSecondConvert);
       expectNoForbiddenPayload(weftResponses);
       expect(scenario.dbPath).toContain(scenario.tempDir);
     } finally {
@@ -1903,7 +1940,7 @@ test.describe("[legacy-typescript-local] Graph node Ask", () => {
     await expect(popup.getByLabel("Ask question")).toHaveValue("");
   });
 
-  test("converts Ask result to a visible Weft and reuses it on repeat conversion", async ({
+  test("converts Ask result to a visible Weft and creates a fresh Weft on repeat conversion", async ({
     page,
   }) => {
     await openMcpGraph(page);
@@ -1922,7 +1959,7 @@ test.describe("[legacy-typescript-local] Graph node Ask", () => {
     await expect(page.getByRole("dialog")).toHaveCount(0);
     await expect(page.getByTestId("graph-continuation-composer")).toHaveCount(0);
     const convertedWeft = page.locator(".loom-graph-node--weft").filter({
-      hasText: "Loom: Plugin boundary should not leak shell assumptions",
+      hasText: "Loom: Turn this into a Weft.",
     });
     await expect(convertedWeft).toBeVisible();
     await expect(convertedWeft).toHaveClass(/is-focused/);
@@ -1947,7 +1984,12 @@ test.describe("[legacy-typescript-local] Graph node Ask", () => {
 
     await page.getByRole("button", { name: /Open MCP and plugin integration notes/ }).click();
     await expect(page.getByRole("heading", { name: "Weft-aware Loom graph" })).toBeVisible();
-    await expect(page.locator(".loom-graph-node--weft")).toHaveCount(weftCount);
+    await expect(page.locator(".loom-graph-node--weft")).toHaveCount(weftCount + 1);
+    await expect(
+      page.locator(".loom-graph-node--weft").filter({
+        hasText: "Loom: Try converting again.",
+      })
+    ).toBeVisible();
   });
 
   test("Quick Ask Convert Weft visible transcript starts with Ask turns only", async ({

@@ -495,3 +495,24 @@ Raw thinking must not enter:
 Only non-sensitive thinking duration/status metadata may be kept.
 
 Engine events must not expose raw thinking text.
+
+---
+
+## 16) Electron macOS Icon Packaging Rule
+
+Every Electron dist/package build MUST use:
+
+- source icon: `public/loom_logo.icns`
+- packaged resource: `Loom.app/Contents/Resources/loom_logo.icns`
+- `Info.plist` key: `CFBundleIconFile => loom_logo.icns`
+
+Packaging MUST NOT leave `electron.icns` in `Contents/Resources`.
+
+When changing Electron packaging or rebuilding `dist-electron/Loom.app`, verify:
+
+- `public/loom_logo.icns` exists
+- packaged `loom_logo.icns` exists
+- packaged `loom_logo.icns` is byte-for-byte identical to `public/loom_logo.icns`
+- `electron.icns` is absent from the packaged app
+
+Do not convert from `.ico` for macOS packaging. Do not reuse old Electron icon paths.

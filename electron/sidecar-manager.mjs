@@ -6,6 +6,10 @@ import path from "node:path";
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 17633;
 const HEALTH_TIMEOUT_MS = 20_000;
+const RUNTIME_LOCK_FILENAME = "loom-service-runtime.lock.json";
+const DEFAULT_GRACEFUL_DRAIN_TIMEOUT_MS = 120_000;
+const DEFAULT_ORPHAN_IDLE_TIMEOUT_MS = 10_000;
+const DEFAULT_QUIT_WAIT_TIMEOUT_MS = 5_000;
 
 function sleep(ms) {
   return new Promise((resolve) => {
@@ -31,26 +35,45 @@ async function findAvailablePort(host, preferredPort) {
   throw new Error(`No available local loom-service port starting at ${preferredPort}.`);
 }
 
-async function waitForExit(child, timeoutMs = 4_000) {
-  if (!child || child.exitCode !== null || child.signalCode !== null) return;
-  await new Promise((resolve) => {
-    const forceKill = setTimeout(() => {
-      if (!child.killed) child.kill("SIGKILL");
-    }, timeoutMs);
-    child.once("exit", () => {
-      clearTimeout(forceKill);
-      resolve();
-    });
-    child.kill("SIGTERM");
-  });
-}
-
 async function fetchHealth(serviceUrl) {
   const response = await fetch(`${serviceUrl}/health`);
   if (!response.ok) {
     throw new Error(`/health returned HTTP ${response.status}`);
   }
   return response.json();
+}
+
+async function fetchRuntimeStatus(serviceUrl) {
+  const response = await fetch(`${serviceUrl}/runtime/status`);
+  if (!response.ok) {
+    throw new Error(`/runtime/status returned HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+async function requestDrainShutdown(serviceUrl, timeoutMs, reason = "electron_quit") {
+  const response = await fetch(`${serviceUrl}/runtime/shutdown`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode: "drain", reason, timeoutMs }),
+  });
+  if (!response.ok) {
+    throw new Error(`/runtime/shutdown returned HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
+async function waitForServiceExit(serviceUrl, timeoutMs) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    try {
+      await fetchRuntimeStatus(serviceUrl);
+    } catch {
+      return true;
+    }
+    await sleep(250);
+  }
+  return false;
 }
 
 async function waitForHealth(serviceUrl, timeoutMs = HEALTH_TIMEOUT_MS) {
@@ -154,6 +177,55 @@ function resolveElectronDataPaths(repoRoot, app) {
   };
 }
 
+function runtimeLockPath(dataDir) {
+  return path.join(dataDir, RUNTIME_LOCK_FILENAME);
+}
+
+function readRuntimeLock(dataDir) {
+  const lockPath = runtimeLockPath(dataDir);
+  if (!fs.existsSync(lockPath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(lockPath, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeRuntimeLock(dataDir, metadata) {
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.writeFileSync(runtimeLockPath(dataDir), `${JSON.stringify(metadata, null, 2)}\n`);
+}
+
+function removeRuntimeLock(dataDir, expectedPid) {
+  const lockPath = runtimeLockPath(dataDir);
+  if (!fs.existsSync(lockPath)) return;
+  const lock = readRuntimeLock(dataDir);
+  if (expectedPid && lock?.pid && Number(lock.pid) !== Number(expectedPid)) return;
+  fs.rmSync(lockPath, { force: true });
+}
+
+function processExists(pid) {
+  if (!pid) return false;
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function samePath(left, right) {
+  if (!left || !right) return false;
+  return path.resolve(left) === path.resolve(right);
+}
+
+function canAttachExternalRuntime(runtimeStatus) {
+  return (
+    runtimeStatus?.lifecycleState === "ready" &&
+    (runtimeStatus.runtimeOwnerKind === "dev" || runtimeStatus.runtimeOwnerKind === "manual")
+  );
+}
+
 export class LoomServiceSidecarManager {
   constructor({ app, repoRoot = resolveRepoRoot(), preferredPort = DEFAULT_PORT } = {}) {
     this.app = app;
@@ -189,7 +261,7 @@ export class LoomServiceSidecarManager {
       throw new Error(`loom-service binary is missing at ${binaryPath}. Build it first.`);
     }
 
-    const port = await findAvailablePort(this.host, this.preferredPort);
+    const port = this.preferredPort;
     const serviceUrl = `http://${this.host}:${port}`;
     const { configPath, dbPath, dataMode } = resolveElectronDataPaths(this.repoRoot, this.app);
     fs.mkdirSync(path.dirname(configPath), { recursive: true });
@@ -213,6 +285,23 @@ export class LoomServiceSidecarManager {
       options.onStarting(this.getStatus());
     }
 
+    const recoveredStatus = await this.recoverExistingRuntime({
+      dataDir: path.dirname(configPath),
+      serviceUrl,
+      dbPath,
+      binaryPath,
+      configPath,
+      dataMode,
+      onStarting: options.onStarting,
+    });
+    if (recoveredStatus) return recoveredStatus;
+
+    if (!(await isPortAvailable(this.host, port))) {
+      throw new Error(
+        `loom-service port ${port} is already in use by an unknown runtime. Refusing to start a second SQLite writer.`,
+      );
+    }
+
     this.child = spawn(binaryPath, {
       cwd: this.repoRoot,
       env: {
@@ -221,11 +310,29 @@ export class LoomServiceSidecarManager {
         LOOM_SERVICE_PORT: String(port),
         LOOM_SERVICE_CONFIG_PATH: configPath,
         LOOM_SERVICE_DB_PATH: dbPath,
+        LOOM_SERVICE_RUNTIME_OWNER_KIND: "electron",
+        LOOM_SERVICE_OWNER_PID: String(process.pid),
+        LOOM_SERVICE_GRACEFUL_DRAIN_TIMEOUT_MS: String(DEFAULT_GRACEFUL_DRAIN_TIMEOUT_MS),
+        LOOM_SERVICE_ORPHAN_IDLE_TIMEOUT_MS: String(DEFAULT_ORPHAN_IDLE_TIMEOUT_MS),
+        LOOM_SERVICE_DRAIN_AFTER_OWNER_LOST: "true",
       },
       stdio: ["ignore", "pipe", "pipe"],
     });
 
     this.status.pid = this.child.pid;
+    writeRuntimeLock(path.dirname(configPath), {
+      kind: "loom-service-runtime-lock",
+      runtimeOwnerKind: "electron",
+      pid: this.child.pid,
+      parentPid: process.pid,
+      serviceUrl,
+      port,
+      dbPath,
+      configPath,
+      binaryPath,
+      state: "starting",
+      startedAt: new Date().toISOString(),
+    });
 
     this.child.stdout?.on("data", (chunk) => {
       process.stdout.write(`[loom-service:${this.child?.pid ?? "stopped"}] ${chunk}`);
@@ -235,6 +342,7 @@ export class LoomServiceSidecarManager {
     });
     this.child.once("exit", (code, signal) => {
       const wasStopping = this.status.state === "stopping";
+      removeRuntimeLock(path.dirname(configPath), this.status.pid);
       this.child = null;
       this.status = {
         ...this.status,
@@ -245,13 +353,160 @@ export class LoomServiceSidecarManager {
     });
 
     const health = await waitForHealth(serviceUrl);
+    const runtimeStatus = await fetchRuntimeStatus(serviceUrl).catch(() => undefined);
+    writeRuntimeLock(path.dirname(configPath), {
+      kind: "loom-service-runtime-lock",
+      runtimeOwnerKind: runtimeStatus?.runtimeOwnerKind ?? "electron",
+      lifecycleState: runtimeStatus?.lifecycleState ?? "ready",
+      pid: runtimeStatus?.pid ?? this.child.pid,
+      parentPid: process.pid,
+      serviceUrl,
+      port,
+      dbPath,
+      configPath,
+      binaryPath,
+      state: "ready",
+      startedAt: runtimeStatus?.startedAt ?? new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    });
     this.status = {
       ...this.status,
       state: "ready",
       health,
+      runtimeStatus,
       error: undefined,
       lastCheckedAt: new Date().toISOString(),
     };
+    return this.getStatus();
+  }
+
+  async recoverExistingRuntime({
+    dataDir,
+    serviceUrl,
+    dbPath,
+    binaryPath,
+    configPath,
+    dataMode,
+    onStarting,
+  }) {
+    const lock = readRuntimeLock(dataDir);
+    if (lock?.pid && !processExists(lock.pid)) {
+      removeRuntimeLock(dataDir, lock.pid);
+    }
+
+    const lockedRuntimeAlive = lock?.pid && processExists(lock.pid);
+    if (!lockedRuntimeAlive && (await isPortAvailable(this.host, this.preferredPort))) {
+      return null;
+    }
+
+    const runtimeUrl = lockedRuntimeAlive ? lock.serviceUrl || serviceUrl : serviceUrl;
+    let runtimeStatus;
+    try {
+      runtimeStatus = await fetchRuntimeStatus(runtimeUrl);
+    } catch (error) {
+      if (lockedRuntimeAlive) {
+        throw new Error(
+          `Existing loom-service process ${lock.pid} did not expose runtime status; refusing to start a second SQLite writer.`,
+        );
+      }
+      throw new Error(
+        `loom-service port ${this.preferredPort} is occupied by an unknown process; refusing to start a second SQLite writer.`,
+      );
+    }
+
+    if (lockedRuntimeAlive && !samePath(lock.dbPath, dbPath)) {
+      throw new Error(
+        `Existing loom-service lock points at a different DB (${lock.dbPath}); refusing to attach or start another writer.`,
+      );
+    }
+
+    if (runtimeStatus.runtimeOwnerKind !== "electron") {
+      if (canAttachExternalRuntime(runtimeStatus)) {
+        const health = await fetchHealth(runtimeUrl).catch(() => undefined);
+        this.status = {
+          ...this.status,
+          state: "ready",
+          serviceUrl: runtimeUrl,
+          port: Number(lock?.port ?? this.preferredPort),
+          pid: runtimeStatus.pid ?? lock?.pid,
+          binaryPath,
+          configPath,
+          dbPath,
+          dataMode,
+          runtimeStatus,
+          health,
+          error: undefined,
+          startedByElectron: false,
+          lastCheckedAt: new Date().toISOString(),
+        };
+        return this.getStatus();
+      }
+      throw new Error(
+        `Existing loom-service on ${runtimeUrl} is ${runtimeStatus.runtimeOwnerKind}; Electron will not kill or replace unknown/manual runtimes.`,
+      );
+    }
+
+    if (runtimeStatus.lifecycleState === "draining" || runtimeStatus.lifecycleState === "stopping") {
+      this.status = {
+        ...this.status,
+        state: "draining",
+        serviceUrl: runtimeUrl,
+        port: Number(lock?.port ?? this.preferredPort),
+        pid: runtimeStatus.pid ?? lock?.pid,
+        binaryPath,
+        configPath,
+        dbPath,
+        dataMode,
+        runtimeStatus,
+        startedByElectron: false,
+        lastCheckedAt: new Date().toISOString(),
+      };
+      if (typeof onStarting === "function") {
+        onStarting(this.getStatus());
+      }
+      const exited = await waitForServiceExit(
+        runtimeUrl,
+        runtimeStatus.gracefulDrainTimeoutMs + DEFAULT_ORPHAN_IDLE_TIMEOUT_MS,
+      );
+      if (!exited) {
+        throw new Error(
+          "Previous Electron-owned loom-service is still draining. Refusing to start a second SQLite writer.",
+        );
+      }
+      removeRuntimeLock(dataDir, runtimeStatus.pid ?? lock?.pid);
+      return null;
+    }
+
+    this.status = {
+      ...this.status,
+      state: "ready",
+      serviceUrl: runtimeUrl,
+      port: Number(lock?.port ?? this.preferredPort),
+      pid: runtimeStatus.pid ?? lock?.pid,
+      binaryPath,
+      configPath,
+      dbPath,
+      dataMode,
+      runtimeStatus,
+      health: await fetchHealth(runtimeUrl).catch(() => undefined),
+      error: undefined,
+      startedByElectron: true,
+      lastCheckedAt: new Date().toISOString(),
+    };
+    writeRuntimeLock(dataDir, {
+      ...(lock ?? {}),
+      kind: "loom-service-runtime-lock",
+      runtimeOwnerKind: "electron",
+      lifecycleState: runtimeStatus.lifecycleState,
+      pid: runtimeStatus.pid ?? lock?.pid,
+      parentPid: process.pid,
+      serviceUrl: runtimeUrl,
+      port: Number(lock?.port ?? this.preferredPort),
+      dbPath,
+      configPath,
+      binaryPath,
+      updatedAt: new Date().toISOString(),
+    });
     return this.getStatus();
   }
 
@@ -259,10 +514,18 @@ export class LoomServiceSidecarManager {
     if (!this.status.serviceUrl) return this.getStatus();
     try {
       const health = await fetchHealth(this.status.serviceUrl);
+      const runtimeStatus = await fetchRuntimeStatus(this.status.serviceUrl).catch(() => undefined);
       this.status = {
         ...this.status,
-        state: this.child ? "ready" : this.status.state,
+        state:
+          runtimeStatus?.lifecycleState === "draining" ||
+          runtimeStatus?.lifecycleState === "stopping"
+            ? runtimeStatus.lifecycleState
+            : this.child || this.status.startedByElectron
+              ? "ready"
+              : this.status.state,
         health,
+        runtimeStatus,
         error: undefined,
         lastCheckedAt: new Date().toISOString(),
       };
@@ -277,14 +540,57 @@ export class LoomServiceSidecarManager {
     return this.getStatus();
   }
 
-  async stop() {
-    if (!this.child) return this.getStatus();
+  async stop({ waitMs = DEFAULT_QUIT_WAIT_TIMEOUT_MS } = {}) {
+    if (!this.status.serviceUrl) return this.getStatus();
+    if (!this.child && this.status.startedByElectron === false) {
+      this.status = {
+        ...this.status,
+        state: "stopped",
+        error: undefined,
+        lastCheckedAt: new Date().toISOString(),
+      };
+      return this.getStatus();
+    }
     const child = this.child;
     this.status = { ...this.status, state: "stopping", lastCheckedAt: new Date().toISOString() };
 
-    await waitForExit(child);
+    try {
+      const runtimeStatus = await fetchRuntimeStatus(this.status.serviceUrl);
+      if (runtimeStatus.runtimeOwnerKind === "electron") {
+        await requestDrainShutdown(
+          this.status.serviceUrl,
+          DEFAULT_GRACEFUL_DRAIN_TIMEOUT_MS,
+          "electron_quit",
+        );
+      } else {
+        throw new Error(
+          `Refusing to stop non-Electron loom-service owner ${runtimeStatus.runtimeOwnerKind}.`,
+        );
+      }
+    } catch (error) {
+      this.status = {
+        ...this.status,
+        state: "error",
+        error: error instanceof Error ? error.message : String(error),
+        lastCheckedAt: new Date().toISOString(),
+      };
+      return this.getStatus();
+    }
+
+    const exited = await waitForServiceExit(this.status.serviceUrl, waitMs);
+    if (!exited) {
+      this.status = {
+        ...this.status,
+        state: "draining",
+        health: undefined,
+        error: undefined,
+        lastCheckedAt: new Date().toISOString(),
+      };
+      return this.getStatus();
+    }
 
     this.child = null;
+    removeRuntimeLock(path.dirname(this.status.configPath), child?.pid ?? this.status.pid);
     this.status = {
       ...this.status,
       state: "stopped",

@@ -11,6 +11,10 @@ pub struct HealthResponse {
     pub status: String,
     pub runtime: &'static str,
     pub version: &'static str,
+    pub lifecycle_state: crate::runtime::RuntimeLifecycleState,
+    pub runtime_owner_kind: crate::runtime::RuntimeOwnerKind,
+    pub active_run_count: usize,
+    pub shutdown_requested: bool,
     pub local_only: bool,
     pub database: DatabaseHealthResponse,
     pub config: crate::config::ConfigStatus,
@@ -38,16 +42,21 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let database_ready = state.database.health_check().await;
     let ollama = state.ollama.health().await;
     let providers_ready = ollama.status == "ready";
+    let runtime_status = state.restart.runtime_status(&state.operations);
 
     Json(HealthResponse {
         status: if database_ready && providers_ready {
-            "ready"
+            runtime_status.lifecycle_state.as_str()
         } else {
             "degraded"
         }
         .to_string(),
         runtime: "loom-service",
         version: PACKAGE_VERSION,
+        lifecycle_state: runtime_status.lifecycle_state,
+        runtime_owner_kind: runtime_status.runtime_owner_kind,
+        active_run_count: runtime_status.active_run_count,
+        shutdown_requested: runtime_status.shutdown_requested,
         local_only: true,
         database: DatabaseHealthResponse {
             status: if database_ready {

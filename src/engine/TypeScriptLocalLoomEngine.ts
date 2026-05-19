@@ -22,6 +22,7 @@ import type {
   ExportLoomInput,
   ExportLoomResult,
   ExportResponseInput,
+  GenerationResponseStateResult,
   GetReferenceInput,
   GetUiStateInput,
   GetUiStateResult,
@@ -33,6 +34,8 @@ import type {
   GraphProjectionResult,
   ListReferencesInput,
   ListReferencesResult,
+  ListCodeSnippetsInput,
+  ListCodeSnippetsResult,
   ListBookmarksResult,
   ListHistoryResult,
   LoomDetail,
@@ -186,6 +189,10 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
     };
   }
 
+  async getGenerationResponseState(): Promise<GenerationResponseStateResult> {
+    throw notImplemented("getGenerationResponseState");
+  }
+
   async quickAsk(input: QuickAskInput): Promise<QuickAskResult> {
     if (this.dependencies.quickAsk) {
       return this.dependencies.quickAsk(input);
@@ -278,6 +285,13 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
       return this.dependencies.listReferences(input);
     }
     return { references: [] };
+  }
+
+  async listCodeSnippets(input: ListCodeSnippetsInput): Promise<ListCodeSnippetsResult> {
+    if (this.dependencies.listCodeSnippets) {
+      return this.dependencies.listCodeSnippets(input);
+    }
+    return { codeSnippets: [] };
   }
 
   async suggestReferences(input: SuggestReferencesInput): Promise<SuggestReferencesResult> {

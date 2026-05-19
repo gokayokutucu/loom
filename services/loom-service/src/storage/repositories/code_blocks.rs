@@ -61,6 +61,13 @@ impl ResponseCodeBlockRepository {
     ) -> Result<Vec<ResponseCodeBlockRecord>, ServiceError> {
         list_code_blocks_by_response(&self.pool, response_id).await
     }
+
+    pub async fn list_by_loom(
+        &self,
+        loom_id: &str,
+    ) -> Result<Vec<ResponseCodeBlockRecord>, ServiceError> {
+        list_code_blocks_by_loom(&self.pool, loom_id).await
+    }
 }
 
 pub async fn sync_code_blocks_for_response(
@@ -168,6 +175,22 @@ pub(crate) async fn list_code_blocks_by_response(
     .await
     .map(|rows| rows.into_iter().map(code_block_from_row).collect())
     .map_err(|error| ServiceError::storage(format!("failed to list Response code blocks: {error}")))
+}
+
+pub(crate) async fn list_code_blocks_by_loom(
+    pool: &SqlitePool,
+    loom_id: &str,
+) -> Result<Vec<ResponseCodeBlockRecord>, ServiceError> {
+    sqlx::query(
+        "SELECT * FROM response_code_blocks
+         WHERE loom_id = ?1
+         ORDER BY response_id ASC, block_index ASC",
+    )
+    .bind(loom_id)
+    .fetch_all(pool)
+    .await
+    .map(|rows| rows.into_iter().map(code_block_from_row).collect())
+    .map_err(|error| ServiceError::storage(format!("failed to list Loom code blocks: {error}")))
 }
 
 fn code_block_from_row(row: sqlx::sqlite::SqliteRow) -> ResponseCodeBlockRecord {

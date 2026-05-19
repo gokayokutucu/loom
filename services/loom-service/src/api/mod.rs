@@ -1,6 +1,7 @@
 mod ask;
 mod bookmarks;
 mod capabilities;
+mod code_snippets;
 mod config;
 mod context;
 mod dev;
@@ -15,6 +16,7 @@ mod orchestration;
 mod references;
 pub(crate) mod resolve;
 mod responses;
+mod runtime_api;
 mod speech;
 mod state;
 mod ui_state;
@@ -59,6 +61,8 @@ pub fn router(
         )
         .route("/runtime/restart-status", get(config::restart_status))
         .route("/runtime/restart", post(config::request_restart))
+        .route("/runtime/status", get(runtime_api::status))
+        .route("/runtime/shutdown", post(runtime_api::shutdown))
         .route("/resolve", post(resolve::resolve))
         .route("/dev/seed-fixtures", post(dev::seed_fixtures))
         .route("/dev/e2e-proof/:loom_id", get(dev::e2e_proof))
@@ -96,6 +100,7 @@ pub fn router(
             "/responses/:response_id/references",
             get(references::list_response_references),
         )
+        .route("/code-snippets", get(code_snippets::list_code_snippets))
         .route("/wefts", post(wefts::create_weft))
         .route("/looms", get(looms::list_looms).post(looms::create_loom))
         .route(

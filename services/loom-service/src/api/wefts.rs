@@ -35,6 +35,7 @@ pub struct CreateWeftRequest {
     pub origin_response_id: Option<String>,
     pub weft_kind: Option<WeftKind>,
     pub title: Option<String>,
+    pub initial_prompt: Option<String>,
     pub summary: Option<String>,
     pub reuse_existing: Option<bool>,
     pub source: Option<WeftSource>,
@@ -184,6 +185,7 @@ pub async fn create_weft(
         ));
     }
     validate_metadata(input.metadata.as_ref())?;
+    validate_revision_prompt_change(weft_kind, input.metadata.as_ref())?;
 
     let loom_repository = LoomRepository::new(&state.database);
     let origin_loom = loom_repository
@@ -295,6 +297,13 @@ pub async fn create_weft(
         .title
         .as_deref()
         .and_then(non_empty_trimmed)
+        .or_else(|| {
+            input
+                .initial_prompt
+                .as_deref()
+                .and_then(non_empty_trimmed)
+                .map(|prompt| weft_title_from_initial_prompt(weft_kind, &prompt))
+        })
         .unwrap_or_else(|| {
             origin_response
                 .as_ref()
@@ -598,6 +607,56 @@ fn default_seed_mode(source: WeftSource, _weft_kind: WeftKind) -> WeftSeedMode {
         | WeftSource::GraphNode
         | WeftSource::Reference => WeftSeedMode::None,
     }
+}
+
+fn weft_title_from_initial_prompt(weft_kind: WeftKind, prompt: &str) -> String {
+    let prefix = if weft_kind == WeftKind::Revision {
+        "Revision: "
+    } else {
+        "Loom: "
+    };
+    format!("{prefix}{}", compact_prompt_title(prompt))
+}
+
+fn compact_prompt_title(prompt: &str) -> String {
+    let normalized = prompt
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '*' | '#' | '-' | '•' | '|'))
+        .trim()
+        .to_string();
+    if normalized.is_empty() {
+        return "Untitled".to_string();
+    }
+    truncate_at_word_boundary(&normalized, 72)
+}
+
+fn truncate_at_word_boundary(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut last_boundary = 0;
+    let mut end_byte = value.len();
+    for (char_index, (byte_index, ch)) in value.char_indices().enumerate() {
+        if char_index >= max_chars {
+            end_byte = byte_index;
+            break;
+        }
+        if ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '.' | '?' | '!') {
+            last_boundary = byte_index;
+        }
+    }
+    let cut = if last_boundary >= max_chars / 2 {
+        last_boundary
+    } else {
+        end_byte
+    };
+    value[..cut]
+        .trim_end_matches(|ch: char| {
+            ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '.' | '-' | '—' | '–')
+        })
+        .to_string()
 }
 
 async fn ensure_visible_weft_seed(
@@ -968,6 +1027,48 @@ fn validate_metadata(metadata: Option<&Value>) -> Result<(), (StatusCode, Json<W
     Ok(())
 }
 
+fn validate_revision_prompt_change(
+    weft_kind: WeftKind,
+    metadata: Option<&Value>,
+) -> Result<(), (StatusCode, Json<WeftApiError>)> {
+    if weft_kind != WeftKind::Revision {
+        return Ok(());
+    }
+    let Some(metadata) = metadata else {
+        return Ok(());
+    };
+    let Some(original_prompt) = metadata_string(metadata, "originalPrompt") else {
+        return Ok(());
+    };
+    let Some(revision_prompt) = metadata_string(metadata, "revisionPrompt") else {
+        return Ok(());
+    };
+    if normalize_prompt_edit_text(original_prompt) == normalize_prompt_edit_text(revision_prompt) {
+        return Err(conflict(
+            "PROMPT_REVISION_UNCHANGED",
+            "Revision Weft requires a changed prompt.",
+        ));
+    }
+    Ok(())
+}
+
+fn metadata_string<'a>(metadata: &'a Value, key: &str) -> Option<&'a str> {
+    metadata.as_object()?.get(key)?.as_str()
+}
+
+fn normalize_prompt_edit_text(value: &str) -> String {
+    let without_nbsp = value.replace('\u{00a0}', " ");
+    let mut normalized = without_nbsp
+        .lines()
+        .map(|line| line.trim_matches(|character| character == ' ' || character == '\t'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    while normalized.contains("\n\n\n") {
+        normalized = normalized.replace("\n\n\n", "\n\n");
+    }
+    normalized.trim().to_string()
+}
+
 fn contains_forbidden_key(value: &Value) -> bool {
     match value {
         Value::Object(map) => map.iter().any(|(key, value)| {
@@ -1205,6 +1306,25 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn post_wefts_can_title_from_initial_prompt() {
+        let state = seeded_state().await;
+        let mut request = response_action_request(false);
+        request.title = None;
+        request.initial_prompt = Some("Bunu maliyet açısından değerlendir.".to_string());
+
+        let response = create_weft(State(state.clone()), Json(request))
+            .await
+            .expect("create Weft")
+            .1
+             .0;
+
+        assert_eq!(
+            response.weft.title,
+            "Loom: Bunu maliyet açısından değerlendir."
+        );
+    }
+
+    #[tokio::test]
     async fn normal_response_weft_keeps_visible_seed_empty_by_default() {
         let state = seeded_state().await;
         let response = create_weft(State(state.clone()), Json(response_action_request(true)))
@@ -1350,6 +1470,31 @@ mod tests {
                 "Response B"
             ]
         );
+    }
+
+    #[tokio::test]
+    async fn revision_weft_rejects_unchanged_prompt_metadata() {
+        let state = seeded_state().await;
+        let mut request = response_action_request(false);
+        request.weft_kind = Some(WeftKind::Revision);
+        request.metadata = Some(json!({
+            "editSource": "prompt_edit",
+            "editedResponseId": "origin-response",
+            "originalPrompt": "Prompt B\n\nDetail",
+            "revisionPrompt": " Prompt B \n\n\n Detail ",
+        }));
+
+        let error = create_weft(State(state.clone()), Json(request))
+            .await
+            .expect_err("unchanged prompt revision should fail");
+
+        assert_eq!(error.0, StatusCode::CONFLICT);
+        assert_eq!(error.1 .0.code, "PROMPT_REVISION_UNCHANGED");
+        let wefts = LoomRepository::new(&state.database)
+            .list_child_wefts_by_origin_loom("origin-loom")
+            .await
+            .expect("list child Wefts");
+        assert!(wefts.is_empty());
     }
 
     #[tokio::test]
@@ -1744,6 +1889,7 @@ mod tests {
             origin_response_id: Some("origin-response".to_string()),
             weft_kind: None,
             title: Some("Service Weft".to_string()),
+            initial_prompt: None,
             summary: Some("Created through service Weft endpoint".to_string()),
             reuse_existing: Some(reuse_existing),
             source: Some(WeftSource::QuickAskConvert),

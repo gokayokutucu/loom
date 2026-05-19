@@ -15,6 +15,9 @@ const appPath = path.join(packageRoot, "Loom.app");
 const resourcesPath = path.join(appPath, "Contents", "Resources");
 const appResourcesPath = path.join(resourcesPath, "app");
 const sidecarResourcesPath = path.join(resourcesPath, "loom-service");
+const iconSourcePath = path.join(repoRoot, "public", "loom_logo.icns");
+const bundleIconFile = "loom_logo.icns";
+const bundleIconPath = path.join(resourcesPath, bundleIconFile);
 const serviceBinaryPath = path.join(
   repoRoot,
   "services",
@@ -58,6 +61,30 @@ async function writeDevRuntimeMetadata() {
   );
 }
 
+async function createMacBundleIcon() {
+  await assertExists(iconSourcePath, "Loom app icon");
+  await fs.copyFile(iconSourcePath, bundleIconPath);
+}
+
+async function assertMissing(target, label) {
+  try {
+    await fs.access(target);
+  } catch {
+    return;
+  }
+  throw new Error(`${label} should not exist at ${target}`);
+}
+
+async function assertFilesEqual(left, right, label) {
+  const [leftBuffer, rightBuffer] = await Promise.all([
+    fs.readFile(left),
+    fs.readFile(right),
+  ]);
+  if (!leftBuffer.equals(rightBuffer)) {
+    throw new Error(`${label} mismatch: ${left} differs from ${right}`);
+  }
+}
+
 async function patchInfoPlist() {
   const plistPath = path.join(appPath, "Contents", "Info.plist");
   const original = await fs.readFile(plistPath, "utf8");
@@ -73,8 +100,23 @@ async function patchInfoPlist() {
     .replace(
       /(<key>CFBundleIdentifier<\/key>\s*<string>)[^<]+(<\/string>)/,
       "$1ai.loom.dev$2"
+    )
+    .replace(
+      /(<key>CFBundleIconFile<\/key>\s*<string>)[^<]+(<\/string>)/,
+      `$1${bundleIconFile}$2`
     );
   await fs.writeFile(plistPath, patched);
+}
+
+async function verifyMacBundleIcon() {
+  const plistPath = path.join(appPath, "Contents", "Info.plist");
+  const plist = await fs.readFile(plistPath, "utf8");
+  await assertExists(bundleIconPath, "Packaged Loom app icon");
+  await assertMissing(path.join(resourcesPath, "electron.icns"), "Old Electron app icon");
+  if (!plist.includes(`<key>CFBundleIconFile</key>\n\t<string>${bundleIconFile}</string>`)) {
+    throw new Error(`Info.plist does not point CFBundleIconFile at ${bundleIconFile}`);
+  }
+  await assertFilesEqual(iconSourcePath, bundleIconPath, "Packaged Loom app icon");
 }
 
 async function packageDevApp() {
@@ -88,6 +130,7 @@ async function packageDevApp() {
     recursive: true,
     verbatimSymlinks: true,
   });
+  await fs.rm(path.join(resourcesPath, "electron.icns"), { force: true });
 
   await fs.rm(appResourcesPath, { recursive: true, force: true });
   await fs.mkdir(path.join(appResourcesPath, "electron"), { recursive: true });
@@ -108,11 +151,13 @@ async function packageDevApp() {
   );
   await writePackageManifest();
   await writeDevRuntimeMetadata();
+  await createMacBundleIcon();
 
   await fs.mkdir(sidecarResourcesPath, { recursive: true });
   await fs.copyFile(serviceBinaryPath, path.join(sidecarResourcesPath, "loom-service"));
   await fs.chmod(path.join(sidecarResourcesPath, "loom-service"), 0o755);
   await patchInfoPlist();
+  await verifyMacBundleIcon();
 
   console.log(`Packaged Loom dev app: ${appPath}`);
 }

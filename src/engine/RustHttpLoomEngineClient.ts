@@ -18,6 +18,8 @@ import type {
   ExportLoomInput,
   ExportLoomResult,
   ExportResponseInput,
+  GenerationResponseStateResult,
+  GenerationResponseSummary,
   DeleteBookmarkInput,
   GetBookmarkForTargetInput,
   GetBookmarkInput,
@@ -27,6 +29,9 @@ import type {
   GraphProjectionInput,
   GraphProjectionResult,
   JsonValue,
+  CodeSnippetReferenceItem,
+  ListCodeSnippetsInput,
+  ListCodeSnippetsResult,
   LoomDetail,
   LoomSummary,
   OpenReferenceInput,
@@ -74,6 +79,7 @@ import type {
   LoomObjectKind,
   LoomObjectStatus,
   LoomResolutionStatus,
+  ResponseCodeBlock,
   ResponseItem,
 } from "../types";
 import { parseLoomAddress } from "../services/loomProtocol";
@@ -567,6 +573,75 @@ interface ServiceResponseRow {
   createdAt?: string;
   sequenceIndex: number;
   metadata?: JsonValue;
+  codeBlocks: ResponseCodeBlock[];
+}
+
+function validateServiceCodeBlock(value: unknown, endpoint: string): ResponseCodeBlock {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid code block.", {
+      endpoint,
+    });
+  }
+  const blockIndex = numberValue(value, "blockIndex");
+  const code = stringValue(value, "code");
+  if (blockIndex === undefined || code === undefined) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid code block.", {
+      endpoint,
+    });
+  }
+  return {
+    codeBlockId: stringValue(value, "codeBlockId"),
+    blockIndex,
+    language: stringValue(value, "language"),
+    code,
+    exactHash: stringValue(value, "exactHash"),
+    fence: stringValue(value, "fence"),
+  };
+}
+
+function validateCodeSnippetReferenceItem(value: unknown, endpoint: string): CodeSnippetReferenceItem {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Code Snippet.", {
+      endpoint,
+    });
+  }
+  const codeBlockId = stringValue(value, "codeBlockId");
+  const responseId = stringValue(value, "responseId");
+  const loomId = stringValue(value, "loomId");
+  const blockIndex = numberValue(value, "blockIndex");
+  const code = stringValue(value, "code");
+  if (!codeBlockId || !responseId || !loomId || blockIndex === undefined || code === undefined) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Code Snippet row.", {
+      endpoint,
+    });
+  }
+  return {
+    codeBlockId,
+    responseId,
+    loomId,
+    loomTitle: stringValue(value, "loomTitle"),
+    sourceResponseTitle: stringValue(value, "sourceResponseTitle"),
+    sourceResponseCode: stringValue(value, "sourceResponseCode"),
+    sourceCanonicalUri: stringValue(value, "sourceCanonicalUri"),
+    blockIndex,
+    language: stringValue(value, "language"),
+    code,
+    exactHash: stringValue(value, "exactHash"),
+    fence: stringValue(value, "fence"),
+    createdAt: stringValue(value, "createdAt"),
+    updatedAt: stringValue(value, "updatedAt"),
+  };
+}
+
+function validateCodeSnippetList(value: unknown, endpoint: string): ListCodeSnippetsResult {
+  if (!isRecord(value) || !Array.isArray(value.codeSnippets)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Code Snippet list.", {
+      endpoint,
+    });
+  }
+  return {
+    codeSnippets: value.codeSnippets.map((item) => validateCodeSnippetReferenceItem(item, endpoint)),
+  };
 }
 
 function validateServiceResponseRow(value: unknown, endpoint: string): ServiceResponseRow {
@@ -594,6 +669,9 @@ function validateServiceResponseRow(value: unknown, endpoint: string): ServiceRe
     createdAt: stringValue(value, "createdAt"),
     sequenceIndex: numberValue(value, "sequenceIndex") ?? 0,
     metadata: value.metadata as JsonValue | undefined,
+    codeBlocks: Array.isArray(value.codeBlocks)
+      ? value.codeBlocks.map((codeBlock) => validateServiceCodeBlock(codeBlock, endpoint))
+      : [],
   };
 }
 
@@ -660,6 +738,9 @@ function buildResponseItemsFromRows(rows: ServiceResponseRow[]): ResponseItem[] 
     }
     const question = pendingUser?.content.trim() || row.title || "Question";
     const title = rowVisibleTitle(row, question);
+    const metadata = isRecord(row.metadata) ? row.metadata : {};
+    const workflowRunId = stringValue(metadata, "workflowRunId");
+    const serviceGenerationStatus = stringValue(metadata, "status");
     items.push({
       id: row.responseId,
       title,
@@ -667,9 +748,12 @@ function buildResponseItemsFromRows(rows: ServiceResponseRow[]): ResponseItem[] 
       question,
       answer: splitPersistedAnswer(row.content),
       finalContent: row.content,
+      codeBlocks: row.codeBlocks,
       suggestedLinks: [],
       bookmarkedLinks: [],
       createdAt: row.createdAt,
+      workflowRunId,
+      serviceGenerationStatus,
       serviceUserResponseId: pendingUser?.responseId,
       meta: responseMetaFromRow(row, title),
     });
@@ -691,6 +775,12 @@ function buildResponseItemsFromRows(rows: ServiceResponseRow[]): ResponseItem[] 
       suggestedLinks: [],
       bookmarkedLinks: [],
       createdAt: pendingUser.createdAt,
+      workflowRunId: isRecord(pendingUser.metadata)
+        ? stringValue(pendingUser.metadata, "workflowRunId")
+        : undefined,
+      serviceGenerationStatus: isRecord(pendingUser.metadata)
+        ? stringValue(pendingUser.metadata, "status")
+        : undefined,
       serviceUserResponseId: pendingUser.responseId,
       meta: responseMetaFromRow(pendingUser, title),
     });
@@ -920,11 +1010,12 @@ function capabilityUnavailable(error: unknown): CapabilitySummary {
 }
 
 function mapReferenceForService(reference: LoomLink) {
+  const targetKind = reference.targetKind ?? reference.type;
   return {
     referenceId: reference.referenceMentionId ?? reference.id,
     label: reference.referenceCustomLabel ?? reference.title,
     selectedTextPreview: reference.selectedText,
-    targetKind: reference.type,
+    targetKind,
     targetId: reference.targetObjectId ?? reference.id,
     sourceResponseCode: reference.sourceResponseCode,
     sourceTitle: reference.title,
@@ -965,6 +1056,74 @@ function validateCancelResponse(
     workflowRunId,
     responseId: stringValue(response, "responseId") ?? input.responseId,
     error: stringValue(response, "error"),
+  };
+}
+
+function validateGenerationResponseSummary(
+  value: unknown,
+  endpoint: string
+): GenerationResponseSummary | undefined {
+  if (value === null || value === undefined) return undefined;
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError(
+      "invalid_response",
+      "loom-service returned an invalid generation response summary.",
+      { endpoint }
+    );
+  }
+  const responseId = stringValue(value, "responseId");
+  const loomId = stringValue(value, "loomId");
+  const role = stringValue(value, "role");
+  const content = stringValue(value, "content");
+  const updatedAt = stringValue(value, "updatedAt");
+  if (!responseId || !loomId || (role !== "user" && role !== "assistant") || content === undefined || !updatedAt) {
+    throw new RustHttpLoomEngineError(
+      "invalid_response",
+      "loom-service returned an incomplete generation response summary.",
+      { endpoint }
+    );
+  }
+  return {
+    responseId,
+    loomId,
+    role,
+    content,
+    sequenceIndex: numberValue(value, "sequenceIndex") ?? 0,
+    status: stringValue(value, "status"),
+    metadata: sanitizeEnginePayload(value.metadata) as JsonValue | undefined,
+    updatedAt,
+  };
+}
+
+function validateGenerationResponseState(
+  response: unknown,
+  workflowRunId: string,
+  endpoint: string
+): GenerationResponseStateResult {
+  if (!isRecord(response)) {
+    throw new RustHttpLoomEngineError(
+      "invalid_response",
+      "loom-service returned an invalid generation response state.",
+      { endpoint }
+    );
+  }
+  const runId = stringValue(response, "runId") ?? stringValue(response, "workflowRunId") ?? workflowRunId;
+  const status = stringValue(response, "status");
+  if (!runId || !status) {
+    throw new RustHttpLoomEngineError(
+      "invalid_response",
+      "loom-service generation response state did not include run status.",
+      { endpoint }
+    );
+  }
+  return {
+    workflowRunId: runId,
+    loomId: stringValue(response, "loomId"),
+    userResponse: validateGenerationResponseSummary(response.userResponse, endpoint),
+    assistantResponse: validateGenerationResponseSummary(response.assistantResponse, endpoint),
+    status,
+    canResume: booleanValue(response, "canResume") ?? false,
+    liveTailSupported: booleanValue(response, "liveTailSupported") ?? false,
   };
 }
 
@@ -1029,6 +1188,7 @@ function createWeftPayload(input: CreateOrOpenWeftInput) {
     originResponseId: input.originResponseId,
     weftKind: input.weftKind,
     title: input.title,
+    initialPrompt: input.initialPrompt,
     summary: input.summary,
     reuseExisting: input.reuseExisting ?? true,
     source: input.source ?? "response_action",
@@ -1281,13 +1441,21 @@ function referenceTargetKind(link: LoomLink): "loom" | "response" | "weft" | "fr
 
 function createReferencePayload(input: AddReferenceInput) {
   const reference = input.reference;
-  const targetKind = referenceTargetKind(reference);
+  const inputMetadata = isRecord(input.metadata) ? input.metadata : {};
+  const metadataTargetKind = stringValue(inputMetadata, "targetKind");
+  const codeBlockId = stringValue(inputMetadata, "codeBlockId");
+  const targetKind =
+    metadataTargetKind === "code_block" || reference.targetKind === "code_block"
+      ? "code_block"
+      : referenceTargetKind(reference);
   return {
     sourceLoomId: reference.sourceLoomId ?? input.loomId,
     sourceResponseId: input.sourceResponseId ?? reference.sourceResponseId,
     targetKind,
     targetId:
-      targetKind === "fragment"
+      targetKind === "code_block"
+        ? codeBlockId ?? reference.targetObjectId ?? reference.id
+        : targetKind === "fragment"
         ? reference.sourceResponseId ?? reference.targetObjectId ?? reference.id
         : reference.targetObjectId ?? reference.id,
     targetUri: reference.canonicalUri ?? reference.path,
@@ -1295,7 +1463,7 @@ function createReferencePayload(input: AddReferenceInput) {
     selectedText: reference.selectedText,
     fragmentHash: reference.fragmentHash,
     metadata: sanitizeEnginePayload({
-      ...(isRecord(input.metadata) ? input.metadata : {}),
+      ...inputMetadata,
       referenceCode: reference.referenceCode,
       referenceDisplayMode: reference.referenceDisplayMode,
       sourceResponseCode: reference.sourceResponseCode,
@@ -1333,13 +1501,14 @@ function validateServiceReference(value: unknown, endpoint: string): LoomLink {
   const referenceCode = metadata ? stringValue(metadata, "referenceCode") : undefined;
   const referenceDisplayMode =
     metadata && stringValue(metadata, "referenceDisplayMode") === "code" ? "code" : "title";
-  const type = targetKind === "fragment" ? "fragment" : targetKind === "response" ? "response" : "conversation";
+  const type = targetKind === "fragment" || targetKind === "code_block" ? "fragment" : targetKind === "response" ? "response" : "conversation";
   return {
     id: targetId ?? referenceId,
     type,
     title: label ?? selectedText ?? targetUri ?? targetId ?? referenceId,
     path: targetUri ?? targetId ?? referenceId,
-    badge: targetKind === "fragment" ? "Fragment" : targetKind === "response" ? "Response" : "Reference",
+    badge: targetKind === "code_block" ? "Code" : targetKind === "fragment" ? "Fragment" : targetKind === "response" ? "Response" : "Reference",
+    targetKind: targetKind === "code_block" ? "code_block" : undefined,
     targetObjectId: targetId,
     canonicalUri: targetUri,
     referenceCode,
@@ -1599,6 +1768,7 @@ function mapServiceEventToEngineEvents(value: unknown): EngineResponseEvent[] {
   const payload = isRecord(value.payload) ? value.payload : {};
   const runId = servicePayloadString(payload, "runId") ?? stringValue(value, "correlationId");
   const loomId = servicePayloadString(payload, "loomId");
+  const loomTitle = servicePayloadString(payload, "loomTitle");
   const assistantResponseId = servicePayloadString(payload, "assistantResponseId");
   const userResponseId = servicePayloadString(payload, "userResponseId");
   const responseId = assistantResponseId ?? servicePayloadString(payload, "responseId");
@@ -1608,13 +1778,13 @@ function mapServiceEventToEngineEvents(value: unknown): EngineResponseEvent[] {
     if (loomId && userResponseId) {
       events.push({
         type: "user_message_created",
-        payload: { loomId, responseId: userResponseId, workflowRunId: runId },
+        payload: { loomId, responseId: userResponseId, workflowRunId: runId, loomTitle },
       });
     }
     if (loomId && assistantResponseId) {
       events.push({
         type: "assistant_placeholder_created",
-        payload: { loomId, responseId: assistantResponseId, workflowRunId: runId },
+        payload: { loomId, responseId: assistantResponseId, workflowRunId: runId, loomTitle },
       });
     }
     return events;
@@ -1667,7 +1837,7 @@ function mapServiceEventToEngineEvents(value: unknown): EngineResponseEvent[] {
     return [
       {
         type: "response_completed",
-        payload: { responseId, doneReason: servicePayloadString(payload, "doneReason") },
+        payload: { responseId, doneReason: servicePayloadString(payload, "doneReason"), loomTitle },
       },
     ];
   }
@@ -1676,7 +1846,7 @@ function mapServiceEventToEngineEvents(value: unknown): EngineResponseEvent[] {
     return [
       {
         type: "response_truncated",
-        payload: { responseId, doneReason: servicePayloadString(payload, "doneReason") },
+        payload: { responseId, doneReason: servicePayloadString(payload, "doneReason"), loomTitle },
       },
     ];
   }
@@ -2359,6 +2529,12 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     return validateCancelResponse(payload, input, endpoint);
   }
 
+  async getGenerationResponseState(workflowRunId: string): Promise<GenerationResponseStateResult> {
+    const endpoint = `/orchestration/runs/${encodeURIComponent(workflowRunId)}/response-state`;
+    const response = await this.requestJson<unknown>(endpoint, { method: "GET" });
+    return validateGenerationResponseState(response, workflowRunId, endpoint);
+  }
+
   async quickAsk(input: QuickAskInput): Promise<QuickAskResult> {
     const endpoint = "/ask/quick";
     let transportMeta: RequestJsonTransportMeta = {
@@ -2465,6 +2641,16 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
       : `/looms/${encodeURIComponent(input.loomId ?? "")}/references`;
     const response = await this.requestJson<unknown>(endpoint, { method: "GET" });
     return validateReferenceList(response, endpoint);
+  }
+
+  async listCodeSnippets(input: ListCodeSnippetsInput): Promise<ListCodeSnippetsResult> {
+    const params = new URLSearchParams();
+    if (input.loomId) params.set("loomId", input.loomId);
+    if (input.limit !== undefined) params.set("limit", String(input.limit));
+    const query = params.toString();
+    const endpoint = `/code-snippets${query ? `?${query}` : ""}`;
+    const response = await this.requestJson<unknown>(endpoint, { method: "GET" });
+    return validateCodeSnippetList(response, endpoint);
   }
 
   async suggestReferences(input: SuggestReferencesInput): Promise<SuggestReferencesResult> {

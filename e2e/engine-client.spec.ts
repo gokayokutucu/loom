@@ -56,6 +56,7 @@ function createMockRustClient(
     removeReference: async () => unsupportedMockMethod("removeReference"),
     getReference: async () => unsupportedMockMethod("getReference"),
     listReferences: async () => unsupportedMockMethod("listReferences"),
+    listCodeSnippets: async () => unsupportedMockMethod("listCodeSnippets"),
     suggestReferences: async () => unsupportedMockMethod("suggestReferences"),
     openReference: async (): Promise<LoomNavigationDestination> =>
       unsupportedMockMethod("openReference"),
@@ -1009,6 +1010,31 @@ test.describe("[engine-contract] Loom engine client selection", () => {
             { status: 200 }
           );
         }
+        if (url === "http://127.0.0.1:17633/code-snippets?loomId=loom-1&limit=25") {
+          return new Response(
+            JSON.stringify({
+              codeSnippets: [
+                {
+                  codeBlockId: "codeblock-response-1-0-hash",
+                  responseId: "response-1",
+                  loomId: "loom-1",
+                  loomTitle: "Service Loom",
+                  sourceResponseTitle: "Selected Fragment",
+                  sourceResponseCode: "R1",
+                  sourceCanonicalUri: "loom://service/response-1",
+                  blockIndex: 0,
+                  language: "ts",
+                  code: "export const value = 1;",
+                  exactHash: "hash",
+                  fence: "```ts",
+                  createdAt: "1",
+                  updatedAt: "1",
+                },
+              ],
+            }),
+            { status: 200 }
+          );
+        }
         if (url === "http://127.0.0.1:17633/references/suggest" && init?.method === "POST") {
           expect(JSON.parse(String(init.body))).toMatchObject({
             loomId: "loom-1",
@@ -1073,6 +1099,16 @@ test.describe("[engine-contract] Loom engine client selection", () => {
 
     await expect(client.listReferences({ loomId: "loom-1" })).resolves.toMatchObject({
       references: [{ referenceMentionId: "reference-1" }],
+    });
+    await expect(client.listCodeSnippets({ loomId: "loom-1", limit: 25 })).resolves.toMatchObject({
+      codeSnippets: [
+        {
+          codeBlockId: "codeblock-response-1-0-hash",
+          responseId: "response-1",
+          language: "ts",
+          code: "export const value = 1;",
+        },
+      ],
     });
     await expect(
       client.suggestReferences({ loomId: "loom-1", draftText: "Selected", limit: 5 })
@@ -2015,6 +2051,53 @@ test.describe("[engine-contract] Loom engine client selection", () => {
       error: undefined,
     });
     expect(JSON.stringify(result)).not.toContain("hidden");
+  });
+
+  test("Rust HTTP client reads generation response state and strips raw thinking fields", async () => {
+    const client = new RustHttpLoomEngineClient({
+      serviceUrl: "http://127.0.0.1:17633",
+      fetch: async (input, init) => {
+        expect(String(input)).toBe(
+          "http://127.0.0.1:17633/orchestration/runs/run-1/response-state"
+        );
+        expect(init?.method).toBe("GET");
+        return new Response(
+          JSON.stringify({
+            runId: "run-1",
+            loomId: "loom-1",
+            status: "running",
+            canResume: true,
+            liveTailSupported: false,
+            assistantResponse: {
+              responseId: "assistant-1",
+              loomId: "loom-1",
+              role: "assistant",
+              content: "Partial answer",
+              sequenceIndex: 2,
+              status: "streaming",
+              updatedAt: "2026-01-01T00:00:00Z",
+              metadata: { workflowRunId: "run-1", raw_thinking: "hidden" },
+            },
+          }),
+          { status: 200 }
+        );
+      },
+    });
+
+    const result = await client.getGenerationResponseState("run-1");
+
+    expect(result).toMatchObject({
+      workflowRunId: "run-1",
+      loomId: "loom-1",
+      status: "running",
+      assistantResponse: {
+        responseId: "assistant-1",
+        content: "Partial answer",
+        status: "streaming",
+      },
+    });
+    expect(JSON.stringify(result)).not.toContain("hidden");
+    expect(JSON.stringify(result)).not.toContain("raw_thinking");
   });
 
   test("Rust HTTP client treats missing orchestration cancel target as not found", async () => {

@@ -19,6 +19,7 @@ export interface NotificationSettings {
 export interface StartupSettings {
   launchAtLogin: boolean;
   reopenLastLooms: boolean;
+  continueFromLastLoom: boolean;
   runtimeCheckOnLaunch: boolean;
   showNewLoomIfNoSession: boolean;
 }
@@ -63,7 +64,8 @@ export const defaultAppSettings: AppSettings = {
   },
   startup: {
     launchAtLogin: false,
-    reopenLastLooms: true,
+    reopenLastLooms: false,
+    continueFromLastLoom: false,
     runtimeCheckOnLaunch: true,
     showNewLoomIfNoSession: true,
   },
@@ -149,6 +151,10 @@ function normalizeStartupSettings(value: unknown): StartupSettings {
   const settings = stored as Partial<StartupSettings>;
   return {
     launchAtLogin: Boolean(settings.launchAtLogin),
+    continueFromLastLoom:
+      typeof settings.continueFromLastLoom === "boolean"
+        ? settings.continueFromLastLoom
+        : defaultAppSettings.startup.continueFromLastLoom,
     reopenLastLooms:
       typeof settings.reopenLastLooms === "boolean"
         ? settings.reopenLastLooms

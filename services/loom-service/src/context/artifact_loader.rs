@@ -154,6 +154,9 @@ impl RepositoryContextLoader {
             if attached.response_capsule.is_some() {
                 continue;
             }
+            if attached.reference.target_kind == "code_block" {
+                continue;
+            }
 
             let Some(response_id) = attached.reference.target_id.as_deref() else {
                 continue;

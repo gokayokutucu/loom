@@ -21,6 +21,10 @@ interface LoomExportJson {
 async function openApp(page: Page) {
   await page.addInitScript(() => {
     window.localStorage.clear();
+    window.localStorage.setItem(
+      "loom-ai-app-settings-v1",
+      JSON.stringify({ mockDataEnabled: true })
+    );
   });
   await page.goto("/");
   await expect(page.getByTestId("loom-sidebar")).toBeVisible();
@@ -198,13 +202,171 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         )
       ).toBe(true);
       await expect(page.locator(".weft-split-view")).toBeVisible();
-      await expect(page.locator(".origin-split-panel")).toContainText(promptB);
-      await expect(page.locator(".origin-split-panel .prompt-revision-branch-indicator")).toContainText(
-        "Revision created"
+      await expect(page.locator(".origin-split-panel")).toContainText(editedPrompt);
+      await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
+        "2/2"
       );
+      await expect(page.locator(".origin-split-panel .response-weft-exploration-counter")).toHaveCount(0);
       await expect(page.locator(".weft-split-panel")).toContainText(editedPrompt);
       await expect(page.locator(".weft-split-panel .qa-item")).not.toContainText(promptA);
       await expect(page.locator(".origin-split-panel .response-weft-chip.is-revision-wefted")).toHaveCount(1);
+      const originTranscript = page.locator(".origin-split-panel .chat-transcript");
+      const originScrollBeforeRevisionToggle = await originTranscript.evaluate(
+        (element) => element.scrollTop
+      );
+      await page
+        .locator(".origin-split-panel .prompt-revision-action-counter")
+        .getByRole("button", { name: "Previous message revision" })
+        .click({ force: true });
+      await expect(page.locator(".origin-split-panel")).toContainText(promptB);
+      await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
+        "1/2"
+      );
+      await page.waitForTimeout(300);
+      const originScrollAfterOriginalRevision = await originTranscript.evaluate(
+        (element) => element.scrollTop
+      );
+      expect(Math.abs(originScrollAfterOriginalRevision - originScrollBeforeRevisionToggle)).toBeLessThanOrEqual(4);
+
+      await page
+        .locator(".origin-split-panel .prompt-revision-action-counter")
+        .getByRole("button", { name: "Next message revision" })
+        .click({ force: true });
+      await expect(page.locator(".origin-split-panel")).toContainText(editedPrompt);
+      await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
+        "2/2"
+      );
+      await expect(page.locator(".weft-split-panel")).toContainText(editedPrompt);
+      await expect
+        .poll(async () =>
+          page
+            .locator(`.origin-split-panel [data-prompt-response-id="${assistantB!.responseId}"]`)
+            .evaluate((element) => {
+              const targetRect = element.getBoundingClientRect();
+              const transcript = element.closest(".chat-transcript");
+              const transcriptRect = transcript?.getBoundingClientRect();
+              if (!transcript || !transcriptRect) return false;
+              const topDelta = targetRect.top - transcriptRect.top;
+              const atScrollEnd =
+                Math.abs(transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop) <= 2;
+              return topDelta >= 0 && (topDelta <= 48 || atScrollEnd);
+            })
+        )
+        .toBe(true);
+
+      await page
+        .locator(".weft-split-panel")
+        .getByRole("button", { name: "Return to Origin" })
+        .click();
+      await expect
+        .poll(async () =>
+          page
+            .locator(`.origin-split-panel [data-prompt-response-id="${assistantB!.responseId}"]`)
+            .evaluate((element) => {
+              const targetRect = element.getBoundingClientRect();
+              const transcript = element.closest(".chat-transcript");
+              const transcriptRect = transcript?.getBoundingClientRect();
+              if (!transcript || !transcriptRect) return false;
+              const topDelta = targetRect.top - transcriptRect.top;
+              const atScrollEnd =
+                Math.abs(transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop) <= 2;
+              return topDelta <= 48 || atScrollEnd;
+            })
+        )
+        .toBe(true);
+      const promptTargetAlignment = await page
+        .locator(`.origin-split-panel [data-prompt-response-id="${assistantB!.responseId}"]`)
+        .evaluate((element) => {
+          const targetRect = element.getBoundingClientRect();
+          const transcript = element.closest(".chat-transcript");
+          const transcriptRect = transcript?.getBoundingClientRect();
+          if (!transcriptRect) return null;
+          return {
+            topDelta: targetRect.top - transcriptRect.top,
+            bottomVisible: targetRect.bottom <= transcriptRect.bottom,
+            atScrollEnd:
+              Math.abs(transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop) <= 2,
+          };
+        });
+      expect(promptTargetAlignment).not.toBeNull();
+      expect(promptTargetAlignment!.topDelta).toBeGreaterThanOrEqual(0);
+      expect(
+        promptTargetAlignment!.topDelta <= 48 || promptTargetAlignment!.atScrollEnd
+      ).toBe(true);
+      expect(promptTargetAlignment!.bottomVisible).toBe(true);
+
+      await page.getByRole("button", { name: "Toggle Graph View" }).click();
+      await expect(page.getByRole("heading", { name: "Weft-aware Loom graph" })).toBeVisible();
+      const revisionGraphNodeByOriginalTitle = page
+        .locator(".loom-graph-node--response", { hasText: promptB })
+        .first();
+      await expect(revisionGraphNodeByOriginalTitle).toBeVisible();
+      const revisionGraphNodeDataId = await revisionGraphNodeByOriginalTitle.evaluate(
+        (element) => element.closest(".react-flow__node")?.getAttribute("data-id")
+      );
+      expect(revisionGraphNodeDataId).toBeTruthy();
+      const revisionGraphNode = page.locator(
+        `.react-flow__node[data-id="${revisionGraphNodeDataId}"] .loom-graph-node--response`
+      );
+      await expect(revisionGraphNode).toBeVisible();
+      await expect(
+        revisionGraphNode.getByRole("button", { name: "Previous graph message revision" })
+      ).toBeDisabled();
+      await revisionGraphNode
+        .getByRole("button", { name: "Next graph message revision" })
+        .click();
+      await expect(revisionGraphNode.locator("h3")).toContainText(editedPrompt);
+      await expect(revisionGraphNode.locator(".loom-graph-preview")).toContainText(
+        "Deterministic E2E provider"
+      );
+      await expect(
+        revisionGraphNode.getByRole("button", { name: "Next graph message revision" })
+      ).toBeDisabled();
+      await revisionGraphNode.click();
+      const graphPreviewModal = page.locator(".graph-response-preview-modal");
+      await expect(graphPreviewModal).toContainText(editedPrompt);
+      await expect(graphPreviewModal).toContainText("Deterministic E2E provider");
+      await page.getByRole("button", { name: "Close response preview" }).click();
+      await revisionGraphNode
+        .getByRole("button", { name: "Previous graph message revision" })
+        .click();
+      await expect(revisionGraphNode.locator("h3")).toContainText(promptB);
+      await expect(revisionGraphNode.locator(".loom-graph-preview")).not.toBeEmpty();
+      await page.getByRole("button", { name: "Toggle Graph View" }).click();
+      await expect(page.locator(".weft-split-view")).toBeVisible();
+
+      let delayedLoomDetailRequests = 0;
+      await page.route(/\/looms\/[^/?]+$/, async (route) => {
+        if (route.request().method() === "GET") {
+          delayedLoomDetailRequests += 1;
+          await new Promise((resolve) => setTimeout(resolve, 700));
+        }
+        await route.continue();
+      });
+      await page.reload();
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+      await expect.poll(() => delayedLoomDetailRequests).toBeGreaterThan(0);
+      await page.getByRole("button", { name: /^Open Revision:/ }).first().click();
+      await expect(page.getByRole("button", { name: "Return to Origin" })).toBeVisible();
+      await page.getByRole("button", { name: "Return to Origin" }).click();
+      await expect(page.locator(".weft-split-view")).toBeVisible();
+      await expect
+        .poll(async () =>
+          page
+            .locator(`.origin-split-panel [data-prompt-response-id="${assistantB!.responseId}"]`)
+            .evaluate((element) => {
+              const targetRect = element.getBoundingClientRect();
+              const transcript = element.closest(".chat-transcript");
+              const transcriptRect = transcript?.getBoundingClientRect();
+              if (!transcript || !transcriptRect) return false;
+              const topDelta = targetRect.top - transcriptRect.top;
+              const atScrollEnd =
+                Math.abs(transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop) <= 2;
+              return topDelta >= 0 && (topDelta <= 48 || atScrollEnd);
+            })
+        )
+        .toBe(true);
+
       expectNoForbiddenPayload(originAfter);
       expectNoForbiddenPayload(revisionResponses);
       expect(scenario.dbPath).toContain(scenario.tempDir);
@@ -246,7 +408,12 @@ test.describe("[legacy-typescript-local] Prompt editing", () => {
     await openApp(page);
     await openGraphLoom(page);
 
-    await page.getByTestId("edit-prompt-r-site-map").click();
+    await page.getByTestId("edit-prompt-r-site-map").evaluate((button) => {
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("Prompt edit trigger is not a button.");
+      }
+      button.click();
+    });
     await page.getByLabel("Edit prompt text").fill("Discarded edit");
     await page.getByRole("button", { name: "Cancel" }).click();
 
@@ -258,11 +425,39 @@ test.describe("[legacy-typescript-local] Prompt editing", () => {
     await expect(response.locator(".stale-answer-notice")).toBeHidden();
   });
 
+  test("keeps Save disabled until the prompt text actually changes", async ({ page }) => {
+    await openApp(page);
+    await openGraphLoom(page);
+
+    await page.getByTestId("edit-prompt-r-site-map").evaluate((button) => {
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("Prompt edit trigger is not a button.");
+      }
+      button.click();
+    });
+    const editor = page.getByLabel("Edit prompt text");
+    await expect(editor).toBeVisible();
+    const saveButton = page.getByRole("button", { name: "Save" });
+    await expect(saveButton).toBeDisabled();
+
+    const originalPrompt = await editor.inputValue();
+    await editor.fill(` ${originalPrompt}\n\n\n`);
+    await expect(saveButton).toBeDisabled();
+
+    await editor.fill(`${originalPrompt}\nPreserve readable hierarchy.`);
+    await expect(saveButton).toBeEnabled();
+  });
+
   test("preserves newlines and Reference metadata when saving", async ({ page }) => {
     await openApp(page);
     await openGraphLoom(page);
 
-    await page.getByTestId("edit-prompt-r-evidence-map").click();
+    await page.getByTestId("edit-prompt-r-evidence-map").evaluate((button) => {
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("Prompt edit trigger is not a button.");
+      }
+      button.click();
+    });
     await expect(page.locator(".prompt-edit-reference-row .sent-prompt-reference-token")).toBeVisible();
     await page.getByLabel("Edit prompt text").fill("Line one\nLine two");
     await page.getByRole("button", { name: "Save" }).click();

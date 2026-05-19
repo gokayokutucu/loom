@@ -314,6 +314,27 @@ export interface CancelMessageResult {
   error?: string;
 }
 
+export interface GenerationResponseSummary {
+  responseId: string;
+  loomId: string;
+  role: "user" | "assistant";
+  content: string;
+  sequenceIndex: number;
+  status?: string;
+  metadata?: JsonValue;
+  updatedAt: string;
+}
+
+export interface GenerationResponseStateResult {
+  workflowRunId: string;
+  loomId?: string;
+  userResponse?: GenerationResponseSummary;
+  assistantResponse?: GenerationResponseSummary;
+  status: "pending" | "running" | "completed" | "truncated" | "cancelled" | "failed" | string;
+  canResume: boolean;
+  liveTailSupported: boolean;
+}
+
 export type QuickAskIntent =
   | "acronym_expansion"
   | "definition"
@@ -411,11 +432,11 @@ export type EngineResponseEvent =
   | { type: "status"; payload: { message: string; stage?: string } }
   | {
       type: "user_message_created";
-      payload: { loomId: string; responseId: string; workflowRunId?: string };
+      payload: { loomId: string; responseId: string; workflowRunId?: string; loomTitle?: string };
     }
   | {
       type: "assistant_placeholder_created";
-      payload: { loomId: string; responseId: string; workflowRunId?: string };
+      payload: { loomId: string; responseId: string; workflowRunId?: string; loomTitle?: string };
     }
   | { type: "answer_plan_ready"; payload: { plan: JsonValue } }
   | { type: "context_ready"; payload: { contextBlockCount: number; numCtx?: number } }
@@ -427,8 +448,8 @@ export type EngineResponseEvent =
       };
     }
   | { type: "content_delta"; payload: { responseId: string; delta: string } }
-  | { type: "response_completed"; payload: { responseId: string; doneReason?: string } }
-  | { type: "response_truncated"; payload: { responseId: string; doneReason?: string } }
+  | { type: "response_completed"; payload: { responseId: string; doneReason?: string; loomTitle?: string } }
+  | { type: "response_truncated"; payload: { responseId: string; doneReason?: string; loomTitle?: string } }
   | {
       type: "response_cancelled";
       payload: { responseId?: string; message?: string; workflowRunId?: string };
@@ -443,6 +464,7 @@ export interface CreateOrOpenWeftInput {
   originResponseId?: string;
   weftKind?: "exploration" | "revision";
   title?: string;
+  initialPrompt?: string;
   summary?: string;
   reuseExisting?: boolean;
   source?: "response_action" | "quick_ask_convert" | "graph_node" | "reference";
@@ -538,6 +560,32 @@ export interface ListReferencesInput {
 
 export interface ListReferencesResult {
   references: LoomLink[];
+}
+
+export interface CodeSnippetReferenceItem {
+  codeBlockId: string;
+  responseId: string;
+  loomId: string;
+  loomTitle?: string;
+  sourceResponseTitle?: string;
+  sourceResponseCode?: string;
+  sourceCanonicalUri?: string;
+  blockIndex: number;
+  language?: string;
+  code: string;
+  exactHash?: string;
+  fence?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export interface ListCodeSnippetsInput {
+  loomId?: string;
+  limit?: number;
+}
+
+export interface ListCodeSnippetsResult {
+  codeSnippets: CodeSnippetReferenceItem[];
 }
 
 export interface SuggestReferencesInput {
@@ -651,6 +699,7 @@ export interface TypeScriptLocalLoomEngineDependencies {
   removeReference?: (input: RemoveReferenceInput) => Promise<void>;
   getReference?: (input: GetReferenceInput) => Promise<AddReferenceResult>;
   listReferences?: (input: ListReferencesInput) => Promise<ListReferencesResult>;
+  listCodeSnippets?: (input: ListCodeSnippetsInput) => Promise<ListCodeSnippetsResult>;
   suggestReferences?: (input: SuggestReferencesInput) => Promise<SuggestReferencesResult>;
   createBookmark?: (input: CreateBookmarkInput) => Promise<BookmarkResult>;
   deleteBookmark?: (input: DeleteBookmarkInput) => Promise<void>;

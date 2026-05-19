@@ -27,6 +27,9 @@ export interface LoomGraphNodeData extends Record<string, unknown> {
   hasExistingWeft?: boolean;
   hasRevisionWeft?: boolean;
   weftCount?: number;
+  revisionVariantCount?: number;
+  revisionVariantIndex?: number;
+  onRevisionNavigate?: (nextIndex: number) => void;
   isTerminalResponse?: boolean;
   isResponsePending?: boolean;
   continuationOpen?: boolean;
@@ -70,6 +73,9 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
     hasExistingWeft,
     hasRevisionWeft,
     weftCount = 0,
+    revisionVariantCount = 0,
+    revisionVariantIndex = 0,
+    onRevisionNavigate,
     isTerminalResponse,
     isResponsePending,
     continuationOpen,
@@ -85,6 +91,16 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
   const showPreview = Boolean(previewText);
   const showPending = projectionNode.kind === "response" && isResponsePending && !showPreview;
   const nodeTitle = cleanMarkdownDisplayText(projectionNode.title) || projectionNode.title;
+  const hasRevisionCarousel =
+    projectionNode.kind === "response" &&
+    revisionVariantCount > 1 &&
+    Boolean(onRevisionNavigate);
+  const previousRevisionIndex =
+    hasRevisionCarousel && revisionVariantIndex > 0 ? revisionVariantIndex - 1 : undefined;
+  const nextRevisionIndex =
+    hasRevisionCarousel && revisionVariantIndex < revisionVariantCount - 1
+      ? revisionVariantIndex + 1
+      : undefined;
 
   return (
     <article className={nodeClassName(projectionNode)}>
@@ -115,7 +131,39 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
           </button>
         )}
       </div>
-      <h3>{nodeTitle}</h3>
+      <div className="loom-graph-node-title-row">
+        {hasRevisionCarousel && (
+          <button
+            type="button"
+            className="loom-graph-node-revision-nav"
+            aria-label="Previous graph message revision"
+            title="Previous message revision"
+            disabled={previousRevisionIndex === undefined}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (previousRevisionIndex !== undefined) onRevisionNavigate?.(previousRevisionIndex);
+            }}
+          >
+            {"<"}
+          </button>
+        )}
+        <h3>{nodeTitle}</h3>
+        {hasRevisionCarousel && (
+          <button
+            type="button"
+            className="loom-graph-node-revision-nav"
+            aria-label="Next graph message revision"
+            title="Next message revision"
+            disabled={nextRevisionIndex === undefined}
+            onClick={(event) => {
+              event.stopPropagation();
+              if (nextRevisionIndex !== undefined) onRevisionNavigate?.(nextRevisionIndex);
+            }}
+          >
+            {">"}
+          </button>
+        )}
+      </div>
       {showSummary && (
         <p className="loom-graph-summary">{summaryText}</p>
       )}

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Copy } from "lucide-react";
+import { Check, Copy, Link2 } from "lucide-react";
 import { parseAssistantMarkdown } from "../services/assistantMarkdown";
+import type { ResponseCodeBlock } from "../types";
 
 const codeKeywords = new Set([
   "as",
@@ -129,20 +130,29 @@ function CodeBlock({
   language,
   code,
   closed,
+  codeBlock,
   onCopyCode,
+  onAddCodeReference,
 }: {
   language: string;
   code: string;
   closed: boolean;
+  codeBlock?: ResponseCodeBlock;
   onCopyCode?: (code: string) => Promise<boolean>;
+  onAddCodeReference?: (codeBlock: ResponseCodeBlock) => Promise<boolean>;
 }) {
   const [copied, setCopied] = useState(false);
+  const [referenced, setReferenced] = useState(false);
   const copiedTimerRef = useRef<number | null>(null);
+  const referencedTimerRef = useRef<number | null>(null);
   const canCopy = Boolean(onCopyCode) && closed && code.trim().length > 0;
+  const canAddReference =
+    Boolean(onAddCodeReference) && closed && code.trim().length > 0;
 
   useEffect(() => {
     return () => {
       if (copiedTimerRef.current) window.clearTimeout(copiedTimerRef.current);
+      if (referencedTimerRef.current) window.clearTimeout(referencedTimerRef.current);
     };
   }, []);
 
@@ -158,27 +168,74 @@ function CodeBlock({
     }, 2000);
   }
 
+  async function addCodeReference() {
+    if (!canAddReference || !onAddCodeReference) return;
+    const success = await onAddCodeReference(
+      codeBlock ?? {
+        blockIndex: 0,
+        language,
+        code,
+      }
+    );
+    if (!success) return;
+    setReferenced(true);
+    if (referencedTimerRef.current) window.clearTimeout(referencedTimerRef.current);
+    referencedTimerRef.current = window.setTimeout(() => {
+      setReferenced(false);
+      referencedTimerRef.current = null;
+    }, 2000);
+  }
+
   return (
     <figure className="assistant-code-block">
       <figcaption>
         <span>{language}</span>
-        {onCopyCode && (
-          <button
-            type="button"
-            className={copied ? "assistant-code-copy copied" : "assistant-code-copy"}
-            disabled={!canCopy}
-            onClick={copyCode}
-            aria-label={copied ? "Copied" : `Copy ${language} code`}
-            title={canCopy ? (copied ? "Copied" : "Copy") : "Copy unavailable until code block completes"}
-          >
-            <Copy size={13} />
-            {copied && (
-              <span className="assistant-code-copy-check" aria-hidden="true">
-                <Check size={9} strokeWidth={3} />
-              </span>
-            )}
-          </button>
-        )}
+        <div className="assistant-code-actions">
+          {onCopyCode && (
+            <button
+              type="button"
+              className={copied ? "assistant-code-copy copied" : "assistant-code-copy"}
+              disabled={!canCopy}
+              onClick={copyCode}
+              aria-label={copied ? "Copied" : `Copy ${language} code`}
+              title={
+                canCopy ? (copied ? "Copied" : "Copy") : "Copy unavailable until code block completes"
+              }
+            >
+              <Copy size={13} />
+              {copied && (
+                <span className="assistant-code-copy-check" aria-hidden="true">
+                  <Check size={9} strokeWidth={3} />
+                </span>
+              )}
+            </button>
+          )}
+          {onAddCodeReference && (
+            <button
+              type="button"
+              className={
+                referenced ? "assistant-code-reference referenced" : "assistant-code-reference"
+              }
+              disabled={!canAddReference}
+              onClick={addCodeReference}
+              aria-label={`Add ${language} code block as Reference`}
+              title={
+                canAddReference
+                  ? referenced
+                    ? "Reference added"
+                    : "Add Reference"
+                  : "Reference unavailable until code block completes"
+              }
+            >
+              <Link2 size={13} />
+              {referenced && (
+                <span className="assistant-code-copy-check" aria-hidden="true">
+                  <Check size={9} strokeWidth={3} />
+                </span>
+              )}
+            </button>
+          )}
+        </div>
       </figcaption>
       <pre>
         <code>
@@ -191,11 +248,16 @@ function CodeBlock({
 
 export function AssistantMarkdownContent({
   markdown,
+  codeBlocks,
   onCopyCode,
+  onAddCodeReference,
 }: {
   markdown: string;
+  codeBlocks?: ResponseCodeBlock[];
   onCopyCode?: (code: string) => Promise<boolean>;
+  onAddCodeReference?: (codeBlock: ResponseCodeBlock) => Promise<boolean>;
 }) {
+  let renderedCodeBlockIndex = -1;
   return (
     <>
       {parseAssistantMarkdown(markdown).map((block, index) => {
@@ -271,13 +333,25 @@ export function AssistantMarkdownContent({
             </div>
           );
         }
+        renderedCodeBlockIndex += 1;
+        const persistedCodeBlock = codeBlocks?.find(
+          (codeBlock) => codeBlock.blockIndex === renderedCodeBlockIndex
+        );
         return (
           <CodeBlock
             key={`code-${index}`}
             language={block.language}
             code={block.code}
             closed={block.closed}
+            codeBlock={
+              persistedCodeBlock ?? {
+                blockIndex: renderedCodeBlockIndex,
+                language: block.language,
+                code: block.code,
+              }
+            }
             onCopyCode={onCopyCode}
+            onAddCodeReference={onAddCodeReference}
           />
         );
       })}

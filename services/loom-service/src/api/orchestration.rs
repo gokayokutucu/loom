@@ -30,7 +30,7 @@ use crate::{
     },
     runtime::OperationKind,
     storage::repositories::{
-        looms::LoomRepository,
+        looms::{LoomMetadataUpdate, LoomRepository},
         responses::{NewResponse, ResponseRecord, ResponseRepository},
     },
 };
@@ -38,14 +38,20 @@ use async_stream::stream;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::sse::{Event, KeepAlive, Sse},
+    response::{
+        sse::{Event, KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     Json,
 };
 use futures_util::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::{convert::Infallible, time::Instant};
-use tokio::time::timeout;
+use std::{
+    convert::Infallible,
+    time::{Duration, Instant},
+};
+use tokio::time::{sleep, timeout};
 
 const MAX_RECENT_CONTEXT_MESSAGES: usize = 10;
 const FORBIDDEN_CONTEXT_KEYS: [&str; 4] = [
@@ -102,16 +108,26 @@ pub async fn dry_run(
 pub async fn execute(
     State(state): State<crate::api::state::AppState>,
     Json(input): Json<OrchestrationExecuteInput>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    Sse::new(execute_stream(state, input)).keep_alive(KeepAlive::default())
+) -> Response {
+    if state.restart.is_draining() {
+        return runtime_draining_response();
+    }
+    Sse::new(execute_stream(state, input))
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 pub async fn regenerate_response(
     State(state): State<crate::api::state::AppState>,
     Path(response_id): Path<String>,
     Json(input): Json<RegenerateResponseInput>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    Sse::new(regenerate_response_stream(state, response_id, input)).keep_alive(KeepAlive::default())
+) -> Response {
+    if state.restart.is_draining() {
+        return runtime_draining_response();
+    }
+    Sse::new(regenerate_response_stream(state, response_id, input))
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 pub async fn cancel(
@@ -127,14 +143,22 @@ pub async fn cancel(
 pub async fn deep_synthesis(
     State(state): State<crate::api::state::AppState>,
     Json(input): Json<DeepSynthesisRequest>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
-    Sse::new(deep_synthesis_stream(state, input)).keep_alive(KeepAlive::default())
+) -> Response {
+    if state.restart.is_draining() {
+        return runtime_draining_response();
+    }
+    Sse::new(deep_synthesis_stream(state, input))
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 pub async fn deep_synthesis_eval(
     State(state): State<crate::api::state::AppState>,
     Json(input): Json<DeepSynthesisEvalRequest>,
 ) -> Result<Json<DeepSynthesisEvalSummary>, (StatusCode, Json<OrchestrationApiError>)> {
+    if state.restart.is_draining() {
+        return Err(runtime_draining_error());
+    }
     let started = Instant::now();
     let prompt = eval_prompt(&input.prompt).to_string();
     let requested_mode = if matches!(
@@ -600,6 +624,29 @@ fn not_found_error(message: impl Into<String>) -> (StatusCode, Json<Orchestratio
     )
 }
 
+fn runtime_draining_error() -> (StatusCode, Json<OrchestrationApiError>) {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(OrchestrationApiError {
+            code: "runtime_draining".to_string(),
+            message: "loom-service is draining and is not accepting new generation requests."
+                .to_string(),
+        }),
+    )
+}
+
+fn runtime_draining_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(json!({
+            "error": "runtime_draining",
+            "kind": "runtime_draining",
+            "message": "loom-service is draining and is not accepting new generation requests."
+        })),
+    )
+        .into_response()
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OrchestrationDryRunResponse {
@@ -871,6 +918,7 @@ struct PersistedResponseLifecycle {
     user_response_id: String,
     assistant_response_id: String,
     assistant_content: String,
+    updated_loom_title: Option<String>,
 }
 
 impl PersistedResponseLifecycle {
@@ -879,6 +927,7 @@ impl PersistedResponseLifecycle {
             "loomId": self.loom_id,
             "userResponseId": self.user_response_id,
             "assistantResponseId": self.assistant_response_id,
+            "loomTitle": self.updated_loom_title,
         })
     }
 }
@@ -992,6 +1041,7 @@ async fn create_persisted_response_lifecycle(
             user_response_id: user.response_id,
             assistant_response_id,
             assistant_content: String::new(),
+            updated_loom_title: None,
         }));
     }
 
@@ -1018,6 +1068,7 @@ async fn create_persisted_response_lifecycle(
     })
     .to_string();
 
+    let existing_responses = repository.list_responses_for_loom(&loom_id).await?;
     repository
         .insert_response_pair_at_next_sequence(
             NewResponse {
@@ -1042,19 +1093,116 @@ async fn create_persisted_response_lifecycle(
                 code: None,
                 canonical_uri: None,
                 created_at: now.clone(),
-                updated_at: now,
+                updated_at: now.clone(),
                 sequence_index: 0,
                 metadata_json: Some(assistant_metadata),
             },
         )
         .await?;
+    let updated_loom_title = maybe_title_weft_from_first_prompt(
+        database,
+        &loom_id,
+        &input.prompt,
+        existing_responses.is_empty(),
+        &now,
+    )
+    .await?;
 
     Ok(Some(PersistedResponseLifecycle {
         loom_id,
         user_response_id,
         assistant_response_id,
         assistant_content: String::new(),
+        updated_loom_title,
     }))
+}
+
+async fn maybe_title_weft_from_first_prompt(
+    database: &crate::storage::db::Database,
+    loom_id: &str,
+    prompt: &str,
+    is_first_visible_turn: bool,
+    now: &str,
+) -> Result<Option<String>, crate::error::ServiceError> {
+    if !is_first_visible_turn {
+        return Ok(None);
+    }
+    let loom_repository = LoomRepository::new(database);
+    let Some(loom) = loom_repository.get_loom(loom_id).await? else {
+        return Ok(None);
+    };
+    if loom.kind != "weft" {
+        return Ok(None);
+    }
+    let title = weft_title_from_first_prompt(&loom.metadata_json, prompt);
+    let updated = loom_repository
+        .update_loom_metadata(
+            loom_id,
+            &LoomMetadataUpdate {
+                title: Some(title.clone()),
+                updated_at: now.to_string(),
+                ..LoomMetadataUpdate::default()
+            },
+        )
+        .await?;
+    Ok(updated.map(|record| record.title))
+}
+
+fn weft_title_from_first_prompt(metadata_json: &Option<String>, prompt: &str) -> String {
+    let is_revision = metadata_json
+        .as_deref()
+        .and_then(|metadata| serde_json::from_str::<Value>(metadata).ok())
+        .and_then(|metadata| {
+            metadata
+                .get("weftKind")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        })
+        .as_deref()
+        == Some("revision");
+    let prefix = if is_revision { "Revision: " } else { "Loom: " };
+    format!("{prefix}{}", compact_prompt_title(prompt))
+}
+
+fn compact_prompt_title(prompt: &str) -> String {
+    let normalized = prompt
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '*' | '#' | '-' | '•' | '|'))
+        .trim()
+        .to_string();
+    if normalized.is_empty() {
+        return "Untitled".to_string();
+    }
+    truncate_at_word_boundary(&normalized, 72)
+}
+
+fn truncate_at_word_boundary(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    let mut last_boundary = 0;
+    let mut end_byte = value.len();
+    for (char_index, (byte_index, ch)) in value.char_indices().enumerate() {
+        if char_index >= max_chars {
+            end_byte = byte_index;
+            break;
+        }
+        if ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '.' | '?' | '!') {
+            last_boundary = byte_index;
+        }
+    }
+    let cut = if last_boundary >= max_chars / 2 {
+        last_boundary
+    } else {
+        end_byte
+    };
+    value[..cut]
+        .trim_end_matches(|ch: char| {
+            ch.is_whitespace() || matches!(ch, ',' | ';' | ':' | '.' | '-' | '—' | '–')
+        })
+        .to_string()
 }
 
 fn answer_plan_summary(answer_plan: &AnswerPlan) -> Value {
@@ -1961,6 +2109,36 @@ fn deterministic_e2e_answer(
     Some("Deterministic E2E provider only answers the Event Sourcing proof scenario.".to_string())
 }
 
+fn deterministic_e2e_thinking_delay_ms() -> u64 {
+    std::env::var("LOOM_SERVICE_E2E_THINKING_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn deterministic_e2e_stream_chunk_delay_ms() -> u64 {
+    std::env::var("LOOM_SERVICE_E2E_STREAM_CHUNK_DELAY_MS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0)
+}
+
+fn deterministic_e2e_answer_chunks(answer: &str, chunk_delay_ms: u64) -> Vec<String> {
+    if chunk_delay_ms == 0 {
+        return vec![answer.to_string()];
+    }
+    let chunks = answer
+        .split_inclusive(char::is_whitespace)
+        .filter(|chunk| !chunk.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if chunks.is_empty() {
+        vec![answer.to_string()]
+    } else {
+        chunks
+    }
+}
+
 fn event_sourcing_detailed_e2e_answer() -> String {
     [
         "# Event Sourcing",
@@ -2396,24 +2574,49 @@ fn execute_stream(
         }
 
         if let Some(answer) = deterministic_e2e_answer(&execution_input, &built_context) {
-            if let Some(lifecycle) = persisted_lifecycle.as_mut() {
-                lifecycle.assistant_content.push_str(&answer);
-                let _ = update_persisted_assistant_content(&state.database, lifecycle).await;
+            let e2e_thinking_delay_ms = deterministic_e2e_thinking_delay_ms();
+            if answer_plan.use_thinking && e2e_thinking_delay_ms > 0 {
+                let thinking_started_at = Instant::now();
+                yield Ok(to_sse_event(service_event(run_id.clone(), "orchestration.progress", json!({
+                    "runId": run_id,
+                    "thinking": {
+                        "status": "active",
+                        "durationMs": thinking_started_at.elapsed().as_millis()
+                    }
+                }))));
+                sleep(Duration::from_millis(e2e_thinking_delay_ms)).await;
+                yield Ok(to_sse_event(service_event(run_id.clone(), "orchestration.progress", json!({
+                    "runId": run_id,
+                    "thinking": {
+                        "status": "active",
+                        "durationMs": thinking_started_at.elapsed().as_millis()
+                    }
+                }))));
             }
-            let payload = merge_response_ids(json!({
-                "runId": run_id,
-                "delta": answer,
-                "content": answer
-            }), persisted_lifecycle.as_ref());
-            let _ = runner
-                .persist_event(
-                    run_id.clone(),
-                    "response.delta".to_string(),
-                    Some("generate".to_string()),
-                    payload.to_string(),
-                )
-                .await;
-            yield Ok(to_sse_event(service_event(run_id.clone(), "response.delta", payload)));
+            let chunk_delay_ms = deterministic_e2e_stream_chunk_delay_ms();
+            for chunk in deterministic_e2e_answer_chunks(&answer, chunk_delay_ms) {
+                if chunk_delay_ms > 0 {
+                    sleep(Duration::from_millis(chunk_delay_ms)).await;
+                }
+                if let Some(lifecycle) = persisted_lifecycle.as_mut() {
+                    lifecycle.assistant_content.push_str(&chunk);
+                    let _ = update_persisted_assistant_content(&state.database, lifecycle).await;
+                }
+                let payload = merge_response_ids(json!({
+                    "runId": run_id,
+                    "delta": chunk,
+                    "content": chunk
+                }), persisted_lifecycle.as_ref());
+                let _ = runner
+                    .persist_event(
+                        run_id.clone(),
+                        "response.delta".to_string(),
+                        Some("generate".to_string()),
+                        payload.to_string(),
+                    )
+                    .await;
+                yield Ok(to_sse_event(service_event(run_id.clone(), "response.delta", payload)));
+            }
             let _ = runner.mark_stage_done(&run_id, "generate").await;
             if let Some(lifecycle) = persisted_lifecycle.as_ref() {
                 let _ = update_persisted_assistant_status(
@@ -3556,8 +3759,9 @@ mod tests {
         MAX_RECENT_CONTEXT_MESSAGES,
     };
     use crate::{
+        api::state::AppState,
         capabilities::strategy::{ExecutionStrategy, ExecutionStrategyDecision, RequestedMode},
-        config::LoomServiceConfig,
+        config::{ConfigManager, LoomServiceConfig, OllamaConfig},
         context::{
             manager::ContextManager,
             types::{
@@ -3573,6 +3777,8 @@ mod tests {
             },
             planner::DeterministicPlanner,
         },
+        providers::ollama::OllamaRuntime,
+        runtime::{OperationTracker, RestartState, RuntimeShutdownRequest},
         storage::{
             db::test_database,
             repositories::{
@@ -3590,7 +3796,8 @@ mod tests {
             },
         },
     };
-    use axum::Json;
+    use axum::{extract::State, http::StatusCode, Json};
+    use std::{path::PathBuf, time::Duration};
 
     #[tokio::test]
     async fn plan_endpoint_returns_answer_plan() {
@@ -3602,6 +3809,58 @@ mod tests {
         .await;
 
         assert!(!answer_plan.use_thinking);
+    }
+
+    #[tokio::test]
+    async fn execute_rejects_new_generation_while_draining() {
+        let state = orchestration_test_state().await;
+        state.restart.request_shutdown(
+            state.operations.clone(),
+            RuntimeShutdownRequest {
+                mode: Some("drain".to_string()),
+                reason: Some("test".to_string()),
+                timeout_ms: Some(1_000),
+            },
+        );
+
+        let response = super::execute(
+            State(state),
+            Json(OrchestrationExecuteInput {
+                loom_id: None,
+                response_id: None,
+                prompt: "hello".to_string(),
+                references: Vec::new(),
+                response_mode: ResponseMode::Instant,
+                model: "test-model".to_string(),
+                options: None,
+                persist_workflow: false,
+                regenerate_from_response_id: None,
+                stale_assistant_response_id: None,
+                source: None,
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    async fn orchestration_test_state() -> AppState {
+        AppState {
+            database: test_database().await,
+            ollama: OllamaRuntime::new(OllamaConfig {
+                base_url: "http://127.0.0.1:9".to_string(),
+                request_timeout: Duration::from_millis(200),
+                first_chunk_timeout: Duration::from_millis(200),
+                stream_idle_timeout: Duration::from_millis(200),
+                security: Default::default(),
+            }),
+            config: ConfigManager::new(
+                PathBuf::from("/tmp/loom-orchestration-runtime-test.toml"),
+                LoomServiceConfig::default(),
+            ),
+            operations: OperationTracker::default(),
+            restart: RestartState::default(),
+        }
     }
 
     #[tokio::test]
@@ -3994,6 +4253,84 @@ mod tests {
                 .expect("metadata json");
         assert_eq!(metadata["status"], "streaming");
         assert_eq!(metadata["workflowRunId"], "workflow-1");
+    }
+
+    #[tokio::test]
+    async fn first_weft_prompt_updates_weft_title() {
+        let database = test_database().await;
+        insert_test_loom(&database).await;
+        LoomRepository::new(&database)
+            .insert_loom(&NewLoom {
+                loom_id: "weft-1".to_string(),
+                title: "Loom: .NET mi Java mı?".to_string(),
+                summary: Some("Branched from Event sourcing nedir.".to_string()),
+                code: Some("W-TEST".to_string()),
+                canonical_uri: Some("loom://wefts/weft-1".to_string()),
+                kind: "weft".to_string(),
+                origin_loom_id: Some("loom-1".to_string()),
+                origin_response_id: Some("origin-response".to_string()),
+                created_at: "1".to_string(),
+                updated_at: "1".to_string(),
+                metadata_json: Some(r#"{"weftKind":"exploration"}"#.to_string()),
+            })
+            .await
+            .expect("insert weft");
+        let input = OrchestrationExecuteInput {
+            loom_id: Some("weft-1".to_string()),
+            response_id: None,
+            prompt: "o zaman .net bildiğin için onunla devam etmem daha doğru olur?".to_string(),
+            references: Vec::new(),
+            response_mode: ResponseMode::Instant,
+            model: "qwen3.5:9b".to_string(),
+            options: None,
+            persist_workflow: true,
+            regenerate_from_response_id: None,
+            stale_assistant_response_id: None,
+            source: Some("composer".to_string()),
+        };
+        let answer_plan = DeterministicPlanner::plan(PlannerInput {
+            clean_user_prompt: input.prompt.clone(),
+            selected_response_mode: input.response_mode.clone(),
+            ..PlannerInput::default()
+        });
+
+        let lifecycle = create_persisted_response_lifecycle(
+            &database,
+            &input,
+            "workflow-weft-title",
+            &answer_plan,
+            &ResponseModeResolution::passthrough(input.response_mode.clone()),
+        )
+        .await
+        .expect("lifecycle persists")
+        .expect("lifecycle exists");
+
+        assert_eq!(
+            lifecycle.updated_loom_title.as_deref(),
+            Some("Loom: o zaman .net bildiğin için onunla devam etmem daha doğru olur?")
+        );
+        let weft = LoomRepository::new(&database)
+            .get_loom("weft-1")
+            .await
+            .expect("get weft")
+            .expect("weft exists");
+        assert_eq!(
+            weft.title,
+            "Loom: o zaman .net bildiğin için onunla devam etmem daha doğru olur?"
+        );
+    }
+
+    #[test]
+    fn compact_prompt_title_does_not_leave_half_word_suffix() {
+        let title = super::weft_title_from_first_prompt(
+            &Some(r#"{"weftKind":"revision"}"#.to_string()),
+            "rust ve go ile ayrı bir service yapsam .net uygulamama olur mu sence? bu cümle uzarsa kırp",
+        );
+
+        assert_eq!(
+            title,
+            "Revision: rust ve go ile ayrı bir service yapsam .net uygulamama olur mu sence?"
+        );
     }
 
     #[tokio::test]

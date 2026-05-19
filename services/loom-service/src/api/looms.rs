@@ -4,6 +4,7 @@ use crate::{
     error::ServiceError,
     storage::repositories::{
         addresses::{AddressRepository, NewAddress, NewAddressAlias},
+        code_blocks::{ResponseCodeBlockRecord, ResponseCodeBlockRepository},
         looms::{LoomMetadataUpdate, LoomRecord, LoomRepository, NewLoom},
         responses::{ResponseRecord, ResponseRepository},
     },
@@ -15,6 +16,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 
 const FORBIDDEN_THINKING_KEYS: [&str; 8] = [
     "raw_thinking",
@@ -97,6 +99,19 @@ pub struct ResponseDto {
     pub updated_at: String,
     pub sequence_index: i64,
     pub metadata: Option<Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub code_blocks: Vec<ResponseCodeBlockDto>,
+}
+
+#[derive(Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ResponseCodeBlockDto {
+    pub code_block_id: String,
+    pub block_index: i64,
+    pub language: Option<String>,
+    pub code: String,
+    pub exact_hash: String,
+    pub fence: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -132,13 +147,15 @@ pub async fn get_loom(
     if loom.is_deleted {
         return Err(not_found());
     }
-    let responses = ResponseRepository::new(&state.database)
+    let response_records = ResponseRepository::new(&state.database)
         .list_responses_for_loom(&loom_id)
         .await
-        .map_err(storage_error)?
-        .into_iter()
-        .map(response_to_dto)
-        .collect();
+        .map_err(storage_error)?;
+    let code_blocks = ResponseCodeBlockRepository::new(&state.database)
+        .list_by_loom(&loom_id)
+        .await
+        .map_err(storage_error)?;
+    let responses = responses_to_dtos(response_records, code_blocks);
 
     Ok(Json(LoomResponse {
         loom: loom_to_dto(loom, responses),
@@ -384,7 +401,32 @@ fn loom_to_dto(loom: LoomRecord, responses: Vec<ResponseDto>) -> LoomDto {
     }
 }
 
-fn response_to_dto(response: ResponseRecord) -> ResponseDto {
+fn responses_to_dtos(
+    responses: Vec<ResponseRecord>,
+    code_blocks: Vec<ResponseCodeBlockRecord>,
+) -> Vec<ResponseDto> {
+    let mut code_blocks_by_response: HashMap<String, Vec<ResponseCodeBlockDto>> = HashMap::new();
+    for code_block in code_blocks {
+        code_blocks_by_response
+            .entry(code_block.response_id.clone())
+            .or_default()
+            .push(code_block_to_dto(code_block));
+    }
+    responses
+        .into_iter()
+        .map(|response| {
+            let code_blocks = code_blocks_by_response
+                .remove(&response.response_id)
+                .unwrap_or_default();
+            response_to_dto(response, code_blocks)
+        })
+        .collect()
+}
+
+fn response_to_dto(
+    response: ResponseRecord,
+    code_blocks: Vec<ResponseCodeBlockDto>,
+) -> ResponseDto {
     let display_code = display_code(DisplayCodeKind::Response, &response.response_id);
     ResponseDto {
         response_id: response.response_id,
@@ -402,6 +444,18 @@ fn response_to_dto(response: ResponseRecord) -> ResponseDto {
             .metadata_json
             .as_deref()
             .and_then(|metadata| serde_json::from_str(metadata).ok()),
+        code_blocks,
+    }
+}
+
+fn code_block_to_dto(code_block: ResponseCodeBlockRecord) -> ResponseCodeBlockDto {
+    ResponseCodeBlockDto {
+        code_block_id: code_block.code_block_id,
+        block_index: code_block.block_index,
+        language: code_block.language,
+        code: code_block.code,
+        exact_hash: code_block.exact_hash,
+        fence: code_block.fence,
     }
 }
 

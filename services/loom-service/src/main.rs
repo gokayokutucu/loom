@@ -52,19 +52,28 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let config_manager = ConfigManager::new(config.config_path.clone(), config.config_file.clone());
     let operations = OperationTracker::default();
     let restart_state = RestartState::default();
+    restart_state.spawn_owner_reaper(operations.clone());
+    let shutdown_state = restart_state.clone();
     let app = api::router(database, ollama, config_manager, operations, restart_state);
     let listener = TcpListener::bind(address).await?;
     tracing::info!(%address, "loom-service started; health endpoint ready at /health");
 
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(shutdown_signal(shutdown_state))
         .await?;
 
     Ok(())
 }
 
-async fn shutdown_signal() {
-    if let Err(error) = tokio::signal::ctrl_c().await {
-        tracing::warn!(%error, "failed to listen for shutdown signal");
+async fn shutdown_signal(restart_state: RestartState) {
+    tokio::select! {
+        result = tokio::signal::ctrl_c() => {
+            if let Err(error) = result {
+                tracing::warn!(%error, "failed to listen for shutdown signal");
+            }
+        }
+        _ = restart_state.wait_for_shutdown() => {
+            tracing::info!("loom-service graceful drain shutdown requested");
+        }
     }
 }

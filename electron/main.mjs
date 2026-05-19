@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain } from "electron";
+import { app, BrowserWindow, ipcMain, nativeImage } from "electron";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { LoomServiceSidecarManager } from "./sidecar-manager.mjs";
@@ -11,8 +11,25 @@ const devServerUrl = process.env.LOOM_ELECTRON_DEV_SERVER_URL;
 
 let mainWindow;
 let sidecar;
+let quitInProgress = false;
 
-function loadingHtml() {
+function getAppIconPath() {
+  const extension = process.platform === "darwin" ? "icns" : "ico";
+  return app.isPackaged
+    ? path.join(process.resourcesPath, `loom_logo.${extension}`)
+    : path.join(repoRoot, "public", `loom_logo.${extension}`);
+}
+
+function getAppIcon() {
+  const icon = nativeImage.createFromPath(getAppIconPath());
+  return icon.isEmpty() ? null : icon;
+}
+
+function loadingHtml(message = "The local loom-service sidecar is starting. The app will open when the runtime is ready.") {
+  const escapedMessage = String(message)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
   return `<!doctype html>
   <html lang="en">
     <head>
@@ -44,7 +61,7 @@ function loadingHtml() {
     <body>
       <main>
         <h1>Starting Loom runtime</h1>
-        <p>The local loom-service sidecar is starting. The app will open when the runtime is ready.</p>
+        <p>${escapedMessage}</p>
       </main>
     </body>
   </html>`;
@@ -94,6 +111,7 @@ function errorHtml(message) {
 
 function createWindow(runtimeStatus) {
   const serviceUrl = runtimeStatus.serviceUrl ?? "http://127.0.0.1:17633";
+  const appIcon = getAppIcon();
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -103,6 +121,7 @@ function createWindow(runtimeStatus) {
     titleBarStyle: "hiddenInset",
     trafficLightPosition: { x: 14, y: 14 },
     backgroundColor: "#101112",
+    icon: appIcon ? getAppIconPath() : undefined,
     show: false,
     webPreferences: {
       contextIsolation: true,
@@ -117,7 +136,11 @@ function createWindow(runtimeStatus) {
     mainWindow?.show();
   });
 
-  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml())}`);
+  const startupMessage =
+    runtimeStatus?.state === "draining"
+      ? "Finishing previous response..."
+      : undefined;
+  mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(loadingHtml(startupMessage))}`);
   return mainWindow;
 }
 
@@ -165,6 +188,11 @@ ipcMain.handle("loom:window-close", () => {
 });
 
 app.whenReady().then(async () => {
+  const appIcon = getAppIcon();
+  if (process.platform === "darwin" && appIcon && app.dock) {
+    app.dock.setIcon(appIcon);
+  }
+
   sidecar = new LoomServiceSidecarManager({ app, repoRoot });
   try {
     const runtimeStatus = await sidecar.start({
@@ -194,8 +222,10 @@ app.whenReady().then(async () => {
 });
 
 app.on("before-quit", async (event) => {
+  if (quitInProgress) return;
   if (!sidecar || sidecar.getStatus().state === "stopped") return;
   event.preventDefault();
+  quitInProgress = true;
   try {
     await sidecar.stop();
   } finally {

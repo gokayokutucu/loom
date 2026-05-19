@@ -16,6 +16,11 @@
     "service:check": "cargo check --manifest-path services/loom-service/Cargo.toml",
     "service:test": "cargo test --manifest-path services/loom-service/Cargo.toml"
   },
+  "build": {
+    "mac": {
+      "icon": "public/loom_logo.icns"
+    }
+  },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
     "@xyflow/react": "^12.10.2",
