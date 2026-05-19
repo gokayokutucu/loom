@@ -12,6 +12,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { formatBadgeCode } from "../../services/displayCode";
 import { cleanMarkdownDisplayText } from "../../services/assistantMarkdown";
+import { formatRelativeTimestamp } from "../../services/timeLabels";
 import type { LoomGraphProjectionNode } from "../../services/loomGraphProjection";
 import type { LoomForkRecord, ResponseItem } from "../../types";
 import { graphNodePreviewText } from "./graphNodePreview";
@@ -284,7 +285,14 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
                     <span>
                       <strong>{record.title}</strong>
                       <em>
-                        {branchIndex + 1} of {weftRecords.length}
+                        {[
+                          `${branchIndex + 1} of ${weftRecords.length}`,
+                          formatRelativeTimestamp(
+                            record.createdAt || record.updatedAt || new Date().toISOString()
+                          ),
+                        ]
+                          .filter(Boolean)
+                          .join(" · ")}
                       </em>
                     </span>
                   </button>

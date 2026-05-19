@@ -92,6 +92,15 @@ async function waitForPersistedResponses(
   throw new Error(`Timed out waiting for ${expectedCount} persisted responses in ${loomId}.`);
 }
 
+async function permanentDeleteSidebarLoom(page: Page, loomId: string) {
+  const tab = page.getByTestId(`sidebar-loom-${loomId}`);
+  await expect(tab).toBeVisible();
+  await tab.click({ button: "right" });
+  await page.getByRole("menuitem", { name: "Delete" }).click();
+  await page.getByRole("button", { name: "Delete permanently" }).click();
+  await expect(tab).toHaveCount(0);
+}
+
 function expectNoForbiddenPayload(value: unknown) {
   const serialized = JSON.stringify(value);
   expect(serialized).not.toContain("raw_thinking");
@@ -101,6 +110,113 @@ function expectNoForbiddenPayload(value: unknown) {
 }
 
 test.describe("[product-service-backed] prompt edit product proof", () => {
+  test("[product-service-backed] permanent delete removes Revision Weft counters from surface and graph", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      const promptA = "Event Sourcing revision delete için başlangıç anlat.";
+      const promptB = "Event Sourcing AWS üzerinde nasıl kurulur?";
+      const editedPrompt = "Event Sourcing GCP üzerinde nasıl kurulur?";
+      await sendMainPrompt(page, promptA);
+      await expect(page.getByText("Deterministic E2E provider").first()).toBeVisible({
+        timeout: 30_000,
+      });
+      await sendMainPrompt(page, promptB);
+      await expect(page.getByText("AWS").first()).toBeVisible({ timeout: 30_000 });
+
+      const rootLoom = (await scenario.client.listLooms()).find((item) =>
+        item.title.includes("Event Sourcing")
+      );
+      expect(rootLoom).toBeTruthy();
+      const beforeResponses = await waitForPersistedResponses(scenario, rootLoom!.loomId, 4);
+      const assistantB = beforeResponses.find(
+        (response) => response.role === "assistant" && response.sequenceIndex === 3
+      );
+      expect(assistantB).toBeTruthy();
+
+      await editPrompt(page, assistantB!.responseId, editedPrompt);
+      await expect(page.getByText("Revision:").first()).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
+        "2/2"
+      );
+      await expect(page.locator(".origin-split-panel .response-weft-chip.is-revision-wefted")).toHaveCount(1);
+
+      const revisionWeft = (await scenario.client.listLooms()).find(
+        (loom) =>
+          loom.kind === "weft" &&
+          loom.originLoomId === rootLoom!.loomId &&
+          loom.weftKind === "revision"
+      );
+      expect(revisionWeft).toBeTruthy();
+
+      await page.getByRole("button", { name: "Toggle Graph View" }).click();
+      const revisionGraphNode = page
+        .locator(".loom-graph-node--response", { hasText: promptB })
+        .first();
+      await expect(revisionGraphNode).toBeVisible();
+      const revisionGraphNodeDataId = await revisionGraphNode.evaluate(
+        (element) => element.closest(".react-flow__node")?.getAttribute("data-id")
+      );
+      expect(revisionGraphNodeDataId).toBeTruthy();
+      const activeRevisionGraphNode = page.locator(
+        `.react-flow__node[data-id="${revisionGraphNodeDataId}"] .loom-graph-node--response`
+      );
+      await activeRevisionGraphNode
+        .getByRole("button", { name: "Next graph message revision" })
+        .click();
+      await expect(activeRevisionGraphNode.locator("h3")).toContainText(editedPrompt);
+      await activeRevisionGraphNode.click();
+      const graphPreviewModal = page.locator(".graph-response-preview-modal");
+      await expect(graphPreviewModal).toContainText(editedPrompt);
+      await page.getByRole("button", { name: "Close response preview" }).click();
+      await page.getByTestId(`sidebar-loom-${rootLoom!.loomId}`).click();
+      await expect(page.getByRole("heading", { name: "Weft-aware Loom graph" })).toBeVisible();
+
+      await permanentDeleteSidebarLoom(page, revisionWeft!.loomId);
+      await expect.poll(async () => (await scenario.client.listLooms()).filter((loom) => loom.kind === "weft").length)
+        .toBe(0);
+      await page.getByTestId(`sidebar-loom-${rootLoom!.loomId}`).click();
+      if ((await page.getByRole("heading", { name: "Weft-aware Loom graph" }).count()) === 0) {
+        await page.getByRole("button", { name: "Toggle Graph View" }).click();
+      }
+      await expect(page.getByRole("heading", { name: "Weft-aware Loom graph" })).toBeVisible();
+
+      const baseGraphNode = page
+        .locator(".loom-graph-node--response", { hasText: promptB })
+        .first();
+      await expect(baseGraphNode).toBeVisible();
+      await baseGraphNode.click();
+      await expect(graphPreviewModal).toBeVisible();
+      await expect(graphPreviewModal).not.toContainText(editedPrompt);
+      await page.getByRole("button", { name: "Close response preview" }).click();
+      await expect(
+        baseGraphNode.getByRole("button", { name: "Next graph message revision" })
+      ).toHaveCount(0);
+      await expect(
+        baseGraphNode.getByRole("button", { name: "Previous graph message revision" })
+      ).toHaveCount(0);
+
+      await page.getByRole("button", { name: "Toggle Graph View" }).click();
+      await expect(page.locator(".prompt-revision-action-counter")).toHaveCount(0);
+      await expect(page.locator(".response-weft-chip.is-revision-wefted")).toHaveCount(0);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
   test("[product-service-backed] editing Prompt B creates a Revision Weft and leaves the origin Loom unchanged", async ({
     page,
   }) => {
@@ -423,6 +539,43 @@ test.describe("[legacy-typescript-local] Prompt editing", () => {
     );
     await expect(response.locator(".user-message")).not.toContainText("Discarded edit");
     await expect(response.locator(".stale-answer-notice")).toBeHidden();
+  });
+
+  test("keyboard shortcuts save and cancel prompt edits", async ({ page }) => {
+    await openApp(page);
+    await openGraphLoom(page);
+
+    await page.getByTestId("edit-prompt-r-site-map").evaluate((button) => {
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("Prompt edit trigger is not a button.");
+      }
+      button.click();
+    });
+    const editor = page.getByLabel("Edit prompt text");
+    await expect(editor).toBeVisible();
+    await editor.fill("Keyboard shortcut saved prompt");
+    await editor.press(process.platform === "darwin" ? "Meta+Enter" : "Control+Enter");
+
+    const response = page.locator('[data-response-id="r-site-map"]');
+    await expect(response.locator(".user-message")).toContainText(
+      "Keyboard shortcut saved prompt"
+    );
+
+    await page.getByTestId("edit-prompt-r-site-map").evaluate((button) => {
+      if (!(button instanceof HTMLButtonElement)) {
+        throw new Error("Prompt edit trigger is not a button.");
+      }
+      button.click();
+    });
+    await page.getByLabel("Edit prompt text").fill("Keyboard shortcut cancelled prompt");
+    await page.getByLabel("Edit prompt text").press("Escape");
+
+    await expect(response.locator(".user-message")).toContainText(
+      "Keyboard shortcut saved prompt"
+    );
+    await expect(response.locator(".user-message")).not.toContainText(
+      "Keyboard shortcut cancelled prompt"
+    );
   });
 
   test("keeps Save disabled until the prompt text actually changes", async ({ page }) => {

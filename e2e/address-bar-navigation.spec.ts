@@ -1,5 +1,6 @@
 // E2E data authority classification: LEGACY_TYPESCRIPT_LOCAL / PURE_UI_RENDERING.
 // This spec exercises current browser navigation rendering over legacy seeded UI state.
+import { readFile } from "node:fs/promises";
 import { expect, type Page, test } from "@playwright/test";
 
 const promotedAddressBarUri =
@@ -65,6 +66,19 @@ async function chooseAddressBarSuggestion(page: Page, query: string, title: stri
   await page.getByRole("option", { name: new RegExp(title) }).click();
 }
 
+async function readAddressInputState(page: Page) {
+  return page.getByLabel("Loom Address Bar").evaluate((node) => {
+    const input = node as HTMLInputElement;
+    return {
+      value: input.value,
+      placeholder: input.placeholder,
+      selectionStart: input.selectionStart,
+      selectionEnd: input.selectionEnd,
+      focused: document.activeElement === input,
+    };
+  });
+}
+
 test.describe("[legacy-typescript-local][pure-ui-rendering] Address Bar navigation", () => {
   test("clicking the focused Address Bar reopens suggestions after dismissal", async ({ page }) => {
     await openApp(page);
@@ -79,6 +93,100 @@ test.describe("[legacy-typescript-local][pure-ui-rendering] Address Bar navigati
 
     await addressInput.click();
     await expect(page.getByRole("listbox")).toBeVisible();
+  });
+
+  test("new conversation Address Bar focus stays empty", async ({ page }) => {
+    await openApp(page);
+    const addressInput = page.getByLabel("Loom Address Bar");
+
+    await expect(addressInput).toHaveAttribute("placeholder", "New conversation");
+    await addressInput.click();
+
+    const state = await readAddressInputState(page);
+    expect(state.value).toBe("");
+    expect(state.placeholder).toBe("Search, ask, or paste a Loom address");
+    expect(state.focused).toBe(true);
+  });
+
+  test("focus shows the current Loom address and selects it", async ({ page }) => {
+    await openAppWithPromotedAddressBarResponse(page);
+
+    await chooseAddressBarSuggestion(
+      page,
+      "Address Bar",
+      "Address Bar as local AI web navigator"
+    );
+
+    const addressInput = page.getByLabel("Loom Address Bar");
+    await addressInput.click();
+
+    const state = await readAddressInputState(page);
+    expect(state.value).toMatch(/^loom:\/\//);
+    expect(state.value).not.toContain("/r/");
+    expect(state.selectionStart).toBe(0);
+    expect(state.selectionEnd).toBe(state.value.length);
+    expect(state.focused).toBe(true);
+  });
+
+  test("typing and Backspace replace the selected current address", async ({ page }) => {
+    await openAppWithPromotedAddressBarResponse(page);
+
+    await chooseAddressBarSuggestion(
+      page,
+      "Address Bar",
+      "Address Bar as local AI web navigator"
+    );
+
+    const addressInput = page.getByLabel("Loom Address Bar");
+    await addressInput.click();
+    await addressInput.type("new draft");
+    await expect(addressInput).toHaveValue("new draft");
+
+    await addressInput.click();
+    await addressInput.press("Backspace");
+    await expect(addressInput).toHaveValue("");
+    await expect(addressInput).toHaveAttribute(
+      "placeholder",
+      "Search, ask, or paste a Loom address"
+    );
+  });
+
+  test("Escape closes suggestions, restores the address, then focuses composer", async ({
+    page,
+  }) => {
+    await openAppWithPromotedAddressBarResponse(page);
+
+    await chooseAddressBarSuggestion(
+      page,
+      "Address Bar",
+      "Address Bar as local AI web navigator"
+    );
+
+    const addressInput = page.getByLabel("Loom Address Bar");
+    await addressInput.click();
+    const currentAddress = (await readAddressInputState(page)).value;
+    await addressInput.type("draft search");
+    await expect(addressInput).toHaveValue("draft search");
+    await expect(page.getByRole("listbox")).toBeVisible();
+
+    await addressInput.press("Escape");
+    await expect(page.getByRole("listbox")).toBeHidden();
+    await expect(addressInput).toHaveValue("draft search");
+    await expect(addressInput).toBeFocused();
+
+    await addressInput.press("Escape");
+    await expect(addressInput).toHaveValue(currentAddress);
+    const restored = await readAddressInputState(page);
+    expect(restored.selectionStart).toBe(0);
+    expect(restored.selectionEnd).toBe(currentAddress.length);
+    expect(restored.focused).toBe(true);
+
+    await addressInput.press("Escape");
+    await expect(addressInput).not.toBeFocused();
+    const composerTextbox = page
+      .locator("[data-testid='prompt-composer'] [role='textbox']")
+      .first();
+    await expect(composerTextbox).toBeFocused();
   });
 
   test("selecting a Response suggestion opens its Loom and exact Response", async ({ page }) => {
@@ -123,7 +231,7 @@ test.describe("[legacy-typescript-local][pure-ui-rendering] Address Bar navigati
 
   test("share menu actions use the active Loom address even when a Response is focused", async ({
     page,
-  }) => {
+  }, testInfo) => {
     await openAppWithPromotedAddressBarResponse(page);
 
     await chooseAddressBarSuggestion(
@@ -192,8 +300,23 @@ test.describe("[legacy-typescript-local][pure-ui-rendering] Address Bar navigati
     expect(csvDownload.suggestedFilename()).toMatch(/\.csv$/);
 
     await page.getByRole("button", { name: "Share" }).click();
+    const zipDownloadPromise = page.waitForEvent("download");
+    await page
+      .getByRole("menu", { name: "Share current Loom" })
+      .getByRole("menuitem", { name: "Export as ZIP" })
+      .click();
+    const zipDownload = await zipDownloadPromise;
+    expect(zipDownload.suggestedFilename()).toMatch(/\.zip$/);
+    const zipPath = testInfo.outputPath(zipDownload.suggestedFilename());
+    await zipDownload.saveAs(zipPath);
+    const zipContent = await readFile(zipPath, "latin1");
+    expect(zipContent).toContain("metadata.json");
+    expect(zipContent).toContain("loom.md");
+    expect(zipContent).toContain("responses.csv");
+    expect(zipContent).toContain('"loomTitle"');
+
+    await page.getByRole("button", { name: "Share" }).click();
     const finalShareMenu = page.getByRole("menu", { name: "Share current Loom" });
-    await expect(finalShareMenu.getByRole("menuitem", { name: "Export as ZIP" })).toBeDisabled();
     await expect(finalShareMenu.getByRole("menuitem", { name: /Make Public/ })).toBeDisabled();
   });
 });

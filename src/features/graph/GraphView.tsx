@@ -41,6 +41,7 @@ import {
 import type { Conversation, LoomForkRecord, ResponseItem } from "../../types";
 import type { LoomEngineClient } from "../../engine";
 import { AssistantMarkdownContent } from "../../components/AssistantMarkdownContent";
+import { formatRelativeTimestamp } from "../../services/timeLabels";
 import { GraphControls } from "./GraphControls";
 import {
   responseForGraphNode,
@@ -298,6 +299,20 @@ function GraphViewInner({
   const skipNextFollowAfterContinuationFocusRef = useRef(false);
 
   const [projection, setProjection] = useState<LoomGraphProjection>({ nodes: [], edges: [] });
+  const conversationTitlesById = useMemo(
+    () =>
+      Object.fromEntries(
+        conversations.map((conversation) => [conversation.id, conversation.title])
+      ),
+    [conversations]
+  );
+  const displayForkRecord = useCallback(
+    (record: LoomForkRecord): LoomForkRecord => ({
+      ...record,
+      title: conversationTitlesById[record.childConversationId] ?? record.title,
+    }),
+    [conversationTitlesById]
+  );
 
   useEffect(() => {
     let cancelled = false;
@@ -646,9 +661,9 @@ function GraphViewInner({
         (record.parentResponseId === node.responseId ||
           responsePairIds.has(record.parentResponseId))
     );
-    const explorationForkRecords = responseForkRecords.filter(
-      (record) => record.kind !== "revision"
-    );
+    const explorationForkRecords = responseForkRecords
+      .filter((record) => record.kind !== "revision")
+      .map(displayForkRecord);
     const revisionForkRecords = responseForkRecords.filter(
       (record) => record.kind === "revision"
     );
@@ -684,6 +699,7 @@ function GraphViewInner({
   }, [
     bookmarkedResponseAddresses,
     bookmarkOverrideForResponse,
+    displayForkRecord,
     forkRecords,
     projection.nodes,
     responsePreviewNodeId,
@@ -759,9 +775,9 @@ function GraphViewInner({
             (record.parentResponseId === projectionNode.responseId ||
               responsePairIds.has(record.parentResponseId))
         );
-        const explorationForkRecords = responseForkRecords.filter(
-          (record) => record.kind !== "revision"
-        );
+        const explorationForkRecords = responseForkRecords
+          .filter((record) => record.kind !== "revision")
+          .map(displayForkRecord);
         const revisionForkRecords = responseForkRecords.filter(
           (record) => record.kind === "revision"
         );
@@ -885,6 +901,7 @@ function GraphViewInner({
       onWeftResponse,
       bookmarkedResponseAddresses,
       bookmarkOverrideForResponse,
+      displayForkRecord,
       forkRecords,
       projection.edges,
       projection.nodes,
@@ -1232,7 +1249,14 @@ function GraphViewInner({
                                   <span>
                                     <strong>{record.title}</strong>
                                     <em>
-                                      {branchIndex + 1} of {responsePreviewTarget.weftCount}
+                                      {[
+                                        `${branchIndex + 1} of ${responsePreviewTarget.weftCount}`,
+                                        formatRelativeTimestamp(
+                                          record.createdAt || record.updatedAt || new Date().toISOString()
+                                        ),
+                                      ]
+                                        .filter(Boolean)
+                                        .join(" · ")}
                                     </em>
                                   </span>
                                 </button>

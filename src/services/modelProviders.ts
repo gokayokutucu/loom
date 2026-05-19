@@ -196,11 +196,10 @@ const OLLAMA_PREFLIGHT_TAGS_TIMEOUT_MS = 6000;
 const OLLAMA_MINIMUM_RECOMMENDED_VERSION = "0.17.1";
 
 const suggestedOllamaModels: ModelDescriptor[] = [
-  { id: OLLAMA_MAIN_DEFAULT_MODEL_ID, name: "qwen3.5:9b", provider: "ollama", installed: false },
-  { id: "llama3.2", name: "llama3.2", provider: "ollama", installed: false },
-  { id: "codeqwen:7b-code", name: "codeqwen:7b-code", provider: "ollama", installed: false },
-  { id: "qwen:7b", name: "qwen:7b", provider: "ollama", installed: false },
-  { id: "llama3.2:3b", name: "Llama 3.2 3B", provider: "ollama", installed: false },
+  { id: OLLAMA_MAIN_DEFAULT_MODEL_ID, name: "Qwen 3.5 9B", provider: "ollama", installed: false },
+  { id: "llama3.2", name: "Llama 3.2 3B", provider: "ollama", installed: false },
+  { id: "codeqwen:7b-code", name: "CodeQwen 7B Code", provider: "ollama", installed: false },
+  { id: "qwen:7b", name: "Qwen 7B", provider: "ollama", installed: false },
   { id: "llama3.1:8b", name: "Llama 3.1 8B", provider: "ollama", installed: false },
   { id: "qwen2.5:7b", name: "Qwen 2.5 7B", provider: "ollama", installed: false },
   { id: "mistral:7b", name: "Mistral 7B", provider: "ollama", installed: false },
@@ -355,13 +354,60 @@ export function resetAIProviderSettings() {
 
 export function mergeOllamaModels(models: ModelDescriptor[]) {
   const byId = new Map<string, ModelDescriptor>();
-  suggestedOllamaModels.forEach((model) => byId.set(model.id, model));
-  models.forEach((model) => byId.set(model.id, model));
+  suggestedOllamaModels.forEach((model) =>
+    byId.set(model.id, { ...model, name: displayNameForOllamaModel(model.id) })
+  );
+  models.forEach((model) => {
+    const normalizedId = normalizeOllamaModelId(model.id);
+    const current = byId.get(normalizedId);
+    byId.set(normalizedId, {
+      ...current,
+      ...model,
+      id: normalizedId,
+      name: displayNameForOllamaModel(normalizedId),
+      installed: Boolean(model.installed || current?.installed),
+      size: model.size ?? current?.size,
+      modifiedAt: model.modifiedAt ?? current?.modifiedAt,
+      location: model.location ?? current?.location,
+    });
+  });
   return Array.from(byId.values());
 }
 
 export function normalizeOllamaModelId(modelId: string) {
   return modelId.endsWith(":latest") ? modelId.slice(0, -":latest".length) : modelId;
+}
+
+export function displayNameForOllamaModel(modelId: string) {
+  const normalizedId = normalizeOllamaModelId(modelId).toLowerCase();
+  const knownNames: Record<string, string> = {
+    "qwen3.5:9b": "Qwen 3.5 9B",
+    "llama3.2": "Llama 3.2 3B",
+    "codeqwen:7b-code": "CodeQwen 7B Code",
+    "qwen:7b": "Qwen 7B",
+    "llama3.1:8b": "Llama 3.1 8B",
+    "qwen2.5:7b": "Qwen 2.5 7B",
+    "mistral:7b": "Mistral 7B",
+    "nomic-embed-text": "Nomic Embed Text",
+  };
+  const knownName = knownNames[normalizedId];
+  if (knownName) return knownName;
+  return normalizedId
+    .split(/[-_:]+/)
+    .filter(Boolean)
+    .map((part) => {
+      const sizeMatch = part.match(/^(\d+(?:\.\d+)?)([bmk])$/i);
+      if (sizeMatch) return `${sizeMatch[1]}${sizeMatch[2].toUpperCase()}`;
+      if (/^qwen$/i.test(part)) return "Qwen";
+      if (/^codeqwen$/i.test(part)) return "CodeQwen";
+      if (/^llama\d*(?:\.\d+)?$/i.test(part)) {
+        return part.replace(/^llama/i, "Llama ");
+      }
+      return part.charAt(0).toUpperCase() + part.slice(1);
+    })
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function isOllamaThinkingCandidate(modelId: string) {
@@ -810,7 +856,7 @@ export async function preflightOllamaRuntime(
         const normalizedName = normalizeOllamaModelId(model.name);
         return {
           id: normalizedName,
-          name: normalizedName,
+          name: displayNameForOllamaModel(normalizedName),
           provider: "ollama" as const,
           installed: true,
           size: model.size ? formatBytes(model.size) : undefined,
@@ -886,7 +932,7 @@ export class OllamaProvider implements ModelProvider {
         const normalizedName = normalizeOllamaModelId(model.name);
         return {
           id: normalizedName,
-          name: normalizedName,
+          name: displayNameForOllamaModel(normalizedName),
           provider: "ollama" as const,
           installed: true,
           size: model.size ? formatBytes(model.size) : undefined,

@@ -152,9 +152,11 @@ import {
   exportLoomAsCsv,
   exportLoomMetadataJson,
   exportLoomAsMarkdown,
+  exportLoomAsZip,
   safeExportFilename,
   textToBase64,
 } from "./services/exportService";
+import { formatRelativeTimestamp } from "./services/timeLabels";
 import { formatBadgeCode } from "./services/displayCode";
 import { getElectronRuntimeInfo, getElectronWindowControls } from "./electronRuntime";
 import {
@@ -1993,9 +1995,29 @@ function serviceLoomDetailsToState(details: LoomDetail[]) {
         revisionSourceResponseId,
         revisionPrompt,
         originalPrompt,
+        createdAt: detail.createdAt,
+        updatedAt: detail.updatedAt,
       };
     });
   return { conversations, responses, forkRecords };
+}
+
+function collectDeletedLoomIds(rootLoomId: string, records: ForkRecord[]) {
+  const deleted = new Set([rootLoomId]);
+  let changed = true;
+  while (changed) {
+    changed = false;
+    records.forEach((record) => {
+      if (
+        deleted.has(record.parentConversationId) &&
+        !deleted.has(record.childConversationId)
+      ) {
+        deleted.add(record.childConversationId);
+        changed = true;
+      }
+    });
+  }
+  return deleted;
 }
 
 function App() {
@@ -2144,6 +2166,7 @@ function App() {
   const [addressFeedback, setAddressFeedback] =
     useState<LoomResolutionResult | null>(null);
   const [selectedSuggestion, setSelectedSuggestion] = useState(-1);
+  const [addressSuggestionsVisible, setAddressSuggestionsVisible] = useState(false);
   const addressFocused = isAddressBarFocusedState(addressBarState);
 
   const setAddressFocused = (focused: boolean) => {
@@ -2236,6 +2259,8 @@ function App() {
     useState<string | null>(null);
   const [completionActionRevealResponseId, setCompletionActionRevealResponseId] =
     useState<string | null>(null);
+  const completionActionRevealFrameRef = useRef<number | null>(null);
+  const completionActionRevealTimerRef = useRef<number | null>(null);
   const growthMilestoneToastTimerRef = useRef<number | null>(null);
   const activeTemporaryWeft = temporaryWefts[activeConversationId];
   const activeTemporaryConversation: Conversation | undefined = activeTemporaryWeft
@@ -2430,6 +2455,24 @@ function App() {
       ),
     [bookmarks]
   );
+  const conversationTitlesById = useMemo(
+    () =>
+      Object.fromEntries(
+        conversations.map((conversation) => [conversation.id, conversation.title])
+      ),
+    [conversations]
+  );
+  const forkRecordsWithTimestamps = useMemo(
+    () =>
+      forkRecords.map((record) => {
+        if (record.createdAt) return record;
+        const childResponses = conversationResponses[record.childConversationId] ?? [];
+        const firstResponseTimestamp = childResponses.find((response) => response.createdAt)
+          ?.createdAt;
+        return firstResponseTimestamp ? { ...record, createdAt: firstResponseTimestamp } : record;
+      }),
+    [conversationResponses, forkRecords]
+  );
 
   const activeDraftKey = activeConversation?.id ?? EPHEMERAL_DRAFT_ID;
   const activeComposerDraft = composerDrafts[activeDraftKey] ?? EMPTY_COMPOSER_DRAFT;
@@ -2536,6 +2579,9 @@ function App() {
     }
     return currentActiveDestination;
   }, [activeAddressableConversation, currentActiveDestination]);
+  const currentAddressBarValue = isNewConversationDraft
+    ? ""
+    : currentShareDestination.canonicalUri ?? currentShareDestination.path;
 
   const currentLoomExportTarget = useMemo(() => {
     if (!focusedSplitConversation) return null;
@@ -2824,7 +2870,15 @@ function App() {
                 warnings: [],
               };
             }
-            throw new Error("ZIP export is not available in TypeScript local fallback.");
+            if (input.format === "zip") {
+              return {
+                fileName: safeExportFilename(currentLoomExportTarget.loom, "zip"),
+                mimeType: "application/zip",
+                contentBase64: exportLoomAsZip(currentLoomExportTarget),
+                warnings: [],
+              };
+            }
+            throw new Error("Unsupported Loom export format.");
           },
         },
       }),
@@ -3141,6 +3195,12 @@ function App() {
       }
       if (growthMilestoneToastTimerRef.current !== null) {
         window.clearTimeout(growthMilestoneToastTimerRef.current);
+      }
+      if (completionActionRevealFrameRef.current !== null) {
+        window.cancelAnimationFrame(completionActionRevealFrameRef.current);
+      }
+      if (completionActionRevealTimerRef.current !== null) {
+        window.clearTimeout(completionActionRevealTimerRef.current);
       }
     },
     []
@@ -3576,9 +3636,24 @@ function App() {
 
   function showResponseCompletionActions(responseId: string) {
     setGeneratingResponseId((current) => (current === responseId ? null : current));
+    if (completionActionRevealFrameRef.current !== null) {
+      window.cancelAnimationFrame(completionActionRevealFrameRef.current);
+      completionActionRevealFrameRef.current = null;
+    }
+    if (completionActionRevealTimerRef.current !== null) {
+      window.clearTimeout(completionActionRevealTimerRef.current);
+      completionActionRevealTimerRef.current = null;
+    }
     setCompletionActionRevealResponseId(null);
-    window.requestAnimationFrame(() => {
+    completionActionRevealFrameRef.current = window.requestAnimationFrame(() => {
+      completionActionRevealFrameRef.current = null;
       setCompletionActionRevealResponseId(responseId);
+      completionActionRevealTimerRef.current = window.setTimeout(() => {
+        completionActionRevealTimerRef.current = null;
+        setCompletionActionRevealResponseId((current) =>
+          current === responseId ? null : current
+        );
+      }, 900);
     });
   }
 
@@ -4691,6 +4766,8 @@ function App() {
         setAddressFocused(false);
         setAddressQuery("");
         setAddressFeedback(null);
+        setAddressSuggestionsVisible(false);
+        setSelectedSuggestion(-1);
       }
       if (contextMenu) {
         setContextMenu(null);
@@ -4712,9 +4789,17 @@ function App() {
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
+        if (
+          addressFocused &&
+          addressBarRef.current?.contains(event.target as Node | null)
+        ) {
+          return;
+        }
         setAddressFocused(false);
         setAddressQuery("");
         setAddressFeedback(null);
+        setAddressSuggestionsVisible(false);
+        setSelectedSuggestion(-1);
         setContextMenu(null);
         setSplitPanelMenu(null);
         if (selectionAskState || askState) closeSelectionAskFlow();
@@ -4831,6 +4916,7 @@ function App() {
     setAddressQuery("");
     setAddressFeedback(null);
     setSelectedSuggestion(-1);
+    setAddressSuggestionsVisible(false);
   }
 
   function blurAddressBarInput() {
@@ -4845,8 +4931,10 @@ function App() {
 
   function focusAddressBar() {
     dispatchAddressBar({ type: "FOCUS" });
+    setAddressQuery(currentAddressBarValue);
     setSelectedSuggestion(-1);
     setAddressFeedback(null);
+    setAddressSuggestionsVisible(true);
     window.requestAnimationFrame(() => {
       const input = addressBarRef.current?.querySelector<HTMLInputElement>(
         "input[aria-label='Loom Address Bar']"
@@ -4854,6 +4942,26 @@ function App() {
       input?.focus();
       input?.select();
     });
+  }
+
+  function selectAddressBarTextSoon() {
+    window.requestAnimationFrame(() => {
+      const input = addressBarRef.current?.querySelector<HTMLInputElement>(
+        "input[aria-label='Loom Address Bar']"
+      );
+      input?.focus();
+      input?.select();
+    });
+  }
+
+  function focusActiveComposerFromAddressBar() {
+    dispatchAddressBar({ type: "BLUR" });
+    setAddressQuery("");
+    setAddressFeedback(null);
+    setAddressSuggestionsVisible(false);
+    setSelectedSuggestion(-1);
+    blurAddressBarInput();
+    focusComposerAfterNavigation();
   }
 
   function focusComposerAfterNavigation() {
@@ -5134,6 +5242,7 @@ function App() {
     setAddressQuery("");
     setAddressFeedback(null);
     setSelectedSuggestion(-1);
+    setAddressSuggestionsVisible(false);
     if (visibleSplitPanel) {
       setActiveSplitPanel(visibleSplitPanel);
     } else if (resolvedNavigationDestination?.mode === "split") {
@@ -5491,6 +5600,7 @@ function App() {
   }
 
   async function deleteConversation(conversation: Conversation) {
+    const deletedLoomIds = collectDeletedLoomIds(conversation.id, forkRecords);
     try {
       await loomEngineClient.deleteLoom({ loomId: conversation.id });
     } catch (error) {
@@ -5503,9 +5613,38 @@ function App() {
       return;
     }
     setConversations((current) =>
-      current.filter((item) => item.id !== conversation.id)
+      current.filter((item) => !deletedLoomIds.has(item.id))
     );
-    setArchived((current) => current.filter((item) => item.id !== conversation.id));
+    setArchived((current) => current.filter((item) => !deletedLoomIds.has(item.id)));
+    setConversationResponses((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([loomId]) => !deletedLoomIds.has(loomId))
+      )
+    );
+    setForkRecords((current) =>
+      current.filter(
+        (record) =>
+          !deletedLoomIds.has(record.parentConversationId) &&
+          !deletedLoomIds.has(record.childConversationId)
+      )
+    );
+    setSelectedPromptRevisionByResponseId((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(([, revisionLoomId]) =>
+          revisionLoomId ? !deletedLoomIds.has(revisionLoomId) : true
+        )
+      )
+    );
+    setTemporaryWefts((current) =>
+      Object.fromEntries(
+        Object.entries(current).filter(
+          ([loomId, workspace]) =>
+            !deletedLoomIds.has(loomId) &&
+            !deletedLoomIds.has(workspace.temporaryId) &&
+            !deletedLoomIds.has(workspace.originLoomId)
+        )
+      )
+    );
     setBookmarks((current) =>
       current.map((bookmark) =>
         bookmark.path.startsWith(conversation.path)
@@ -5514,10 +5653,13 @@ function App() {
       )
     );
     setPinnedConversationIds((current) =>
-      current.filter((id) => id !== conversation.id)
+      current.filter((id) => !deletedLoomIds.has(id))
     );
-    if (conversation.id === activeConversationId) {
+    if (deletedLoomIds.has(activeConversationId)) {
       openNewConversationDraft();
+    }
+    if (getConfiguredLoomEngineMode() === "rust-service" && !mockDataEnabled) {
+      void refreshServiceLooms();
     }
     setDeleteTarget(null);
     setContextMenu(null);
@@ -5674,6 +5816,7 @@ function App() {
   function handleAddressKeyDown(event: React.KeyboardEvent<HTMLInputElement>) {
     if (event.key === "ArrowDown") {
       event.preventDefault();
+      setAddressSuggestionsVisible(true);
       if (filteredSuggestions.length === 0) return;
       setSelectedSuggestion((index) =>
         index < 0 ? 0 : Math.min(index + 1, filteredSuggestions.length - 1)
@@ -5682,6 +5825,7 @@ function App() {
     }
     if (event.key === "ArrowUp") {
       event.preventDefault();
+      setAddressSuggestionsVisible(true);
       if (filteredSuggestions.length === 0) return;
       setSelectedSuggestion((index) =>
         index < 0 ? filteredSuggestions.length - 1 : Math.max(index - 1, 0)
@@ -5722,9 +5866,20 @@ function App() {
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      dispatchAddressBar({ type: "BLUR" });
-      setAddressFeedback(null);
-      setSelectedSuggestion(-1);
+      if (addressSuggestionsVisible) {
+        setAddressSuggestionsVisible(false);
+        setSelectedSuggestion(-1);
+        return;
+      }
+      if (addressQuery !== currentAddressBarValue) {
+        dispatchAddressBar({ type: "FOCUS" });
+        setAddressQuery(currentAddressBarValue);
+        setAddressFeedback(null);
+        setSelectedSuggestion(-1);
+        selectAddressBarTextSoon();
+        return;
+      }
+      focusActiveComposerFromAddressBar();
     }
   }
 
@@ -5743,6 +5898,7 @@ function App() {
     setAddressQuery("");
     setAddressFeedback(null);
     setSelectedSuggestion(-1);
+    setAddressSuggestionsVisible(false);
     blurAddressBarInput();
     setGraphMode(false);
     closeUnpinnedUtilityOverlays();
@@ -5946,7 +6102,7 @@ function App() {
     showLinkCopyToast("Title and address are copied");
   }
 
-  async function exportCurrentLoom(format: "markdown" | "csv") {
+  async function exportCurrentLoom(format: "markdown" | "csv" | "zip") {
     if (!currentLoomExportTarget) {
       showToast({
         title: "Export failed",
@@ -5962,7 +6118,7 @@ function App() {
         includeMetadata: true,
         includeReferences: true,
         includeBookmarks: true,
-        includeGraph: false,
+        includeGraph: format === "zip",
       });
       downloadBase64File(
         exportResult.fileName,
@@ -5970,8 +6126,8 @@ function App() {
         exportResult.mimeType
       );
       showToast({
-        title: `${format === "markdown" ? "Markdown" : "CSV"} export created`,
-        message: `${currentLoomExportTarget.loom.title} was exported as ${format === "markdown" ? "Markdown" : "CSV"}.`,
+        title: `${format === "markdown" ? "Markdown" : format === "csv" ? "CSV" : "ZIP"} export created`,
+        message: `${currentLoomExportTarget.loom.title} was exported as ${format === "markdown" ? "Markdown" : format === "csv" ? "CSV" : "ZIP"}.`,
         color: "sunset",
         icon: "copy",
       });
@@ -6724,9 +6880,11 @@ function App() {
             parentConversationId: temporaryTargetWeft.originLoomId,
             parentResponseId: temporaryTargetWeft.originResponseId,
             childConversationId: promotedConversation.id,
-            title: `Loom from ${originResponseForPromotion.title}`,
-            kind: serviceResult.weft?.weftKind ?? "exploration",
-          },
+        title: promotedConversation.title,
+        kind: serviceResult.weft?.weftKind ?? "exploration",
+        createdAt: serviceResult.weft?.createdAt ?? new Date().toISOString(),
+        updatedAt: serviceResult.weft?.updatedAt,
+      },
         ]);
         setTemporaryWefts((current) => {
           const { [temporaryTargetWeft.temporaryId]: _discard, ...rest } = current;
@@ -6813,8 +6971,9 @@ function App() {
             parentConversationId: temporaryTargetWeft.originLoomId,
             parentResponseId: temporaryTargetWeft.originResponseId,
             childConversationId: promotedConversation.id,
-            title: `Loom from ${originResponseForPromotion.title}`,
+            title: promotedConversation.title,
             kind: "exploration",
+            createdAt: new Date().toISOString(),
           },
         ]);
         setTemporaryWefts((current) => {
@@ -9000,8 +9159,10 @@ function App() {
             parentConversationId: sourceConversation.id,
             parentResponseId: response.id,
             childConversationId: serviceWeftConversation.id,
-            title: `Loom from ${response.title}`,
+            title: serviceWeftConversation.title,
             kind: serviceResult.weft?.weftKind ?? "exploration",
+            createdAt: serviceResult.weft?.createdAt ?? new Date().toISOString(),
+            updatedAt: serviceResult.weft?.updatedAt,
           };
           if (
             existingIndex >= 0 &&
@@ -9165,8 +9326,9 @@ function App() {
         parentConversationId: sourceConversation.id,
         parentResponseId: response.id,
         childConversationId: id,
-        title: `Loom from ${response.title}`,
+        title: conversation.title,
         kind: "exploration",
+        createdAt: new Date().toISOString(),
       },
     ]);
     setComposerDrafts((current) => ({
@@ -9432,6 +9594,8 @@ function App() {
         revisionSourceResponseId: sourceResponse.id,
         revisionPrompt: normalizedPrompt,
         originalPrompt: sourceResponse.question,
+        createdAt: serviceWeft?.createdAt ?? new Date().toISOString(),
+        updatedAt: serviceWeft?.updatedAt,
       },
     ]);
     setSelectedPromptRevisionByResponseId((current) => ({
@@ -10941,6 +11105,7 @@ function App() {
         suggestions={filteredSuggestions}
         resolutionFeedback={addressFeedback}
         selectedSuggestion={selectedSuggestion}
+        addressSuggestionsVisible={addressSuggestionsVisible}
         canBack={navigationIndex > 0}
         canForward={navigationIndex < navigationStack.length - 1}
         backTraversal={getBackTraversal(navigationStack, navigationIndex)}
@@ -10951,12 +11116,13 @@ function App() {
         currentBookmarked={isDestinationBookmarked(currentActiveDestination)}
         currentDestination={currentActiveDestination}
         canDragCurrentDestination={!isNewConversationDraft}
-        onAddressFocus={() => dispatchAddressBar({ type: "FOCUS" })}
+        onAddressFocus={focusAddressBar}
         onAddressChange={(value) => {
           dispatchAddressBar({ type: "INPUT_CHANGED" });
           setAddressQuery(value);
           setAddressFeedback(null);
           setSelectedSuggestion(-1);
+          setAddressSuggestionsVisible(true);
         }}
         onAddressKeyDown={handleAddressKeyDown}
         onVisit={(destination) => {
@@ -10982,6 +11148,7 @@ function App() {
         }}
         onTogglePanel={(panel) => {
           dispatchAddressBar({ type: "BLUR" });
+          setAddressSuggestionsVisible(false);
           toggleUtilityPanel(panel);
           setAddressFeedback(null);
         }}
@@ -10989,6 +11156,7 @@ function App() {
           dispatchAddressBar({ type: "RESET" });
           setAddressQuery("");
           setAddressFeedback(null);
+          setAddressSuggestionsVisible(false);
           toggleGraphOverlay();
         }}
       />
@@ -11141,7 +11309,7 @@ function App() {
                   engineClient={loomEngineClient}
                   conversations={conversations}
                   responsesByConversation={conversationResponses}
-                  forkRecords={forkRecords}
+                  forkRecords={forkRecordsWithTimestamps}
                   activeLoomId={activeAddressableConversation?.id ?? activeConversation?.id}
                   focusedResponseId={
                     currentNavigationDestination?.scrollTargetResponseId ??
@@ -11318,7 +11486,8 @@ function App() {
                             onSelectWeft={openPersistedWeftBranch}
                             onToggleSuggestedBookmark={toggleSuggestedBookmark}
                             bookmarkedPaths={bookmarkedResponseAddresses}
-                            forkRecords={forkRecords}
+                            forkRecords={forkRecordsWithTimestamps}
+                            conversationTitlesById={conversationTitlesById}
                             temporaryWefts={Object.values(temporaryWefts)}
                             onSelectionAsk={(response) => {
                               markSplitPanelActive("origin");
@@ -11398,7 +11567,8 @@ function App() {
                             onSelectWeft={openPersistedWeftBranch}
                             onToggleSuggestedBookmark={toggleSuggestedBookmark}
                             bookmarkedPaths={bookmarkedResponseAddresses}
-                            forkRecords={forkRecords}
+                            forkRecords={forkRecordsWithTimestamps}
+                            conversationTitlesById={conversationTitlesById}
                             temporaryWefts={Object.values(temporaryWefts)}
                             onSelectionAsk={(response) => {
                               markSplitPanelActive("weft");
@@ -11511,7 +11681,8 @@ function App() {
                     onSelectWeft={openPersistedWeftBranch}
                     onToggleSuggestedBookmark={toggleSuggestedBookmark}
                     bookmarkedPaths={bookmarkedResponseAddresses}
-                    forkRecords={forkRecords}
+                    forkRecords={forkRecordsWithTimestamps}
+                    conversationTitlesById={conversationTitlesById}
                     temporaryWefts={Object.values(temporaryWefts)}
                     onSelectionAsk={onSelectionAsk}
                     responseTitleOverrides={responseTitleOverrides}
@@ -12325,6 +12496,7 @@ interface TopBrowserBarProps {
   suggestions: AddressSuggestion[];
   resolutionFeedback: LoomResolutionResult | null;
   selectedSuggestion: number;
+  addressSuggestionsVisible: boolean;
   canBack: boolean;
   canForward: boolean;
   backTraversal: NavigationTraversalEntry[];
@@ -12345,7 +12517,7 @@ interface TopBrowserBarProps {
   onJumpTraversal: (index: number) => void;
   onBookmarkCurrent: () => void;
   onCopyShareItem: (kind: "address" | "markdown" | "title-address") => void;
-  onExportCurrentLoom: (format: "markdown" | "csv") => void;
+  onExportCurrentLoom: (format: "markdown" | "csv" | "zip") => void;
   onToggleSidebar: () => void;
   onTogglePanel: (panel: "bookmarks" | "history" | "looms") => void;
   onToggleGraph: () => void;
@@ -12360,6 +12532,7 @@ function TopBrowserBar({
   suggestions,
   resolutionFeedback,
   selectedSuggestion,
+  addressSuggestionsVisible,
   canBack,
   canForward,
   backTraversal,
@@ -12497,7 +12670,7 @@ function TopBrowserBar({
     closeShareMenu();
   }
 
-  function handleShareExport(format: "markdown" | "csv") {
+  function handleShareExport(format: "markdown" | "csv" | "zip") {
     if (!canDragCurrentDestination) return;
     onExportCurrentLoom(format);
     closeShareMenu();
@@ -12736,7 +12909,7 @@ function TopBrowserBar({
             onKeyDown={onAddressKeyDown}
             aria-label="Loom Address Bar"
             role="combobox"
-            aria-expanded={addressFocused}
+            aria-expanded={addressFocused && addressSuggestionsVisible}
             aria-controls="address-suggestion-list"
             aria-activedescendant={
               selectedSuggestion >= 0
@@ -12746,7 +12919,7 @@ function TopBrowserBar({
             placeholder={addressFocused ? "Search, ask, or paste a Loom address" : location}
           />
           <span className="address-path">{addressFocused ? path : "loom addressable"}</span>
-          {addressFocused && (
+          {addressFocused && addressSuggestionsVisible && (
             <AddressSuggestionList
               suggestions={suggestions}
               resolutionFeedback={resolutionFeedback}
@@ -12818,7 +12991,7 @@ function ShareMenu({
   style: CSSProperties;
   disabled: boolean;
   onCopy: (kind: "address" | "markdown" | "title-address") => void;
-  onExport: (format: "markdown" | "csv") => void;
+  onExport: (format: "markdown" | "csv" | "zip") => void;
 }) {
   return (
     <div className="share-menu" style={style} role="menu" aria-label="Share current Loom">
@@ -12842,7 +13015,7 @@ function ShareMenu({
         <button type="button" role="menuitem" disabled={disabled} onClick={() => onExport("csv")}>
           Export as CSV
         </button>
-        <button type="button" role="menuitem" disabled title="ZIP export is not available yet.">
+        <button type="button" role="menuitem" disabled={disabled} onClick={() => onExport("zip")}>
           Export as ZIP
         </button>
       </div>
@@ -13684,6 +13857,7 @@ function ChatTranscript({
   onToggleSuggestedBookmark,
   bookmarkedPaths,
   forkRecords,
+  conversationTitlesById,
   temporaryWefts,
   onSelectionAsk,
   responseTitleOverrides,
@@ -13725,6 +13899,7 @@ function ChatTranscript({
   onToggleSuggestedBookmark: (link: LoomLink, currentlyBookmarked?: boolean) => void;
   bookmarkedPaths: Set<string>;
   forkRecords: ForkRecord[];
+  conversationTitlesById: Record<string, string>;
   temporaryWefts: TemporaryWeftWorkspace[];
   onSelectionAsk: (response: ResponseItem) => void;
   responseTitleOverrides: Record<string, string>;
@@ -13975,6 +14150,17 @@ function ChatTranscript({
         const promptEditHasChanges =
           normalizedPromptEditDraft.length > 0 &&
           normalizedPromptEditDraft !== normalizePromptEditText(displayPromptText);
+        const savePromptEdit = () => {
+          const draftToSave = promptEditDraft;
+          if (!promptEditHasChanges) return;
+          setEditingPromptId(null);
+          setPromptEditDraft("");
+          void onEditPrompt(conversation.id, displayResponse.id, draftToSave);
+        };
+        const cancelPromptEdit = () => {
+          setEditingPromptId(null);
+          setPromptEditDraft("");
+        };
         const responseBranchRecords = responseWeftRecords;
         const explorationWeftCount = responseBranchRecords.length;
         const hasExistingWeft = explorationWeftCount > 0;
@@ -14126,28 +14312,33 @@ function ChatTranscript({
                       value={promptEditDraft}
                       aria-label="Edit prompt text"
                       onChange={(event) => setPromptEditDraft(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Escape") {
+                          event.preventDefault();
+                          cancelPromptEdit();
+                          return;
+                        }
+                        if (
+                          event.key === "Enter" &&
+                          (event.metaKey || event.ctrlKey)
+                        ) {
+                          event.preventDefault();
+                          savePromptEdit();
+                        }
+                      }}
                       rows={Math.min(Math.max(promptEditDraft.split("\n").length, 2), 8)}
                     />
                     <div className="prompt-edit-actions">
                       <button
                         type="button"
-                        onClick={() => {
-                          const draftToSave = promptEditDraft;
-                          if (!promptEditHasChanges) return;
-                          setEditingPromptId(null);
-                          setPromptEditDraft("");
-                          void onEditPrompt(conversation.id, displayResponse.id, draftToSave);
-                        }}
+                        onClick={savePromptEdit}
                         disabled={!promptEditHasChanges}
                       >
                         Save
                       </button>
                       <button
                         type="button"
-                        onClick={() => {
-                          setEditingPromptId(null);
-                          setPromptEditDraft("");
-                        }}
+                        onClick={cancelPromptEdit}
                       >
                         Cancel
                       </button>
@@ -14428,8 +14619,20 @@ function ChatTranscript({
                         >
                           <GitFork size={13} />
                           <span>
-                            <strong>{record.title}</strong>
-                            <em>{branchIndex + 1} of {explorationWeftCount}</em>
+                            <strong>
+                              {conversationTitlesById[record.childConversationId] ??
+                                record.title}
+                            </strong>
+                            <em>
+                              {[
+                                `${branchIndex + 1} of ${explorationWeftCount}`,
+                                formatRelativeTimestamp(
+                                  record.createdAt || record.updatedAt || new Date().toISOString()
+                                ),
+                              ]
+                                .filter(Boolean)
+                                .join(" · ")}
+                            </em>
                           </span>
                         </button>
                       ))}
@@ -14588,6 +14791,7 @@ function PromptComposer({
   } | null>(null);
   const [referencePickerOpen, setReferencePickerOpen] = useState(false);
   const [referenceSearch, setReferenceSearch] = useState("");
+  const [referenceSelectedIndex, setReferenceSelectedIndex] = useState(0);
   const [referencePopoverStyle, setReferencePopoverStyle] = useState<{
     left: number;
     top: number;
@@ -14796,6 +15000,12 @@ function PromptComposer({
         .includes(query)
     );
   }, [visibleAttachedReferences, draftInlineReferences, referenceSearch]);
+
+  useEffect(() => {
+    setReferenceSelectedIndex((current) =>
+      Math.min(current, Math.max(filteredLinkedReferences.length - 1, 0))
+    );
+  }, [filteredLinkedReferences.length]);
 
   const selectedReferenceKeys = useMemo(() => {
     const keys = new Set<string>();
@@ -15175,6 +15385,14 @@ function PromptComposer({
       window.removeEventListener("scroll", updateMentionPopoverPosition, true);
     };
   }, [flattenedMentionOptions.length, mention?.query, mention?.range]);
+
+  useLayoutEffect(() => {
+    if (!mention) return;
+    const menu = mentionMenuRef.current;
+    if (!menu) return;
+    const selected = menu.querySelector<HTMLElement>(".mention-option.selected");
+    selected?.scrollIntoView({ block: "nearest" });
+  }, [mention?.selectedIndex, mention?.query]);
 
   function clearAddressHintTimer() {
     if (addressHintTimerRef.current === null) return;
@@ -16542,6 +16760,7 @@ function PromptComposer({
             }
           : current
       );
+      return;
     }
     if (event.key === "ArrowUp") {
       event.preventDefault();
@@ -16550,14 +16769,17 @@ function PromptComposer({
           ? { ...current, selectedIndex: Math.max(current.selectedIndex - 1, 0) }
           : current
       );
+      return;
     }
     if (event.key === "Enter" && flattenedMentionOptions[mention.selectedIndex]) {
       event.preventDefault();
       selectMentionOption(flattenedMentionOptions[mention.selectedIndex]);
+      return;
     }
     if (event.key === "Escape") {
       event.preventDefault();
       setMention(null);
+      return;
     }
   }
 
@@ -17017,8 +17239,22 @@ function PromptComposer({
                   const next = !current;
                   if (!next) setReferencePopoverStyle(null);
                   if (!next) setReferenceOpenError(null);
+                  if (next) setReferenceSelectedIndex(0);
                   return next;
                 });
+              }}
+              onKeyDown={(event) => {
+                if (!referencePickerOpen) return;
+                if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+                event.preventDefault();
+                setReferenceSelectedIndex((current) =>
+                  event.key === "ArrowDown"
+                    ? Math.min(current + 1, Math.max(filteredLinkedReferences.length - 1, 0))
+                    : Math.max(current - 1, 0)
+                );
+                referenceMenuRef.current
+                  ?.querySelector<HTMLInputElement>("input[aria-label='Search linked references']")
+                  ?.focus();
               }}
               aria-label="References"
               title="References"
@@ -17051,8 +17287,13 @@ function PromptComposer({
                 }
                 links={filteredLinkedReferences}
                 query={referenceSearch}
+                selectedIndex={referenceSelectedIndex}
                 error={referenceOpenError}
-                onQueryChange={setReferenceSearch}
+                onQueryChange={(query) => {
+                  setReferenceSearch(query);
+                  setReferenceSelectedIndex(0);
+                }}
+                onSelectedIndexChange={setReferenceSelectedIndex}
                 onOpen={(link) => {
                   const error = onOpenReference(link);
                   setReferenceOpenError(error);
@@ -17066,6 +17307,11 @@ function PromptComposer({
                   setReferenceOpenError(null);
                 }}
                 onRemove={removeLinkedReference}
+                onClose={() => {
+                  setReferencePickerOpen(false);
+                  setReferencePopoverStyle(null);
+                  setReferenceOpenError(null);
+                }}
               />,
               document.body
             )}
@@ -17338,6 +17584,7 @@ function ComposerMentionMenu({
                 <button
                   key={`${group.group}-${option.path}`}
                   className={selected ? "mention-option selected" : "mention-option"}
+                  data-selected={selected ? "true" : "false"}
                   onMouseDown={(event) => event.preventDefault()}
                   onClick={() => onSelect(option)}
                   role="option"
@@ -17409,63 +17656,131 @@ function LinkedReferenceDropdown({
   style,
   links,
   query,
+  selectedIndex,
   error,
   onQueryChange,
+  onSelectedIndexChange,
   onOpen,
   onCopy,
   onRemove,
+  onClose,
 }: {
   menuRef: RefObject<HTMLDivElement>;
   style?: CSSProperties;
   links: LoomLink[];
   query: string;
+  selectedIndex: number;
   error: string | null;
   onQueryChange: (query: string) => void;
+  onSelectedIndexChange: (index: number | ((current: number) => number)) => void;
   onOpen: (link: LoomLink) => void;
   onCopy: (link: LoomLink) => void;
   onRemove: (link: LoomLink) => void;
+  onClose: () => void;
 }) {
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const rowRefs = useRef<Array<HTMLDivElement | null>>([]);
   const [contextMenu, setContextMenu] = useState<{
     link: LoomLink;
     x: number;
     y: number;
   } | null>(null);
 
+  useEffect(() => {
+    window.requestAnimationFrame(() => {
+      searchInputRef.current?.focus();
+    });
+  }, []);
+
+  useLayoutEffect(() => {
+    const row = rowRefs.current[selectedIndex];
+    row?.scrollIntoView({ block: "nearest" });
+  }, [selectedIndex, links.length]);
+
   function openReference(link: LoomLink) {
     setContextMenu(null);
     onOpen(link);
   }
 
+  function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      onSelectedIndexChange((current) =>
+        Math.min(current + 1, Math.max(links.length - 1, 0))
+      );
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      onSelectedIndexChange((current) => Math.max(current - 1, 0));
+      return;
+    }
+    if (event.key === "Home") {
+      event.preventDefault();
+      onSelectedIndexChange(0);
+      return;
+    }
+    if (event.key === "End") {
+      event.preventDefault();
+      onSelectedIndexChange(Math.max(links.length - 1, 0));
+      return;
+    }
+    if (event.key === "Enter") {
+      const link = links[selectedIndex];
+      if (!link) return;
+      event.preventDefault();
+      openReference(link);
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+    }
+  }
+
   return (
-    <div ref={menuRef} className="linked-reference-dropdown" style={style}>
+    <div
+      ref={menuRef}
+      className="linked-reference-dropdown"
+      style={style}
+      onKeyDown={handleKeyDown}
+    >
       <label className="linked-reference-search">
         <Search size={13} />
         <input
+          ref={searchInputRef}
           value={query}
           onChange={(event) => onQueryChange(event.target.value)}
           placeholder="Search linked references"
           aria-label="Search linked references"
         />
       </label>
-      <ReferencesListBox>
+      <ReferencesListBox role="listbox" aria-label="Linked references">
         {links.length === 0 ? (
           <div className="empty-state">No linked references.</div>
         ) : (
-          links.map((link) => {
+          links.map((link, index) => {
             const Icon = iconForType[link.type];
             const primaryLabel = visibleLinkedReferenceLabel(link);
             const secondaryLabel =
               link.referenceCustomLabel?.trim() && link.referenceCustomLabel.trim() !== link.title
                 ? `${link.title} · ${link.path}`
                 : link.path;
+            const selected = index === selectedIndex;
             return (
               <div
-                className="linked-reference-row"
+                ref={(node) => {
+                  rowRefs.current[index] = node;
+                }}
+                className={selected ? "linked-reference-row selected" : "linked-reference-row"}
                 key={`${link.id}-${link.path}`}
-                role="button"
+                role="option"
+                aria-selected={selected}
+                data-selected={selected ? "true" : "false"}
                 tabIndex={0}
                 title="Open Reference"
                 onClick={() => openReference(link)}
+                onFocus={() => onSelectedIndexChange(index)}
                 onContextMenu={(event) => {
                   event.preventDefault();
                   setContextMenu({ link, x: event.clientX, y: event.clientY });

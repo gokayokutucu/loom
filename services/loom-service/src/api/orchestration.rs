@@ -2056,6 +2056,18 @@ fn deterministic_e2e_answer(
     let has_event_context = context_text.contains("event sourcing")
         && (context_text.contains("event store") || context_text.contains("cqrs"));
 
+    if prompt.contains("blue otter") && prompt.contains("event sourcing") {
+        return Some("Blue Otter is the project codename. In the Event Sourcing explanation, Blue Otter uses an Event Store as the source of truth and can replay events to rebuild projections.".to_string());
+    }
+    if prompt.contains("project codename") || prompt.contains("codename") {
+        return Some(
+            if context_text.contains("blue otter") && context_text.contains("event sourcing") {
+                "The project codename is Blue Otter. It relates to the previous Event Sourcing explanation because Blue Otter is the example system whose state is rebuilt from stored events and projections.".to_string()
+            } else {
+                "Konu bağlamı bulunamadı.".to_string()
+            },
+        );
+    }
     if prompt.contains("mcp") && prompt.contains("cqrs") {
         return Some(mcp_cqrs_quick_ask_e2e_answer());
     }

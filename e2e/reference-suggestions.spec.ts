@@ -5,6 +5,10 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 async function openApp(page: Page) {
   await page.addInitScript(() => {
     window.localStorage.clear();
+    window.localStorage.setItem(
+      "loom-ai-app-settings-v1",
+      JSON.stringify({ mockDataEnabled: true })
+    );
   });
   await page.goto("/");
   await expect(page.getByTestId("loom-sidebar")).toBeVisible();
@@ -89,6 +93,60 @@ test.describe("[legacy-typescript-local] # Reference suggestions", () => {
     await expect(dropdown).toContainText("Loom AI navigation architecture");
   });
 
+  test("Arrow keys move the selected Reference suggestion", async ({ page }) => {
+    await openApp(page);
+    await openArchitectureLoom(page);
+
+    const editor = await replaceComposerText(page, "#");
+    const dropdown = await visibleSuggestionDropdown(page);
+    const options = dropdown.getByRole("option");
+    const optionCount = await options.count();
+    expect(optionCount).toBeGreaterThan(1);
+
+    await expect(options.nth(0)).toHaveAttribute("aria-selected", "true");
+    await editor.press("ArrowDown");
+    await expect(options.nth(0)).toHaveAttribute("aria-selected", "false");
+    await expect(options.nth(1)).toHaveAttribute("aria-selected", "true");
+    await expect(options.nth(1)).toHaveClass(/selected/);
+    await expect(options.nth(1)).toHaveAttribute("data-selected", "true");
+
+    await editor.press("ArrowUp");
+    await expect(options.nth(0)).toHaveAttribute("aria-selected", "true");
+    await expect(options.nth(1)).toHaveAttribute("aria-selected", "false");
+  });
+
+  test("References popover supports Arrow key selection", async ({ page }) => {
+    await openApp(page);
+    await openArchitectureLoom(page);
+
+    const editor = await replaceComposerText(page, "#");
+    await visibleSuggestionDropdown(page);
+    await editor.press("Enter");
+    await expect(page.getByRole("button", { name: /^References/ }).first()).toContainText("1");
+
+    await editor.click();
+    await page.keyboard.type(" #R-");
+    await visibleSuggestionDropdown(page);
+    await editor.press("Enter");
+    await expect(page.getByRole("button", { name: /^References/ }).first()).toContainText("2");
+
+    await page.getByRole("button", { name: /^References/ }).first().click();
+    const listbox = page.getByRole("listbox", { name: "Linked references" });
+    await expect(listbox).toBeVisible();
+    const options = listbox.getByRole("option");
+    await expect(options).toHaveCount(2);
+    await expect(options.nth(0)).toHaveAttribute("aria-selected", "true");
+
+    await page.keyboard.press("ArrowDown");
+    await expect(options.nth(0)).toHaveAttribute("aria-selected", "false");
+    await expect(options.nth(1)).toHaveAttribute("aria-selected", "true");
+    await expect(options.nth(1)).toHaveClass(/selected/);
+
+    await page.keyboard.press("ArrowUp");
+    await expect(options.nth(0)).toHaveAttribute("aria-selected", "true");
+    await expect(options.nth(1)).toHaveAttribute("aria-selected", "false");
+  });
+
   test("dropdown closes on outside focus and reopens when the caret is still on a # query", async ({
     page,
   }) => {
@@ -98,7 +156,7 @@ test.describe("[legacy-typescript-local] # Reference suggestions", () => {
     const editor = await replaceComposerText(page, "#L-");
     await visibleSuggestionDropdown(page);
 
-    await page.getByRole("textbox", { name: "Loom Address Bar" }).click();
+    await page.getByRole("combobox", { name: "Loom Address Bar" }).click();
     await expect(page.getByTestId("reference-suggestion-dropdown")).toBeHidden();
 
     await editor.click();
@@ -113,7 +171,7 @@ test.describe("[legacy-typescript-local] # Reference suggestions", () => {
     await page
       .locator("article")
       .filter({ hasText: "Address Bar as local AI web navigator" })
-      .getByRole("button", { name: "Weft" })
+      .getByRole("button", { name: /Start Weft from/i })
       .click();
     const weftPanel = page.locator(".weft-split-panel");
     await expect(weftPanel).toBeVisible();

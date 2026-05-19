@@ -1,5 +1,13 @@
-import type { ReactNode } from "react";
+import type { HTMLAttributes, ReactNode } from "react";
 
-export function ReferencesListBox({ children }: { children: ReactNode }) {
-  return <div className="linked-reference-list">{children}</div>;
+export function ReferencesListBox({
+  children,
+  className,
+  ...props
+}: { children: ReactNode } & HTMLAttributes<HTMLDivElement>) {
+  return (
+    <div className={["linked-reference-list", className].filter(Boolean).join(" ")} {...props}>
+      {children}
+    </div>
+  );
 }
