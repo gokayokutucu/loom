@@ -884,7 +884,41 @@ test.describe("[engine-contract] Loom engine client selection", () => {
                 kind: "loom",
                 createdAt: "1",
                 updatedAt: "1",
-                responses: [],
+                responses: [
+                  {
+                    responseId: "user-1",
+                    role: "user",
+                    content: "[[csharp code from Response]] IProcessor nasıl olmalı",
+                    createdAt: "1",
+                    sequenceIndex: 0,
+                    metadata: {
+                      references: [
+                        {
+                          referenceId: "reference-1",
+                          label: "csharp code from Response",
+                          selectedTextPreview: "public interface IProcessor {}",
+                          targetKind: "code_block",
+                          targetId: "code-block-1",
+                          sourceResponseCode: "R-00001",
+                          sourceTitle: "Code Snippet",
+                          raw_thinking: "hidden",
+                        },
+                      ],
+                    },
+                  },
+                  {
+                    responseId: "assistant-1",
+                    role: "assistant",
+                    content: "IProcessor should model one processing responsibility.",
+                    title: "IProcessor Interface Nasıl Olmalı?",
+                    canonicalUri: "loom://service/loom-write-1/r/R-00001?id=assistant-1",
+                    code: "R-00001",
+                    createdAt: "2",
+                    sequenceIndex: 1,
+                    metadata: {},
+                    codeBlocks: [],
+                  },
+                ],
               },
             }),
             { status: 200 }
@@ -913,10 +947,25 @@ test.describe("[engine-contract] Loom engine client selection", () => {
     });
 
     await expect(client.listLooms()).resolves.toHaveLength(1);
-    await expect(client.getLoom("loom-write-1")).resolves.toMatchObject({
+    const hydratedLoom = await client.getLoom("loom-write-1");
+    expect(hydratedLoom).toMatchObject({
       loomId: "loom-write-1",
-      responses: [],
+      responses: [
+        {
+          question: "[[csharp code from Response]] IProcessor nasıl olmalı",
+          questionReferences: [
+            {
+              targetKind: "code_block",
+              referenceCustomLabel: "csharp code from Response",
+              referenceMentionId: "reference-1",
+              selectedText: "public interface IProcessor {}",
+            },
+          ],
+        },
+      ],
     });
+    expect(JSON.stringify(hydratedLoom)).not.toContain("raw_thinking");
+    expect(JSON.stringify(hydratedLoom)).not.toContain("hidden");
     await expect(
       client.updateLoomMetadata({
         loomId: "loom-write-1",

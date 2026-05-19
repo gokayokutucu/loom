@@ -243,6 +243,8 @@ export interface LoomForkRecord {
   revisionSourceResponseId?: string;
   revisionPrompt?: string;
   originalPrompt?: string;
+  createdAt?: string;
+  updatedAt?: string;
 }
 
 export interface LoomLink {

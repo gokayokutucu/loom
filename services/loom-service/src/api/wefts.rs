@@ -27,6 +27,8 @@ const FORBIDDEN_THINKING_KEYS: [&str; 8] = [
     "chainOfThought",
     "hiddenReasoning",
 ];
+const ORIGIN_SNAPSHOT_CONTENT_LIMIT: usize = 8_000;
+const ORIGIN_SNAPSHOT_TITLE_LIMIT: usize = 240;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -251,7 +253,7 @@ pub async fn create_weft(
                     upsert_origin_context_snapshot(
                         &state.database,
                         &existing.loom_id,
-                        &origin_loom_id,
+                        &origin_loom,
                         origin_response,
                         None,
                         None,
@@ -353,7 +355,7 @@ pub async fn create_weft(
             upsert_origin_context_snapshot(
                 &state.database,
                 &created.loom_id,
-                &origin_loom_id,
+                &origin_loom,
                 origin_response,
                 None,
                 None,
@@ -532,10 +534,15 @@ pub async fn persist_weft_responses(
                 "Origin Response was not found.",
             )
         })?;
+    let origin_loom = LoomRepository::new(&state.database)
+        .get_loom(&origin_loom_id)
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(|| not_found("ORIGIN_LOOM_NOT_FOUND", "Origin Loom was not found."))?;
     let origin_context_snapshot_id = upsert_origin_context_snapshot(
         &state.database,
         &weft_loom_id,
-        &origin_loom_id,
+        &origin_loom,
         &origin_response,
         input.selected_text.as_deref(),
         input.fragment_hash.as_deref(),
@@ -828,7 +835,7 @@ fn visible_seed_response_to_dto(response: ResponseRecord) -> VisibleWeftSeedResp
 async fn upsert_origin_context_snapshot(
     database: &crate::storage::db::Database,
     weft_loom_id: &str,
-    origin_loom_id: &str,
+    origin_loom: &LoomRecord,
     origin_response: &ResponseRecord,
     selected_text: Option<&str>,
     fragment_hash: Option<&str>,
@@ -836,10 +843,13 @@ async fn upsert_origin_context_snapshot(
     now: &str,
 ) -> Result<Option<String>, (StatusCode, Json<WeftApiError>)> {
     let repository = ContextArtifactsRepository::new(database);
+    let origin_loom_id = origin_loom.loom_id.as_str();
     let capsule = repository
         .get_response_capsule(&origin_response.response_id)
         .await
         .map_err(storage_error)?;
+    let previous_user_response =
+        immediate_previous_user_response(database, origin_loom_id, origin_response).await?;
     let mut snapshot = Map::new();
     snapshot.insert(
         "kind".to_string(),
@@ -853,6 +863,17 @@ async fn upsert_origin_context_snapshot(
         "originResponseId".to_string(),
         Value::String(origin_response.response_id.clone()),
     );
+    snapshot.insert("originLoom".to_string(), loom_snapshot_json(origin_loom));
+    snapshot.insert(
+        "originResponse".to_string(),
+        response_snapshot_json(origin_response),
+    );
+    if let Some(previous_user_response) = previous_user_response.as_ref() {
+        snapshot.insert(
+            "previousUserResponse".to_string(),
+            response_snapshot_json(previous_user_response),
+        );
+    }
     if let Some(selected_text) = selected_text.and_then(non_empty_trimmed) {
         snapshot.insert("selectedText".to_string(), Value::String(selected_text));
     }
@@ -907,6 +928,101 @@ async fn upsert_origin_context_snapshot(
         .await
         .map_err(storage_error)?;
     Ok(Some(context_id))
+}
+
+async fn immediate_previous_user_response(
+    database: &crate::storage::db::Database,
+    origin_loom_id: &str,
+    origin_response: &ResponseRecord,
+) -> Result<Option<ResponseRecord>, (StatusCode, Json<WeftApiError>)> {
+    if origin_response.role != "assistant" {
+        return Ok(None);
+    }
+    let responses = ResponseRepository::new(database)
+        .list_responses_for_loom(origin_loom_id)
+        .await
+        .map_err(storage_error)?;
+    Ok(responses
+        .into_iter()
+        .filter(|response| {
+            response.role == "user" && response.sequence_index < origin_response.sequence_index
+        })
+        .max_by_key(|response| response.sequence_index))
+}
+
+fn loom_snapshot_json(loom: &LoomRecord) -> Value {
+    let mut value = Map::new();
+    value.insert("loomId".to_string(), Value::String(loom.loom_id.clone()));
+    value.insert(
+        "title".to_string(),
+        bounded_safe_string_value(&loom.title, ORIGIN_SNAPSHOT_TITLE_LIMIT),
+    );
+    if let Some(code) = loom.code.as_deref().and_then(non_empty_trimmed) {
+        value.insert("code".to_string(), Value::String(code));
+    }
+    if let Some(canonical_uri) = loom.canonical_uri.as_deref().and_then(non_empty_trimmed) {
+        value.insert("canonicalUri".to_string(), Value::String(canonical_uri));
+    }
+    Value::Object(value)
+}
+
+fn response_snapshot_json(response: &ResponseRecord) -> Value {
+    let mut value = Map::new();
+    value.insert(
+        "responseId".to_string(),
+        Value::String(response.response_id.clone()),
+    );
+    value.insert("role".to_string(), Value::String(response.role.clone()));
+    value.insert(
+        "sequenceIndex".to_string(),
+        Value::Number(response.sequence_index.into()),
+    );
+    if let Some(title) = response.title.as_deref().and_then(non_empty_trimmed) {
+        value.insert(
+            "title".to_string(),
+            bounded_safe_string_value(&title, ORIGIN_SNAPSHOT_TITLE_LIMIT),
+        );
+    }
+    if let Some(code) = response.code.as_deref().and_then(non_empty_trimmed) {
+        value.insert("code".to_string(), Value::String(code));
+    }
+    if let Some(canonical_uri) = response
+        .canonical_uri
+        .as_deref()
+        .and_then(non_empty_trimmed)
+    {
+        value.insert("canonicalUri".to_string(), Value::String(canonical_uri));
+    }
+    if let Some(content) = bounded_safe_content_value(&response.content) {
+        value.insert("content".to_string(), content);
+    } else {
+        value.insert(
+            "contentOmittedReason".to_string(),
+            Value::String("raw_thinking_marker".to_string()),
+        );
+    }
+    Value::Object(value)
+}
+
+fn bounded_safe_string_value(value: &str, max_chars: usize) -> Value {
+    Value::String(truncate_at_word_boundary(value, max_chars))
+}
+
+fn bounded_safe_content_value(value: &str) -> Option<Value> {
+    if contains_forbidden_thinking_marker(value) {
+        return None;
+    }
+    Some(Value::String(truncate_at_word_boundary(
+        value,
+        ORIGIN_SNAPSHOT_CONTENT_LIMIT,
+    )))
+}
+
+fn contains_forbidden_thinking_marker(value: &str) -> bool {
+    let lowered = value.to_ascii_lowercase();
+    FORBIDDEN_THINKING_KEYS
+        .iter()
+        .any(|key| lowered.contains(&key.to_ascii_lowercase()))
 }
 
 async fn insert_canonical_address(
@@ -1261,6 +1377,7 @@ mod tests {
     use super::{
         create_weft, list_wefts_for_loom, list_wefts_for_response, persist_weft_responses,
         CreateWeftRequest, PersistWeftTurn, PersistWeftTurnsRequest, WeftKind, WeftSource,
+        ORIGIN_SNAPSHOT_CONTENT_LIMIT,
     };
     use crate::{
         api::{graph::build_graph_projection, resolve::resolve_address, state::AppState},
@@ -1387,7 +1504,112 @@ mod tests {
         assert_eq!(context.origin_response_id, "origin-response");
         let summary = context.origin_summary.expect("origin summary");
         assert!(summary.contains("weft_origin_context_snapshot"));
+        assert!(summary.contains("Origin Loom"));
+        assert!(summary.contains("Origin question"));
+        assert!(summary.contains("Origin content"));
+        assert!(summary.contains("previousUserResponse"));
+        assert!(summary.contains("originResponse"));
         assert!(!summary.contains("raw_thinking"));
+    }
+
+    #[tokio::test]
+    async fn hidden_origin_context_snapshot_does_not_require_response_capsule() {
+        let state = seeded_state().await;
+        let response = create_weft(State(state.clone()), Json(response_action_request(false)))
+            .await
+            .expect("create Weft")
+            .1
+             .0;
+
+        let context = ContextArtifactsRepository::new(&state.database)
+            .get_weft_origin_context(&response.weft.loom_id)
+            .await
+            .expect("get context")
+            .expect("context exists");
+        let summary = context.origin_summary.expect("origin summary");
+        let value: serde_json::Value = serde_json::from_str(&summary).expect("summary json");
+
+        assert_eq!(value["originLoomId"], json!("origin-loom"));
+        assert_eq!(value["originResponseId"], json!("origin-response"));
+        assert_eq!(value["originLoom"]["title"], json!("Origin Loom"));
+        assert_eq!(value["originLoom"]["code"], json!("L-ORIGIN"));
+        assert_eq!(value["originResponse"]["role"], json!("assistant"));
+        assert_eq!(value["originResponse"]["sequenceIndex"], json!(1));
+        assert_eq!(value["originResponse"]["content"], json!("Origin content"));
+        assert_eq!(value["previousUserResponse"]["role"], json!("user"));
+        assert_eq!(
+            value["previousUserResponse"]["content"],
+            json!("Origin question")
+        );
+    }
+
+    #[tokio::test]
+    async fn hidden_origin_context_snapshot_excludes_raw_thinking_keys() {
+        let state = seeded_state().await;
+        let response = create_weft(State(state.clone()), Json(response_action_request(false)))
+            .await
+            .expect("create Weft")
+            .1
+             .0;
+        let context = ContextArtifactsRepository::new(&state.database)
+            .get_weft_origin_context(&response.weft.loom_id)
+            .await
+            .expect("get context")
+            .expect("context exists");
+        let summary = context.origin_summary.expect("origin summary");
+        let value: serde_json::Value = serde_json::from_str(&summary).expect("summary json");
+
+        assert_eq!(value["originResponse"]["content"], json!("Origin content"));
+        assert!(!summary.contains("raw_thinking"));
+        assert!(!summary.contains("thinking_text"));
+        assert!(!summary.contains("chain_of_thought"));
+        assert!(!summary.contains("hidden_reasoning"));
+    }
+
+    #[tokio::test]
+    async fn hidden_origin_context_snapshot_truncates_large_content() {
+        let state = seeded_state().await;
+        let long_content = format!("{} final boundary", "context ".repeat(2_000));
+        ResponseRepository::new(&state.database)
+            .insert_response(&NewResponse {
+                response_id: "long-origin-response".to_string(),
+                loom_id: "origin-loom".to_string(),
+                role: "assistant".to_string(),
+                content: long_content,
+                title: Some("Long Origin Response".to_string()),
+                code: Some("R-LONG".to_string()),
+                canonical_uri: None,
+                created_at: "2026-05-08T00:00:04Z".to_string(),
+                updated_at: "2026-05-08T00:00:04Z".to_string(),
+                sequence_index: 2,
+                metadata_json: None,
+            })
+            .await
+            .expect("insert long response");
+        let request = CreateWeftRequest {
+            origin_response_id: Some("long-origin-response".to_string()),
+            reuse_existing: Some(false),
+            ..response_action_request(false)
+        };
+
+        let response = create_weft(State(state.clone()), Json(request))
+            .await
+            .expect("create Weft")
+            .1
+             .0;
+        let context = ContextArtifactsRepository::new(&state.database)
+            .get_weft_origin_context(&response.weft.loom_id)
+            .await
+            .expect("get context")
+            .expect("context exists");
+        let summary = context.origin_summary.expect("origin summary");
+        let value: serde_json::Value = serde_json::from_str(&summary).expect("summary json");
+        let content = value["originResponse"]["content"]
+            .as_str()
+            .expect("origin content");
+
+        assert!(content.len() <= ORIGIN_SNAPSHOT_CONTENT_LIMIT);
+        assert!(!content.contains("final boundary"));
     }
 
     #[tokio::test]

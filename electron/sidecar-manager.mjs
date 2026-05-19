@@ -2,6 +2,12 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import {
+  createSidecarLifecycleState,
+  sidecarEventForBinaryResolution,
+  sidecarEventForPortAvailability,
+  transitionSidecarLifecycle,
+} from "./sidecar-lifecycle.mjs";
 
 const DEFAULT_HOST = "127.0.0.1";
 const DEFAULT_PORT = 17633;
@@ -233,6 +239,7 @@ export class LoomServiceSidecarManager {
     this.preferredPort = Number(process.env.LOOM_ELECTRON_SERVICE_PORT || preferredPort);
     this.host = process.env.LOOM_ELECTRON_SERVICE_HOST || DEFAULT_HOST;
     this.child = null;
+    this.lifecycle = createSidecarLifecycleState();
     this.status = {
       state: "stopped",
       serviceUrl: undefined,
@@ -253,11 +260,26 @@ export class LoomServiceSidecarManager {
     return { ...this.status };
   }
 
+  transition(event) {
+    this.lifecycle = transitionSidecarLifecycle(this.lifecycle, event);
+    return this.lifecycle;
+  }
+
   async start(options = {}) {
     if (this.child && this.status.serviceUrl) return this.getStatus();
 
+    this.transition("START_REQUESTED");
     const binaryPath = resolveBinaryPath(this.repoRoot, this.app);
-    if (!fs.existsSync(binaryPath)) {
+    const binaryExists = fs.existsSync(binaryPath);
+    const binaryTransition = this.transition(sidecarEventForBinaryResolution(binaryExists));
+    if (!binaryExists) {
+      this.status = {
+        ...this.status,
+        state: binaryTransition.state,
+        binaryPath,
+        error: `loom-service binary is missing at ${binaryPath}. Build it first.`,
+        lastCheckedAt: new Date().toISOString(),
+      };
       throw new Error(`loom-service binary is missing at ${binaryPath}. Build it first.`);
     }
 
@@ -296,7 +318,15 @@ export class LoomServiceSidecarManager {
     });
     if (recoveredStatus) return recoveredStatus;
 
-    if (!(await isPortAvailable(this.host, port))) {
+    const portAvailable = await isPortAvailable(this.host, port);
+    const portTransition = this.transition(sidecarEventForPortAvailability(portAvailable));
+    if (!portAvailable) {
+      this.status = {
+        ...this.status,
+        state: portTransition.state,
+        error: `loom-service port ${port} is already in use by an unknown runtime. Refusing to start a second SQLite writer.`,
+        lastCheckedAt: new Date().toISOString(),
+      };
       throw new Error(
         `loom-service port ${port} is already in use by an unknown runtime. Refusing to start a second SQLite writer.`,
       );
@@ -320,6 +350,7 @@ export class LoomServiceSidecarManager {
     });
 
     this.status.pid = this.child.pid;
+    this.transition("PROCESS_SPAWNED");
     writeRuntimeLock(path.dirname(configPath), {
       kind: "loom-service-runtime-lock",
       runtimeOwnerKind: "electron",
@@ -342,17 +373,34 @@ export class LoomServiceSidecarManager {
     });
     this.child.once("exit", (code, signal) => {
       const wasStopping = this.status.state === "stopping";
+      const exitTransition = this.transition("PROCESS_EXITED");
       removeRuntimeLock(path.dirname(configPath), this.status.pid);
       this.child = null;
       this.status = {
         ...this.status,
-        state: wasStopping ? "stopped" : "exited",
+        state: wasStopping ? "stopped" : exitTransition.state,
         error: wasStopping ? undefined : `loom-service exited with code ${code ?? "null"} signal ${signal ?? "null"}`,
         lastCheckedAt: new Date().toISOString(),
       };
     });
 
-    const health = await waitForHealth(serviceUrl);
+    let health;
+    try {
+      health = await waitForHealth(serviceUrl);
+    } catch (error) {
+      const failureTransition = this.transition({
+        type: "HEALTH_FAILED",
+        error: error instanceof Error ? error.message : String(error),
+      });
+      this.status = {
+        ...this.status,
+        state: failureTransition.state,
+        error: failureTransition.error,
+        lastCheckedAt: new Date().toISOString(),
+      };
+      throw error;
+    }
+    this.transition("HEALTH_READY");
     const runtimeStatus = await fetchRuntimeStatus(serviceUrl).catch(() => undefined);
     writeRuntimeLock(path.dirname(configPath), {
       kind: "loom-service-runtime-lock",
@@ -377,6 +425,7 @@ export class LoomServiceSidecarManager {
       error: undefined,
       lastCheckedAt: new Date().toISOString(),
     };
+    this.lifecycle = createSidecarLifecycleState("ready");
     return this.getStatus();
   }
 
@@ -439,8 +488,10 @@ export class LoomServiceSidecarManager {
           startedByElectron: false,
           lastCheckedAt: new Date().toISOString(),
         };
+        this.lifecycle = createSidecarLifecycleState("ready");
         return this.getStatus();
       }
+      this.transition("PORT_OCCUPIED_UNKNOWN");
       throw new Error(
         `Existing loom-service on ${runtimeUrl} is ${runtimeStatus.runtimeOwnerKind}; Electron will not kill or replace unknown/manual runtimes.`,
       );
@@ -493,6 +544,7 @@ export class LoomServiceSidecarManager {
       startedByElectron: true,
       lastCheckedAt: new Date().toISOString(),
     };
+    this.lifecycle = createSidecarLifecycleState("ready");
     writeRuntimeLock(dataDir, {
       ...(lock ?? {}),
       kind: "loom-service-runtime-lock",
@@ -543,6 +595,7 @@ export class LoomServiceSidecarManager {
   async stop({ waitMs = DEFAULT_QUIT_WAIT_TIMEOUT_MS } = {}) {
     if (!this.status.serviceUrl) return this.getStatus();
     if (!this.child && this.status.startedByElectron === false) {
+      this.lifecycle = createSidecarLifecycleState("stopped");
       this.status = {
         ...this.status,
         state: "stopped",
@@ -552,6 +605,7 @@ export class LoomServiceSidecarManager {
       return this.getStatus();
     }
     const child = this.child;
+    this.transition("STOP_REQUESTED");
     this.status = { ...this.status, state: "stopping", lastCheckedAt: new Date().toISOString() };
 
     try {
@@ -599,12 +653,14 @@ export class LoomServiceSidecarManager {
       error: undefined,
       lastCheckedAt: new Date().toISOString(),
     };
+    this.lifecycle = createSidecarLifecycleState("stopped");
     return this.getStatus();
   }
 
   async restart(options = {}) {
     const previousPort = this.status.port ?? this.preferredPort;
     const previousServiceUrl = this.status.serviceUrl;
+    this.transition("RESTART_REQUESTED");
     this.status = {
       ...this.status,
       state: "restarting",

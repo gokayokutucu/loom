@@ -1,5 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useReducer, useRef, useState } from "react";
 import type { LoomEngineClient } from "../engine";
+import {
+  initialSpeechToTextState,
+  reduceSpeechToText,
+  type SpeechToTextStatus,
+} from "../state/speechToTextMachine";
 
 const AUDIO_MIME_CANDIDATES = [
   "audio/webm",
@@ -13,7 +18,7 @@ const PLACEHOLDER_BARS = 24;
 const MAX_RECORDING_MS = 60_000;
 const MAX_AUDIO_BYTES = 10 * 1024 * 1024;
 
-export type SpeechRecorderStatus = "idle" | "recording" | "transcribing" | "error";
+export type SpeechRecorderStatus = SpeechToTextStatus;
 
 export interface SpeechRecorderResult {
   transcript: string;
@@ -74,8 +79,10 @@ function placeholderWaveform(frame: number) {
 }
 
 export function useSpeechToTextRecorder(engineClient: LoomEngineClient): SpeechRecorderState {
-  const [status, setStatus] = useState<SpeechRecorderStatus>("idle");
-  const [error, setError] = useState<string | null>(null);
+  const [recorderState, dispatchRecorder] = useReducer(
+    reduceSpeechToText,
+    initialSpeechToTextState
+  );
   const [waveform, setWaveform] = useState<number[]>(() => placeholderWaveform(0));
   const streamRef = useRef<MediaStream | null>(null);
   const recorderRef = useRef<MediaRecorder | null>(null);
@@ -152,32 +159,40 @@ export function useSpeechToTextRecorder(engineClient: LoomEngineClient): SpeechR
   }, [stopWaveform]);
 
   const startRecording = useCallback(async () => {
-    setError(null);
+    dispatchRecorder({ type: "START_REQUESTED" });
     if (!navigator.mediaDevices?.getUserMedia) {
-      setStatus("error");
-      setError("This browser does not support microphone capture.");
+      dispatchRecorder({
+        type: "PERMISSION_DENIED",
+        error: "This browser does not support microphone capture.",
+      });
       return;
     }
     if (typeof MediaRecorder === "undefined") {
-      setStatus("error");
-      setError("This browser does not support audio recording.");
+      dispatchRecorder({
+        type: "PERMISSION_DENIED",
+        error: "This browser does not support audio recording.",
+      });
       return;
     }
     const mimeType = bestSupportedMimeType();
     if (!mimeType) {
-      setStatus("error");
-      setError("This browser does not support a compatible audio format.");
+      dispatchRecorder({
+        type: "PERMISSION_DENIED",
+        error: "This browser does not support a compatible audio format.",
+      });
       return;
     }
 
     try {
       cleanupAudio();
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      dispatchRecorder({ type: "PERMISSION_GRANTED" });
       streamRef.current = stream;
       chunksRef.current = [];
       mimeTypeRef.current = mimeType;
       const recorder = new MediaRecorder(stream, { mimeType });
       recorderRef.current = recorder;
+      dispatchRecorder({ type: "RECORDER_READY" });
       recorder.addEventListener("dataavailable", (event) => {
         if (event.data.size > 0) chunksRef.current.push(event.data);
       });
@@ -192,15 +207,19 @@ export function useSpeechToTextRecorder(engineClient: LoomEngineClient): SpeechR
           }
         }
         cleanupAudio();
-        setStatus("error");
-        setError("Maximum recording duration reached. Please retry with a shorter recording.");
+        dispatchRecorder({
+          type: "TRANSCRIBE_FAILED",
+          error: "Maximum recording duration reached. Please retry with a shorter recording.",
+        });
       }, MAX_RECORDING_MS);
       startWaveform(stream);
-      setStatus("recording");
+      dispatchRecorder({ type: "RECORDING_STARTED" });
     } catch (recordingError) {
       cleanupAudio();
-      setStatus("error");
-      setError(errorMessageForMediaError(recordingError));
+      dispatchRecorder({
+        type: "PERMISSION_DENIED",
+        error: errorMessageForMediaError(recordingError),
+      });
     }
   }, [cleanupAudio, startWaveform]);
 
@@ -214,17 +233,20 @@ export function useSpeechToTextRecorder(engineClient: LoomEngineClient): SpeechR
       }
     }
     cleanupAudio();
-    setStatus("idle");
-    setError(null);
+    dispatchRecorder({ type: "CANCEL_REQUESTED" });
+    dispatchRecorder({ type: "CLEANUP_DONE" });
     setWaveform(placeholderWaveform(0));
   }, [cleanupAudio]);
 
   const stopAndTranscribe = useCallback(async () => {
+    dispatchRecorder({ type: "STOP_REQUESTED" });
     const recorder = recorderRef.current;
     if (!recorder || recorder.state === "inactive") {
-      setStatus("error");
-      setError("No active microphone recording was found.");
       cleanupAudio();
+      dispatchRecorder({
+        type: "TRANSCRIBE_FAILED",
+        error: "No active microphone recording was found.",
+      });
       return null;
     }
 
@@ -240,28 +262,35 @@ export function useSpeechToTextRecorder(engineClient: LoomEngineClient): SpeechR
       stopWaveform();
       streamRef.current?.getTracks().forEach((track) => track.stop());
       streamRef.current = null;
-      setStatus("transcribing");
+      dispatchRecorder({ type: "AUDIO_READY" });
       if (chunks.length === 0) {
         cleanupAudio();
-        setStatus("error");
-        setError("No speech was captured. Please retry.");
+        dispatchRecorder({
+          type: "TRANSCRIBE_FAILED",
+          error: "No speech was captured. Please retry.",
+        });
         return null;
       }
       const blob = new Blob(chunks, { type: mimeType });
       if (blob.size === 0) {
         cleanupAudio();
-        setStatus("error");
-        setError("No speech was captured. Please retry.");
+        dispatchRecorder({
+          type: "TRANSCRIBE_FAILED",
+          error: "No speech was captured. Please retry.",
+        });
         return null;
       }
       if (blob.size > MAX_AUDIO_BYTES) {
         cleanupAudio();
-        setStatus("error");
-        setError("Recording is too large to transcribe. Please retry with a shorter recording.");
+        dispatchRecorder({
+          type: "TRANSCRIBE_FAILED",
+          error: "Recording is too large to transcribe. Please retry with a shorter recording.",
+        });
         return null;
       }
       const audioBytes = Array.from(new Uint8Array(await blob.arrayBuffer()));
       cleanupAudio();
+      dispatchRecorder({ type: "TRANSCRIBE_STARTED" });
       const response = await engineClient.transcribeSpeech({
         audioBytes,
         mimeType,
@@ -270,12 +299,14 @@ export function useSpeechToTextRecorder(engineClient: LoomEngineClient): SpeechR
       });
       const transcript = response.transcript.trim();
       if (!transcript) {
-        setStatus("error");
-        setError("Speech transcription was empty. Please retry.");
+        dispatchRecorder({
+          type: "TRANSCRIBE_FAILED",
+          error: "Speech transcription was empty. Please retry.",
+        });
         return null;
       }
-      setStatus("idle");
-      setError(null);
+      dispatchRecorder({ type: "TRANSCRIBE_SUCCEEDED" });
+      dispatchRecorder({ type: "CLEANUP_DONE" });
       return {
         transcript,
         warnings: response.warnings,
@@ -283,22 +314,23 @@ export function useSpeechToTextRecorder(engineClient: LoomEngineClient): SpeechR
       };
     } catch (transcriptionError) {
       cleanupAudio();
-      setStatus("error");
-      setError(errorMessageForTranscription(transcriptionError));
+      dispatchRecorder({
+        type: "TRANSCRIBE_FAILED",
+        error: errorMessageForTranscription(transcriptionError),
+      });
       return null;
     }
   }, [cleanupAudio, engineClient, stopWaveform]);
 
   const resetError = useCallback(() => {
-    setError(null);
-    setStatus("idle");
+    dispatchRecorder({ type: "RESET" });
   }, []);
 
   useEffect(() => cleanupAudio, [cleanupAudio]);
 
   return {
-    status,
-    error,
+    status: recorderState.status,
+    error: recorderState.error,
     waveform,
     startRecording,
     stopAndTranscribe,
