@@ -725,6 +725,156 @@ function responseMetaFromRow(row: ServiceResponseRow, fallbackTitle: string) {
   };
 }
 
+function loomObjectTypeValue(value: unknown): LoomLink["type"] | undefined {
+  if (
+    value === "conversation" ||
+    value === "loom" ||
+    value === "response" ||
+    value === "fragment" ||
+    value === "bookmark" ||
+    value === "semantic" ||
+    value === "recent"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function referenceTargetKindValue(value: unknown): LoomLink["targetKind"] | undefined {
+  if (
+    value === "loom" ||
+    value === "response" ||
+    value === "weft" ||
+    value === "fragment" ||
+    value === "code_block" ||
+    value === "external"
+  ) {
+    return value;
+  }
+  return undefined;
+}
+
+function referenceDisplayModeValue(value: unknown): LoomLink["referenceDisplayMode"] | undefined {
+  return value === "code" || value === "title" ? value : undefined;
+}
+
+function loomLinkFromQuestionReference(value: unknown): LoomLink | null {
+  const sanitized = sanitizeEnginePayload(value);
+  if (!isRecord(sanitized)) return null;
+
+  const targetKind = referenceTargetKindValue(sanitized.targetKind);
+  const type =
+    loomObjectTypeValue(sanitized.type) ??
+    (targetKind === "code_block" || targetKind === "fragment"
+      ? "fragment"
+      : targetKind === "response"
+      ? "response"
+      : "conversation");
+  const id =
+    stringValue(sanitized, "id") ??
+    stringValue(sanitized, "targetObjectId") ??
+    stringValue(sanitized, "referenceMentionId");
+  const title =
+    stringValue(sanitized, "title") ??
+    stringValue(sanitized, "referenceCustomLabel") ??
+    stringValue(sanitized, "selectedText") ??
+    id;
+  const path =
+    stringValue(sanitized, "path") ??
+    stringValue(sanitized, "canonicalUri") ??
+    stringValue(sanitized, "sourceCanonicalUri") ??
+    id;
+
+  if (!id || !title || !path) return null;
+
+  return {
+    id,
+    type,
+    title,
+    path,
+    badge: stringValue(sanitized, "badge"),
+    targetObjectId: stringValue(sanitized, "targetObjectId"),
+    targetKind,
+    canonicalUri: stringValue(sanitized, "canonicalUri"),
+    referenceCode: stringValue(sanitized, "referenceCode"),
+    referenceDisplayMode: referenceDisplayModeValue(sanitized.referenceDisplayMode),
+    referenceCustomLabel: stringValue(sanitized, "referenceCustomLabel"),
+    referenceOccurrenceIndex: numberValue(sanitized, "referenceOccurrenceIndex"),
+    referenceMentionId: stringValue(sanitized, "referenceMentionId"),
+    resolutionStatus:
+      stringValue(sanitized, "resolutionStatus") === "resolved" ? "resolved" : undefined,
+    sourceLoomId: stringValue(sanitized, "sourceLoomId"),
+    sourceResponseId: stringValue(sanitized, "sourceResponseId"),
+    selectedText: stringValue(sanitized, "selectedText"),
+    sourceResponseCode: stringValue(sanitized, "sourceResponseCode"),
+    sourceResponseTitle: stringValue(sanitized, "sourceResponseTitle"),
+    sourceCanonicalUri: stringValue(sanitized, "sourceCanonicalUri"),
+    fragmentHash: stringValue(sanitized, "fragmentHash"),
+    createdAt: numberValue(sanitized, "createdAt"),
+  };
+}
+
+function loomLinkFromPlannerReference(value: unknown): LoomLink | null {
+  const sanitized = sanitizeEnginePayload(value);
+  if (!isRecord(sanitized)) return null;
+
+  const referenceId = stringValue(sanitized, "referenceId");
+  const targetKind = referenceTargetKindValue(sanitized.targetKind);
+  const targetId = stringValue(sanitized, "targetId");
+  const label = stringValue(sanitized, "label");
+  const selectedText = stringValue(sanitized, "selectedTextPreview");
+  const sourceTitle = stringValue(sanitized, "sourceTitle");
+  const id = targetId ?? referenceId;
+  const title = label ?? selectedText ?? sourceTitle ?? id;
+  if (!referenceId || !id || !title) return null;
+
+  return {
+    id,
+    type:
+      targetKind === "code_block" || targetKind === "fragment"
+        ? "fragment"
+        : targetKind === "response"
+        ? "response"
+        : "conversation",
+    title,
+    path: id,
+    badge:
+      targetKind === "code_block"
+        ? "Code"
+        : targetKind === "fragment"
+        ? "Fragment"
+        : targetKind === "response"
+        ? "Response"
+        : "Reference",
+    targetKind,
+    targetObjectId: targetId,
+    referenceDisplayMode: "title",
+    referenceCustomLabel: label,
+    referenceMentionId: referenceId,
+    resolutionStatus: "resolved",
+    selectedText,
+    sourceResponseCode: stringValue(sanitized, "sourceResponseCode"),
+    sourceResponseTitle: sourceTitle,
+  };
+}
+
+function questionReferencesFromRow(row?: ServiceResponseRow | null): LoomLink[] {
+  const metadata = isRecord(row?.metadata) ? row.metadata : undefined;
+  const questionReferences = metadata?.questionReferences;
+  if (Array.isArray(questionReferences)) {
+    const parsed = questionReferences
+      .map(loomLinkFromQuestionReference)
+      .filter((reference): reference is LoomLink => reference !== null);
+    if (parsed.length > 0) return parsed;
+  }
+
+  const plannerReferences = metadata?.references;
+  if (!Array.isArray(plannerReferences)) return [];
+  return plannerReferences
+    .map(loomLinkFromPlannerReference)
+    .filter((reference): reference is LoomLink => reference !== null);
+}
+
 function buildResponseItemsFromRows(rows: ServiceResponseRow[]): ResponseItem[] {
   const responses = rows
     .filter((row) => !isHiddenWeftSeedRow(row))
@@ -746,6 +896,7 @@ function buildResponseItemsFromRows(rows: ServiceResponseRow[]): ResponseItem[] 
       title,
       address: row.canonicalUri ?? "",
       question,
+      questionReferences: questionReferencesFromRow(pendingUser),
       answer: splitPersistedAnswer(row.content),
       finalContent: row.content,
       codeBlocks: row.codeBlocks,
@@ -770,6 +921,7 @@ function buildResponseItemsFromRows(rows: ServiceResponseRow[]): ResponseItem[] 
       title,
       address: pendingUser.canonicalUri ?? "",
       question,
+      questionReferences: questionReferencesFromRow(pendingUser),
       answer: [],
       finalContent: "",
       suggestedLinks: [],

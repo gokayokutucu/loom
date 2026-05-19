@@ -4,6 +4,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useReducer,
   useRef,
   useState,
   type CSSProperties,
@@ -118,6 +119,23 @@ import {
   readRuntimeBookmarks,
   writeRuntimeBookmarks,
 } from "./services/loomRuntimeGraph";
+import {
+  transitionTemporaryWeftStatus,
+  type TemporaryWeftLifecycleStatus,
+} from "./state/temporaryWeftMachine";
+import {
+  addressablePanelFromFocusState,
+  initialSplitFocusState,
+  reduceSplitFocus,
+  splitPanelFromFocusState,
+  type SplitFocusEvent,
+} from "./state/splitFocusMachine";
+import {
+  initialAddressBarState,
+  isAddressBarFocusedState,
+  reduceAddressBar,
+  type AddressBarEvent,
+} from "./state/addressBarMachine";
 import {
   isMockDataEnabled,
   readAppSettings,
@@ -408,6 +426,20 @@ interface SelectionReferenceState {
 
 type ForkRecord = LoomForkRecord;
 
+type TemporaryWeftWorkspaceStatus = Exclude<
+  TemporaryWeftLifecycleStatus,
+  "absent" | "discarded"
+>;
+
+function asTemporaryWeftWorkspaceStatus(
+  status: TemporaryWeftLifecycleStatus
+): TemporaryWeftWorkspaceStatus {
+  if (status === "absent" || status === "discarded") {
+    throw new Error(`Temporary Weft workspace cannot remain in ${status} state.`);
+  }
+  return status;
+}
+
 interface TemporaryWeftWorkspace {
   temporaryId: string;
   originLoomId: string;
@@ -418,7 +450,7 @@ interface TemporaryWeftWorkspace {
   folder: string;
   anchorTitle: string;
   anchorCode?: string;
-  status: "temporary" | "promoting" | "persisted";
+  status: TemporaryWeftWorkspaceStatus;
   persistedWeftId?: string;
   createdAt: string;
 }
@@ -2061,7 +2093,10 @@ function App() {
     initialNavigationDestination.title
   );
   const [activePanel, setActivePanel] = useState<ActivePanel>(null);
-  const [activeSplitPanel, setActiveSplitPanel] = useState<"origin" | "weft">("weft");
+  const [splitFocusState, dispatchSplitFocus] = useReducer(
+    reduceSplitFocus,
+    initialSplitFocusState
+  );
   const [splitPanelMenu, setSplitPanelMenu] = useState<{
     panel: "origin" | "weft";
     x: number;
@@ -2101,11 +2136,23 @@ function App() {
   ]);
   const [navigationIndex, setNavigationIndex] = useState(0);
   const [workspaceWidth, setWorkspaceWidth] = useState(0);
-  const [addressFocused, setAddressFocused] = useState(false);
+  const [addressBarState, dispatchAddressBar] = useReducer(
+    reduceAddressBar,
+    initialAddressBarState
+  );
   const [addressQuery, setAddressQuery] = useState("");
   const [addressFeedback, setAddressFeedback] =
     useState<LoomResolutionResult | null>(null);
   const [selectedSuggestion, setSelectedSuggestion] = useState(-1);
+  const addressFocused = isAddressBarFocusedState(addressBarState);
+
+  const setAddressFocused = (focused: boolean) => {
+    dispatchAddressBar({ type: focused ? "FOCUS" : "BLUR" });
+  };
+
+  const dispatchAddressBarSequence = (...events: AddressBarEvent[]) => {
+    events.forEach((event) => dispatchAddressBar(event));
+  };
   const [serviceLoomsLoading, setServiceLoomsLoading] = useState(false);
   const [loomSurfaceLoading, setLoomSurfaceLoading] = useState(false);
   const [askState, setAskState] = useState<AskState | null>(null);
@@ -2339,6 +2386,18 @@ function App() {
     Boolean(activeWeftOrigin && originConversation) &&
     (currentNavigationDestination.mode === "split" || Boolean(activeTemporaryWeft)) &&
     canShowWeftSplit;
+  const activeSplitPanel = splitPanelFromFocusState(splitFocusState);
+  const activeAddressableSplitPanel = addressablePanelFromFocusState(splitFocusState);
+
+  const setActiveSplitPanel = (panel: "origin" | "weft") => {
+    const event: SplitFocusEvent =
+      panel === "origin"
+        ? { type: "ORIGIN_INTERACTED" }
+        : activeTemporaryWeft
+          ? { type: "TEMP_WEFT_INTERACTED" }
+          : { type: "PERSISTED_WEFT_INTERACTED" };
+    dispatchSplitFocus(event);
+  };
 
   useEffect(() => {
     if (activeWeftOrigin) return;
@@ -2355,10 +2414,11 @@ function App() {
     focusedSplitConversation && focusedSplitConversation.id !== draftConversation?.id
       ? conversationResponses[focusedSplitConversation.id] ?? []
       : [];
-  const activeAddressableConversation =
-    showWeftSplit && activeSplitPanel === "weft" && activeTemporaryWeft
+  const activeAddressableConversation = showWeftSplit
+    ? activeAddressableSplitPanel === "origin"
       ? originConversation
-      : focusedSplitConversation;
+      : activeConversation
+    : focusedSplitConversation;
   const activeAddressableResponses =
     activeAddressableConversation && activeAddressableConversation.id !== draftConversation?.id
       ? conversationResponses[activeAddressableConversation.id] ?? []
@@ -2460,6 +2520,22 @@ function App() {
     responseTitleOverrides,
     showWeftSplit,
   ]);
+  const currentShareDestination = useMemo<LoomLink>(() => {
+    if (activeAddressableConversation) {
+      return {
+        id: activeAddressableConversation.id,
+        type: getWeftOrigin(activeAddressableConversation.id) ? "loom" : "conversation",
+        title: activeAddressableConversation.title,
+        path: activeAddressableConversation.path,
+        badge: getWeftOrigin(activeAddressableConversation.id)
+          ? typeLabel.loom
+          : typeLabel.conversation,
+        canonicalUri: activeAddressableConversation.meta?.canonicalUri,
+        meta: activeAddressableConversation.meta,
+      };
+    }
+    return currentActiveDestination;
+  }, [activeAddressableConversation, currentActiveDestination]);
 
   const currentLoomExportTarget = useMemo(() => {
     if (!focusedSplitConversation) return null;
@@ -2474,10 +2550,16 @@ function App() {
 
   useEffect(() => {
     if (showWeftSplit && !wasWeftSplitVisibleRef.current) {
-      setActiveSplitPanel("weft");
+      dispatchSplitFocus({
+        type: "SPLIT_OPENED",
+        weftKind: activeTemporaryWeft ? "temporary" : "persisted",
+      });
+    }
+    if (!showWeftSplit && wasWeftSplitVisibleRef.current) {
+      dispatchSplitFocus({ type: "NAVIGATED_FULL" });
     }
     wasWeftSplitVisibleRef.current = showWeftSplit;
-  }, [showWeftSplit]);
+  }, [activeTemporaryWeft, showWeftSplit]);
 
   const composerReferenceOptions = useMemo<ComposerReferenceOption[]>(() => {
     const conversationOptions = conversations.map((conversation) => ({
@@ -4242,6 +4324,47 @@ function App() {
     );
   }
 
+  function findReferenceTargetResponse(link: LoomLink) {
+    if (link.sourceLoomId && link.sourceResponseId) {
+      const sourceResponse = findResponseInLoom(link.sourceLoomId, link.sourceResponseId);
+      if (sourceResponse) return { loomId: link.sourceLoomId, response: sourceResponse };
+    }
+
+    const codeBlockCandidates = new Set(
+      [
+        link.targetKind === "code_block" ? link.targetObjectId : undefined,
+        link.targetKind === "code_block" ? link.id : undefined,
+      ].filter((candidate): candidate is string => Boolean(candidate))
+    );
+    const responseCodeCandidates = new Set(
+      [
+        link.sourceResponseCode,
+        link.referenceCode,
+      ].filter((candidate): candidate is string => Boolean(candidate))
+    );
+
+    if (codeBlockCandidates.size === 0 && responseCodeCandidates.size === 0) {
+      return null;
+    }
+
+    for (const [loomId, responses] of Object.entries(conversationResponses)) {
+      for (const response of responses) {
+        const hasCodeBlockTarget = (response.codeBlocks ?? []).some((codeBlock) =>
+          codeBlock.codeBlockId ? codeBlockCandidates.has(codeBlock.codeBlockId) : false
+        );
+        const hasResponseCodeTarget = [
+          response.meta?.code,
+          response.meta?.displayCode,
+        ].some((code) => code ? responseCodeCandidates.has(code) : false);
+        if (hasCodeBlockTarget || hasResponseCodeTarget) {
+          return { loomId, response };
+        }
+      }
+    }
+
+    return null;
+  }
+
   function destinationAddressCandidates(
     destination: LoomLink | AddressSuggestion | HistoryEntry
   ) {
@@ -4683,10 +4806,14 @@ function App() {
   }
 
   function openGraphOverlay() {
+    dispatchSplitFocus({ type: "GRAPH_CONTEXT_SWITCHED" });
+    dispatchSplitFocus({ type: "GRAPH_CONTEXT_SWITCHED" });
     setGraphMode(true);
   }
 
   function toggleGraphOverlay() {
+    dispatchSplitFocus({ type: "GRAPH_CONTEXT_SWITCHED" });
+    dispatchSplitFocus({ type: "GRAPH_CONTEXT_SWITCHED" });
     setGraphMode((current) => !current);
   }
 
@@ -4700,7 +4827,7 @@ function App() {
   }
 
   function closeAddressSearch() {
-    setAddressFocused(false);
+    dispatchAddressBar({ type: "RESET" });
     setAddressQuery("");
     setAddressFeedback(null);
     setSelectedSuggestion(-1);
@@ -4717,7 +4844,7 @@ function App() {
   }
 
   function focusAddressBar() {
-    setAddressFocused(true);
+    dispatchAddressBar({ type: "FOCUS" });
     setSelectedSuggestion(-1);
     setAddressFeedback(null);
     window.requestAnimationFrame(() => {
@@ -5079,6 +5206,8 @@ function App() {
   ) {
     if (options.source !== "addressBar") {
       closeAddressSearch();
+    } else {
+      dispatchAddressBarSequence({ type: "RESOLVE_STARTED" });
     }
     let resolution:
       | { ok: true; destination: LoomLink | AddressSuggestion | HistoryEntry }
@@ -5094,13 +5223,16 @@ function App() {
             : "Address navigation failed.",
         color: "neutral",
       });
-      setAddressFocused(true);
+      dispatchAddressBarSequence({ type: "RESOLVE_FAILED" }, { type: "FOCUS" });
       return;
     }
     if (!resolution.ok) {
       setAddressFeedback(resolution.resolution);
-      setAddressFocused(true);
+      dispatchAddressBar({ type: "RESOLVE_FAILED" });
       return;
+    }
+    if (options.source === "addressBar") {
+      dispatchAddressBarSequence({ type: "RESOLVE_SUCCEEDED" });
     }
     const resolvedDestination = resolution.destination;
     const source = options.source ?? "userNavigation";
@@ -5116,6 +5248,7 @@ function App() {
         : undefined) ??
       navigationDestinationForLink(resolvedDestination, source);
     if (fromAddressBar) blurAddressBarInput();
+    if (fromAddressBar) dispatchAddressBar({ type: "NAVIGATION_STARTED" });
     restoreDestination(resolvedDestination, navigationDestination);
     if (
       navigationDestination.mode === "full" &&
@@ -5172,6 +5305,7 @@ function App() {
       ...markHistoryOlder(current),
     ]);
     if (fromAddressBar) focusComposerAfterNavigation();
+    if (fromAddressBar) dispatchAddressBar({ type: "NAVIGATION_FINISHED" });
   }
 
   useEffect(() => {
@@ -5556,15 +5690,18 @@ function App() {
     }
     if (event.key === "Enter") {
       event.preventDefault();
+      dispatchAddressBar({ type: "SUBMIT" });
       const action = resolveAddressBarEnterAction({
         query: addressQuery,
         suggestions: filteredSuggestions,
         selectedSuggestion,
       });
       if (action.kind === "suggestion") {
+        dispatchAddressBar({ type: "ADDRESS_DETECTED" });
         visitDestination(action.suggestion, { source: "addressBar" });
       }
       if (action.kind === "address") {
+        dispatchAddressBar({ type: "ADDRESS_DETECTED" });
         visitDestination(
           {
             id: `address-${Date.now()}`,
@@ -5577,6 +5714,7 @@ function App() {
         );
       }
       if (action.kind === "prompt") {
+        dispatchAddressBar({ type: "FREE_TEXT_DETECTED" });
         void startNewLoomFromAddressBar(action.prompt);
       }
       return;
@@ -5584,7 +5722,7 @@ function App() {
     if (event.key === "Escape") {
       event.preventDefault();
       event.stopPropagation();
-      setAddressFocused(false);
+      dispatchAddressBar({ type: "BLUR" });
       setAddressFeedback(null);
       setSelectedSuggestion(-1);
     }
@@ -5601,7 +5739,7 @@ function App() {
       });
       return;
     }
-    setAddressFocused(false);
+    dispatchAddressBar({ type: "RESET" });
     setAddressQuery("");
     setAddressFeedback(null);
     setSelectedSuggestion(-1);
@@ -5620,7 +5758,11 @@ function App() {
       }
     );
     focusComposerAfterNavigation();
-    await sendPromise;
+    try {
+      await sendPromise;
+    } finally {
+      dispatchAddressBar({ type: "NAVIGATION_FINISHED" });
+    }
   }
 
   function handleBackForward(direction: NavigationDirection) {
@@ -5787,7 +5929,7 @@ function App() {
   }
 
   function copyShareItem(kind: "address" | "markdown" | "title-address") {
-    const address = currentActiveDestination.canonicalUri ?? currentActiveDestination.path;
+    const address = currentShareDestination.canonicalUri ?? currentShareDestination.path;
     if (kind === "address") {
       void browserHostShell.copyText(address);
       showLinkCopyToast("Loom address is copied");
@@ -5795,12 +5937,12 @@ function App() {
     }
     if (kind === "markdown") {
       void browserHostShell.copyText(
-        toLoomMarkdown({ title: currentActiveDestination.title, path: address })
+        toLoomMarkdown({ title: currentShareDestination.title, path: address })
       );
       showLinkCopyToast("Markdown link is copied");
       return;
     }
-    void browserHostShell.copyText(`${currentActiveDestination.title}\n${address}`);
+    void browserHostShell.copyText(`${currentShareDestination.title}\n${address}`);
     showLinkCopyToast("Title and address are copied");
   }
 
@@ -6139,14 +6281,14 @@ function App() {
   }
 
   function openComposerReference(link: LoomLink) {
-    if (link.type === "fragment" && link.sourceLoomId && link.sourceResponseId) {
-      const sourceResponse = findResponseInLoom(link.sourceLoomId, link.sourceResponseId);
-      if (!sourceResponse) return "This Fragment Reference source cannot be opened.";
-      const destination = responseLinkForNavigation(link.sourceLoomId, sourceResponse);
+    if (link.type === "fragment" || link.targetKind === "code_block") {
+      const target = findReferenceTargetResponse(link);
+      if (!target) return "This Reference source cannot be opened.";
+      const destination = responseLinkForNavigation(target.loomId, target.response);
       visitDestination(destination, {
         source: "userNavigation",
         navigationDestination: navigationDestinationForLink(destination, "userNavigation", {
-          scrollTargetResponseId: link.sourceResponseId,
+          scrollTargetResponseId: target.response.id,
           scrollMode: "exact",
         }),
       });
@@ -6487,7 +6629,11 @@ function App() {
         ...current,
         [temporaryTargetWeft.temporaryId]: {
           ...temporaryTargetWeft,
-          status: "promoting",
+          status: asTemporaryWeftWorkspaceStatus(
+            transitionTemporaryWeftStatus(temporaryTargetWeft.status, {
+              type: "SUBMIT_FIRST_PROMPT",
+            })
+          ),
         },
       }));
       setComposerRuntimeState({
@@ -6595,8 +6741,9 @@ function App() {
           composerDraftsRef.current = next;
           return next;
         });
+        dispatchSplitFocus({ type: "TEMP_WEFT_PROMOTED" });
         setActiveConversationId(promotedConversation.id);
-        setActiveSplitPanel("weft");
+        dispatchSplitFocus({ type: "PERSISTED_WEFT_INTERACTED" });
         setActiveObjectTitle(promotedConversation.title);
         pendingScrollDestinationRef.current = {
           loomId: promotedConversation.id,
@@ -6674,8 +6821,9 @@ function App() {
           const { [temporaryTargetWeft.temporaryId]: _discard, ...rest } = current;
           return rest;
         });
+        dispatchSplitFocus({ type: "TEMP_WEFT_PROMOTED" });
         setActiveConversationId(promotedConversation.id);
-        setActiveSplitPanel("weft");
+        dispatchSplitFocus({ type: "PERSISTED_WEFT_INTERACTED" });
         setActiveObjectTitle(promotedConversation.title);
         const promotedLink: LoomLink = {
           id: promotedConversation.id,
@@ -8191,6 +8339,23 @@ function App() {
 
   function focusVisibleWeftWorkspace() {
     setActiveSplitPanel("weft");
+    if (activeTemporaryWeft) {
+      setTemporaryWefts((current) => {
+        const workspace = current[activeTemporaryWeft.temporaryId];
+        if (!workspace) return current;
+        const nextStatus = transitionTemporaryWeftStatus(workspace.status, {
+          type: "FOCUS_TEMP",
+        });
+        if (nextStatus === workspace.status) return current;
+        return {
+          ...current,
+          [workspace.temporaryId]: {
+            ...workspace,
+            status: asTemporaryWeftWorkspaceStatus(nextStatus),
+          },
+        };
+      });
+    }
     const latestResponse = activeConversation
       ? lastResponseInLoom(activeConversation.id)
       : undefined;
@@ -8313,12 +8478,13 @@ function App() {
     };
     const latestResponse = lastResponseInLoom(weftConversation.id);
     const originFocusResponseId = record.revisionSourceResponseId ?? record.parentResponseId;
+    const preserveMountedOriginScroll = Boolean(options.preserveOriginScroll && showWeftSplit);
     const destination: LoomNavigationDestination = {
       loomId: weftConversation.id,
       mode: canShowWeftSplit ? "split" : "full",
       originLoomId: record.parentConversationId,
       originResponseId: originFocusResponseId,
-      preserveOriginScroll: options.preserveOriginScroll,
+      preserveOriginScroll: preserveMountedOriginScroll,
       scrollTargetResponseId: options.scrollMode === "top" ? undefined : latestResponse?.id,
       scrollMode: options.scrollMode ?? "lastResponse",
       source: "userNavigation",
@@ -8336,11 +8502,31 @@ function App() {
     return true;
   }
 
-  function discardTemporaryWeft(temporaryId: string) {
+  function discardTemporaryWeft(
+    temporaryId: string,
+    eventType: "DISCARD_TEMP" | "CLOSE_SPLIT" = "DISCARD_TEMP"
+  ) {
+    let shouldDiscard = false;
     setTemporaryWefts((current) => {
+      const workspace = current[temporaryId];
+      if (!workspace) return current;
+      const nextStatus = transitionTemporaryWeftStatus(workspace.status, {
+        type: eventType,
+      });
+      shouldDiscard = nextStatus === "discarded";
+      if (!shouldDiscard) {
+        return {
+          ...current,
+          [temporaryId]: {
+            ...workspace,
+            status: asTemporaryWeftWorkspaceStatus(nextStatus),
+          },
+        };
+      }
       const { [temporaryId]: _discard, ...rest } = current;
       return rest;
     });
+    if (!shouldDiscard) return;
     setConversationResponses((current) => {
       const { [temporaryId]: _discard, ...rest } = current;
       return rest;
@@ -8374,7 +8560,9 @@ function App() {
         folder: sourceConversation.folder,
         anchorTitle: response.title,
         anchorCode: response.meta?.displayCode ?? response.meta?.code,
-        status: "temporary",
+        status: asTemporaryWeftWorkspaceStatus(
+          transitionTemporaryWeftStatus("absent", { type: "OPEN_TEMP" })
+        ),
         createdAt: new Date().toISOString(),
       } satisfies TemporaryWeftWorkspace);
 
@@ -10642,9 +10830,10 @@ function App() {
     if (activeTemporaryWeft) {
       const originId = activeTemporaryWeft.originLoomId;
       const originResponseId = activeTemporaryWeft.originResponseId;
-      discardTemporaryWeft(activeTemporaryWeft.temporaryId);
+      discardTemporaryWeft(activeTemporaryWeft.temporaryId, "CLOSE_SPLIT");
+      dispatchSplitFocus({ type: "SPLIT_CLOSED" });
+      dispatchSplitFocus({ type: "NAVIGATED_FULL" });
       setActiveConversationId(originId);
-      setActiveSplitPanel("origin");
       focusComposerAfterNavigation();
       pendingScrollDestinationRef.current = {
         loomId: originId,
@@ -10674,8 +10863,9 @@ function App() {
       const link = originResponse
         ? responseLinkForNavigation(activeWeftOrigin.originLoomId, originResponse)
         : loomLinkForId(activeWeftOrigin.originLoomId);
+      dispatchSplitFocus({ type: "SPLIT_CLOSED" });
+      dispatchSplitFocus({ type: "NAVIGATED_FULL" });
       setActiveConversationId(activeWeftOrigin.originLoomId);
-      setActiveSplitPanel("origin");
       setActiveObjectTitle(originResponse?.title ?? originConversationForClose?.title ?? link.title);
       restoreDestination(link, destination);
       pushNavigationEntry(link, destination);
@@ -10761,15 +10951,22 @@ function App() {
         currentBookmarked={isDestinationBookmarked(currentActiveDestination)}
         currentDestination={currentActiveDestination}
         canDragCurrentDestination={!isNewConversationDraft}
-        onAddressFocus={() => setAddressFocused(true)}
+        onAddressFocus={() => dispatchAddressBar({ type: "FOCUS" })}
         onAddressChange={(value) => {
+          dispatchAddressBar({ type: "INPUT_CHANGED" });
           setAddressQuery(value);
           setAddressFeedback(null);
           setSelectedSuggestion(-1);
         }}
         onAddressKeyDown={handleAddressKeyDown}
-        onVisit={(destination) => visitDestination(destination, { source: "addressBar" })}
-        onStartNewLoomFromAddressBar={startNewLoomFromAddressBar}
+        onVisit={(destination) => {
+          dispatchAddressBarSequence({ type: "SUBMIT" }, { type: "ADDRESS_DETECTED" });
+          visitDestination(destination, { source: "addressBar" });
+        }}
+        onStartNewLoomFromAddressBar={(value) => {
+          dispatchAddressBarSequence({ type: "SUBMIT" }, { type: "FREE_TEXT_DETECTED" });
+          void startNewLoomFromAddressBar(value);
+        }}
         onBack={() => handleBackForward("back")}
         onForward={() => handleBackForward("forward")}
         onJumpTraversal={jumpNavigationTraversal}
@@ -10784,12 +10981,12 @@ function App() {
           setSidebarCollapsed((current) => !current);
         }}
         onTogglePanel={(panel) => {
-          setAddressFocused(false);
+          dispatchAddressBar({ type: "BLUR" });
           toggleUtilityPanel(panel);
           setAddressFeedback(null);
         }}
         onToggleGraph={() => {
-          setAddressFocused(false);
+          dispatchAddressBar({ type: "RESET" });
           setAddressQuery("");
           setAddressFeedback(null);
           toggleGraphOverlay();
@@ -11083,6 +11280,7 @@ function App() {
                         <div
                           className="weft-panel origin-split-panel"
                           onPointerDownCapture={() => markSplitPanelActive("origin")}
+                          onClickCapture={() => markSplitPanelActive("origin")}
                           onFocusCapture={() => markSplitPanelActive("origin")}
                         >
                           {renderSplitPanelControls("origin")}
@@ -11166,6 +11364,7 @@ function App() {
                         <div
                           className="weft-panel weft-split-panel"
                           onPointerDownCapture={() => markSplitPanelActive("weft")}
+                          onClickCapture={() => markSplitPanelActive("weft")}
                           onFocusCapture={() => markSplitPanelActive("weft")}
                         >
                           {renderSplitPanelControls("weft")}
@@ -13565,8 +13764,6 @@ function ChatTranscript({
   const [weftBranchPickerResponseId, setWeftBranchPickerResponseId] =
     useState<string | null>(null);
   const sentReferenceHintCloseTimerRef = useRef<number | null>(null);
-  const weftBranchLongPressTimerRef = useRef<number | null>(null);
-  const suppressNextWeftClickRef = useRef(false);
   const transcriptNodeRef = useRef<HTMLElement | null>(null);
   const {
     visible: scrollToBottomVisible,
@@ -13612,14 +13809,6 @@ function ChatTranscript({
     };
   }, []);
 
-  useEffect(() => {
-    return () => {
-      if (weftBranchLongPressTimerRef.current !== null) {
-        window.clearTimeout(weftBranchLongPressTimerRef.current);
-      }
-    };
-  }, []);
-
   function clearSentReferenceHintCloseTimer() {
     if (sentReferenceHintCloseTimerRef.current === null) return;
     window.clearTimeout(sentReferenceHintCloseTimerRef.current);
@@ -13644,12 +13833,6 @@ function ChatTranscript({
       sentReferenceHintCloseTimerRef.current = null;
       setSentReferenceHint(null);
     }, 140);
-  }
-
-  function clearWeftBranchLongPressTimer() {
-    if (weftBranchLongPressTimerRef.current === null) return;
-    window.clearTimeout(weftBranchLongPressTimerRef.current);
-    weftBranchLongPressTimerRef.current = null;
   }
 
   function preserveTranscriptScrollAfterRevisionAction() {
@@ -13828,7 +14011,6 @@ function ChatTranscript({
           setWeftBranchPickerResponseId(null);
           onSelectWeft(record, { preserveOriginScroll: true, scrollMode: "top" });
         };
-        const hasWeftBranchPicker = explorationWeftCount > 1;
         const isWeftBranchPickerOpen = weftBranchPickerResponseId === displayResponse.id;
         const weftButtonClassName = [
           "link-chip response-action-chip response-weft-chip",
@@ -14182,44 +14364,18 @@ function ChatTranscript({
                   </AddressMetadataBadge>
                 </Tooltip>
                 <span className="response-weft-action-cluster">
-                  <Tooltip label={hasExistingWeft ? "Open Weft" : "Start Weft"} placement="bottom-right">
+                  <Tooltip label={hasTemporaryWeft ? "Focus Weft" : "Start Weft"} placement="bottom-right">
                     <button
                       className={weftButtonClassName}
-                      onPointerDown={() => {
-                        if (!hasWeftBranchPicker) return;
-                        suppressNextWeftClickRef.current = false;
-                        clearWeftBranchLongPressTimer();
-                        weftBranchLongPressTimerRef.current = window.setTimeout(() => {
-                          weftBranchLongPressTimerRef.current = null;
-                          suppressNextWeftClickRef.current = true;
-                          setWeftBranchPickerResponseId(displayResponse.id);
-                        }, 420);
-                      }}
-                      onPointerUp={clearWeftBranchLongPressTimer}
-                      onPointerCancel={clearWeftBranchLongPressTimer}
-                      onPointerLeave={clearWeftBranchLongPressTimer}
-                      onContextMenu={(event) => {
-                        if (!hasWeftBranchPicker) return;
-                        event.preventDefault();
-                        setWeftBranchPickerResponseId(displayResponse.id);
-                      }}
                       onClick={(event) => {
-                        if (suppressNextWeftClickRef.current) {
-                          suppressNextWeftClickRef.current = false;
-                          event.preventDefault();
-                          return;
-                        }
+                        event.preventDefault();
                         setWeftBranchPickerResponseId(null);
                         onLoom(displayResponse);
                       }}
                       aria-pressed={hasExistingWeft || hasTemporaryWeft}
-                      aria-haspopup={hasWeftBranchPicker ? "menu" : undefined}
-                      aria-expanded={hasWeftBranchPicker ? isWeftBranchPickerOpen : undefined}
                       aria-label={
                         hasTemporaryWeft
                           ? `Focus temporary Flow from ${displayResponseTitle}`
-                          : hasExistingWeft
-                          ? `Open Weft from ${displayResponseTitle}`
                           : `Start Weft from ${displayResponseTitle}`
                       }
                       title={
@@ -14245,8 +14401,6 @@ function ChatTranscript({
                       } from this response`}
                       onPointerDown={(event) => {
                         event.stopPropagation();
-                        clearWeftBranchLongPressTimer();
-                        suppressNextWeftClickRef.current = false;
                       }}
                       onClick={(event) => {
                         event.preventDefault();
@@ -17056,7 +17210,15 @@ function SpeechListeningBar({
   onStop,
   onRetry,
 }: {
-  status: "recording" | "transcribing" | "error" | "idle";
+  status:
+    | "idle"
+    | "requesting-permission"
+    | "recording"
+    | "stopping"
+    | "transcribing"
+    | "completed"
+    | "error"
+    | "cancelled";
   error: string | null;
   waveform: number[];
   onCancel: () => void;
@@ -17066,7 +17228,11 @@ function SpeechListeningBar({
   const isRecording = status === "recording";
   const isTranscribing = status === "transcribing";
   const isError = status === "error";
-  const label = isError ? error ?? "Microphone error. Please retry." : isTranscribing ? "Transcribing..." : "Listening...";
+  const label = isError
+    ? error ?? "Microphone error. Please retry."
+    : isTranscribing
+      ? "Transcribing..."
+      : "Listening...";
   return (
     <div
       className={[
