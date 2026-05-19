@@ -8,12 +8,12 @@ import {
   Plus,
   Workflow,
 } from "lucide-react";
-import type { CSSProperties } from "react";
+import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { formatBadgeCode } from "../../services/displayCode";
 import { cleanMarkdownDisplayText } from "../../services/assistantMarkdown";
 import type { LoomGraphProjectionNode } from "../../services/loomGraphProjection";
-import type { ResponseItem } from "../../types";
+import type { LoomForkRecord, ResponseItem } from "../../types";
 import { graphNodePreviewText } from "./graphNodePreview";
 
 export interface LoomGraphNodeData extends Record<string, unknown> {
@@ -23,10 +23,12 @@ export interface LoomGraphNodeData extends Record<string, unknown> {
   onBookmark: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
   onLink: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
   onWeft: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
+  onOpenWeftRecord?: (record: LoomForkRecord) => void;
   onContinue: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
   hasExistingWeft?: boolean;
   hasRevisionWeft?: boolean;
   weftCount?: number;
+  weftRecords?: LoomForkRecord[];
   revisionVariantCount?: number;
   revisionVariantIndex?: number;
   onRevisionNavigate?: (nextIndex: number) => void;
@@ -69,10 +71,12 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
     onBookmark,
     onLink,
     onWeft,
+    onOpenWeftRecord,
     onContinue,
     hasExistingWeft,
     hasRevisionWeft,
     weftCount = 0,
+    weftRecords = [],
     revisionVariantCount = 0,
     revisionVariantIndex = 0,
     onRevisionNavigate,
@@ -81,6 +85,8 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
     continuationOpen,
     viewportZoom = 1,
   } = data;
+  const [weftPickerOpen, setWeftPickerOpen] = useState(false);
+  const weftClusterRef = useRef<HTMLSpanElement | null>(null);
   const canActOnResponse = projectionNode.kind === "response" && Boolean(response);
   const canOpenNode = projectionNode.kind === "response" ? Boolean(response) : true;
   const showContinuationButton =
@@ -101,6 +107,18 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
     hasRevisionCarousel && revisionVariantIndex < revisionVariantCount - 1
       ? revisionVariantIndex + 1
       : undefined;
+  const canOpenWeftPicker = weftRecords.length > 0 && Boolean(onOpenWeftRecord);
+
+  useEffect(() => {
+    if (!weftPickerOpen) return undefined;
+    const closeWeftPicker = (event: PointerEvent) => {
+      const target = event.target;
+      if (target instanceof globalThis.Node && weftClusterRef.current?.contains(target)) return;
+      setWeftPickerOpen(false);
+    };
+    window.addEventListener("pointerdown", closeWeftPicker);
+    return () => window.removeEventListener("pointerdown", closeWeftPicker);
+  }, [weftPickerOpen]);
 
   return (
     <article className={nodeClassName(projectionNode)}>
@@ -215,25 +233,65 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
             <Link2 size={13} />
             <span>Link</span>
           </button>
-          <button
-            type="button"
-            className={[
-              "loom-graph-node-weft",
-              hasExistingWeft ? "is-wefted" : "",
-              hasRevisionWeft ? "is-revision-wefted" : "",
-            ].filter(Boolean).join(" ")}
-            aria-pressed={hasExistingWeft}
-            aria-label={
-              hasExistingWeft
-                ? `Open Weft from ${projectionNode.title}`
-                : `Start Weft from ${projectionNode.title}`
-            }
-            onClick={() => onWeft(projectionNode, response)}
-          >
-            <GitFork size={13} />
-            <span>Weft</span>
-            {weftCount > 1 && <span className="weft-count-badge">{weftCount}</span>}
-          </button>
+          <span className="loom-graph-node-weft-cluster nodrag" ref={weftClusterRef}>
+            <button
+              type="button"
+              className={[
+                "loom-graph-node-weft",
+                hasExistingWeft ? "is-wefted" : "",
+                hasRevisionWeft ? "is-revision-wefted" : "",
+              ].filter(Boolean).join(" ")}
+              aria-pressed={hasExistingWeft}
+              aria-haspopup={canOpenWeftPicker ? "menu" : undefined}
+              aria-expanded={canOpenWeftPicker ? weftPickerOpen : undefined}
+              aria-label={
+                hasExistingWeft
+                  ? `Open Weft list from ${projectionNode.title}`
+                  : `Start Weft from ${projectionNode.title}`
+              }
+              onClick={(event) => {
+                event.stopPropagation();
+                if (canOpenWeftPicker) {
+                  setWeftPickerOpen((current) => !current);
+                  return;
+                }
+                onWeft(projectionNode, response);
+              }}
+            >
+              <GitFork size={13} />
+              <span>Weft</span>
+              {weftCount > 0 && <span className="weft-count-badge">{weftCount}</span>}
+            </button>
+            {weftPickerOpen && canOpenWeftPicker && (
+              <div
+                className="weft-branch-picker loom-graph-node-weft-picker nowheel nopan"
+                role="menu"
+                aria-label="Weft branches"
+                onWheelCapture={(event) => event.stopPropagation()}
+              >
+                {weftRecords.map((record, branchIndex) => (
+                  <button
+                    key={record.id}
+                    type="button"
+                    role="menuitem"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      setWeftPickerOpen(false);
+                      onOpenWeftRecord?.(record);
+                    }}
+                  >
+                    <GitFork size={13} />
+                    <span>
+                      <strong>{record.title}</strong>
+                      <em>
+                        {branchIndex + 1} of {weftRecords.length}
+                      </em>
+                    </span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </span>
         </div>
       )}
       <Handle

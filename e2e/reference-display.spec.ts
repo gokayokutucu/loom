@@ -473,6 +473,30 @@ test.describe("[product-service-backed] Reference product proof", () => {
       expect(reference.sourceResponseId).toBe(persistedCodeBlock.responseId);
       expect(reference.targetUri).toContain("#code-block=");
       expect(JSON.stringify(reference)).not.toContain("raw_thinking");
+
+      await page.keyboard.insertText(" IProcessor nasıl olmalı");
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(page.locator(".sent-prompt-reference-token").last()).toContainText(
+        "ts code from"
+      );
+      await expect(page.getByText("[[ts code from", { exact: false })).toHaveCount(0);
+
+      await page.reload();
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+      await page.getByRole("button", { name: `Open ${rootLoom!.title}` }).click();
+      await expect(page.locator(".sent-prompt-reference-token").last()).toContainText(
+        "ts code from"
+      );
+      await expect(page.getByText("[[ts code from", { exact: false })).toHaveCount(0);
+      await page.locator(".sent-prompt-reference-token").last().click();
+      await expect(
+        page
+          .locator(".assistant-code-block", {
+            hasText: "const stream = eventStore.load",
+          })
+          .first()
+      ).toBeVisible();
+
       expect(scenario.dbPath).toContain(scenario.tempDir);
     } finally {
       const cleanup = await scenario.cleanup();

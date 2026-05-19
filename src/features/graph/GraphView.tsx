@@ -825,12 +825,16 @@ function GraphViewInner({
             onWeft: (node, nodeResponse) => {
               if (nodeResponse) onWeftResponse(node.loomId, nodeResponse);
             },
+            onOpenWeftRecord: (record) => {
+              onOpenLoom(record.childConversationId);
+            },
             onContinue: (node, nodeResponse) => {
               if (nodeResponse) openContinuationForResponse(node, nodeResponse);
             },
             hasExistingWeft,
             hasRevisionWeft,
             weftCount,
+            weftRecords: explorationForkRecords,
             revisionVariantCount: revisionVariants.length,
             revisionVariantIndex: selectedRevisionIndex,
             onRevisionNavigate: (nextIndex) => {
@@ -1207,9 +1211,10 @@ function GraphViewInner({
                         </button>
                         {responsePreviewWeftPickerOpen && responsePreviewTarget.weftCount > 0 && (
                           <div
-                            className="weft-branch-picker graph-response-preview-weft-picker"
+                            className="weft-branch-picker graph-response-preview-weft-picker nowheel nopan"
                             role="menu"
                             aria-label="Weft branches"
+                            onWheelCapture={(event) => event.stopPropagation()}
                           >
                             {responsePreviewTarget.explorationForkRecords.map(
                               (record, branchIndex) => (

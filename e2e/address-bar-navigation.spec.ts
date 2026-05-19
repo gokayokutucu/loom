@@ -3,11 +3,15 @@
 import { expect, type Page, test } from "@playwright/test";
 
 const promotedAddressBarUri =
-  "loom://loom-ai-navigation-architecture/L-TEST/r/R-ADDR?id=meta-response-address";
+  "loom://loom-ai-navigation-architecture/L-TEST/r/R-ADDR?id=r-address-bar";
 
 async function openApp(page: Page) {
   await page.addInitScript(() => {
     window.localStorage.clear();
+    window.localStorage.setItem(
+      "loom-ai-app-settings-v1",
+      JSON.stringify({ mockDataEnabled: true })
+    );
   });
   await page.goto("/");
   await expect(page.getByTestId("loom-sidebar")).toBeVisible();
@@ -16,6 +20,23 @@ async function openApp(page: Page) {
 async function openAppWithPromotedAddressBarResponse(page: Page) {
   await page.addInitScript((canonicalUri) => {
     window.localStorage.clear();
+    Object.defineProperty(navigator, "clipboard", {
+      configurable: true,
+      value: {
+        async write(items: ClipboardItem[]) {
+          const item = items[0];
+          const blob = await item.getType("text/plain");
+          window.localStorage.setItem("loom-test-clipboard", await blob.text());
+        },
+        async writeText(value: string) {
+          window.localStorage.setItem("loom-test-clipboard", value);
+        },
+      },
+    });
+    window.localStorage.setItem(
+      "loom-ai-app-settings-v1",
+      JSON.stringify({ mockDataEnabled: true })
+    );
     window.localStorage.setItem(
       "loom.runtime.metadata.v1",
       JSON.stringify({
@@ -98,5 +119,81 @@ test.describe("[legacy-typescript-local][pure-ui-rendering] Address Bar navigati
     );
     await expect(response).toBeVisible();
     await expect(response).toHaveAttribute("data-response-address", promotedAddressBarUri);
+  });
+
+  test("share menu actions use the active Loom address even when a Response is focused", async ({
+    page,
+  }) => {
+    await openAppWithPromotedAddressBarResponse(page);
+
+    await chooseAddressBarSuggestion(
+      page,
+      "Address Bar",
+      "Address Bar as local AI web navigator"
+    );
+
+    await expect(page.getByLabel("Loom Address Bar")).toHaveAttribute(
+      "placeholder",
+      /Loom AI navigation architecture \/ Address Bar as local AI web navigator/
+    );
+
+    const expectedLoomTitle = "Loom AI navigation architecture";
+
+    await page.getByRole("button", { name: "Share" }).click();
+    const shareMenu = page.getByRole("menu", { name: "Share current Loom" });
+    await expect(shareMenu).toBeVisible();
+    await shareMenu.getByRole("menuitem", { name: "Copy Loom Address" }).click();
+    await expect
+      .poll(() => page.evaluate(() => window.localStorage.getItem("loom-test-clipboard")))
+      .not.toContain("/r/");
+    await expect
+      .poll(() => page.evaluate(() => window.localStorage.getItem("loom-test-clipboard")))
+      .toMatch(/^loom:\/\/loom-ai-navigation-architecture\/L-[A-Z0-9]+/);
+    const copiedLoomAddress = await page.evaluate(() =>
+      window.localStorage.getItem("loom-test-clipboard")
+    );
+    expect(copiedLoomAddress).toBeTruthy();
+    expect(copiedLoomAddress).not.toBe(promotedAddressBarUri);
+
+    await page.getByRole("button", { name: "Share" }).click();
+    await page
+      .getByRole("menu", { name: "Share current Loom" })
+      .getByRole("menuitem", { name: "Copy Markdown Link" })
+      .click();
+    await expect
+      .poll(() => page.evaluate(() => window.localStorage.getItem("loom-test-clipboard")))
+      .toBe(`[${expectedLoomTitle}](${copiedLoomAddress})`);
+
+    await page.getByRole("button", { name: "Share" }).click();
+    await page
+      .getByRole("menu", { name: "Share current Loom" })
+      .getByRole("menuitem", { name: "Copy Title + Address" })
+      .click();
+    await expect
+      .poll(() => page.evaluate(() => window.localStorage.getItem("loom-test-clipboard")))
+      .toBe(`${expectedLoomTitle}\n${copiedLoomAddress}`);
+
+    await page.getByRole("button", { name: "Share" }).click();
+    const markdownDownloadPromise = page.waitForEvent("download");
+    await page
+      .getByRole("menu", { name: "Share current Loom" })
+      .getByRole("menuitem", { name: "Export as Markdown" })
+      .click();
+    const markdownDownload = await markdownDownloadPromise;
+    expect(markdownDownload.suggestedFilename()).toMatch(/\.md$/);
+
+    await page.getByRole("button", { name: "Share" }).click();
+    const csvDownloadPromise = page.waitForEvent("download");
+    await page
+      .getByRole("menu", { name: "Share current Loom" })
+      .getByRole("menuitem", { name: "Export as CSV" })
+      .click();
+    const csvDownload = await csvDownloadPromise;
+    expect(csvDownload.suggestedFilename()).toMatch(/\.csv$/);
+
+    await page.getByRole("button", { name: "Share" }).click();
+    const finalShareMenu = page.getByRole("menu", { name: "Share current Loom" });
+    await expect(finalShareMenu.getByRole("menuitem", { name: "Export as ZIP" })).toBeDisabled();
+    await expect(finalShareMenu.getByRole("menuitem", { name: /Make Public/ })).toBeDisabled();
   });
 });

@@ -3608,7 +3608,7 @@ kbd {
   position: absolute;
   left: 0;
   bottom: calc(100% + 8px);
-  z-index: 90;
+  z-index: 430;
   display: grid;
   gap: 4px;
   width: min(260px, calc(100vw - 32px));
@@ -7514,7 +7514,7 @@ kbd {
 .graph-response-preview-header {
   position: sticky;
   top: 0;
-  z-index: 2;
+  z-index: 6;
   display: grid;
   gap: 14px;
   padding: 24px 24px 18px;
@@ -7579,6 +7579,7 @@ kbd {
   position: absolute;
   top: 24px;
   right: 24px;
+  z-index: 8;
   display: inline-flex;
   align-items: center;
   gap: 8px;
@@ -7622,7 +7623,33 @@ kbd {
 .graph-response-preview-weft-picker {
   left: auto;
   right: 0;
-  bottom: calc(100% + 8px);
+  top: calc(100% + 8px);
+  bottom: auto;
+  z-index: 520;
+}
+
+.graph-response-preview-actions .graph-response-preview-weft-picker button {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  justify-content: initial;
+  width: 100%;
+  height: auto;
+  min-height: 36px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--loom-text-secondary);
+  font-size: 12px;
+  text-align: left;
+}
+
+.graph-response-preview-actions .graph-response-preview-weft-picker button:hover,
+.graph-response-preview-actions .graph-response-preview-weft-picker button:focus-visible {
+  background: rgba(255, 255, 255, 0.075);
+  color: var(--loom-focus);
 }
 
 .graph-response-preview-actions .graph-response-preview-bookmark.is-bookmarked,
@@ -7651,6 +7678,10 @@ kbd {
   background: color-mix(in srgb, var(--accent-fallback) 18%, transparent);
   color: var(--accent, var(--accent-fallback));
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-fallback) 38%, transparent);
+}
+
+.graph-response-preview-actions .graph-response-preview-weft.is-wefted > svg {
+  display: none;
 }
 
 .graph-response-preview-answer {
@@ -7866,6 +7897,21 @@ kbd {
   gap: 4px;
 }
 
+.loom-graph-node-weft-cluster {
+  position: relative;
+  display: inline-flex;
+}
+
+.loom-graph-node-weft-picker {
+  left: auto;
+  right: 0;
+  bottom: calc(100% + 8px);
+}
+
+.react-flow__node:has(.loom-graph-node-weft-picker) {
+  z-index: 430 !important;
+}
+
 .loom-graph-node-actions button,
 .loom-graph-node-open,
 .loom-graph-controls button {
@@ -7935,6 +7981,28 @@ kbd {
   background: color-mix(in srgb, var(--accent-fallback) 18%, transparent);
   color: var(--accent, var(--accent-fallback));
   box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent-fallback) 38%, transparent);
+}
+
+.loom-graph-node-actions .loom-graph-node-weft-picker button {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr);
+  gap: 8px;
+  align-items: center;
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.035);
+  color: var(--loom-text-secondary);
+  font-size: 12px;
+  text-align: left;
+}
+
+.loom-graph-node-actions .loom-graph-node-weft-picker button:hover,
+.loom-graph-node-actions .loom-graph-node-weft-picker button:focus-visible {
+  background: rgba(255, 255, 255, 0.075);
+  color: var(--loom-focus);
 }
 
 .loom-graph-handle {

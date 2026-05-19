@@ -115,15 +115,26 @@ test.describe("[product-service-backed] Graph projection product proof", () => {
       expect(rootLoom).toBeTruthy();
       const loomId = rootLoom!.loomId;
 
-      await scenario.sendPrompt(
+      const tableFollowup = await scenario.sendPrompt(
         loomId,
         "Avantajları ve dezavantajları tablo şeklinde verebilir misin?"
       );
-      await scenario.sendPrompt(loomId, "Dezavantajları ve avantajları biraz daha açar mısın");
+      const expandedFollowup = await scenario.sendPrompt(
+        loomId,
+        "Dezavantajları ve avantajları biraz daha açar mısın"
+      );
       await scenario.runPendingContextJobs();
 
       const detail = await scenario.client.getLoom(loomId);
-      expect(detail.responses.length).toBeGreaterThanOrEqual(4);
+      expect(tableFollowup.assistantResponseId).toBeTruthy();
+      expect(expandedFollowup.assistantResponseId).toBeTruthy();
+      expect(detail.responses).toHaveLength(3);
+      expect(detail.responses.map((response) => response.id)).toEqual(
+        expect.arrayContaining([
+          tableFollowup.assistantResponseId!,
+          expandedFollowup.assistantResponseId!,
+        ])
+      );
       const originResponse = detail.responses[1];
       const latestResponse = detail.responses[detail.responses.length - 1];
       expect(originResponse).toBeTruthy();
