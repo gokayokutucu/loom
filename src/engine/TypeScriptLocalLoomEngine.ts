@@ -48,13 +48,17 @@ import type {
   RegenerateFromResponseInput,
   RecordHistoryInput,
   RemoveReferenceInput,
+  RetryUserMessageInput,
   RenameLoomInput,
   ResolveAddressInput,
   ResolveAddressResult,
   LoomServiceRuntimeConfig,
+  RuntimeModelDownloadJob,
+  RuntimeModelsResult,
   ServiceConfigUpdateResult,
   ServiceConfigStatus,
   SpeechProviderHealth,
+  SpeechSetupStatus,
   ServiceHealthStatus,
   SendMessageInput,
   SaveUiStateInput,
@@ -117,6 +121,22 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
     throw new Error("Speech-to-text provider configuration requires the Rust service runtime.");
   }
 
+  async getRuntimeModels(): Promise<RuntimeModelsResult> {
+    throw new Error("Model runtime management requires the Rust service runtime.");
+  }
+
+  async startModelDownload(): Promise<RuntimeModelDownloadJob> {
+    throw new Error("Model downloads require the Rust service runtime.");
+  }
+
+  async getModelDownload(): Promise<RuntimeModelDownloadJob> {
+    throw new Error("Model download status requires the Rust service runtime.");
+  }
+
+  async cancelModelDownload(): Promise<RuntimeModelDownloadJob> {
+    throw new Error("Model download cancellation requires the Rust service runtime.");
+  }
+
   async getSpeechProviderHealth(): Promise<SpeechProviderHealth> {
     return {
       status: "provider_unavailable",
@@ -124,6 +144,18 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
       message: "Speech-to-text requires the Rust service runtime.",
       checks: [],
     };
+  }
+
+  async getSpeechSetupStatus(): Promise<SpeechSetupStatus> {
+    throw new Error("Speech-to-text setup requires the Rust service runtime.");
+  }
+
+  async downloadSpeechSetupModel(): Promise<SpeechSetupStatus> {
+    throw new Error("Speech-to-text model download requires the Rust service runtime.");
+  }
+
+  async configureSpeechSetup(): Promise<SpeechSetupStatus> {
+    throw new Error("Speech-to-text setup requires the Rust service runtime.");
   }
 
   async getCapabilitySummary(): Promise<CapabilitySummary> {
@@ -179,6 +211,13 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
       return this.dependencies.regenerateFromResponse(input);
     }
     return notImplementedStream("regenerateFromResponse");
+  }
+
+  retryUserMessage(input: RetryUserMessageInput): AsyncIterable<EngineResponseEvent> {
+    if (this.dependencies.retryUserMessage) {
+      return this.dependencies.retryUserMessage(input);
+    }
+    return notImplementedStream("retryUserMessage");
   }
 
   async cancelMessage(input: CancelMessageInput): Promise<CancelMessageResult> {

@@ -21,7 +21,7 @@ import {
   getProfileModel,
   isMockResponseModeEnabled,
   mergeOllamaModels,
-  OllamaProvider,
+  validateOllamaBaseUrlSecurity,
   type AIProviderSettings,
   type ModelDescriptor,
   type ModelProfileId,
@@ -31,6 +31,7 @@ import {
   isMockDataForced,
   type AccessibilitySettings,
   type AppSettings,
+  type MemorySettings,
   type NotificationSettings,
   type StartupSettings,
 } from "../services/appSettings";
@@ -44,20 +45,23 @@ import {
 import {
   getElectronRuntimeBridge,
   getElectronRuntimeInfo,
+  logElectronEvent,
   type LoomDesktopRuntimeStatus,
 } from "../electronRuntime";
+import { transcodeRecordedAudioToPcmWav } from "../services/audioWav";
 import type {
   CapabilitySummary,
   LoomEngineClient,
   LoomServiceRuntimeConfig,
+  RuntimeModelDownloadJob,
+  RuntimeModelsResult,
   ServiceConfigStatus,
   ServiceHealthStatus,
   SpeechProviderHealth,
+  SpeechSetupStatus,
   SpeechToTextProviderKind,
   SpeechToTextRuntimeConfig,
 } from "../engine";
-
-const provider = new OllamaProvider();
 
 type SettingsCategoryId =
   | "runtime"
@@ -82,7 +86,7 @@ const settingsCategories: Array<{
   { id: "ai-providers", label: "Providers", description: "Connection, endpoint safety, availability", icon: Server },
   { id: "models", label: "Models", description: "Quick/Main selection and availability", icon: Bot },
   { id: "capability", label: "Capability", description: "Local capability and safe strategy", icon: SlidersHorizontal },
-  { id: "context-memory", label: "Context & Memory", description: "Recent turns, retrieval, local memory", icon: Workflow },
+  { id: "context-memory", label: "Memory", description: "Recent Looms, saved memories, profile", icon: Workflow },
   { id: "privacy-security", label: "Privacy & Security", description: "Local-first and raw-thinking protections", icon: ShieldCheck },
   { id: "data-storage", label: "Data & Storage", description: "SQLite and local data", icon: Database },
   { id: "export-import", label: "Export / Import", description: "Portable Loom data", icon: Download },
@@ -116,11 +120,97 @@ function speechArgsText(args: string[]) {
   return args.join("\n");
 }
 
+function speechSetupGuidance(status: SpeechSetupStatus | null) {
+  switch (status?.state) {
+    case "whisper_not_found":
+      return "Local Speech Engine is not installed. Open Settings → Capability → Speech-to-Text and install the local speech engine.";
+    case "model_missing":
+      return "Local Speech Engine is installed, but no speech model is available. Open Settings → Capability → Speech-to-Text and download/select a model.";
+    case "model_ready":
+      return "Speech-to-Text is not configured yet. Open Settings → Capability → Speech-to-Text and run Auto-configure.";
+    case "ready":
+      return "Speech-to-Text is configured, but the local command failed. Open Settings → Capability → Speech-to-Text and run Check Provider.";
+    default:
+      return "Speech-to-Text is not configured yet. Open Settings → Capability → Speech-to-Text and run Auto-configure.";
+  }
+}
+
+function speechProviderHealthMessage(health: SpeechProviderHealth, setup: SpeechSetupStatus | null) {
+  const legacyMissingCommand = health.message
+    .toLowerCase()
+    .includes("local speech-to-text provider is not configured");
+  if (health.status === "missing_command" || legacyMissingCommand) {
+    return speechSetupGuidance(setup);
+  }
+  return health.message;
+}
+
 function parseSpeechArgs(value: string) {
   return value
     .split(/\n+/)
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function runtimeStatusLabel(status?: string) {
+  if (!status) return "Not available";
+  if (status === "unknown") return "Connection not tested";
+  if (status === "not_running") return "Offline";
+  if (status === "degraded") return "Needs attention";
+  if (status === "ready") return "Connected";
+  return status
+    .split(/[-_]/g)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+function providerPillLabel(status: AIProviderSettings["ollama"]["lastConnectionStatus"]) {
+  if (status === "connected") return "connected";
+  if (status === "offline") return "offline";
+  return "not tested";
+}
+
+function securityAccessLabel(
+  security:
+    | {
+        localOnly?: boolean;
+        networkExposureRisk?: string;
+      }
+    | undefined,
+  baseUrl: string
+) {
+  const baseUrlSecurity = validateOllamaBaseUrlSecurity(baseUrl);
+  const localOnly = security?.localOnly ?? baseUrlSecurity.localOnly;
+  const exposure = security?.networkExposureRisk ?? baseUrlSecurity.networkExposureRisk;
+  if (!localOnly) return "Remote access blocked by default";
+  if (exposure === "high") return "Network exposure blocked";
+  if (exposure === "low") return "Local-only access enabled";
+  return "Local access target is invalid";
+}
+
+function providerVersionLabel(versionStatus?: string) {
+  if (versionStatus === "ok") return "Version check OK";
+  if (versionStatus === "vulnerable") return "Update recommended";
+  if (versionStatus === "unavailable") return "Version unavailable while provider is offline";
+  return "Version not checked yet";
+}
+
+function formatModelBytes(value?: number | null) {
+  if (!value || value <= 0) return undefined;
+  if (value > 1024 * 1024 * 1024) return `${(value / (1024 * 1024 * 1024)).toFixed(1)} GB`;
+  if (value > 1024 * 1024) return `${(value / (1024 * 1024)).toFixed(1)} MB`;
+  return `${Math.round(value / 1024)} KB`;
+}
+
+function descriptorsFromRuntimeModels(runtimeModels: RuntimeModelsResult): ModelDescriptor[] {
+  return runtimeModels.models.map((model) => ({
+    id: model.modelName,
+    name: model.displayName,
+    provider: "ollama",
+    installed: model.installed,
+    size: formatModelBytes(model.sizeBytes),
+    location: model.localPath ?? runtimeModels.provider.modelStorePath,
+  }));
 }
 
 export function AIProviderSettingsModal({
@@ -166,6 +256,16 @@ export function AIProviderSettingsModal({
   const [speechDraft, setSpeechDraft] = useState<SpeechToTextRuntimeConfig>(
     defaultSpeechConfigDraft
   );
+  const [memoryDraft, setMemoryDraft] = useState<MemorySettings>(appSettings.memory);
+  const [runtimeModels, setRuntimeModels] = useState<RuntimeModelsResult | null>(null);
+  const [downloadJobs, setDownloadJobs] = useState<Record<string, RuntimeModelDownloadJob>>({});
+  const [speechSetup, setSpeechSetup] = useState<SpeechSetupStatus | null>(null);
+  const [speechSetupWorking, setSpeechSetupWorking] = useState<string | null>(null);
+  const [speechSmoke, setSpeechSmoke] = useState<{
+    status: "idle" | "recording" | "transcribing" | "success" | "error";
+    message: string;
+    transcript?: string;
+  }>({ status: "idle", message: "Record a short sample after setup is ready." });
 
   const desktopRuntimeInfo = getElectronRuntimeInfo();
   const desktopRuntimeBridge = getElectronRuntimeBridge();
@@ -173,6 +273,10 @@ export function AIProviderSettingsModal({
   useEffect(() => {
     setDraft(settings);
   }, [settings]);
+
+  useEffect(() => {
+    setMemoryDraft(appSettings.memory);
+  }, [appSettings.memory]);
 
   async function refreshServiceStatus() {
     setServiceStatus((current) => ({ ...current, loading: true }));
@@ -213,7 +317,6 @@ export function AIProviderSettingsModal({
       setDesktopRuntimeStatus({
         state: "unavailable",
         startedByElectron: false,
-        error: "Runtime restart is available in the desktop app.",
       });
       return;
     }
@@ -243,6 +346,20 @@ export function AIProviderSettingsModal({
     if (serviceStatus.serviceConfig?.speech) {
       setSpeechDraft(serviceStatus.serviceConfig.speech);
     }
+    if (serviceStatus.serviceConfig?.providers) {
+      setDraft((current) => ({
+        ...current,
+        profiles: {
+          ...current.profiles,
+          quickModelId:
+            serviceStatus.serviceConfig?.providers?.defaultQuickModel ??
+            current.profiles.quickModelId,
+          mainModelId:
+            serviceStatus.serviceConfig?.providers?.defaultMainModel ??
+            current.profiles.mainModelId,
+        },
+      }));
+    }
   }, [serviceStatus.serviceConfig]);
 
   useEffect(() => {
@@ -259,6 +376,18 @@ export function AIProviderSettingsModal({
     if (activeCategory !== "runtime" && activeCategory !== "advanced") return;
     void refreshDesktopRuntimeStatus();
   }, [activeCategory]);
+
+  useEffect(() => {
+    if (activeCategory === "capability" && !speechSetup && !speechSetupWorking) {
+      void refreshSpeechSetupStatus();
+    }
+  }, [activeCategory, speechSetup, speechSetupWorking]);
+
+  useEffect(() => {
+    if (activeCategory === "models" && !runtimeModels && working !== "refresh") {
+      void refreshModels();
+    }
+  }, [activeCategory, runtimeModels, working]);
 
   const filteredModels = useMemo(() => {
     const value = query.trim().toLowerCase();
@@ -293,6 +422,49 @@ export function AIProviderSettingsModal({
     updateAppSettings({ ...appSettings, accessibility: next });
   }
 
+  function updateMemoryDraft(patch: Partial<MemorySettings>) {
+    setMemoryDraft((current) => ({ ...current, ...patch }));
+  }
+
+  async function saveMemorySettings() {
+    updateAppSettings({ ...appSettings, memory: memoryDraft });
+    if (serviceStatus.serviceConfig) {
+      try {
+        const result = await engineClient.updateServiceConfig({
+          memory: {
+            referenceRecentLooms: memoryDraft.referenceRecentLooms,
+            referenceSavedMemories: memoryDraft.referenceSavedMemories,
+          },
+        });
+        setServiceStatus((current) => ({
+          ...current,
+          serviceConfig: result.config,
+          configError: undefined,
+          config: current.config
+            ? {
+                ...current.config,
+                restartRequired: result.restartStatus?.restartRequired,
+                pendingRestart: result.restartStatus?.pendingRestart,
+              }
+            : current.config,
+        }));
+      } catch (error) {
+        setMessage(
+          error instanceof Error
+            ? error.message
+            : "Memory settings could not be saved to loom-service."
+        );
+        return;
+      }
+    }
+    setMessage("Memory settings saved.");
+  }
+
+  function resetMemorySettings() {
+    setMemoryDraft(appSettings.memory);
+    setMessage(null);
+  }
+
   async function testConnection() {
     setWorking("test");
     setMessage(null);
@@ -310,7 +482,10 @@ export function AIProviderSettingsModal({
     setWorking("refresh");
     setMessage(null);
     try {
-      const models = await provider.refreshModels(draft);
+      const result = await engineClient.getRuntimeModels();
+      setRuntimeModels(result);
+      setDownloadJobs(Object.fromEntries(result.jobs.map((job) => [job.jobId, job])));
+      const models = mergeOllamaModels(descriptorsFromRuntimeModels(result));
       update({
         ...draft,
         ollama: {
@@ -332,33 +507,76 @@ export function AIProviderSettingsModal({
     setWorking(model.id);
     setMessage(null);
     try {
-      await provider.pullModel(draft, model.id);
-      let models = mergeOllamaModels([
-        ...draft.ollama.models,
-        { ...model, installed: true, location: draft.ollama.modelLocation },
-      ]);
-      try {
-        models = await provider.refreshModels(draft);
-      } catch {
-        // Keep the optimistic installed state if refresh fails after a successful pull.
-      }
-      update({ ...draft, ollama: { ...draft.ollama, models } });
-      setMessage(`${model.name} is installed.`);
+      const job = await engineClient.startModelDownload(model.id);
+      setDownloadJobs((current) => ({ ...current, [job.jobId]: job }));
+      setMessage(`${model.name} download started.`);
+      void pollModelDownload(job.jobId, model.name);
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : `Could not pull ${model.name}.`);
+      setMessage(error instanceof Error ? error.message : `Could not download ${model.name}.`);
     } finally {
       setWorking(null);
     }
   }
 
+  async function pollModelDownload(jobId: string, modelName: string) {
+    let lastJob: RuntimeModelDownloadJob | undefined;
+    for (let attempt = 0; attempt < 720; attempt += 1) {
+      await new Promise((resolve) => window.setTimeout(resolve, 1000));
+      try {
+        const job = await engineClient.getModelDownload(jobId);
+        lastJob = job;
+        setDownloadJobs((current) => ({ ...current, [job.jobId]: job }));
+        if (["installed", "failed", "cancelled"].includes(job.status)) break;
+      } catch {
+        break;
+      }
+    }
+    if (lastJob?.status === "installed") {
+      const result = await engineClient.getRuntimeModels();
+      setRuntimeModels(result);
+      update({ ...draft, ollama: { ...draft.ollama, models: mergeOllamaModels(descriptorsFromRuntimeModels(result)) } });
+      setMessage(`${modelName} is installed.`);
+    } else if (lastJob?.status === "cancelled") {
+      setMessage(`${modelName} download cancelled.`);
+    } else if (lastJob?.status === "failed") {
+      setMessage(lastJob.error ?? `${modelName} download failed.`);
+    }
+  }
+
+  async function cancelModelDownload(jobId: string) {
+    try {
+      const job = await engineClient.cancelModelDownload(jobId);
+      setDownloadJobs((current) => ({ ...current, [job.jobId]: job }));
+      setMessage("Model download cancellation requested.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not cancel model download.");
+    }
+  }
+
   function setProfile(profile: ModelProfileId, modelId: string) {
-    update({
+    const next = {
       ...draft,
       profiles: {
         ...draft.profiles,
         [profile === "quick" ? "quickModelId" : "mainModelId"]: modelId,
       },
-    });
+    };
+    update(next);
+    void persistModelProfiles(next);
+  }
+
+  async function persistModelProfiles(next: AIProviderSettings) {
+    try {
+      const result = await engineClient.updateServiceConfig({
+        providers: {
+          defaultQuickModel: next.profiles.quickModelId,
+          defaultMainModel: next.profiles.mainModelId,
+        },
+      });
+      setServiceStatus((current) => ({ ...current, serviceConfig: result.config }));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Model assignment could not be saved.");
+    }
   }
 
   function resetDefaults() {
@@ -411,6 +629,210 @@ export function AIProviderSettingsModal({
       );
     } finally {
       setWorking(null);
+    }
+  }
+
+  async function refreshSpeechSetupStatus() {
+    setSpeechSetupWorking("check");
+    try {
+      const status = await engineClient.getSpeechSetupStatus();
+      setSpeechSetup(status);
+      setMessage(status.message);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not check Speech-to-Text setup.");
+    } finally {
+      setSpeechSetupWorking(null);
+    }
+  }
+
+  async function copySpeechInstallCommand() {
+    const command = speechSetup?.installCommand ?? "Install the Loom local speech engine from Settings.";
+    try {
+      await navigator.clipboard.writeText(command);
+      setMessage("Install command copied.");
+    } catch {
+      setMessage(command);
+    }
+  }
+
+  async function installLocalSpeechEngine() {
+    setSpeechSetupWorking("install-runtime");
+    try {
+      const status = await engineClient.getSpeechSetupStatus();
+      setSpeechSetup(status);
+      if (status.detectedBinaryPath) {
+        setMessage("Local Speech Engine is already installed.");
+      } else if (status.runningInElectron) {
+        setMessage(
+          "This Loom build does not include a bundled Local Speech Engine yet. Add the packaged runtime asset and rebuild, or use the advanced developer fallback."
+        );
+      } else {
+        setMessage(
+          "Local Speech Engine installation is available in the packaged Electron app. Developer fallback remains available below."
+        );
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not check Local Speech Engine setup.");
+    } finally {
+      setSpeechSetupWorking(null);
+    }
+  }
+
+  async function downloadSpeechModel() {
+    setSpeechSetupWorking("download-model");
+    setMessage("Downloading Whisper model...");
+    try {
+      const status = await engineClient.downloadSpeechSetupModel();
+      setSpeechSetup(status);
+      setMessage(status.message);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not download Whisper model.");
+    } finally {
+      setSpeechSetupWorking(null);
+    }
+  }
+
+  async function configureSpeechProviderFromSetup() {
+    setSpeechSetupWorking("configure");
+    try {
+      const status = await engineClient.configureSpeechSetup();
+      setSpeechSetup(status);
+      const config = await engineClient.getServiceConfig();
+      setSpeechDraft(config.speech);
+      const health = await engineClient.getSpeechProviderHealth();
+      setServiceStatus((current) => ({
+        ...current,
+        serviceConfig: config,
+        speechHealth: health,
+        speechHealthError: undefined,
+      }));
+      setMessage(status.message);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Could not configure Speech-to-Text.");
+    } finally {
+      setSpeechSetupWorking(null);
+    }
+  }
+
+  async function resetSpeechProviderConfig() {
+    setSpeechSetupWorking("reset");
+    try {
+      const result = await engineClient.updateServiceConfig({
+        speech: {
+          enabled: true,
+          defaultProviderKind: "local_command",
+          localCommandPath: null,
+          localCommandArgs: [],
+          localCommandTimeoutMs: defaultSpeechConfigDraft.localCommandTimeoutMs,
+          localTempDir: null,
+          localCommandOutputMode: defaultSpeechConfigDraft.localCommandOutputMode,
+          localCommandTranscriptFileExtension:
+            defaultSpeechConfigDraft.localCommandTranscriptFileExtension,
+        },
+      });
+      const [setup, health] = await Promise.all([
+        engineClient.getSpeechSetupStatus(),
+        engineClient.getSpeechProviderHealth(),
+      ]);
+      setSpeechSetup(setup);
+      setSpeechDraft(result.config.speech);
+      setServiceStatus((current) => ({
+        ...current,
+        serviceConfig: result.config,
+        speechHealth: health,
+        speechHealthError: undefined,
+      }));
+      setMessage("Speech-to-Text configuration reset. Downloaded models were not deleted.");
+    } catch (error) {
+      setMessage(
+        error instanceof Error
+          ? error.message
+          : "Could not reset Speech-to-Text configuration."
+      );
+    } finally {
+      setSpeechSetupWorking(null);
+    }
+  }
+
+  async function runSpeechSmokeTest() {
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      logElectronEvent("warn", "speech.settings_smoke.unsupported_recorder");
+      setSpeechSmoke({
+        status: "error",
+        message: "This browser cannot record a Speech-to-Text smoke sample.",
+      });
+      return;
+    }
+    logElectronEvent("info", "speech.settings_smoke.started");
+    setSpeechSmoke({ status: "recording", message: "Recording a short sample..." });
+    let stream: MediaStream | null = null;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const recorder = new MediaRecorder(stream);
+      logElectronEvent("info", "speech.settings_smoke.recording_started", {
+        mimeType: recorder.mimeType || "unknown",
+      });
+      const chunks: Blob[] = [];
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) chunks.push(event.data);
+      };
+      await new Promise<void>((resolve, reject) => {
+        recorder.onerror = () => reject(new Error("Speech sample recording failed."));
+        recorder.onstop = () => resolve();
+        recorder.start();
+        window.setTimeout(() => {
+          if (recorder.state !== "inactive") recorder.stop();
+        }, 2500);
+      });
+      setSpeechSmoke({ status: "transcribing", message: "Transcribing sample..." });
+      const wavAudio = await transcodeRecordedAudioToPcmWav(
+        chunks,
+        recorder.mimeType || "audio/webm"
+      );
+      logElectronEvent("info", "speech.settings_smoke.transcribe_requested", {
+        sourceMimeType: wavAudio.sourceMimeType,
+        mimeType: wavAudio.mimeType,
+        sourceByteSize: wavAudio.sourceByteSize,
+        byteSize: wavAudio.wavByteSize,
+        chunkCount: chunks.length,
+        sampleRate: wavAudio.sampleRate,
+        channelCount: wavAudio.channelCount,
+        durationSeconds: Number(wavAudio.durationSeconds.toFixed(3)),
+      });
+      const response = await engineClient.transcribeSpeech({
+        audioBytes: wavAudio.audioBytes,
+        mimeType: wavAudio.mimeType,
+        mode: "preview",
+        metadata: {
+          source: "settings_speech_smoke_test",
+          sourceMimeType: wavAudio.sourceMimeType,
+          audioFormat: "pcm_s16le_wav",
+          sampleRate: wavAudio.sampleRate,
+          channelCount: wavAudio.channelCount,
+          sourceByteSize: wavAudio.sourceByteSize,
+          wavByteSize: wavAudio.wavByteSize,
+        },
+      });
+      logElectronEvent("info", "speech.settings_smoke.transcribe_succeeded", {
+        transcriptLength: response.transcript.length,
+        audioPersisted: response.retention.audioPersisted,
+        transcriptPersisted: response.retention.transcriptPersisted,
+      });
+      setSpeechSmoke({
+        status: "success",
+        message: "Speech-to-Text smoke test passed.",
+        transcript: response.transcript,
+      });
+    } catch (error) {
+      logElectronEvent("warn", "speech.settings_smoke.failed", {
+        message: error instanceof Error ? error.message : "Speech-to-Text smoke test failed.",
+      });
+      setSpeechSmoke({
+        status: "error",
+        message: error instanceof Error ? error.message : "Speech-to-Text smoke test failed.",
+      });
+    } finally {
+      stream?.getTracks().forEach((track) => track.stop());
     }
   }
 
@@ -552,6 +974,37 @@ export function AIProviderSettingsModal({
   }
 
   function renderAIProvidersSettings() {
+    const providerOffline = runtimeHealth.status === "not_running";
+    const providerInvalid = runtimeHealth.status === "degraded";
+    const providerConnected = runtimeHealth.status === "ready" && runtimeHealth.ollama_running;
+    const noInstalledModels = providerConnected && !runtimeHealth.models_available;
+    const selectedModelMissing =
+      providerConnected && runtimeHealth.models_available && !selectedModelsReady;
+    const providerCardTitle = demoResponsesEnabled
+      ? "Demo responses enabled"
+      : providerOffline
+        ? "Local model provider is offline"
+        : providerInvalid
+          ? "Provider configuration needs attention"
+          : noInstalledModels
+            ? "No models installed yet"
+            : selectedModelMissing
+              ? "Selected model is not installed"
+              : providerConnected
+                ? "Local model provider connected"
+                : "Connection not tested yet";
+    const providerCardMessage = demoResponsesEnabled
+      ? "Demo responses bypass the local model provider."
+      : providerOffline
+        ? "Loom is running normally. Start or install Ollama to use local models."
+        : noInstalledModels
+          ? "Ollama is running, but it has no installed models yet."
+          : selectedModelMissing
+            ? "Install the selected Quick/Main model before sending prompts."
+            : runtimeHealth.message;
+    const providerSecurity = runtimeHealth.ollama?.security;
+    const providerSecurityText = securityAccessLabel(providerSecurity, draft.ollama.baseUrl);
+    const providerVersionText = providerVersionLabel(providerSecurity?.versionStatus);
     return (
       <>
         <section className="provider-section">
@@ -561,7 +1014,7 @@ export function AIProviderSettingsModal({
               <h3>Local model provider</h3>
             </div>
             <span className={`connection-pill ${draft.ollama.lastConnectionStatus}`}>
-              {draft.ollama.lastConnectionStatus}
+              {providerPillLabel(draft.ollama.lastConnectionStatus)}
             </span>
           </div>
 
@@ -581,7 +1034,7 @@ export function AIProviderSettingsModal({
           <div className="settings-actions">
             <button onClick={testConnection} disabled={working === "test" || runtimeHealth.checking}>
               <CheckCircle2 size={14} />
-              Test Runtime
+              Retry connection
             </button>
             <button onClick={refreshModels} disabled={working === "refresh"}>
               <RefreshCw size={14} />
@@ -593,19 +1046,13 @@ export function AIProviderSettingsModal({
             </button>
           </div>
 
-          <div className={`runtime-health-card ${runtimeHealth.status}`}>
-            <strong>
-              {demoResponsesEnabled
-                ? "Demo responses enabled"
-                : !runtimeHealth.ollama_installed
-                  ? "Install Ollama"
-                  : !runtimeHealth.models_available
-                    ? "Pull Model"
-                    : selectedModelsReady
-                      ? "Runtime ready"
-                      : "Download selected model"}
-            </strong>
-            <span>{runtimeHealth.message}</span>
+          <div
+            className={`runtime-health-card ${
+              noInstalledModels || selectedModelMissing ? "warning" : runtimeHealth.status
+            }`}
+          >
+            <strong>{providerCardTitle}</strong>
+            <span>{providerCardMessage}</span>
             {runtimeHealth.checkedAt && (
               <small>Last checked {new Date(runtimeHealth.checkedAt).toLocaleTimeString()}</small>
             )}
@@ -614,11 +1061,8 @@ export function AIProviderSettingsModal({
             )}
             {runtimeHealth.ollama?.security && (
               <>
-                <span>
-                  Local-only: {runtimeHealth.ollama.security.localOnly ? "OK" : "Warning"}
-                  {" · "}
-                  Security: {runtimeHealth.ollama.security.versionStatus ?? "unknown"}
-                </span>
+                <span>{providerSecurityText}</span>
+                <span>{providerVersionText}</span>
                 {runtimeHealth.ollama.security.warnings.slice(0, 2).map((warning) => (
                   <small key={warning}>{warning}</small>
                 ))}
@@ -817,6 +1261,11 @@ export function AIProviderSettingsModal({
           </div>
           <div className="provider-model-list">
             {filteredModels.map((model) => {
+              const modelJob = Object.values(downloadJobs).find(
+                (job) =>
+                  job.modelName === model.id &&
+                  ["queued", "downloading", "verifying"].includes(job.status)
+              );
               const selectedProfiles = [
                 draft.profiles.quickModelId === model.id ? "Quick" : "",
                 draft.profiles.mainModelId === model.id ? "Main" : "",
@@ -838,6 +1287,8 @@ export function AIProviderSettingsModal({
                     className={
                       selectedButUnavailable
                         ? "missing"
+                        : modelJob
+                          ? "installing"
                         : model.installed
                           ? "installed"
                           : "missing"
@@ -845,11 +1296,22 @@ export function AIProviderSettingsModal({
                   >
                     {selectedButUnavailable
                       ? "Runtime unavailable"
+                      : modelJob
+                        ? `${Math.round(modelJob.progressPercent)}%`
                       : model.installed
                         ? "Available"
                         : "Missing"}
                   </em>
-                  {!model.installed && (
+                  {modelJob ? (
+                    <button
+                      className="download-model-button"
+                      onClick={() => void cancelModelDownload(modelJob.jobId)}
+                      aria-label={`Cancel ${model.name} download`}
+                      title="Cancel download"
+                    >
+                      <X size={14} />
+                    </button>
+                  ) : !model.installed ? (
                     <button
                       className="download-model-button"
                       onClick={() => pullModel(model)}
@@ -859,7 +1321,7 @@ export function AIProviderSettingsModal({
                     >
                       <Download size={14} />
                     </button>
-                  )}
+                  ) : null}
                 </div>
               );
             })}
@@ -1104,6 +1566,20 @@ export function AIProviderSettingsModal({
     const config = serviceStatus.config;
     const desktopMode = desktopRuntimeInfo?.isElectron ? "Electron sidecar" : "Web";
     const desktopStatus = desktopRuntimeStatus?.state ?? (desktopRuntimeInfo?.isElectron ? "unknown" : "unavailable");
+    const runtimeNeedsModelAction =
+      runtimeHealth.ollama_running &&
+      (!runtimeHealth.models_available || !selectedModelsReady);
+    const runtimeState = health?.status ?? runtimeHealth.status;
+    const serviceMessage = runtimeNeedsModelAction
+      ? "Loom is running, but the selected model is not ready."
+      : health?.status === "ready"
+        ? "Loom is running normally. Model provider availability is shown separately."
+        : runtimeHealth.message;
+    const desktopCardState = !desktopRuntimeBridge
+      ? "info"
+      : desktopStatus === "ready"
+        ? "ready"
+        : "degraded";
     return (
       <>
         <section className="provider-section">
@@ -1126,15 +1602,17 @@ export function AIProviderSettingsModal({
 
           <div className={`runtime-health-card ${health?.status ?? runtimeHealth.status}`}>
             <strong>
-              {health?.runtime === "rust-service" ? "Rust Service" : "Runtime"}
+              Loom Runtime
               {" · "}
-              {statusLabel(health?.status ?? runtimeHealth.status)}
+              {runtimeStatusLabel(runtimeNeedsModelAction ? "degraded" : runtimeState)}
             </strong>
             <span>
-              Product mode uses the Rust-service engine boundary when service mode is enabled. No
-              TypeScript runtime fallback is introduced here.
+              Product mode uses the Rust-service engine boundary.
             </span>
-            <span>{runtimeHealth.message}</span>
+            <span>{serviceMessage}</span>
+            {runtimeNeedsModelAction && (
+              <span>Install or choose a Quick/Main model before sending prompts.</span>
+            )}
             {health?.serviceUrl && <span>Service URL: {health.serviceUrl}</span>}
             {health?.database && <span>Database: {statusLabel(health.database.status)}</span>}
             {health?.config && <span>Config: {statusLabel(health.config.status)}</span>}
@@ -1144,7 +1622,7 @@ export function AIProviderSettingsModal({
           <div className="settings-actions">
             <button onClick={testConnection} disabled={working === "test" || runtimeHealth.checking}>
               <CheckCircle2 size={14} />
-              Test Runtime
+              Check provider
             </button>
             <button
               type="button"
@@ -1176,9 +1654,9 @@ export function AIProviderSettingsModal({
             </button>
           </div>
 
-          <div className={`runtime-health-card ${desktopStatus === "ready" ? "ready" : "degraded"}`}>
+          <div className={`runtime-health-card ${desktopCardState}`}>
             <strong>
-              Runtime: loom-service · {statusLabel(desktopStatus)}
+              Runtime: loom-service · {desktopRuntimeBridge ? statusLabel(desktopStatus) : "Web mode"}
             </strong>
             <span>Mode: {desktopMode}</span>
             {desktopRuntimeStatus?.dataMode && (
@@ -1196,6 +1674,10 @@ export function AIProviderSettingsModal({
             {desktopRuntimeStatus?.configPath && (
               <span>Config: {desktopRuntimeStatus.configPath}</span>
             )}
+            {desktopRuntimeStatus?.appSessionId && (
+              <span>App session: {desktopRuntimeStatus.appSessionId}</span>
+            )}
+            {desktopRuntimeStatus?.logPath && <span>Log: {desktopRuntimeStatus.logPath}</span>}
             {desktopRuntimeStatus?.lastCheckedAt && (
               <span>
                 Last checked: {new Date(desktopRuntimeStatus.lastCheckedAt).toLocaleTimeString()}
@@ -1203,7 +1685,7 @@ export function AIProviderSettingsModal({
             )}
             {desktopRuntimeStatus?.error && <span>{desktopRuntimeStatus.error}</span>}
             {!desktopRuntimeBridge && (
-              <span>Runtime restart is available in the desktop app.</span>
+              <span>Desktop runtime controls are available in the Electron app.</span>
             )}
           </div>
 
@@ -1241,12 +1723,12 @@ export function AIProviderSettingsModal({
             </div>
             <div className="settings-placeholder">
               <strong>Runtime checks</strong>
-              <span>Ollama: {statusLabel(runtimeHealth.status)}</span>
+              <span>Ollama: {runtimeStatusLabel(runtimeHealth.status)}</span>
               <span>
                 Last checked:{" "}
                 {runtimeHealth.checkedAt
                   ? new Date(runtimeHealth.checkedAt).toLocaleTimeString()
-                  : "Not checked"}
+                  : "Connection not tested yet"}
               </span>
             </div>
           </div>
@@ -1263,7 +1745,7 @@ export function AIProviderSettingsModal({
         ? "Disabled"
         : pathConfigured
           ? "Configured"
-          : "Local speech-to-text provider is not configured.";
+          : "Speech-to-Text setup required";
     const unavailable = serviceStatus.configError ?? (!hasConfig ? "Service config is not loaded." : null);
     const canSave = hasConfig && !serviceStatus.configError && working !== "speech-config";
     const speechHealth = serviceStatus.speechHealth;
@@ -1271,6 +1753,18 @@ export function AIProviderSettingsModal({
       { value: "local_command", label: "Local command" },
       { value: "disabled", label: "Disabled" },
     ];
+    const setupReady = speechSetup?.state === "ready";
+    const modelReady = Boolean(speechSetup?.model.exists);
+    const binaryReady = Boolean(speechSetup?.detectedBinaryPath);
+    const canConfigureFromSetup = binaryReady && modelReady && speechSetupWorking !== "configure";
+    const runtimeSummary = binaryReady
+      ? `${speechSetup?.detectedRuntimeSource ?? "local"} runtime`
+      : "Not installed";
+    const modelSummary = modelReady
+      ? `Ready${speechSetup?.model.sizeBytes ? ` · ${formatModelBytes(speechSetup.model.sizeBytes)}` : ""}`
+      : "Missing";
+    const providerSummary =
+      speechSetup?.providerHealth.status ?? speechHealth?.status ?? "Not checked";
 
     return (
       <section className="provider-section" data-testid="speech-settings-section">
@@ -1284,168 +1778,277 @@ export function AIProviderSettingsModal({
           </span>
         </div>
 
-        <div className="settings-placeholder">
+        <div className="speech-setup-hero">
           <strong>{providerStatus}</strong>
           <span>
-            Choose a local transcription command, such as a local Whisper-compatible binary.
-            Microphone input will work after the local command is configured.
-          </span>
-          <span>
-            Loom does not install Whisper automatically. Install a local binary first, then configure
-            its path and arguments here.
+            Set up local speech once, then use the microphone without terminal commands.
           </span>
           {unavailable && <span>{unavailable}</span>}
           {serviceStatus.speechHealthError && <span>{serviceStatus.speechHealthError}</span>}
           {speechHealth && (
             <span>
-              Provider check: {speechHealth.status} · {speechHealth.message}
+              Provider check: {speechHealth.status} · {speechProviderHealthMessage(speechHealth, speechSetup)}
             </span>
           )}
         </div>
 
-        <div className="settings-two-column settings-field-grid">
-          <label className="settings-field">
-            <span>Provider kind</span>
-            <select
-              value={speechDraft.defaultProviderKind}
-              onChange={(event) =>
-                setSpeechDraft({
-                  ...speechDraft,
-                  defaultProviderKind: event.target.value as SpeechToTextProviderKind,
-                })
-              }
-            >
-              {providerOptions.map((option) => (
-                <option key={option.value} value={option.value}>
-                  {option.label}
-                </option>
-              ))}
-            </select>
-            <small>Cloud providers and test-only providers are not user-facing options.</small>
-          </label>
-
-          <label className="settings-field">
-            <span>Command timeout</span>
-            <input
-              type="number"
-              min={1_000}
-              step={1_000}
-              value={speechDraft.localCommandTimeoutMs}
-              onChange={(event) =>
-                setSpeechDraft({
-                  ...speechDraft,
-                  localCommandTimeoutMs: Math.max(1_000, Number(event.target.value) || 1_000),
-                })
-              }
-            />
-            <small>Milliseconds before the local provider is treated as timed out.</small>
-          </label>
-        </div>
-
-        <div className="settings-two-column settings-field-grid">
-          <label className="settings-field">
-            <span>Output mode</span>
-            <select
-              value={speechDraft.localCommandOutputMode}
-              onChange={(event) =>
-                setSpeechDraft({
-                  ...speechDraft,
-                  localCommandOutputMode: event.target.value === "file" ? "file" : "stdout",
-                })
-              }
-            >
-              <option value="file">Transcript file</option>
-              <option value="stdout">Standard output</option>
-            </select>
-            <small>whisper.cpp usually writes transcript files. Other commands may print to stdout.</small>
-          </label>
-
-          <label className="settings-field">
-            <span>Transcript file extension</span>
-            <input
-              value={speechDraft.localCommandTranscriptFileExtension}
-              placeholder="txt"
-              onChange={(event) =>
-                setSpeechDraft({
-                  ...speechDraft,
-                  localCommandTranscriptFileExtension: event.target.value || "txt",
-                })
-              }
-            />
-            <small>Used in file output mode. whisper.cpp with -otxt writes {"{output}"}.txt.</small>
-          </label>
-        </div>
-
-        <label className="settings-field">
-          <span>Local command path</span>
-          <input
-            value={speechDraft.localCommandPath ?? ""}
-            placeholder="/usr/local/bin/whisper-cli"
-            onChange={(event) =>
-              setSpeechDraft({ ...speechDraft, localCommandPath: event.target.value })
-            }
-          />
-          <small>Path to a local executable. Loom does not install STT binaries.</small>
-        </label>
-
-        <label className="settings-field">
-          <span>Command arguments</span>
-          <textarea
-            rows={4}
-            value={speechArgsText(speechDraft.localCommandArgs)}
-            onChange={(event) =>
-              setSpeechDraft({
-                ...speechDraft,
-                localCommandArgs: parseSpeechArgs(event.target.value),
-              })
-            }
-          />
-          <small>
-            One argument per line. Supported placeholders: {"{input}"}, {"{audio_file}"}, {"{output}"}, {"{mime_type}"}, {"{language}"}.
-          </small>
-        </label>
-
-        <div className="settings-placeholder">
-          <strong>whisper.cpp example</strong>
-          <span>Command path: /path/to/whisper-cli</span>
-          <span>Arguments, one per line: -m /path/to/ggml-base.en.bin -f {"{input}"} -otxt -of {"{output}"}</span>
-          <span>Output mode: Transcript file · Extension: txt</span>
-        </div>
-
-        <label className="settings-field">
-          <span>Temporary audio directory</span>
-          <input
-            value={speechDraft.localTempDir ?? ""}
-            placeholder="System temporary directory"
-            onChange={(event) =>
-              setSpeechDraft({ ...speechDraft, localTempDir: event.target.value })
-            }
-          />
-          <small>Optional directory for temporary provider input files. Files are cleaned up.</small>
-        </label>
-
-        <div className="settings-placeholder">
-          <strong>Privacy posture</strong>
-          <span>Local-only STT configuration. Cloud STT is not enabled.</span>
-          <span>Raw audio is not persisted by default.</span>
-          <span>Transcripts are not persisted separately by default.</span>
-          <span>Transcribed text is inserted into the composer draft and is never auto-sent.</span>
+        <div className="speech-setup-summary" data-testid="speech-setup-guide">
+          <div className={`speech-setup-card ${binaryReady ? "ready" : "needs-action"}`}>
+            <strong>Local Speech Engine</strong>
+            <span>{runtimeSummary}</span>
+          </div>
+          <div className={`speech-setup-card ${modelReady ? "ready" : "needs-action"}`}>
+            <strong>Speech model</strong>
+            <span>{modelSummary}</span>
+          </div>
+          <div className={`speech-setup-card ${pathConfigured ? "ready" : "needs-action"}`}>
+            <strong>Provider</strong>
+            <span>{providerSummary}</span>
+          </div>
         </div>
 
         <div className="settings-actions">
-          <button type="button" onClick={() => void saveSpeechConfig()} disabled={!canSave}>
-            <CheckCircle2 size={14} />
-            {working === "speech-config" ? "Saving" : "Save Speech Settings"}
-          </button>
           <button
             type="button"
-            onClick={() => void refreshServiceStatus()}
-            disabled={serviceStatus.loading}
+            onClick={() => void refreshSpeechSetupStatus()}
+            disabled={Boolean(speechSetupWorking)}
           >
             <RefreshCw size={14} />
-            Check Provider
+            {speechSetupWorking === "check" ? "Checking" : "Check setup"}
+          </button>
+          {!binaryReady && (
+            <button
+              type="button"
+              onClick={() => void installLocalSpeechEngine()}
+              disabled={binaryReady}
+            >
+              {speechSetupWorking === "install-runtime" ? "Checking engine" : "Install Local Speech Engine"}
+            </button>
+          )}
+          {!modelReady && (
+            <button
+              type="button"
+              onClick={() => void downloadSpeechModel()}
+              disabled={!binaryReady || modelReady || speechSetupWorking === "download-model"}
+            >
+              <Download size={14} />
+              {speechSetupWorking === "download-model" ? "Downloading model" : "Download model"}
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={() => void configureSpeechProviderFromSetup()}
+            disabled={!canConfigureFromSetup}
+          >
+            <CheckCircle2 size={14} />
+            Auto-configure provider
           </button>
         </div>
+
+        <div className="speech-test-card">
+          <strong>Test Speech-to-Text</strong>
+          <span>{speechSmoke.message}</span>
+          {speechSmoke.transcript && <span>Transcript: {speechSmoke.transcript}</span>}
+          <button
+            type="button"
+            onClick={() => void runSpeechSmokeTest()}
+            disabled={!setupReady || speechSmoke.status === "recording" || speechSmoke.status === "transcribing"}
+          >
+            {speechSmoke.status === "recording"
+              ? "Recording"
+              : speechSmoke.status === "transcribing"
+                ? "Transcribing"
+                : "Test Speech-to-Text"}
+          </button>
+        </div>
+
+        <div className="settings-placeholder speech-privacy-note">
+          <strong>Privacy</strong>
+          <span>Local-only transcription. Audio is temporary, transcripts are inserted into the draft, and nothing is auto-sent.</span>
+        </div>
+
+        <details className="settings-advanced-panel">
+          <summary>Advanced</summary>
+          <div className="settings-advanced-content">
+            <div className="settings-placeholder">
+              <strong>Diagnostics</strong>
+              <span>
+                Runtime: {speechSetup?.runningInElectron ? "Electron packaged app" : "Web/dev browser"}
+              </span>
+              <span>
+                Local runtime: {speechSetup?.detectedRuntimeSource ?? "not checked"}
+                {speechSetup?.detectedBinaryPath ? ` · ${speechSetup.detectedBinaryPath}` : ""}
+              </span>
+              <span>Runtime version: {speechSetup?.runtimeVersion ?? "Not detected"}</span>
+              <span>
+                Model path: {speechSetup?.model.path ?? "Unknown"}
+              </span>
+              <span>Setup status: {speechSetup?.state ?? "not checked"}</span>
+              <span>Saved command path: {speechDraft.localCommandPath?.trim() || "Not configured"}</span>
+              <small>
+                Saved arguments:{" "}
+                {speechDraft.localCommandArgs.length
+                  ? speechDraft.localCommandArgs.join(" ")
+                  : "Not configured"}
+              </small>
+              {speechSetup?.binaryCandidates.length ? (
+                <small>
+                  Checked runtimes:{" "}
+                  {speechSetup.binaryCandidates
+                    .map((candidate) => `${candidate.source}: ${candidate.path}`)
+                    .join(", ")}
+                </small>
+              ) : null}
+            </div>
+
+            <div className="settings-actions">
+              <button
+                type="button"
+                onClick={() => void copySpeechInstallCommand()}
+                disabled={binaryReady}
+              >
+                Copy developer fallback
+              </button>
+              <button
+                type="button"
+                onClick={() => void resetSpeechProviderConfig()}
+                disabled={Boolean(speechSetupWorking)}
+              >
+                <RotateCcw size={14} />
+                {speechSetupWorking === "reset" ? "Resetting" : "Reset Speech-to-Text Configuration"}
+              </button>
+            </div>
+
+            <div className="settings-two-column settings-field-grid">
+              <label className="settings-field">
+                <span>Provider kind</span>
+                <select
+                  value={speechDraft.defaultProviderKind}
+                  onChange={(event) =>
+                    setSpeechDraft({
+                      ...speechDraft,
+                      defaultProviderKind: event.target.value as SpeechToTextProviderKind,
+                    })
+                  }
+                >
+                  {providerOptions.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+                <small>Cloud providers and test-only providers are not user-facing options.</small>
+              </label>
+
+              <label className="settings-field">
+                <span>Command timeout</span>
+                <input
+                  type="number"
+                  min={1_000}
+                  step={1_000}
+                  value={speechDraft.localCommandTimeoutMs}
+                  onChange={(event) =>
+                    setSpeechDraft({
+                      ...speechDraft,
+                      localCommandTimeoutMs: Math.max(1_000, Number(event.target.value) || 1_000),
+                    })
+                  }
+                />
+                <small>Milliseconds before the local provider is treated as timed out.</small>
+              </label>
+            </div>
+
+            <div className="settings-two-column settings-field-grid">
+              <label className="settings-field">
+                <span>Output mode</span>
+                <select
+                  value={speechDraft.localCommandOutputMode}
+                  onChange={(event) =>
+                    setSpeechDraft({
+                      ...speechDraft,
+                      localCommandOutputMode: event.target.value === "file" ? "file" : "stdout",
+                    })
+                  }
+                >
+                  <option value="file">Transcript file</option>
+                  <option value="stdout">Standard output</option>
+                </select>
+                <small>whisper.cpp usually writes transcript files. Other commands may print to stdout.</small>
+              </label>
+
+              <label className="settings-field">
+                <span>Transcript file extension</span>
+                <input
+                  value={speechDraft.localCommandTranscriptFileExtension}
+                  placeholder="txt"
+                  onChange={(event) =>
+                    setSpeechDraft({
+                      ...speechDraft,
+                      localCommandTranscriptFileExtension: event.target.value || "txt",
+                    })
+                  }
+                />
+                <small>Used in file output mode. whisper.cpp with -otxt writes {"{output}"}.txt.</small>
+              </label>
+            </div>
+
+            <label className="settings-field">
+              <span>Local command path</span>
+              <input
+                value={speechDraft.localCommandPath ?? ""}
+                placeholder="/usr/local/bin/whisper-cli"
+                onChange={(event) =>
+                  setSpeechDraft({ ...speechDraft, localCommandPath: event.target.value })
+                }
+              />
+              <small>Path to a local executable. Normal setup should use the Loom-managed engine.</small>
+            </label>
+
+            <label className="settings-field">
+              <span>Command arguments</span>
+              <textarea
+                rows={4}
+                value={speechArgsText(speechDraft.localCommandArgs)}
+                onChange={(event) =>
+                  setSpeechDraft({
+                    ...speechDraft,
+                    localCommandArgs: parseSpeechArgs(event.target.value),
+                  })
+                }
+              />
+              <small>
+                One argument per line. Supported placeholders: {"{input}"}, {"{audio_file}"}, {"{output}"}, {"{mime_type}"}, {"{language}"}.
+              </small>
+            </label>
+
+            <label className="settings-field">
+              <span>Temporary audio directory</span>
+              <input
+                value={speechDraft.localTempDir ?? ""}
+                placeholder="System temporary directory"
+                onChange={(event) =>
+                  setSpeechDraft({ ...speechDraft, localTempDir: event.target.value })
+                }
+              />
+              <small>Optional directory for temporary provider input files. Files are cleaned up.</small>
+            </label>
+
+            <div className="settings-actions">
+              <button type="button" onClick={() => void saveSpeechConfig()} disabled={!canSave}>
+                <CheckCircle2 size={14} />
+                {working === "speech-config" ? "Saving" : "Save Speech Settings"}
+              </button>
+              <button
+                type="button"
+                onClick={() => void refreshServiceStatus()}
+                disabled={serviceStatus.loading}
+              >
+                <RefreshCw size={14} />
+                Check Provider
+              </button>
+            </div>
+          </div>
+        </details>
       </section>
     );
   }
@@ -1518,44 +2121,176 @@ export function AIProviderSettingsModal({
   }
 
   function renderContextMemorySettings() {
+    const memoryChanged = JSON.stringify(memoryDraft) !== JSON.stringify(appSettings.memory);
     return (
       <>
-        <section className="provider-section">
+        <section className="provider-section memory-settings-section" data-testid="memory-settings-section">
           <div className="provider-section-heading">
             <div>
-              <span>Context</span>
-              <h3>Local conversation memory</h3>
+              <span>Memory</span>
+              <h3>Memory</h3>
             </div>
           </div>
-          <div className="settings-placeholder">
-            <strong>Loom stores conversation memory locally in SQLite.</strong>
-            <span>
-              Recent turns, References, response parts, capsules, checkpoints, tags, graph links,
-              and retrieval candidates are assembled by the Rust-service ContextManager.
-            </span>
+          <div className="memory-toggle-list" aria-label="Memory controls">
+            <label className="settings-toggle memory-toggle">
+              <input
+                type="checkbox"
+                checked={memoryDraft.enabled}
+                onChange={(event) => updateMemoryDraft({ enabled: event.target.checked })}
+              />
+              <span>
+                <strong>Use memory in Loom</strong>
+                <small>Allow future memory features to participate in answers when enabled.</small>
+              </span>
+            </label>
+            <label className="settings-toggle memory-toggle">
+              <input
+                type="checkbox"
+                checked={memoryDraft.referenceRecentLooms}
+                onChange={(event) =>
+                  updateMemoryDraft({ referenceRecentLooms: event.target.checked })
+                }
+                disabled={!memoryDraft.enabled}
+              />
+              <span>
+                <strong>Reference recent Looms</strong>
+                <small>Use recent Loom context as derived session memory.</small>
+              </span>
+            </label>
+            <label className="settings-toggle memory-toggle">
+              <input
+                type="checkbox"
+                checked={memoryDraft.referenceSavedMemories}
+                onChange={(event) =>
+                  updateMemoryDraft({ referenceSavedMemories: event.target.checked })
+                }
+                disabled={!memoryDraft.enabled}
+              />
+              <span>
+                <strong>Reference saved memories</strong>
+                <small>Use explicit, user-approved saved memories when available.</small>
+              </span>
+            </label>
           </div>
-          <div className="settings-placeholder">
-            <strong>Raw model thinking is never stored or reused as future context.</strong>
-            <span>
-              Only visible answer content and safe status metadata can participate in future context.
-            </span>
+          <div className="memory-actions settings-actions">
+            <button
+              type="button"
+              data-testid="memory-save"
+              onClick={() => void saveMemorySettings()}
+              disabled={!memoryChanged}
+            >
+              Save
+            </button>
+            <button
+              type="button"
+              data-testid="memory-reset"
+              onClick={resetMemorySettings}
+              disabled={!memoryChanged}
+            >
+              Reset changes
+            </button>
           </div>
         </section>
 
         <section className="provider-section">
           <div className="provider-section-heading">
             <div>
-              <span>Memory controls</span>
-              <h3>User memory settings</h3>
+              <span>Saved memories</span>
+              <h3>Saved memories</h3>
             </div>
-            <span className="settings-planned-pill">Coming later</span>
+            <span className="settings-planned-pill">Shell only</span>
           </div>
-          <div className="settings-placeholder settings-placeholder-disabled">
-            <strong>Explicit remember / forget policy required</strong>
+          <div className="memory-empty-state" data-testid="memory-empty-state">
+            <strong>No saved memories yet.</strong>
             <span>
-              Memory write, inspect, delete, and provenance controls are deferred until the
-              auditable memory policy is accepted.
+              Saved memories will appear here only after explicit remember and forget controls are
+              implemented.
             </span>
+          </div>
+          <div className="memory-actions settings-actions">
+            <button type="button" disabled>
+              Clear all memories
+            </button>
+            <button type="button" disabled>
+              Export memories
+            </button>
+          </div>
+          <small>
+            This shell does not create memory rows, write memories automatically, or expose hidden
+            reasoning.
+          </small>
+        </section>
+
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Profile</span>
+              <h3>Your profile and preferences</h3>
+            </div>
+          </div>
+          <div className="settings-two-column settings-field-grid">
+            <label className="settings-field">
+              <span>Your nickname</span>
+              <input
+                value={memoryDraft.nickname}
+                onChange={(event) => updateMemoryDraft({ nickname: event.target.value })}
+                placeholder="Optional"
+              />
+              <small>Displayed as a future explicit memory preference.</small>
+            </label>
+            <label className="settings-field">
+              <span>Your occupation</span>
+              <input
+                value={memoryDraft.occupation}
+                onChange={(event) => updateMemoryDraft({ occupation: event.target.value })}
+                placeholder="Optional"
+              />
+              <small>Stored only with these frontend settings in this shell.</small>
+            </label>
+          </div>
+          <label className="settings-field">
+            <span>Language and style preferences</span>
+            <textarea
+              value={memoryDraft.stylePreferences}
+              onChange={(event) => updateMemoryDraft({ stylePreferences: event.target.value })}
+              placeholder="Tone, language, formatting, or response style preferences."
+            />
+          </label>
+          <label className="settings-field">
+            <span>More about you</span>
+            <textarea
+              value={memoryDraft.moreAboutYou}
+              onChange={(event) => updateMemoryDraft({ moreAboutYou: event.target.value })}
+              placeholder="Optional background you may later choose to save as explicit memory."
+            />
+          </label>
+        </section>
+
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Privacy and retention</span>
+              <h3>Memory boundaries</h3>
+            </div>
+          </div>
+          <div className="memory-policy-grid">
+            <div className="settings-placeholder">
+              <strong>Explicit Memory</strong>
+              <span>User-approved, durable, inspectable, editable, and deletable.</span>
+            </div>
+            <div className="settings-placeholder">
+              <strong>Derived Context Artifacts</strong>
+              <span>
+                Capsules, checkpoints, retrieval summaries, and orchestration artifacts are context
+                infrastructure, not saved memories.
+              </span>
+            </div>
+            <div className="settings-placeholder">
+              <strong>Raw model thinking is never saved as memory.</strong>
+              <span>
+                Hidden reasoning and internal monologue must not be persisted, exported, or reused.
+              </span>
+            </div>
           </div>
         </section>
       </>
@@ -1730,23 +2465,6 @@ export function AIProviderSettingsModal({
           <label className="settings-toggle">
             <input
               type="checkbox"
-              checked={appSettings.showGenerationDebug}
-              onChange={(event) =>
-                updateAppSettings({
-                  ...appSettings,
-                  showGenerationDebug: event.target.checked,
-                })
-              }
-            />
-            <span>Show generation debug monitor while answering</span>
-          </label>
-          <small>
-            Shows safe generation metadata during active responses. It does not expose or store raw
-            model thinking.
-          </small>
-          <label className="settings-toggle">
-            <input
-              type="checkbox"
               checked={appSettings.mockDataEnabled || isMockDataForced()}
               disabled={isMockDataForced()}
               onChange={(event) =>
@@ -1790,12 +2508,12 @@ export function AIProviderSettingsModal({
 
           <div className={`runtime-health-card ${health?.status ?? "degraded"}`}>
             <strong>
-              {health?.runtime === "rust-service" ? "Rust Service" : "TypeScript Local"}
+              {health?.runtime === "rust-service" ? "Rust Service" : "Service unavailable"}
               {" · "}
               {statusLabel(health?.status)}
             </strong>
             <span>
-              Mode: {health?.runtime === "rust-service" ? "Rust Service" : "TypeScript Local"}
+              Mode: {health?.runtime === "rust-service" ? "Rust Service" : "Service unavailable"}
               {health?.serviceUrl ? ` · ${health.serviceUrl}` : ""}
             </span>
             {health?.version && <span>Version: {health.version}</span>}
@@ -1810,11 +2528,13 @@ export function AIProviderSettingsModal({
                     : ""}
                 </span>
                 <span>
-                  Local-only:{" "}
-                  {health.providers.ollama.security?.localOnly ? "OK" : "Warning"}
-                  {health.providers.ollama.security?.versionStatus
-                    ? ` · Security: ${health.providers.ollama.security.versionStatus}`
-                    : ""}
+                  {securityAccessLabel(
+                    health.providers.ollama.security,
+                    health.providers.ollama.baseUrl ?? draft.ollama.baseUrl
+                  )}
+                </span>
+                <span>
+                  {providerVersionLabel(health.providers.ollama.security?.versionStatus)}
                 </span>
                 {health.providers.ollama.security?.warnings?.slice(0, 2).map((warning) => (
                   <small key={warning}>{warning}</small>

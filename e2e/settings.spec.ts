@@ -1,9 +1,19 @@
 import { expect, type Page, test } from "@playwright/test";
 
-async function openApp(page: Page) {
+const providerSettingsKey = "loom-ai-provider-settings-v1";
+
+async function openApp(page: Page, providerSettings?: Record<string, unknown>) {
   await page.addInitScript(() => {
     window.localStorage.clear();
   });
+  if (providerSettings) {
+    await page.addInitScript(
+      ([key, value]) => {
+        window.localStorage.setItem(key, JSON.stringify(value));
+      },
+      [providerSettingsKey, providerSettings] as const
+    );
+  }
   await page.goto("/");
   await expect(page.getByTestId("loom-sidebar")).toBeVisible();
 }
@@ -27,18 +37,19 @@ test.describe("[pure-ui-rendering] Settings information architecture", () => {
       "Providers",
       "Models",
       "Capability",
-      "Context & Memory",
+      "Memory",
       "Privacy & Security",
       "Data & Storage",
       "Export / Import",
       "UI Preferences",
+      "Shortcuts",
       "Advanced",
     ]) {
       await expect(categoryList.getByText(label, { exact: true })).toBeVisible();
     }
 
     await expect(page.getByRole("heading", { name: "Engine and service status" })).toBeVisible();
-    await expect(page.getByRole("button", { name: "Test Runtime" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Check provider" })).toBeVisible();
     await expect(page.getByRole("button", { name: "Refresh service status" }).first()).toBeVisible();
   });
 
@@ -50,20 +61,36 @@ test.describe("[pure-ui-rendering] Settings information architecture", () => {
 
     await page.getByRole("button", { name: /Capability/ }).click();
     await expect(page.getByRole("heading", { name: "Local transcription provider" })).toBeVisible();
-    await expect(page.getByText("Local speech-to-text provider is not configured.")).toBeVisible();
-    await expect(page.getByText("Choose a local transcription command")).toBeVisible();
+    const speechSetupGuide = page.getByTestId("speech-setup-guide");
+    await expect(speechSetupGuide.getByText("Local Speech Engine")).toBeVisible();
+    await expect(speechSetupGuide.getByText("Speech model")).toBeVisible();
+    await expect(speechSetupGuide.getByText("Provider", { exact: true })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Check setup" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Auto-configure provider" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Test Speech-to-Text" })).toBeVisible();
+    await expect(page.getByText("Speech-to-Text setup required")).toBeVisible();
+    const legacySttMessage = new RegExp(
+      ["Local speech-to-text provider", "is not configured\\."].join(" ")
+    );
+    await expect(page.getByText(legacySttMessage)).toHaveCount(0);
+    await expect(page.getByText("Set up local speech once")).toBeVisible();
+    await expect(page.getByText("Local-only transcription. Audio is temporary")).toBeVisible();
+
+    await page.getByTestId("speech-settings-section").getByText("Advanced").click();
+    await expect(page.getByRole("button", { name: "Copy developer fallback" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Reset Speech-to-Text Configuration" })).toBeVisible();
+    await expect(page.getByText(/Saved command path:/)).toBeVisible();
+    await expect(page.getByText(/Saved arguments:/)).toBeVisible();
+    await expect(page.getByText(/Setup status:/)).toBeVisible();
+    await expect(page.getByText(/Local runtime:/)).toBeVisible();
+    await expect(page.getByText(/Runtime version:/)).toBeVisible();
     await expect(page.getByLabel("Local command path")).toBeVisible();
     await expect(page.getByLabel("Command arguments")).toBeVisible();
     await expect(page.getByLabel("Command timeout")).toBeVisible();
     await expect(page.getByRole("combobox", { name: "Output mode" })).toBeVisible();
     await expect(page.getByLabel("Transcript file extension")).toBeVisible();
     await expect(page.getByLabel("Temporary audio directory")).toBeVisible();
-    await expect(page.getByText("whisper.cpp example")).toBeVisible();
-    await expect(page.getByText("Arguments, one per line: -m /path/to/ggml-base.en.bin")).toBeVisible();
     await expect(page.getByRole("button", { name: "Check Provider" })).toBeVisible();
-    await expect(page.getByText("Cloud STT is not enabled.")).toBeVisible();
-    await expect(page.getByText("Raw audio is not persisted by default.")).toBeVisible();
-    await expect(page.getByText("Transcripts are not persisted separately by default.")).toBeVisible();
     await expect(page.getByText("mock_test")).toHaveCount(0);
   });
 
@@ -75,6 +102,11 @@ test.describe("[pure-ui-rendering] Settings information architecture", () => {
 
     await page.getByRole("button", { name: /Providers/ }).click();
     await expect(page.getByRole("heading", { name: "Local model provider" })).toBeVisible();
+    await expect(page.getByText("Connection not tested yet.")).toBeVisible();
+    await expect(page.getByText("Local-only access enabled")).toBeVisible();
+    await expect(page.getByText("Security: unknown")).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Retry connection" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Install Ollama" })).toBeVisible();
     await expect(page.getByText("Secure native storage required")).toBeVisible();
     await expect(page.locator('input[type="password"]')).toHaveCount(0);
 
@@ -95,9 +127,15 @@ test.describe("[pure-ui-rendering] Settings information architecture", () => {
     await expect(page.locator('label:has-text("Copy chain of thought")')).toHaveCount(0);
     await expect(page.locator('label:has-text("Export hidden reasoning")')).toHaveCount(0);
 
-    await page.getByRole("button", { name: /Context & Memory/ }).click();
-    await expect(page.getByText("Explicit remember / forget policy required")).toBeVisible();
-    await expect(page.getByText("Coming later")).toBeVisible();
+    await page.getByRole("button", { name: /^Memory/ }).click();
+    await expect(
+      page.getByTestId("memory-settings-section").getByRole("heading", { name: "Memory" })
+    ).toBeVisible();
+    await expect(page.getByText("Explicit Memory", { exact: true })).toBeVisible();
+    await expect(page.getByText("Derived Context Artifacts", { exact: true })).toBeVisible();
+    await expect(
+      page.getByText("Raw model thinking is never saved as memory.", { exact: true })
+    ).toBeVisible();
 
     await page.getByRole("button", { name: /Advanced/ }).click();
     await expect(page.getByRole("heading", { name: "Diagnostics" })).toBeVisible();
@@ -108,6 +146,120 @@ test.describe("[pure-ui-rendering] Settings information architecture", () => {
     await expect(page.getByText("Tool artifacts")).toBeVisible();
     await expect(
       page.getByRole("checkbox", { name: "Show generation debug monitor while answering" })
-    ).toBeChecked();
+    ).toHaveCount(0);
+  });
+
+  test("[pure-ui-rendering] separates Loom runtime readiness from offline provider state", async ({
+    page,
+  }) => {
+    await openApp(page, {
+      ollama: {
+        baseUrl: "http://127.0.0.1:11434",
+        lastConnectionStatus: "offline",
+        lastCheckedAt: "2026-05-20T09:00:00.000Z",
+      },
+    });
+    await openSettings(page);
+
+    await expect(page.getByRole("heading", { name: "Engine and service status" })).toBeVisible();
+    await expect(page.getByText("Loom is running normally. Model provider availability is shown separately.")).toBeVisible();
+    await expect(page.getByText("Desktop runtime controls are available in the Electron app.")).toBeVisible();
+    await expect(page.getByText("Runtime restart is available in the desktop app.")).toHaveCount(0);
+
+    await page.getByRole("button", { name: /Providers/ }).click();
+    await expect(page.getByText("Local model provider is offline")).toBeVisible();
+    await expect(page.getByText("Loom is running normally. Start or install Ollama to use local models.")).toBeVisible();
+    await expect(page.getByRole("button", { name: "Retry connection" })).toBeVisible();
+    await expect(page.getByRole("link", { name: "Install Ollama" })).toBeVisible();
+  });
+
+  test("[pure-ui-rendering] explains connected provider with no installed models", async ({
+    page,
+  }) => {
+    await openApp(page, {
+      ollama: {
+        baseUrl: "http://127.0.0.1:11434",
+        lastConnectionStatus: "connected",
+        lastCheckedAt: "2026-05-20T09:00:00.000Z",
+        models: [
+          {
+            id: "qwen3.5:9b",
+            name: "Qwen 3.5 9B",
+            provider: "ollama",
+            installed: false,
+          },
+        ],
+      },
+    });
+    await openSettings(page);
+
+    await expect(page.getByText("Loom Runtime · Needs attention")).toBeVisible();
+    await expect(page.getByText("Loom Runtime Needs Attention")).toHaveCount(0);
+    await expect(page.getByText("Loom is running, but the selected model is not ready.")).toBeVisible();
+    await expect(page.getByText("Install or choose a Quick/Main model before sending prompts.")).toBeVisible();
+
+    await page.getByRole("button", { name: /Providers/ }).click();
+    await expect(page.locator(".runtime-health-card.warning")).toContainText("No models installed yet");
+    await expect(page.getByText("No models installed yet")).toBeVisible();
+    await expect(page.getByText("Ollama is running, but it has no installed models yet.")).toBeVisible();
+    await expect(page.getByText("Local-only access enabled")).toBeVisible();
+  });
+
+  test("[pure-ui-rendering] supports the Memory settings shell without memory persistence", async ({
+    page,
+  }) => {
+    await openApp(page);
+    await openSettings(page);
+
+    await page.getByRole("button", { name: /^Memory/ }).click();
+    await expect(page.getByTestId("memory-settings-section")).toBeVisible();
+
+    const useMemory = page.getByRole("checkbox", { name: /Use memory in Loom/ });
+    const recentLooms = page.getByRole("checkbox", { name: /Reference recent Looms/ });
+    const savedMemories = page.getByRole("checkbox", { name: /Reference saved memories/ });
+    await expect(useMemory).toBeChecked();
+    await expect(recentLooms).toBeChecked();
+    await expect(savedMemories).not.toBeChecked();
+    await expect(page.getByTestId("memory-save")).toBeDisabled();
+
+    await savedMemories.check();
+    await page.getByLabel("Your nickname").fill("Gokay");
+    await page.getByLabel("Your occupation").fill("Builder");
+    await expect(page.getByTestId("memory-save")).toBeEnabled();
+    await page.getByTestId("memory-save").click();
+    await expect(page.getByTestId("memory-save")).toBeDisabled();
+
+    await page.getByRole("button", { name: "Close settings" }).click();
+    await openSettings(page);
+    await page.getByRole("button", { name: /^Memory/ }).click();
+    await expect(page.getByRole("checkbox", { name: /Reference saved memories/ })).toBeChecked();
+    await expect(page.getByLabel("Your nickname")).toHaveValue("Gokay");
+    await expect(page.getByLabel("Your occupation")).toHaveValue("Builder");
+
+    await expect(page.getByTestId("memory-empty-state")).toContainText("No saved memories yet.");
+    await expect(page.getByRole("button", { name: "Clear all memories" })).toBeDisabled();
+    await expect(page.getByRole("button", { name: "Export memories" })).toBeDisabled();
+    await expect(
+      page.locator("label").filter({ hasText: /raw thinking|chain of thought|hidden reasoning/i })
+    ).toHaveCount(0);
+    const memoryStorageKeys = await page.evaluate(() =>
+      Object.keys(window.localStorage).filter((key) => /memories/i.test(key))
+    );
+    expect(memoryStorageKeys).toEqual([]);
+  });
+
+  test("[pure-ui-rendering] resets unsaved Memory shell edits", async ({ page }) => {
+    await openApp(page);
+    await openSettings(page);
+
+    await page.getByRole("button", { name: /^Memory/ }).click();
+    await page.getByRole("checkbox", { name: /Reference recent Looms/ }).uncheck();
+    await page.getByLabel("Language and style preferences").fill("Prefer concise Turkish.");
+    await expect(page.getByTestId("memory-save")).toBeEnabled();
+    await page.getByTestId("memory-reset").click();
+
+    await expect(page.getByRole("checkbox", { name: /Reference recent Looms/ })).toBeChecked();
+    await expect(page.getByLabel("Language and style preferences")).toHaveValue("");
+    await expect(page.getByTestId("memory-save")).toBeDisabled();
   });
 });

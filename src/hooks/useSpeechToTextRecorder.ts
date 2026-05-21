@@ -1,10 +1,11 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from "react";
-import type { LoomEngineClient } from "../engine";
+import type { LoomEngineClient, SpeechSetupStatus } from "../engine";
 import {
   initialSpeechToTextState,
   reduceSpeechToText,
   type SpeechToTextStatus,
 } from "../state/speechToTextMachine";
+import { transcodeRecordedAudioToPcmWav } from "../services/audioWav";
 
 const AUDIO_MIME_CANDIDATES = [
   "audio/webm",
@@ -59,12 +60,38 @@ function errorMessageForMediaError(error: unknown) {
   return error instanceof Error ? error.message : "Microphone recording failed.";
 }
 
-function errorMessageForTranscription(error: unknown) {
-  if (
-    error instanceof Error &&
-    error.message.includes("Local speech-to-text provider is not configured")
-  ) {
-    return "Local speech-to-text provider is not configured. Configure a local Whisper-compatible command in Settings → Capability.";
+export function speechSetupRemediationMessage(setup: SpeechSetupStatus | null | undefined) {
+  switch (setup?.state) {
+    case "whisper_not_found":
+      return "Local Speech Engine is not installed. Open Settings → Capability → Speech-to-Text and install the local speech engine.";
+    case "model_missing":
+      return "Local Speech Engine is installed, but no speech model is available. Open Settings → Capability → Speech-to-Text and download/select a model.";
+    case "model_ready":
+      return "Speech-to-Text is not configured yet. Open Settings → Capability → Speech-to-Text and run Auto-configure.";
+    case "ready":
+      return "Speech-to-Text is configured, but the local command failed. Open Settings → Capability → Speech-to-Text and run Check Provider.";
+    default:
+      return "Speech-to-Text is not configured yet. Open Settings → Capability → Speech-to-Text and run Auto-configure.";
+  }
+}
+
+function isMissingSpeechProviderError(error: unknown) {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("local speech-to-text provider is not configured") ||
+    message.includes("speech-to-text is not configured") ||
+    message.includes("missing_command")
+  );
+}
+
+async function errorMessageForTranscription(error: unknown, engineClient: LoomEngineClient) {
+  if (isMissingSpeechProviderError(error)) {
+    try {
+      return speechSetupRemediationMessage(await engineClient.getSpeechSetupStatus());
+    } catch {
+      return speechSetupRemediationMessage(null);
+    }
   }
   if (error instanceof Error) return error.message;
   return "Speech transcription failed. Please retry.";
@@ -271,16 +298,8 @@ export function useSpeechToTextRecorder(engineClient: LoomEngineClient): SpeechR
         });
         return null;
       }
-      const blob = new Blob(chunks, { type: mimeType });
-      if (blob.size === 0) {
-        cleanupAudio();
-        dispatchRecorder({
-          type: "TRANSCRIBE_FAILED",
-          error: "No speech was captured. Please retry.",
-        });
-        return null;
-      }
-      if (blob.size > MAX_AUDIO_BYTES) {
+      const wavAudio = await transcodeRecordedAudioToPcmWav(chunks, mimeType);
+      if (wavAudio.wavByteSize > MAX_AUDIO_BYTES) {
         cleanupAudio();
         dispatchRecorder({
           type: "TRANSCRIBE_FAILED",
@@ -288,14 +307,21 @@ export function useSpeechToTextRecorder(engineClient: LoomEngineClient): SpeechR
         });
         return null;
       }
-      const audioBytes = Array.from(new Uint8Array(await blob.arrayBuffer()));
       cleanupAudio();
       dispatchRecorder({ type: "TRANSCRIBE_STARTED" });
       const response = await engineClient.transcribeSpeech({
-        audioBytes,
-        mimeType,
+        audioBytes: wavAudio.audioBytes,
+        mimeType: wavAudio.mimeType,
         mode: "preview",
-        metadata: { source: "main_composer_microphone" },
+        metadata: {
+          source: "main_composer_microphone",
+          sourceMimeType: wavAudio.sourceMimeType,
+          audioFormat: "pcm_s16le_wav",
+          sampleRate: wavAudio.sampleRate,
+          channelCount: wavAudio.channelCount,
+          sourceByteSize: wavAudio.sourceByteSize,
+          wavByteSize: wavAudio.wavByteSize,
+        },
       });
       const transcript = response.transcript.trim();
       if (!transcript) {
@@ -314,9 +340,10 @@ export function useSpeechToTextRecorder(engineClient: LoomEngineClient): SpeechR
       };
     } catch (transcriptionError) {
       cleanupAudio();
+      const error = await errorMessageForTranscription(transcriptionError, engineClient);
       dispatchRecorder({
         type: "TRANSCRIBE_FAILED",
-        error: errorMessageForTranscription(transcriptionError),
+        error,
       });
       return null;
     }

@@ -47,17 +47,23 @@ import type {
   RegenerateFromResponseInput,
   RecordHistoryInput,
   RemoveReferenceInput,
+  RetryUserMessageInput,
   RenameLoomInput,
   ResolveAddressInput,
   ResolveAddressResult,
   RustHttpLoomEngineClientOptions,
   LoomServiceRuntimeConfig,
+  RuntimeModelDownloadJob,
+  RuntimeModelItem,
+  RuntimeModelProviderStatus,
+  RuntimeModelsResult,
   ServiceConfigUpdateResult,
   ServiceConfigStatus,
   ServiceHealthStatus,
   SendMessageInput,
   SaveUiStateInput,
   SpeechProviderHealth,
+  SpeechSetupStatus,
   SpeechToTextProviderKind,
   SpeechToTextRuntimeConfig,
   SuggestReferencesInput,
@@ -140,6 +146,14 @@ const forbiddenThinkingKeys = new Set([
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null) return true;
+  if (["string", "number", "boolean"].includes(typeof value)) return true;
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (!isRecord(value)) return false;
+  return Object.values(value).every(isJsonValue);
 }
 
 function sanitizeEnginePayload(value: unknown): unknown {
@@ -1111,6 +1125,139 @@ function validateSpeechProviderHealth(value: unknown): SpeechProviderHealth {
   };
 }
 
+function validateSpeechSetupStatus(value: unknown, endpoint: string): SpeechSetupStatus {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid speech setup status.", {
+      endpoint,
+    });
+  }
+  const model = isRecord(value.model) ? value.model : {};
+  const providerHealth = validateSpeechProviderHealth(value.providerHealth);
+  return {
+    state: stringValue(value, "state") ?? "unknown",
+    message: stringValue(value, "message") ?? "Speech-to-Text setup status is unavailable.",
+    runningInElectron: booleanValue(value, "runningInElectron") ?? false,
+    installCommand:
+      stringValue(value, "installCommand") ??
+      "Install the Loom local speech engine from Settings.",
+    detectedBinaryPath: nullableStringValue(value, "detectedBinaryPath"),
+    detectedRuntimeSource: stringValue(value, "detectedRuntimeSource") ?? "missing",
+    runtimeVersion: nullableStringValue(value, "runtimeVersion"),
+    binaryCandidates: Array.isArray(value.binaryCandidates)
+      ? value.binaryCandidates.filter(isRecord).map((candidate) => ({
+          path: stringValue(candidate, "path") ?? "",
+          exists: booleanValue(candidate, "exists") ?? false,
+          executable: booleanValue(candidate, "executable") ?? false,
+          preferred: booleanValue(candidate, "preferred") ?? false,
+          source: stringValue(candidate, "source") ?? "unknown",
+        }))
+      : [],
+    modelDirectory: stringValue(value, "modelDirectory") ?? "",
+    model: {
+      name: stringValue(model, "name") ?? "ggml-base.bin",
+      path: stringValue(model, "path") ?? "",
+      exists: booleanValue(model, "exists") ?? false,
+      sizeBytes: numberValue(model, "sizeBytes"),
+      downloadUrl: stringValue(model, "downloadUrl") ?? "",
+    },
+    recommendedArgs: arrayOfStrings(value.recommendedArgs),
+    providerHealth,
+  };
+}
+
+function speechSetupStatusFromEnvelope(value: unknown, endpoint: string): SpeechSetupStatus {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid speech setup result.", {
+      endpoint,
+    });
+  }
+  return validateSpeechSetupStatus(value.status, endpoint);
+}
+
+function validateRuntimeModelsResult(value: unknown): RuntimeModelsResult {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid runtime models.", {
+      endpoint: "/runtime/models",
+    });
+  }
+  return {
+    provider: validateRuntimeModelProviderStatus(value.provider),
+    models: Array.isArray(value.models) ? value.models.map(validateRuntimeModelItem) : [],
+    jobs: Array.isArray(value.jobs) ? value.jobs.map(validateRuntimeModelDownloadJob) : [],
+  };
+}
+
+function validateRuntimeModelProviderStatus(value: unknown): RuntimeModelProviderStatus {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid runtime provider status.", {
+      endpoint: "/runtime/models",
+    });
+  }
+  return {
+    providerKind: stringValue(value, "providerKind") ?? "unknown",
+    providerProfileId: stringValue(value, "providerProfileId") ?? "unknown",
+    status: stringValue(value, "status") ?? "unknown",
+    baseUrl: stringValue(value, "baseUrl"),
+    version: stringValue(value, "version"),
+    modelsEndpointReachable: booleanValue(value, "modelsEndpointReachable"),
+    runtimeOwnedBy: stringValue(value, "runtimeOwnedBy") ?? "unknown",
+    modelStorePath: stringValue(value, "modelStorePath"),
+    supportsDownloads: booleanValue(value, "supportsDownloads") ?? false,
+    supportsStart: booleanValue(value, "supportsStart") ?? false,
+    supportsStop: booleanValue(value, "supportsStop") ?? false,
+    warnings: arrayOfStrings(value.warnings),
+  };
+}
+
+function validateRuntimeModelItem(value: unknown): RuntimeModelItem {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid runtime model item.", {
+      endpoint: "/runtime/models",
+    });
+  }
+  return {
+    assetId: stringValue(value, "assetId") ?? "",
+    providerKind: stringValue(value, "providerKind") ?? "unknown",
+    providerProfileId: nullableStringValue(value, "providerProfileId"),
+    modelName: stringValue(value, "modelName") ?? "unknown",
+    displayName: stringValue(value, "displayName") ?? stringValue(value, "modelName") ?? "Unknown",
+    installed: booleanValue(value, "installed") ?? false,
+    status: stringValue(value, "status") ?? "missing",
+    localPath: nullableStringValue(value, "localPath"),
+    sizeBytes: numberValue(value, "sizeBytes"),
+    digest: nullableStringValue(value, "digest"),
+    supportsQuick: booleanValue(value, "supportsQuick") ?? true,
+    supportsMain: booleanValue(value, "supportsMain") ?? true,
+    supportsThinking: booleanValue(value, "supportsThinking") ?? false,
+    source: stringValue(value, "source") ?? "runtime",
+  };
+}
+
+function validateRuntimeModelDownloadJob(value: unknown): RuntimeModelDownloadJob {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid model download job.", {
+      endpoint: "/runtime/downloads",
+    });
+  }
+  return {
+    jobId: stringValue(value, "jobId") ?? "",
+    providerKind: stringValue(value, "providerKind") ?? "unknown",
+    providerProfileId: nullableStringValue(value, "providerProfileId"),
+    modelName: stringValue(value, "modelName") ?? "unknown",
+    status: stringValue(value, "status") ?? "queued",
+    progressPercent: numberValue(value, "progressPercent") ?? 0,
+    downloadedBytes: numberValue(value, "downloadedBytes"),
+    totalBytes: numberValue(value, "totalBytes"),
+    digest: nullableStringValue(value, "digest"),
+    error: nullableStringValue(value, "error"),
+    cancelRequested: booleanValue(value, "cancelRequested") ?? false,
+    metadataJson: isJsonValue(value.metadataJson) ? value.metadataJson : undefined,
+    createdAt: stringValue(value, "createdAt") ?? "",
+    updatedAt: stringValue(value, "updatedAt") ?? "",
+    completedAt: nullableStringValue(value, "completedAt"),
+  };
+}
+
 function validateServiceConfig(value: unknown): LoomServiceRuntimeConfig {
   if (!isRecord(value)) {
     throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid config.", {
@@ -1120,8 +1267,22 @@ function validateServiceConfig(value: unknown): LoomServiceRuntimeConfig {
   const database = isRecord(value.database)
     ? { path: stringValue(value.database, "path") }
     : undefined;
+  const memory = isRecord(value.memory)
+    ? {
+        referenceRecentLooms: booleanValue(value.memory, "referenceRecentLooms"),
+        referenceSavedMemories: booleanValue(value.memory, "referenceSavedMemories"),
+      }
+    : undefined;
+  const providers = isRecord(value.providers)
+    ? {
+        defaultMainModel: stringValue(value.providers, "defaultMainModel"),
+        defaultQuickModel: stringValue(value.providers, "defaultQuickModel"),
+      }
+    : undefined;
   return {
     speech: validateSpeechConfig(value.speech),
+    memory,
+    providers,
     database,
   };
 }
@@ -1307,6 +1468,22 @@ function regeneratePayload(input: RegenerateFromResponseInput) {
     responseMode: serviceResponseMode(input.responseMode),
     replaceStale: false,
     source: input.source ?? "prompt_edit_regenerate",
+    model: input.model ?? "qwen3:latest",
+    options: input.options
+      ? {
+          numCtx: input.options.numCtx,
+          numPredict: input.options.numPredict,
+          temperature: input.options.temperature,
+        }
+      : undefined,
+  };
+}
+
+function retryPayload(input: RetryUserMessageInput) {
+  return {
+    responseMode: serviceResponseMode(input.responseMode),
+    softDeleteDownstream: input.softDeleteDownstream ?? true,
+    reason: input.reason ?? "retry_from_user_message",
     model: input.model ?? "qwen3:latest",
     options: input.options
       ? {
@@ -2252,9 +2429,65 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     return validateConfigUpdateResult(response);
   }
 
+  async getRuntimeModels(): Promise<RuntimeModelsResult> {
+    const response = await this.requestJson<unknown>("/runtime/models");
+    return validateRuntimeModelsResult(response);
+  }
+
+  async startModelDownload(modelName: string): Promise<RuntimeModelDownloadJob> {
+    const response = await this.requestJson<unknown>(
+      `/runtime/models/${encodeURIComponent(modelName)}/download`,
+      {
+        method: "POST",
+        body: JSON.stringify({ providerProfileId: "ollama-local" }),
+      }
+    );
+    if (!isRecord(response)) {
+      throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid model download job.", {
+        endpoint: "/runtime/models/:model/download",
+      });
+    }
+    return validateRuntimeModelDownloadJob(response.job);
+  }
+
+  async getModelDownload(jobId: string): Promise<RuntimeModelDownloadJob> {
+    const response = await this.requestJson<unknown>(
+      `/runtime/downloads/${encodeURIComponent(jobId)}`
+    );
+    return validateRuntimeModelDownloadJob(response);
+  }
+
+  async cancelModelDownload(jobId: string): Promise<RuntimeModelDownloadJob> {
+    const response = await this.requestJson<unknown>(
+      `/runtime/downloads/${encodeURIComponent(jobId)}/cancel`,
+      { method: "POST" }
+    );
+    return validateRuntimeModelDownloadJob(response);
+  }
+
   async getSpeechProviderHealth(): Promise<SpeechProviderHealth> {
     const response = await this.requestJson<unknown>("/speech/provider/health");
     return validateSpeechProviderHealth(response);
+  }
+
+  async getSpeechSetupStatus(): Promise<SpeechSetupStatus> {
+    const response = await this.requestJson<unknown>("/speech/setup/status");
+    return validateSpeechSetupStatus(response, "/speech/setup/status");
+  }
+
+  async downloadSpeechSetupModel(): Promise<SpeechSetupStatus> {
+    const response = await this.requestJson<unknown>("/speech/setup/download-model", {
+      method: "POST",
+      timeoutMs: 300_000,
+    });
+    return speechSetupStatusFromEnvelope(response, "/speech/setup/download-model");
+  }
+
+  async configureSpeechSetup(): Promise<SpeechSetupStatus> {
+    const response = await this.requestJson<unknown>("/speech/setup/configure", {
+      method: "POST",
+    });
+    return speechSetupStatusFromEnvelope(response, "/speech/setup/configure");
   }
 
   async getCapabilitySummary(): Promise<CapabilitySummary> {
@@ -2635,6 +2868,125 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
         });
       }
       throw new RustHttpLoomEngineError("service_unavailable", "loom-service regenerate stream failed.", {
+        path: endpoint,
+      });
+    } finally {
+      input.signal?.removeEventListener("abort", abortFromInputSignal);
+      reader.releaseLock();
+    }
+  }
+
+  async *retryUserMessage(input: RetryUserMessageInput): AsyncIterable<EngineResponseEvent> {
+    const endpoint = `/responses/${encodeURIComponent(input.userResponseId)}/retry`;
+    const controller = new AbortController();
+    const abortFromInputSignal = () => controller.abort();
+    if (input.signal?.aborted) {
+      controller.abort();
+    } else {
+      input.signal?.addEventListener("abort", abortFromInputSignal, { once: true });
+    }
+    const timeout = globalThis.setTimeout(
+      () => controller.abort(),
+      Math.max(this.requestTimeoutMs, GENERATION_STREAM_OPEN_TIMEOUT_MS)
+    );
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.serviceUrl}${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(retryPayload(input)),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      globalThis.clearTimeout(timeout);
+      input.signal?.removeEventListener("abort", abortFromInputSignal);
+      if (error instanceof DOMException && error.name === "AbortError") {
+        if (input.signal?.aborted) {
+          throw new RustHttpLoomEngineError("request_failed", "loom-service retry request was cancelled.", {
+            path: endpoint,
+          });
+        }
+        throw new RustHttpLoomEngineError(
+          "timeout",
+          "loom-service retry stream did not open before the startup timeout.",
+          {
+            path: endpoint,
+            timeoutMs: Math.max(this.requestTimeoutMs, GENERATION_STREAM_OPEN_TIMEOUT_MS),
+            requestKind: "user_message_retry",
+          }
+        );
+      }
+      throw new RustHttpLoomEngineError("service_unavailable", "loom-service is not reachable.", {
+        path: endpoint,
+      });
+    }
+    globalThis.clearTimeout(timeout);
+
+    if (response.status === 404 || response.status === 501) {
+      input.signal?.removeEventListener("abort", abortFromInputSignal);
+      throw new RustHttpLoomEngineError("unsupported_method", "loom-service endpoint is not available yet.", {
+        path: endpoint,
+        status: response.status,
+      });
+    }
+    if (!response.ok) {
+      input.signal?.removeEventListener("abort", abortFromInputSignal);
+      throw new RustHttpLoomEngineError("request_failed", "loom-service retry request failed.", {
+        path: endpoint,
+        status: response.status,
+      });
+    }
+    if (!response.body) {
+      input.signal?.removeEventListener("abort", abortFromInputSignal);
+      throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an empty retry stream.", {
+        path: endpoint,
+      });
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const buffer = { text: "" };
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value, { stream: true });
+        for (const data of parseSseEvents(buffer, text)) {
+          let parsed: unknown;
+          try {
+            parsed = sanitizeEnginePayload(JSON.parse(data));
+          } catch {
+            throw new RustHttpLoomEngineError("invalid_response", "loom-service returned malformed SSE data.", {
+              path: endpoint,
+            });
+          }
+          for (const event of mapServiceEventToEngineEvents(parsed)) {
+            yield sanitizeEngineResponseEvent(event);
+          }
+        }
+      }
+      const trailing = decoder.decode();
+      for (const data of parseSseEvents(buffer, trailing)) {
+        let parsed: unknown;
+        try {
+          parsed = sanitizeEnginePayload(JSON.parse(data));
+        } catch {
+          throw new RustHttpLoomEngineError("invalid_response", "loom-service returned malformed SSE data.", {
+            path: endpoint,
+          });
+        }
+        for (const event of mapServiceEventToEngineEvents(parsed)) {
+          yield sanitizeEngineResponseEvent(event);
+        }
+      }
+    } catch (error) {
+      if (error instanceof RustHttpLoomEngineError) throw error;
+      if (input.signal?.aborted) {
+        throw new RustHttpLoomEngineError("request_failed", "loom-service retry stream was cancelled.", {
+          path: endpoint,
+        });
+      }
+      throw new RustHttpLoomEngineError("service_unavailable", "loom-service retry stream failed.", {
         path: endpoint,
       });
     } finally {

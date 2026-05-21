@@ -130,6 +130,19 @@ pub async fn regenerate_response(
         .into_response()
 }
 
+pub async fn retry_response(
+    State(state): State<crate::api::state::AppState>,
+    Path(response_id): Path<String>,
+    Json(input): Json<RetryResponseInput>,
+) -> Response {
+    if state.restart.is_draining() {
+        return runtime_draining_response();
+    }
+    Sse::new(retry_response_stream(state, response_id, input))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
 pub async fn cancel(
     State(state): State<crate::api::state::AppState>,
     Path(run_id): Path<String>,
@@ -701,6 +714,18 @@ pub struct RegenerateResponseInput {
     pub replace_stale: bool,
     #[serde(default = "default_regenerate_source")]
     pub source: String,
+    pub model: Option<String>,
+    pub options: Option<OrchestrationExecuteOptions>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryResponseInput {
+    pub response_mode: ResponseMode,
+    #[serde(default)]
+    pub soft_delete_downstream: bool,
+    #[serde(default = "default_retry_reason")]
+    pub reason: String,
     pub model: Option<String>,
     pub options: Option<OrchestrationExecuteOptions>,
 }
@@ -1678,6 +1703,10 @@ fn default_regenerate_source() -> String {
     "prompt_edit_regenerate".to_string()
 }
 
+fn default_retry_reason() -> String {
+    "retry_from_user_message".to_string()
+}
+
 fn regenerate_response_stream(
     state: crate::api::state::AppState,
     response_id: String,
@@ -1735,6 +1764,90 @@ fn regenerate_response_stream(
             regenerate_from_response_id: Some(user.response_id),
             stale_assistant_response_id: stale_assistant,
             source: Some(input.source),
+        };
+        let inner = execute_stream(state, execute_input);
+        futures_util::pin_mut!(inner);
+        while let Some(event) = inner.next().await {
+            yield event;
+        }
+    }
+}
+
+fn retry_response_stream(
+    state: crate::api::state::AppState,
+    response_id: String,
+    input: RetryResponseInput,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    stream! {
+        let repository = ResponseRepository::new(&state.database);
+        let user = match repository.get_response(&response_id).await {
+            Ok(Some(response)) => response,
+            Ok(None) => {
+                yield Ok(to_sse_event(service_event(response_id.clone(), "response.error", json!({
+                    "runId": Value::Null,
+                    "stage": "retry",
+                    "kind": "not_found",
+                    "message": "Response was not found."
+                }))));
+                return;
+            }
+            Err(error) => {
+                yield Ok(to_sse_event(service_event(response_id.clone(), "response.error", json!({
+                    "runId": Value::Null,
+                    "stage": "retry",
+                    "kind": "response_lookup_error",
+                    "message": error.to_string()
+                }))));
+                return;
+            }
+        };
+        if user.role != "user" {
+            yield Ok(to_sse_event(service_event(response_id.clone(), "response.error", json!({
+                "runId": Value::Null,
+                "stage": "retry",
+                "kind": "unsupported_response_retry",
+                "message": "Retry requires a user Response."
+            }))));
+            return;
+        }
+        let stale_assistant = match repository
+            .next_assistant_after(&user.loom_id, user.sequence_index)
+            .await
+        {
+            Ok(value) => value.map(|response| response.response_id),
+            Err(_) => None,
+        };
+        if input.soft_delete_downstream {
+            if let Err(error) = repository
+                .soft_delete_responses_after(
+                    &user.loom_id,
+                    user.sequence_index,
+                    &input.reason,
+                    &user.response_id,
+                )
+                .await
+            {
+                yield Ok(to_sse_event(service_event(user.response_id.clone(), "response.error", json!({
+                    "runId": Value::Null,
+                    "stage": "retry",
+                    "kind": "downstream_soft_delete_failed",
+                    "message": error.to_string()
+                }))));
+                return;
+            }
+        }
+        let execute_input = OrchestrationExecuteInput {
+            loom_id: Some(user.loom_id.clone()),
+            response_id: Some(user.response_id.clone()),
+            prompt: user.content.clone(),
+            references: references_from_response_metadata(user.metadata_json.as_deref()),
+            response_mode: input.response_mode,
+            model: input.model.unwrap_or_else(|| "qwen3:latest".to_string()),
+            options: input.options,
+            persist_workflow: true,
+            regenerate_from_response_id: Some(user.response_id),
+            stale_assistant_response_id: stale_assistant,
+            source: Some(input.reason),
         };
         let inner = execute_stream(state, execute_input);
         futures_util::pin_mut!(inner);
@@ -2119,6 +2232,22 @@ fn deterministic_e2e_answer(
     }
 
     Some("Deterministic E2E provider only answers the Event Sourcing proof scenario.".to_string())
+}
+
+fn should_fail_initial_e2e_prompt(input: &OrchestrationExecuteInput) -> bool {
+    let Ok(marker) = std::env::var("LOOM_SERVICE_E2E_FAIL_INITIAL_PROMPT") else {
+        return false;
+    };
+    let marker = marker.trim().to_lowercase();
+    if marker.is_empty() {
+        return false;
+    }
+    let is_retry = input
+        .source
+        .as_deref()
+        .map(|source| source == "retry_from_user_message")
+        .unwrap_or(false);
+    !is_retry && input.prompt.to_lowercase().contains(&marker)
 }
 
 fn deterministic_e2e_thinking_delay_ms() -> u64 {
@@ -2583,6 +2712,40 @@ fn execute_stream(
                 yield Ok(workflow_error_event(&run_id, "generate", error.to_string()));
                 return;
             }
+        }
+
+        if should_fail_initial_e2e_prompt(&execution_input) {
+            let message = "Deterministic E2E failed placeholder requested.";
+            let _ = runner.mark_stage_failed(&run_id, "generate", "e2e_failed_placeholder").await;
+            if let Some(lifecycle) = persisted_lifecycle.as_ref() {
+                let _ = update_persisted_assistant_status(
+                    &state.database,
+                    lifecycle,
+                    "error",
+                    Some("error"),
+                    Some("e2e_failed_placeholder"),
+                    Some(message),
+                )
+                .await;
+            }
+            schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
+            let payload = merge_response_ids(json!({
+                "runId": run_id,
+                "stage": "generate",
+                "kind": "e2e_failed_placeholder",
+                "message": message,
+                "elapsedMs": started.elapsed().as_millis()
+            }), persisted_lifecycle.as_ref());
+            let _ = runner
+                .persist_event(
+                    run_id.clone(),
+                    "response.error".to_string(),
+                    Some("generate".to_string()),
+                    payload.to_string(),
+                )
+                .await;
+            yield Ok(to_sse_event(service_event(run_id.clone(), "response.error", payload)));
+            return;
         }
 
         if let Some(answer) = deterministic_e2e_answer(&execution_input, &built_context) {

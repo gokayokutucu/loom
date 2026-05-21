@@ -158,7 +158,11 @@ import {
 } from "./services/exportService";
 import { formatRelativeTimestamp } from "./services/timeLabels";
 import { formatBadgeCode } from "./services/displayCode";
-import { getElectronRuntimeInfo, getElectronWindowControls } from "./electronRuntime";
+import {
+  getElectronPermissionsBridge,
+  getElectronRuntimeInfo,
+  getElectronWindowControls,
+} from "./electronRuntime";
 import {
   applyMetadataRefinement,
   buildRuntimeMetadataRecord,
@@ -1954,12 +1958,47 @@ function conversationFromServiceLoom(loom: LoomSummary): Conversation {
   };
 }
 
+function tabOrderTimestamp(value?: string | null) {
+  if (!value) return 0n;
+  if (/^\d+$/.test(value)) return BigInt(value);
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0n : BigInt(parsed) * 1_000_000n;
+}
+
+function compareServiceLoomDetailsByTabOrder(left: LoomDetail, right: LoomDetail) {
+  const leftTime = tabOrderTimestamp(left.createdAt ?? left.updatedAt);
+  const rightTime = tabOrderTimestamp(right.createdAt ?? right.updatedAt);
+  if (leftTime !== rightTime) return leftTime < rightTime ? -1 : 1;
+  return left.loomId.localeCompare(right.loomId);
+}
+
+function appendConversationInTabOrder(
+  current: Conversation[],
+  conversation: Conversation
+) {
+  return [
+    ...current.filter((item) => item.id !== conversation.id),
+    conversation,
+  ];
+}
+
+function appendTabGroupConversationId(group: TabGroup, conversationId: string) {
+  return {
+    ...group,
+    conversationIds: [
+      ...group.conversationIds.filter((item) => item !== conversationId),
+      conversationId,
+    ],
+  };
+}
+
 function serviceLoomDetailsToState(details: LoomDetail[]) {
-  const conversations = details.map(conversationFromServiceLoom);
+  const sortedDetails = [...details].sort(compareServiceLoomDetailsByTabOrder);
+  const conversations = sortedDetails.map(conversationFromServiceLoom);
   const responses = Object.fromEntries(
-    details.map((detail) => [detail.loomId, detail.responses])
+    sortedDetails.map((detail) => [detail.loomId, detail.responses])
   );
-  const forkRecords: ForkRecord[] = details
+  const forkRecords: ForkRecord[] = sortedDetails
     .filter(
       (detail) =>
         detail.kind === "weft" &&
@@ -4697,6 +4736,20 @@ function App() {
     source: LoomNavigationDestination["source"]
   ): LoomNavigationDestination {
     const next: LoomNavigationDestination = { ...navigationDestination, source };
+    if (next.scrollTargetResponseId) {
+      const responses = conversationResponses[next.loomId];
+      const targetStillVisible = responses?.some(
+        (response) => response.id === next.scrollTargetResponseId
+      );
+      if (responses && !targetStillVisible) {
+        const latest = responses[responses.length - 1];
+        return {
+          ...next,
+          scrollTargetResponseId: latest?.id,
+          scrollMode: latest ? "lastResponse" : undefined,
+        };
+      }
+    }
     if (next.scrollMode || next.scrollTargetResponseId) return next;
     const responseTarget = findLocalResponseTarget(destination);
     if (responseTarget) {
@@ -5107,6 +5160,9 @@ function App() {
       (resolution.status === "not_found" || resolution.status === "missing") &&
       (options.allowUnresolved || hasLocalNavigationTarget(destination))
     ) {
+      return { ok: true, destination };
+    }
+    if (resolution.status === "deleted" && hasLocalNavigationTarget(destination)) {
       return { ok: true, destination };
     }
     if (options.allowUnresolved && hasLocalNavigationTarget(destination)) {
@@ -5537,6 +5593,20 @@ function App() {
       }
 
       if (
+        pendingDestination?.scrollTargetResponseId &&
+        !serviceLoomsLoading &&
+        activeConversationId === pendingDestination.loomId
+      ) {
+        const latest = lastResponseInLoom(pendingDestination.loomId);
+        const transcript = transcriptForLoom(pendingDestination.loomId);
+        if (latest && scrollTranscriptToEnd(transcript)) return;
+        if (transcript) {
+          completePendingScroll();
+          return;
+        }
+      }
+
+      if (
         pendingPath &&
         scrollToResponse(
           transcriptRef.current,
@@ -5593,7 +5663,7 @@ function App() {
 
   function restoreConversation(conversation: Conversation) {
     setArchived((current) => current.filter((item) => item.id !== conversation.id));
-    setConversations((current) => [...current, conversation]);
+    setConversations((current) => appendConversationInTabOrder(current, conversation));
     setActiveConversationId(conversation.id);
     setActiveObjectTitle(conversation.title);
     closeUnpinnedUtilityOverlays();
@@ -6621,11 +6691,14 @@ function App() {
       summary: "New grouped conversation tab.",
       iconKey: "compass",
     };
-    setConversations((current) => [...current, conversation]);
+    setConversations((current) => appendConversationInTabOrder(current, conversation));
     setTabGroups((current) =>
       current.map((group) =>
         group.id === groupId
-          ? { ...group, collapsed: false, conversationIds: [...group.conversationIds, id] }
+          ? {
+              ...appendTabGroupConversationId(group, id),
+              collapsed: false,
+            }
           : group
       )
     );
@@ -6699,7 +6772,7 @@ function App() {
         }),
       }),
     };
-    setConversations((current) => [conversation, ...current]);
+    setConversations((current) => appendConversationInTabOrder(current, conversation));
     setComposerDrafts((current) => {
       const { [EPHEMERAL_DRAFT_ID]: _discard, ...rest } = current;
       return {
@@ -6839,15 +6912,7 @@ function App() {
         promotedSeedResponses = [];
         setConversations((current) => {
           if (current.some((item) => item.id === promotedConversation.id)) return current;
-          const sourceIndex = current.findIndex(
-            (item) => item.id === originConversationForPromotion.id
-          );
-          if (sourceIndex < 0) return [promotedConversation, ...current];
-          return [
-            ...current.slice(0, sourceIndex),
-            promotedConversation,
-            ...current.slice(sourceIndex),
-          ];
+          return appendConversationInTabOrder(current, promotedConversation);
         });
         setTabGroups((current) =>
           current.map((group) => {
@@ -6856,14 +6921,7 @@ function App() {
               originConversationForPromotion.id
             );
             if (sourceIndex < 0) return group;
-            return {
-              ...group,
-              conversationIds: [
-                ...group.conversationIds.slice(0, sourceIndex),
-                promotedConversation.id,
-                ...group.conversationIds.slice(sourceIndex),
-              ],
-            };
+            return appendTabGroupConversationId(group, promotedConversation.id);
           })
         );
         setConversationResponses((current) => {
@@ -6956,7 +7014,7 @@ function App() {
         };
         promotedTargetConversation = promotedConversation;
         promotedSeedResponses = [];
-        setConversations((current) => [promotedConversation, ...current]);
+        setConversations((current) => appendConversationInTabOrder(current, promotedConversation));
         setConversationResponses((current) => {
           const { [temporaryTargetWeft.temporaryId]: _discard, ...rest } = current;
           return {
@@ -7076,7 +7134,7 @@ function App() {
     const materializingNewLoom = targetLoomId === EPHEMERAL_DRAFT_ID || !existingTargetConversation;
 
     if (materializingNewLoom) {
-      setConversations((current) => [...current, targetConversation]);
+      setConversations((current) => appendConversationInTabOrder(current, targetConversation));
       setDraftConversation(null);
       setActiveConversationId(targetConversation.id);
       setActiveObjectTitle(targetConversation.title);
@@ -7190,7 +7248,8 @@ function App() {
       let serviceResponseId = response.id;
       let serviceFinalContent = "";
       let persistedUserResponseId: string | undefined;
-      const mainModelName = getProfileModel(providerSettings, "main").name;
+      const mainModel = getProfileModel(providerSettings, "main");
+      const mainModelName = mainModel.name;
       const retainServiceWorkflowRunId = (workflowRunId?: string) => {
         if (!workflowRunId) return;
         mainServiceCancellationRef.current = {
@@ -7319,7 +7378,7 @@ function App() {
           responseMode: selectedResponseMode,
           focusedResponseId: lastResponseInLoom(targetConversation.id)?.id,
           source: "composer",
-          model: mainModelName,
+          model: mainModel.id,
           options: {
             numCtx: providerSettings.ollama.contextLength,
           },
@@ -7753,7 +7812,8 @@ function App() {
       "Loom context built",
       `${loomContext.context.length} context blocks, strategy:${answerPlan.contextStrategy}`
     );
-    const mainModelName = getProfileModel(providerSettings, "main").name;
+    const mainModel = getProfileModel(providerSettings, "main");
+    const mainModelName = mainModel.name;
     setComposerRuntimeState({
       running: true,
       message: `Sending to ${mainModelName}...`,
@@ -8441,9 +8501,18 @@ function App() {
     const buildConversationNode = (
       conversation: Conversation,
       asLoom: boolean,
-      forkTitle?: string
+      forkTitle?: string,
+      forkSubtitle?: string
     ): LineageNode => {
       const responses = conversationResponses[conversation.id] ?? [];
+      const responseMatchesForkParent = (response: ResponseItem, record: ForkRecord) =>
+        record.parentResponseId === response.id ||
+        record.parentResponseId === response.serviceUserResponseId;
+      const orphanForkRecords = forkRecords.filter(
+        (record) =>
+          record.parentConversationId === conversation.id &&
+          !responses.some((response) => responseMatchesForkParent(response, record))
+      );
       return {
         id: `${asLoom ? "loom" : "conversation"}-${conversation.id}`,
         type: asLoom ? "loom" : "conversation",
@@ -8452,33 +8521,48 @@ function App() {
         canonicalUri: conversation.meta?.canonicalUri,
         referenceCode: conversation.meta?.code,
         meta: conversation.meta,
-        subtitle: asLoom ? conversation.title : "Conversation root",
+        subtitle: forkSubtitle ?? (asLoom ? conversation.title : "Conversation root"),
         conversationId: conversation.id,
-        children: responses.map((response) => ({
-          id: `response-${conversation.id}-${response.id}`,
-          type: "response" as const,
-          title: response.title,
-          path: response.address,
-          canonicalUri: response.meta?.canonicalUri,
-          referenceCode: response.meta?.code,
-          meta: response.meta,
-          subtitle: "Response",
-          conversationId: conversation.id,
-          responseId: response.id,
-          children: forkRecords
-            .filter(
-              (record) =>
-                record.parentConversationId === conversation.id &&
-                record.parentResponseId === response.id
-            )
+        children: [
+          ...responses.map((response) => ({
+            id: `response-${conversation.id}-${response.id}`,
+            type: "response" as const,
+            title: response.title,
+            path: response.address,
+            canonicalUri: response.meta?.canonicalUri,
+            referenceCode: response.meta?.code,
+            meta: response.meta,
+            subtitle: "Response",
+            conversationId: conversation.id,
+            responseId: response.id,
+            children: forkRecords
+              .filter(
+                (record) =>
+                  record.parentConversationId === conversation.id &&
+                  responseMatchesForkParent(response, record)
+              )
+              .map((record) => {
+                const childConversation = conversationsById.get(record.childConversationId);
+                return childConversation
+                  ? buildConversationNode(childConversation, true, record.title)
+                  : null;
+              })
+              .filter((node): node is LineageNode => Boolean(node)),
+          })),
+          ...orphanForkRecords
             .map((record) => {
               const childConversation = conversationsById.get(record.childConversationId);
               return childConversation
-                ? buildConversationNode(childConversation, true, record.title)
+                ? buildConversationNode(
+                    childConversation,
+                    true,
+                    record.title,
+                    "Original response no longer available"
+                  )
                 : null;
             })
             .filter((node): node is LineageNode => Boolean(node)),
-        })),
+        ],
       };
     };
 
@@ -9108,27 +9192,14 @@ function App() {
         });
         setConversations((current) => {
           if (current.some((item) => item.id === serviceWeftConversation.id)) return current;
-          const sourceIndex = current.findIndex((item) => item.id === sourceConversation.id);
-          if (sourceIndex < 0) return [serviceWeftConversation, ...current];
-          return [
-            ...current.slice(0, sourceIndex),
-            serviceWeftConversation,
-            ...current.slice(sourceIndex),
-          ];
+          return appendConversationInTabOrder(current, serviceWeftConversation);
         });
         setTabGroups((current) =>
           current.map((group) => {
             if (group.conversationIds.includes(serviceWeftConversation.id)) return group;
             const sourceIndex = group.conversationIds.indexOf(sourceConversation.id);
             if (sourceIndex < 0) return group;
-            return {
-              ...group,
-              conversationIds: [
-                ...group.conversationIds.slice(0, sourceIndex),
-                serviceWeftConversation.id,
-                ...group.conversationIds.slice(sourceIndex),
-              ],
-            };
+            return appendTabGroupConversationId(group, serviceWeftConversation.id);
           })
         );
         setConversationResponses((current) => {
@@ -9292,27 +9363,12 @@ function App() {
       askResponseFromTurn(turn, path, lineage.length + index + 1)
     );
     const weftResponses = initialAskResponses.length > 0 ? initialAskResponses : lineage;
-    setConversations((current) => {
-      const sourceIndex = current.findIndex((item) => item.id === sourceConversation.id);
-      if (sourceIndex < 0) return [conversation, ...current];
-      return [
-        ...current.slice(0, sourceIndex),
-        conversation,
-        ...current.slice(sourceIndex),
-      ];
-    });
+    setConversations((current) => appendConversationInTabOrder(current, conversation));
     setTabGroups((current) =>
       current.map((group) => {
         const sourceIndex = group.conversationIds.indexOf(sourceConversation.id);
         if (sourceIndex < 0) return group;
-        return {
-          ...group,
-          conversationIds: [
-            ...group.conversationIds.slice(0, sourceIndex),
-            id,
-            ...group.conversationIds.slice(sourceIndex),
-          ],
-        };
+        return appendTabGroupConversationId(group, id);
       })
     );
     setConversationResponses((current) => ({
@@ -9358,6 +9414,18 @@ function App() {
   function returnToOrigin(options: { keepPromptRevisionSelection?: boolean } = {}) {
     const origin = getWeftOrigin(activeConversationId);
     if (!origin) return;
+    const originConversation = conversations.find(
+      (conversation) => conversation.id === origin.originLoomId
+    );
+    if (!originConversation) {
+      showToast({
+        title: "Return unavailable",
+        message: "The original Loom is no longer available.",
+        color: "neutral",
+        icon: "weft",
+      });
+      return;
+    }
     const activeRevisionRecord = forkRecords.find(
       (record) => record.kind === "revision" && record.childConversationId === activeConversationId
     );
@@ -9370,28 +9438,39 @@ function App() {
       }));
     }
     const originResponse = findResponseInLoom(origin.originLoomId, originResponseId);
+    const fallbackResponse = originResponse ?? lastResponseInLoom(origin.originLoomId);
+    if (!originResponse) {
+      showToast({
+        title: "Origin response unavailable",
+        message: "The original response is no longer available.",
+        color: "neutral",
+        icon: "weft",
+      });
+    }
     const destination: LoomNavigationDestination = {
       loomId: origin.originLoomId,
       mode: canShowWeftSplit ? "split" : "full",
-      scrollTargetResponseId: originResponseId,
-      scrollMode: "origin",
+      scrollTargetResponseId: fallbackResponse?.id,
+      scrollMode: originResponse ? "origin" : fallbackResponse ? "lastResponse" : undefined,
       source: "returnToOrigin",
     };
-    const link = originResponse
-      ? responseLinkForNavigation(origin.originLoomId, originResponse)
+    const link = fallbackResponse
+      ? responseLinkForNavigation(origin.originLoomId, fallbackResponse)
       : loomLinkForId(origin.originLoomId);
     if (canShowWeftSplit) {
       setActiveConversationId(activeConversationId);
       setActiveSplitPanel("origin");
       pendingScrollDestinationRef.current = destination;
-      pendingScrollHighlightRef.current = true;
+      pendingScrollHighlightRef.current = Boolean(originResponse);
       focusComposerAfterNavigation();
-      window.requestAnimationFrame(() => {
-        scrollTranscriptPromptToStart(originTranscriptRef.current, originResponseId);
-        window.setTimeout(() => {
+      if (originResponse) {
+        window.requestAnimationFrame(() => {
           scrollTranscriptPromptToStart(originTranscriptRef.current, originResponseId);
-        }, 160);
-      });
+          window.setTimeout(() => {
+            scrollTranscriptPromptToStart(originTranscriptRef.current, originResponseId);
+          }, 160);
+        });
+      }
     } else {
       restoreDestination(link, destination);
     }
@@ -9563,13 +9642,7 @@ function App() {
 
     setConversations((current) => {
       if (current.some((conversation) => conversation.id === weftConversation.id)) return current;
-      const sourcePosition = current.findIndex((conversation) => conversation.id === sourceConversation.id);
-      if (sourcePosition < 0) return [weftConversation, ...current];
-      return [
-        ...current.slice(0, sourcePosition + 1),
-        weftConversation,
-        ...current.slice(sourcePosition + 1),
-      ];
+      return appendConversationInTabOrder(current, weftConversation);
     });
     setConversationResponses((current) => ({
       ...current,
@@ -9641,7 +9714,8 @@ function App() {
     mainAbortRef.current = controller;
     let activeResponseId = localResponseId;
     let finalContent = "";
-    const mainModelName = getProfileModel(providerSettings, "main").name;
+    const mainModel = getProfileModel(providerSettings, "main");
+    const mainModelName = mainModel.name;
     setComposerRuntimeState({
       running: true,
       message: `Writing Revision Weft with ${mainModelName}...`,
@@ -9671,7 +9745,7 @@ function App() {
         responseMode: appSettings.modelResponseMode,
         focusedResponseId: seedItems[seedItems.length - 1]?.id,
         source: "composer",
-        model: mainModelName,
+        model: mainModel.id,
         options: {
           numCtx: providerSettings.ollama.contextLength,
         },
@@ -9800,7 +9874,8 @@ function App() {
     const localResponseId = `regenerated-${sourceResponse.id}-${Date.now()}`;
     let activeResponseId = localResponseId;
     let finalContent = "";
-    const mainModelName = getProfileModel(providerSettings, "main").name;
+    const mainModel = getProfileModel(providerSettings, "main");
+    const mainModelName = mainModel.name;
     const regeneratedResponse: ResponseItem = {
       ...sourceResponse,
       id: localResponseId,
@@ -9856,7 +9931,7 @@ function App() {
         staleAssistantResponseId: sourceResponse.id,
         responseMode: appSettings.modelResponseMode,
         source: "prompt_edit_regenerate",
-        model: mainModelName,
+        model: mainModel.id,
         options: {
           numCtx: providerSettings.ollama.contextLength,
         },
@@ -9999,6 +10074,260 @@ function App() {
       const message = providerErrorMessage(error);
       showToast({
         title: "Regenerate failed",
+        message,
+        color: "sunset",
+      });
+      setConversationResponses((current) => ({
+        ...current,
+        [loomId]: (current[loomId] ?? []).map((item) =>
+          item.id === activeResponseId
+            ? {
+                ...sourceResponse,
+                id: activeResponseId,
+                answer: [message],
+                finalContent: message,
+                answerStale: false,
+                visibleProgress: undefined,
+              }
+            : item
+        ),
+      }));
+      setGeneratingResponseId(null);
+      setComposerRuntimeState({ running: false, message });
+      mainAbortRef.current = null;
+      mainServiceCancellationRef.current = null;
+    }
+  }
+
+  async function retryFromUserMessage(loomId: string, responseId: string) {
+    const responses = conversationResponses[loomId] ?? [];
+    const sourceIndex = responses.findIndex((response) => response.id === responseId);
+    const sourceResponse = responses[sourceIndex];
+    if (!sourceResponse?.serviceUserResponseId) {
+      showToast({
+        title: "Retry unavailable",
+        message: "This prompt is not persisted in loom-service yet.",
+        color: "sunset",
+      });
+      return;
+    }
+    const hasDownstreamActiveMessages = sourceIndex >= 0 && sourceIndex < responses.length - 1;
+    if (
+      hasDownstreamActiveMessages &&
+      !window.confirm(
+        "Retrying from this message will remove later messages from this Loom. Existing Wefts will be preserved."
+      )
+    ) {
+      return;
+    }
+
+    const generationId = mainGenerationRef.current + 1;
+    mainGenerationRef.current = generationId;
+    const controller = new AbortController();
+    mainAbortRef.current = controller;
+    const localResponseId = `retry-${sourceResponse.id}-${Date.now()}`;
+    let activeResponseId = localResponseId;
+    let finalContent = "";
+    const mainModel = getProfileModel(providerSettings, "main");
+    const mainModelName = mainModel.name;
+    const retryResponse: ResponseItem = {
+      ...sourceResponse,
+      id: localResponseId,
+      address: `${sourceResponse.address}/retry-${Date.now().toString(36)}`,
+      answer: [],
+      finalContent: undefined,
+      answerStale: false,
+      workflowRunId: undefined,
+      visiblePlan: undefined,
+      visibleProgress: createOrchestrationVisibleProgress(),
+      doneReason: undefined,
+      truncated: false,
+      bookmarked: false,
+    };
+    setConversationResponses((current) => ({
+      ...current,
+      [loomId]: replaceResponseAndPruneTail(current[loomId] ?? [], sourceResponse, retryResponse),
+    }));
+    setGeneratingResponseId(localResponseId);
+    setComposerRuntimeState({
+      running: true,
+      message: `Retrying through loom-service with ${mainModelName}...`,
+    });
+    mainServiceCancellationRef.current = {
+      loomId,
+      responseId: localResponseId,
+      cancelRequested: false,
+    };
+
+    const replaceActiveResponseId = (nextResponseId: string) => {
+      if (nextResponseId === activeResponseId) return;
+      const previousResponseId = activeResponseId;
+      activeResponseId = nextResponseId;
+      setGeneratingResponseId(nextResponseId);
+      if (mainServiceCancellationRef.current) {
+        mainServiceCancellationRef.current = {
+          ...mainServiceCancellationRef.current,
+          responseId: nextResponseId,
+        };
+      }
+      setConversationResponses((current) => ({
+        ...current,
+        [loomId]: (current[loomId] ?? []).map((item) =>
+          item.id === previousResponseId ? { ...item, id: nextResponseId } : item
+        ),
+      }));
+    };
+
+    try {
+      for await (const event of loomEngineClient.retryUserMessage({
+        loomId,
+        userResponseId: sourceResponse.serviceUserResponseId,
+        responseMode: appSettings.modelResponseMode,
+        softDeleteDownstream: true,
+        reason: "retry_from_user_message",
+        model: mainModel.id,
+        options: {
+          numCtx: providerSettings.ollama.contextLength,
+        },
+        signal: controller.signal,
+      })) {
+        if (controller.signal.aborted || mainGenerationRef.current !== generationId) return;
+        if (event.type === "user_message_created") {
+          if (event.payload.workflowRunId) {
+            mainServiceCancellationRef.current = {
+              loomId,
+              responseId: activeResponseId,
+              workflowRunId: event.payload.workflowRunId,
+              cancelRequested: false,
+            };
+          }
+          continue;
+        }
+        if (event.type === "assistant_placeholder_created") {
+          if (event.payload.workflowRunId) {
+            mainServiceCancellationRef.current = {
+              loomId,
+              responseId: event.payload.responseId,
+              workflowRunId: event.payload.workflowRunId,
+              cancelRequested: false,
+            };
+          }
+          replaceActiveResponseId(event.payload.responseId);
+          continue;
+        }
+        if (event.type === "context_ready") {
+          updateResponseVisibleProgress(
+            loomId,
+            activeResponseId,
+            activateVisibleAnswerStage(
+              retryResponse.visibleProgress ?? createOrchestrationVisibleProgress(),
+              "context",
+              "Building Loom context..."
+            )
+          );
+          continue;
+        }
+        if (event.type === "thinking_status") {
+          updateResponseThinking(loomId, activeResponseId, {
+            thinkingStartedAt: new Date().toISOString(),
+            elapsedThinkingSeconds:
+              event.payload.durationMs !== undefined
+                ? Math.round(event.payload.durationMs / 1000)
+                : undefined,
+          });
+          continue;
+        }
+        if (event.type === "content_delta") {
+          if (event.payload.responseId) replaceActiveResponseId(event.payload.responseId);
+          finalContent += event.payload.delta;
+          const firstFinalStartedAt = new Date().toISOString();
+          updateResponseThinking(loomId, activeResponseId, {
+            finalStartedAt: firstFinalStartedAt,
+            thinkingEndedAt: firstFinalStartedAt,
+          });
+          updateResponseVisiblePlanAndProgress(loomId, activeResponseId, undefined, undefined);
+          updateResponseMarkdown(loomId, activeResponseId, finalContent);
+          continue;
+        }
+        if (event.type === "response_completed" || event.type === "response_truncated") {
+          replaceActiveResponseId(event.payload.responseId);
+          const sanitizedFinalContent = sanitizeModelAnswer(finalContent);
+          const answer = answerParagraphs(sanitizedFinalContent);
+          const completedResponse: ResponseItem = {
+            ...retryResponse,
+            id: activeResponseId,
+            answer,
+            finalContent: sanitizedFinalContent,
+            doneReason: event.payload.doneReason,
+            truncated: event.type === "response_truncated",
+            workflowRunId: mainServiceCancellationRef.current?.workflowRunId,
+            visibleProgress: undefined,
+            meta: createDraftResponseMetadata({
+              id: createMetadataUuid(),
+              title: sourceResponse.title,
+              text: metadataTextForResponse({
+                title: sourceResponse.title,
+                question: sourceResponse.question,
+                answer,
+              }),
+            }),
+          };
+          updateResponseThinking(loomId, activeResponseId, {
+            finalContent: sanitizedFinalContent,
+            doneReason: event.payload.doneReason,
+            truncated: event.type === "response_truncated",
+            done: true,
+          });
+          setConversationResponses((current) => ({
+            ...current,
+            [loomId]: (current[loomId] ?? []).map((item) =>
+              item.id === activeResponseId
+                ? {
+                    ...item,
+                    ...completedResponse,
+                    thinkingEndedAt:
+                      item.thinkingStartedAt && !item.thinkingEndedAt
+                        ? new Date().toISOString()
+                        : item.thinkingEndedAt,
+                  }
+                : item
+            ),
+          }));
+          setComposerRuntimeState({ running: false, message: "Message retried." });
+          setGeneratingResponseId(null);
+          showResponseCompletionActions(activeResponseId);
+          queueResponseMetadataGeneration(loomId, completedResponse);
+          mainAbortRef.current = null;
+          mainServiceCancellationRef.current = null;
+          return;
+        }
+        if (event.type === "response_error") {
+          if (event.payload.responseId) replaceActiveResponseId(event.payload.responseId);
+          const message = event.payload.message;
+          updateResponseThinking(loomId, activeResponseId, { done: true });
+          updateResponseAnswer(loomId, activeResponseId, [message]);
+          updateResponseVisiblePlanAndProgress(loomId, activeResponseId, undefined, undefined);
+          setComposerRuntimeState({ running: false, message });
+          setGeneratingResponseId(null);
+          showResponseCompletionActions(activeResponseId);
+          mainAbortRef.current = null;
+          mainServiceCancellationRef.current = null;
+          return;
+        }
+        if (event.type === "response_cancelled") {
+          updateResponseThinking(loomId, activeResponseId, { done: true });
+          setComposerRuntimeState({ running: false, message: "Response stopped." });
+          setGeneratingResponseId(null);
+          showResponseCompletionActions(activeResponseId);
+          mainAbortRef.current = null;
+          mainServiceCancellationRef.current = null;
+          return;
+        }
+      }
+    } catch (error) {
+      const message = providerErrorMessage(error);
+      showToast({
+        title: "Retry failed",
         message,
         color: "sunset",
       });
@@ -10368,11 +10697,13 @@ function App() {
         payloadReport: exchange.payloadReport as AskExchange["payloadReport"],
       }))
     );
-    const quickModelName = getProfileModel(providerSettings, "quick").name;
+    const quickModel = getProfileModel(providerSettings, "quick");
+    const mainModel = getProfileModel(providerSettings, "main");
+    const quickModelName = quickModel.name;
     const quickServiceModel =
-      quickModelName === getProfileModel(providerSettings, "main").name
+      quickModel.id === mainModel.id
         ? undefined
-        : quickModelName;
+        : quickModel.id;
     const quickAskInput = {
       sessionId: askState.sessionId ?? `ask-${askState.response.id}`,
       quickAskTraceId,
@@ -11014,27 +11345,36 @@ function App() {
         activeWeftOrigin.originLoomId,
         activeWeftOrigin.originResponseId
       );
+      const fallbackResponse = originResponse ?? lastResponseInLoom(activeWeftOrigin.originLoomId);
       const originConversationForClose = conversations.find(
         (conversation) => conversation.id === activeWeftOrigin.originLoomId
       );
       const destination: LoomNavigationDestination = {
         loomId: activeWeftOrigin.originLoomId,
         mode: "full",
-        scrollTargetResponseId: activeWeftOrigin.originResponseId,
-        scrollMode: "origin",
+        scrollTargetResponseId: fallbackResponse?.id,
+        scrollMode: originResponse ? "origin" : fallbackResponse ? "lastResponse" : undefined,
         source: "userNavigation",
       };
-      const link = originResponse
-        ? responseLinkForNavigation(activeWeftOrigin.originLoomId, originResponse)
+      const link = fallbackResponse
+        ? responseLinkForNavigation(activeWeftOrigin.originLoomId, fallbackResponse)
         : loomLinkForId(activeWeftOrigin.originLoomId);
+      if (!originResponse) {
+        showToast({
+          title: "Origin response unavailable",
+          message: "The original response is no longer available.",
+          color: "neutral",
+          icon: "weft",
+        });
+      }
       dispatchSplitFocus({ type: "SPLIT_CLOSED" });
       dispatchSplitFocus({ type: "NAVIGATED_FULL" });
       setActiveConversationId(activeWeftOrigin.originLoomId);
-      setActiveObjectTitle(originResponse?.title ?? originConversationForClose?.title ?? link.title);
+      setActiveObjectTitle(fallbackResponse?.title ?? originConversationForClose?.title ?? link.title);
       restoreDestination(link, destination);
       pushNavigationEntry(link, destination);
       pendingScrollDestinationRef.current = destination;
-      pendingScrollHighlightRef.current = true;
+      pendingScrollHighlightRef.current = Boolean(originResponse);
       focusComposerAfterNavigation();
       return;
     }
@@ -11524,6 +11864,7 @@ function App() {
                             onContinueTruncatedResponse={continueTruncatedResponse}
                             onEditPrompt={updateResponsePrompt}
                             onRegenerateFromPrompt={regenerateFromEditedPrompt}
+                            onRetryPrompt={retryFromUserMessage}
                             showGenerationDebug={appSettings.showGenerationDebug}
                           />
                           {renderPanelComposer(originConversation.id, "origin")}
@@ -11605,6 +11946,7 @@ function App() {
                             onContinueTruncatedResponse={continueTruncatedResponse}
                             onEditPrompt={updateResponsePrompt}
                             onRegenerateFromPrompt={regenerateFromEditedPrompt}
+                            onRetryPrompt={retryFromUserMessage}
                             showGenerationDebug={appSettings.showGenerationDebug}
                           />
                           {renderPanelComposer(activeConversation.id, "weft")}
@@ -11710,6 +12052,7 @@ function App() {
                     onContinueTruncatedResponse={continueTruncatedResponse}
                     onEditPrompt={updateResponsePrompt}
                     onRegenerateFromPrompt={regenerateFromEditedPrompt}
+                    onRetryPrompt={retryFromUserMessage}
                     showGenerationDebug={appSettings.showGenerationDebug}
                   />
                 )}
@@ -11905,6 +12248,7 @@ function App() {
           }}
           onSubmit={submitQuickQuestion}
           onStop={stopQuickAskResponse}
+          showDebug={false}
         />
       )}
 
@@ -12150,14 +12494,16 @@ function Sidebar({
           </span>
         </button>
         <div className="conversation-tab-actions">
-          <button
-            className="icon-button subtle"
-            onClick={() => onArchive(conversation)}
-            aria-label={`Archive ${displayTitle}`}
-            title="Archive conversation"
-          >
-            <X size={12} />
-          </button>
+          <Tooltip label="Archive" placement="bottom-right">
+            <button
+              className="icon-button subtle"
+              onClick={() => onArchive(conversation)}
+              aria-label={`Archive ${displayTitle}`}
+              title="Archive conversation"
+            >
+              <X size={12} />
+            </button>
+          </Tooltip>
         </div>
       </div>
     );
@@ -12211,6 +12557,8 @@ function Sidebar({
             event.preventDefault();
             onDropBookmark(link);
           }}
+          aria-label="Open Bookmarks"
+          title="Open Bookmarks"
         >
           <Bookmark size={16} />
           Bookmarks
@@ -12218,6 +12566,8 @@ function Sidebar({
         <button
           className={activePanel === "history" ? "nav-row active" : "nav-row"}
           onClick={() => onOpenPanel("history")}
+          aria-label="Open Loom History"
+          title="Open Loom History"
         >
           <History size={16} />
           Loom History
@@ -12225,6 +12575,8 @@ function Sidebar({
         <button
           className={activePanel === "archive" ? "nav-row active" : "nav-row"}
           onClick={() => onOpenPanel("archive")}
+          aria-label="Open Archive"
+          title="Open Archive"
         >
           <Archive size={16} />
           Archive
@@ -12322,7 +12674,12 @@ function Sidebar({
       </div>
 
       <div className="sidebar-bottom">
-        <button className="new-chat-button" onClick={onNewConversation}>
+        <button
+          className="new-chat-button"
+          onClick={onNewConversation}
+          aria-label="New Loom"
+          title="Open a new Loom"
+        >
           <Plus size={16} />
           <span>New Loom</span>
           <kbd>{primaryCompactShortcutLabel("new-loom")}</kbd>
@@ -12862,14 +13219,16 @@ function TopBrowserBar({
       </div>
 
       <AddressBar addressBarRef={addressBarRef} focused={addressFocused}>
-        <button
-          className={currentBookmarked ? "icon-button address-bookmark-button active" : "icon-button address-bookmark-button"}
-          onClick={onBookmarkCurrent}
-          aria-label={currentBookmarked ? "Loom address bookmarked" : "Bookmark current Loom address"}
-          title={currentBookmarked ? "Loom address bookmarked" : "Bookmark current Loom address"}
-        >
-          <Bookmark size={15} />
-        </button>
+        <Tooltip label={currentBookmarked ? "Bookmarked" : "Bookmark"}>
+          <button
+            className={currentBookmarked ? "icon-button address-bookmark-button active" : "icon-button address-bookmark-button"}
+            onClick={onBookmarkCurrent}
+            aria-label={currentBookmarked ? "Loom address bookmarked" : "Bookmark current Loom address"}
+            title={currentBookmarked ? "Loom address bookmarked" : "Bookmark current Loom address"}
+          >
+            <Bookmark size={15} />
+          </button>
+        </Tooltip>
         <div className="address-shell">
           <span
             className={
@@ -12930,16 +13289,19 @@ function TopBrowserBar({
             />
           )}
         </div>
-        <button
-          ref={shareButtonRef}
-          className="icon-button address-share-button"
-          aria-label="Share"
-          aria-haspopup="menu"
-          aria-expanded={Boolean(shareMenuPosition)}
-          onClick={toggleShareMenu}
-        >
-          <Share size={16} />
-        </button>
+        <Tooltip label="Share">
+          <button
+            ref={shareButtonRef}
+            className="icon-button address-share-button"
+            aria-label="Share"
+            title="Share"
+            aria-haspopup="menu"
+            aria-expanded={Boolean(shareMenuPosition)}
+            onClick={toggleShareMenu}
+          >
+            <Share size={16} />
+          </button>
+        </Tooltip>
         {shareMenuPosition &&
           createPortal(
             <ShareMenu
@@ -12953,30 +13315,36 @@ function TopBrowserBar({
       </AddressBar>
 
       <div className="top-actions">
-        <button
-          className={activePanel === "history" ? "chrome-button history-icon-button active" : "chrome-button history-icon-button"}
-          onClick={() => onTogglePanel("history")}
-          aria-label="Open Loom History"
-          title="History"
-        >
-          <History size={16} />
-        </button>
-        <button
-          className={activePanel === "looms" ? "chrome-button active" : "chrome-button"}
-          onClick={() => onTogglePanel("looms")}
-          aria-label="Open Flow"
-          title="Flow"
-        >
-          <GitBranch size={16} />
-        </button>
-        <button
-          className={graphMode ? "chrome-button active" : "chrome-button"}
-          onClick={onToggleGraph}
-          aria-label="Toggle Graph View"
-          title="Graph"
-        >
-          <Map size={16} />
-        </button>
+        <Tooltip label="History">
+          <button
+            className={activePanel === "history" ? "chrome-button history-icon-button active" : "chrome-button history-icon-button"}
+            onClick={() => onTogglePanel("history")}
+            aria-label="Open Loom History"
+            title="History"
+          >
+            <History size={16} />
+          </button>
+        </Tooltip>
+        <Tooltip label="Flow">
+          <button
+            className={activePanel === "looms" ? "chrome-button active" : "chrome-button"}
+            onClick={() => onTogglePanel("looms")}
+            aria-label="Open Flow"
+            title="Flow"
+          >
+            <GitBranch size={16} />
+          </button>
+        </Tooltip>
+        <Tooltip label="Graph">
+          <button
+            className={graphMode ? "chrome-button active" : "chrome-button"}
+            onClick={onToggleGraph}
+            aria-label="Toggle Graph View"
+            title="Graph"
+          >
+            <Map size={16} />
+          </button>
+        </Tooltip>
       </div>
     </TopBar>
   );
@@ -13469,6 +13837,7 @@ function ThinkingPanel({
   onStop: (responseId: string) => void;
 }) {
   const [continuedAt, setContinuedAt] = useState<number | null>(null);
+  const hasVisibleProgress = Boolean(visibleProgress);
   const [expanded, setExpanded] = useState(false);
   const [now, setNow] = useState(Date.now());
   const hasThinking = Boolean(
@@ -13507,7 +13876,7 @@ function ThinkingPanel({
     return () => window.clearInterval(timer);
   }, [hasThinking, thinkingRunning]);
 
-  if (!hasThinking) return null;
+  if (!hasThinking && !hasVisibleProgress) return null;
   if (finalStarted && !showGuardControls && !response.thinkingStopped) return null;
 
   const liveElapsed =
@@ -13515,12 +13884,19 @@ function ThinkingPanel({
       ? Math.max(0, (now - Date.parse(response.thinkingStartedAt)) / 1000)
       : response.elapsedThinkingSeconds;
   const elapsedLabel = formatThinkingSeconds(liveElapsed);
+  const visibleTask = visibleProgress?.tasks.find(
+    (task) => task.id === visibleProgress.activeTaskId
+  );
+  const visibleStatusLabel =
+    visibleProgress?.statusText || (visibleTask ? `${visibleTask.title}...` : undefined);
   const label = thinkingRunning
     ? showGuardControls
       ? "Still thinking..."
       : elapsedLabel
       ? `Thinking for ${elapsedLabel} seconds`
       : "Thinking..."
+    : visibleStatusLabel
+      ? "Thinking"
     : elapsedLabel
       ? `Thought for ${elapsedLabel} seconds`
       : "Thought";
@@ -13536,6 +13912,9 @@ function ThinkingPanel({
       >
         <Lightbulb size={13} />
         <span>{label}</span>
+        {!thinkingRunning && visibleStatusLabel && (
+          <small>{visibleStatusLabel}</small>
+        )}
       </button>
       {expanded && !showGuardControls && !response.thinkingStopped && (
         <div className="thinking-panel-detail">
@@ -13881,6 +14260,7 @@ function ChatTranscript({
   onContinueTruncatedResponse,
   onEditPrompt,
   onRegenerateFromPrompt,
+  onRetryPrompt,
   showGenerationDebug,
 }: {
   transcriptRef?: (node: HTMLElement | null) => void;
@@ -13927,6 +14307,7 @@ function ChatTranscript({
   onContinueTruncatedResponse: (responseId: string) => void;
   onEditPrompt: (loomId: string, responseId: string, nextPrompt: string) => Promise<boolean>;
   onRegenerateFromPrompt: (loomId: string, responseId: string) => void;
+  onRetryPrompt: (loomId: string, responseId: string) => void;
   showGenerationDebug: boolean;
 }) {
   const [sentReferenceHint, setSentReferenceHint] = useState<{
@@ -14211,20 +14592,6 @@ function ChatTranscript({
           displayResponse.id === completionActionRevealResponseId;
         const displayResponseTitle =
           cleanMarkdownDisplayTitle(displayResponse.title) || displayResponse.title;
-        const responseAnswerText = displayResponse.answer.join("\n\n").trim();
-        const responseFinalText = displayResponse.finalContent?.trim() ?? "";
-        const thinkingBeforeFinalAnswer =
-          displayResponse.thinkingStartedAt &&
-          !displayResponse.finalStartedAt &&
-          !responseAnswerText &&
-          !responseFinalText;
-        const showResponseProgress =
-          isGeneratingResponse &&
-          Boolean(displayResponse.visibleProgress) &&
-          !thinkingBeforeFinalAnswer &&
-          !displayResponse.finalStartedAt &&
-          !responseAnswerText &&
-          !responseFinalText;
         const responseUrl = responseAddressForConversation(conversation, displayResponse);
         const responseLink: LoomLink = {
           id: displayResponse.id,
@@ -14420,6 +14787,22 @@ function ChatTranscript({
                       <Edit3 size={16} />
                     </button>
                   </Tooltip>
+                  {conversation && displayResponse.serviceUserResponseId && (
+                    <Tooltip label="Retry" placement="bottom-right">
+                      <button
+                        type="button"
+                        className="prompt-action-button prompt-retry-trigger"
+                        aria-label="Retry from this message"
+                        data-testid={`retry-prompt-${displayResponse.id}`}
+                        title="Retry"
+                        onClick={() => {
+                          onRetryPrompt(conversation.id, displayResponse.id);
+                        }}
+                      >
+                        <RotateCcw size={16} />
+                      </button>
+                    </Tooltip>
+                  )}
                 </div>
               )}
             </div>
@@ -14458,12 +14841,6 @@ function ChatTranscript({
                 />
               )}
               <div className="assistant-body">
-                {showResponseProgress && displayResponse.visibleProgress && (
-                  <ResponseProgressChecklist
-                    progress={displayResponse.visibleProgress}
-                    showDebug={showGenerationDebug}
-                  />
-                )}
                 <ThinkingPanel
                   response={displayResponse}
                   visibleProgress={displayResponse.visibleProgress}
@@ -14623,15 +15000,13 @@ function ChatTranscript({
                               {conversationTitlesById[record.childConversationId] ??
                                 record.title}
                             </strong>
-                            <em>
-                              {[
-                                `${branchIndex + 1} of ${explorationWeftCount}`,
-                                formatRelativeTimestamp(
-                                  record.createdAt || record.updatedAt || new Date().toISOString()
-                                ),
-                              ]
-                                .filter(Boolean)
-                                .join(" · ")}
+                            <em className="weft-branch-picker-meta">
+                              <span>{branchIndex + 1} of {explorationWeftCount}</span>
+                              <span>
+                                {formatRelativeTimestamp(record.createdAt) ||
+                                  formatRelativeTimestamp(record.updatedAt) ||
+                                  formatRelativeTimestamp(new Date().toISOString())}
+                              </span>
                             </em>
                           </span>
                         </button>
@@ -14857,6 +15232,7 @@ function PromptComposer({
             : null;
   const speechRecorder = useSpeechToTextRecorder(engineClient);
   const speechActive = speechRecorder.status !== "idle";
+  const electronPermissions = getElectronPermissionsBridge();
 
   function setMainModel(modelId: string) {
     onProviderSettingsChange({
@@ -16214,6 +16590,10 @@ function PromptComposer({
     await startSpeechRecording();
   }
 
+  async function openMicrophoneSettings() {
+    await electronPermissions?.openMicrophoneSettings();
+  }
+
   function insertSpeechTranscript(transcript: string) {
     const editor = editorRef.current;
     const snapshot = speechSnapshotRef.current;
@@ -16972,6 +17352,9 @@ function PromptComposer({
             onCancel={cancelSpeechRecording}
             onStop={stopSpeechRecording}
             onRetry={retrySpeechRecording}
+            onOpenMicrophoneSettings={
+              electronPermissions ? openMicrophoneSettings : undefined
+            }
           />
         )}
         <div
@@ -17165,26 +17548,28 @@ function PromptComposer({
         )}
 
         <div className="composer-footer">
-          <button
-            ref={attachButtonRef}
-            className="composer-icon-action"
-            aria-label="Attach"
-            title="Attach"
-            aria-haspopup="dialog"
-            aria-expanded={attachPickerOpen}
-            onClick={() => {
-              setAttachPickerOpen((current) => {
-                const next = !current;
-                if (!next) {
-                  setAttachPopoverStyle(null);
-                  setAttachFeedback(null);
-                }
-                return next;
-              });
-            }}
-          >
-            <Plus size={16} />
-          </button>
+          <Tooltip label="Attach" placement="bottom-right">
+            <button
+              ref={attachButtonRef}
+              className="composer-icon-action"
+              aria-label="Attach"
+              title="Attach"
+              aria-haspopup="dialog"
+              aria-expanded={attachPickerOpen}
+              onClick={() => {
+                setAttachPickerOpen((current) => {
+                  const next = !current;
+                  if (!next) {
+                    setAttachPopoverStyle(null);
+                    setAttachFeedback(null);
+                  }
+                  return next;
+                });
+              }}
+            >
+              <Plus size={16} />
+            </button>
+          </Tooltip>
           {attachPickerOpen && createPortal(
             <AttachContentDropdown
               menuRef={attachMenuRef}
@@ -17231,42 +17616,44 @@ function PromptComposer({
             document.body
           )}
           <div className="linked-reference-anchor">
-            <button
-              ref={referenceButtonRef}
-              className={referencePickerOpen ? "reference-globe active" : "reference-globe"}
-              onClick={() => {
-                setReferencePickerOpen((current) => {
-                  const next = !current;
-                  if (!next) setReferencePopoverStyle(null);
-                  if (!next) setReferenceOpenError(null);
-                  if (next) setReferenceSelectedIndex(0);
-                  return next;
-                });
-              }}
-              onKeyDown={(event) => {
-                if (!referencePickerOpen) return;
-                if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-                event.preventDefault();
-                setReferenceSelectedIndex((current) =>
-                  event.key === "ArrowDown"
-                    ? Math.min(current + 1, Math.max(filteredLinkedReferences.length - 1, 0))
-                    : Math.max(current - 1, 0)
-                );
-                referenceMenuRef.current
-                  ?.querySelector<HTMLInputElement>("input[aria-label='Search linked references']")
-                  ?.focus();
-              }}
-              aria-label="References"
-              title="References"
-              aria-haspopup="listbox"
-              aria-expanded={referencePickerOpen}
-            >
-              <Globe2 size={15} />
-              <span>References</span>
-              {draft.links.length + attachedReferences.length > 0 && (
-                <em>{draft.links.length + attachedReferences.length}</em>
-              )}
-            </button>
+            <Tooltip label="References" placement="bottom-right">
+              <button
+                ref={referenceButtonRef}
+                className={referencePickerOpen ? "reference-globe active" : "reference-globe"}
+                onClick={() => {
+                  setReferencePickerOpen((current) => {
+                    const next = !current;
+                    if (!next) setReferencePopoverStyle(null);
+                    if (!next) setReferenceOpenError(null);
+                    if (next) setReferenceSelectedIndex(0);
+                    return next;
+                  });
+                }}
+                onKeyDown={(event) => {
+                  if (!referencePickerOpen) return;
+                  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+                  event.preventDefault();
+                  setReferenceSelectedIndex((current) =>
+                    event.key === "ArrowDown"
+                      ? Math.min(current + 1, Math.max(filteredLinkedReferences.length - 1, 0))
+                      : Math.max(current - 1, 0)
+                  );
+                  referenceMenuRef.current
+                    ?.querySelector<HTMLInputElement>("input[aria-label='Search linked references']")
+                    ?.focus();
+                }}
+                aria-label="References"
+                title="References"
+                aria-haspopup="listbox"
+                aria-expanded={referencePickerOpen}
+              >
+                <Globe2 size={15} />
+                <span>References</span>
+                {draft.links.length + attachedReferences.length > 0 && (
+                  <em>{draft.links.length + attachedReferences.length}</em>
+                )}
+              </button>
+            </Tooltip>
             {referencePickerOpen && createPortal(
               <LinkedReferenceDropdown
                 menuRef={referenceMenuRef}
@@ -17317,21 +17704,26 @@ function PromptComposer({
             )}
           </div>
           <span>Type # to insert Loom references inline.</span>
-          <button
-            ref={modelButtonRef}
-            type="button"
-            className="model-picker-button"
-            onClick={() => setModelPickerOpen((current) => !current)}
-            aria-haspopup="menu"
-            aria-expanded={modelPickerOpen}
-            aria-label="Select model"
-            title={`Main model: ${mainModel.name}. Response mode: ${
-              modelResponseModes.find((mode) => mode.id === modelResponseMode)?.label ?? "Auto"
-            }`}
+          <Tooltip
+            label={`Model: ${mainModel.name}`}
+            placement="bottom-right"
           >
-            <span>{mainModel.name}</span>
-            <ChevronDown size={15} />
-          </button>
+            <button
+              ref={modelButtonRef}
+              type="button"
+              className="model-picker-button"
+              onClick={() => setModelPickerOpen((current) => !current)}
+              aria-haspopup="menu"
+              aria-expanded={modelPickerOpen}
+              aria-label="Select model"
+              title={`Main model: ${mainModel.name}. Response mode: ${
+                modelResponseModes.find((mode) => mode.id === modelResponseMode)?.label ?? "Auto"
+              }`}
+            >
+              <span>{mainModel.name}</span>
+              <ChevronDown size={15} />
+            </button>
+          </Tooltip>
           {modelPickerOpen && createPortal(
             <div
               ref={modelMenuRef}
@@ -17403,21 +17795,23 @@ function PromptComposer({
             </div>,
             document.body
           )}
-          <button
-            type="button"
-            className={speechActive ? "composer-icon-action active" : "composer-icon-action"}
-            aria-label="Voice input"
-            title="Voice input"
-            aria-pressed={speechRecorder.status === "recording"}
-            disabled={runtimeState.running || speechRecorder.status === "transcribing"}
-            onClick={() => {
-              if (speechRecorder.status === "recording") void stopSpeechRecording();
-              else if (speechRecorder.status === "error") void retrySpeechRecording();
-              else void startSpeechRecording();
-            }}
-          >
-            <Mic size={15} />
-          </button>
+          <Tooltip label="Voice input" placement="bottom-right">
+            <button
+              type="button"
+              className={speechActive ? "composer-icon-action active" : "composer-icon-action"}
+              aria-label="Voice input"
+              title="Voice input"
+              aria-pressed={speechRecorder.status === "recording"}
+              disabled={runtimeState.running || speechRecorder.status === "transcribing"}
+              onClick={() => {
+                if (speechRecorder.status === "recording") void stopSpeechRecording();
+                else if (speechRecorder.status === "error") void retrySpeechRecording();
+                else void startSpeechRecording();
+              }}
+            >
+              <Mic size={15} />
+            </button>
+          </Tooltip>
           <button
             className="send-button"
             aria-label={runtimeState.running ? "Stop response" : "Send"}
@@ -17455,6 +17849,7 @@ function SpeechListeningBar({
   onCancel,
   onStop,
   onRetry,
+  onOpenMicrophoneSettings,
 }: {
   status:
     | "idle"
@@ -17470,15 +17865,21 @@ function SpeechListeningBar({
   onCancel: () => void;
   onStop: () => void;
   onRetry: () => void;
+  onOpenMicrophoneSettings?: () => void;
 }) {
   const isRecording = status === "recording";
   const isTranscribing = status === "transcribing";
   const isError = status === "error";
+  const isPermissionError = /permission|denied|access/i.test(error ?? "");
   const label = isError
     ? error ?? "Microphone error. Please retry."
     : isTranscribing
       ? "Transcribing..."
       : "Listening...";
+  const showPermissionSettings =
+    isError &&
+    Boolean(onOpenMicrophoneSettings) &&
+    isPermissionError;
   return (
     <div
       className={[
@@ -17496,28 +17897,39 @@ function SpeechListeningBar({
         }
       }}
     >
-      <button
-        type="button"
-        className="speech-bar-action"
-        aria-label="Cancel voice input"
-        title="Cancel voice input"
-        onClick={onCancel}
-      >
-        <X size={15} />
-      </button>
       <SpeechWaveform values={waveform} subdued={isTranscribing || isError} />
       <span className="speech-listening-label">{label}</span>
       <SpeechWaveform values={waveform.slice().reverse()} subdued={isTranscribing || isError} />
-      <button
-        type="button"
-        className="speech-bar-action speech-bar-stop"
-        aria-label={isError ? "Retry voice input" : "Stop and transcribe voice input"}
-        title={isError ? "Retry voice input" : "Stop and transcribe voice input"}
-        disabled={isTranscribing}
-        onClick={isError ? onRetry : onStop}
-      >
-        {isError ? <Mic size={15} /> : <Square size={12} fill={isRecording ? "currentColor" : "none"} />}
-      </button>
+      <div className="speech-listening-actions">
+        {showPermissionSettings && (
+          <button
+            type="button"
+            className="speech-permission-settings-button"
+            onClick={onOpenMicrophoneSettings}
+          >
+            Open Microphone Settings
+          </button>
+        )}
+        <button
+          type="button"
+          className="speech-bar-action"
+          aria-label="Cancel voice input"
+          title="Cancel voice input"
+          onClick={onCancel}
+        >
+          <X size={15} />
+        </button>
+        <button
+          type="button"
+          className="speech-bar-action speech-bar-stop"
+          aria-label={isError ? "Retry voice input" : "Stop and transcribe voice input"}
+          title={isError ? "Retry voice input" : "Stop and transcribe voice input"}
+          disabled={isTranscribing}
+          onClick={isError ? onRetry : onStop}
+        >
+          {isError ? <Mic size={15} /> : <Square size={12} fill={isRecording ? "currentColor" : "none"} />}
+        </button>
+      </div>
     </div>
   );
 }

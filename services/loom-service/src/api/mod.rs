@@ -11,6 +11,8 @@ pub(crate) mod graph;
 mod health;
 mod history;
 mod looms;
+mod memory;
+mod model_runtime;
 mod ollama;
 mod orchestration;
 mod references;
@@ -63,12 +65,40 @@ pub fn router(
         .route("/runtime/restart", post(config::request_restart))
         .route("/runtime/status", get(runtime_api::status))
         .route("/runtime/shutdown", post(runtime_api::shutdown))
+        .route("/runtime/providers", get(model_runtime::providers))
+        .route(
+            "/runtime/models",
+            get(model_runtime::models).post(model_runtime::discover_models),
+        )
+        .route(
+            "/runtime/models/:model_name/download",
+            post(model_runtime::start_download),
+        )
+        .route("/runtime/downloads", get(model_runtime::list_downloads))
+        .route(
+            "/runtime/downloads/:job_id",
+            get(model_runtime::get_download),
+        )
+        .route(
+            "/runtime/downloads/:job_id/events",
+            get(model_runtime::download_events),
+        )
+        .route(
+            "/runtime/downloads/:job_id/cancel",
+            post(model_runtime::cancel_download),
+        )
         .route("/resolve", post(resolve::resolve))
         .route("/dev/seed-fixtures", post(dev::seed_fixtures))
         .route("/dev/e2e-proof/:loom_id", get(dev::e2e_proof))
         .route("/ask/quick", post(ask::quick))
         .route("/speech/transcribe", post(speech::transcribe))
         .route("/speech/provider/health", get(speech::provider_health))
+        .route("/speech/setup/status", get(speech::setup_status))
+        .route(
+            "/speech/setup/download-model",
+            post(speech::download_setup_model),
+        )
+        .route("/speech/setup/configure", post(speech::configure_setup))
         .route(
             "/bookmarks",
             get(bookmarks::list_bookmarks).post(bookmarks::create_bookmark),
@@ -80,6 +110,16 @@ pub fn router(
         .route(
             "/ui/state/:key",
             get(ui_state::get_ui_state).put(ui_state::put_ui_state),
+        )
+        .route(
+            "/memory",
+            get(memory::list_memory).post(memory::create_memory),
+        )
+        .route(
+            "/memory/:memory_id",
+            get(memory::get_memory)
+                .patch(memory::patch_memory)
+                .delete(memory::delete_memory),
         )
         .route("/bookmarks/target", get(bookmarks::get_bookmark_for_target))
         .route(
@@ -124,6 +164,10 @@ pub fn router(
         .route(
             "/responses/:response_id/regenerate",
             post(orchestration::regenerate_response),
+        )
+        .route(
+            "/responses/:response_id/retry",
+            post(orchestration::retry_response),
         )
         .route("/responses/:response_id", patch(responses::patch_response))
         .route("/context/prepare", post(context::prepare))

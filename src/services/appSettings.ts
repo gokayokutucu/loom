@@ -32,6 +32,16 @@ export interface AccessibilitySettings {
   keyboardNavigationHints: boolean;
 }
 
+export interface MemorySettings {
+  enabled: boolean;
+  referenceRecentLooms: boolean;
+  referenceSavedMemories: boolean;
+  nickname: string;
+  occupation: string;
+  stylePreferences: string;
+  moreAboutYou: string;
+}
+
 export interface AppSettings {
   referenceDisplayMode: ReferenceDisplayMode;
   weftOpenBehavior: WeftOpenBehavior;
@@ -42,6 +52,7 @@ export interface AppSettings {
   notifications: NotificationSettings;
   startup: StartupSettings;
   accessibility: AccessibilitySettings;
+  memory: MemorySettings;
   showGenerationDebug: boolean;
   mockDataEnabled: boolean;
   hasSeenFirstBookmarkFeedback: boolean;
@@ -76,7 +87,16 @@ export const defaultAppSettings: AppSettings = {
     alwaysShowIconLabels: false,
     keyboardNavigationHints: false,
   },
-  showGenerationDebug: true,
+  memory: {
+    enabled: true,
+    referenceRecentLooms: true,
+    referenceSavedMemories: false,
+    nickname: "",
+    occupation: "",
+    stylePreferences: "",
+    moreAboutYou: "",
+  },
+  showGenerationDebug: false,
   mockDataEnabled: false,
   hasSeenFirstBookmarkFeedback: false,
   growthEventCount: 0,
@@ -182,6 +202,34 @@ function normalizeAccessibilitySettings(value: unknown): AccessibilitySettings {
   };
 }
 
+function normalizeMemoryText(value: unknown, maxLength: number): string {
+  if (typeof value !== "string") return "";
+  return value.slice(0, maxLength);
+}
+
+function normalizeMemorySettings(value: unknown): MemorySettings {
+  const stored = typeof value === "object" && value ? value : {};
+  const settings = stored as Partial<MemorySettings>;
+  return {
+    enabled:
+      typeof settings.enabled === "boolean"
+        ? settings.enabled
+        : defaultAppSettings.memory.enabled,
+    referenceRecentLooms:
+      typeof settings.referenceRecentLooms === "boolean"
+        ? settings.referenceRecentLooms
+        : defaultAppSettings.memory.referenceRecentLooms,
+    referenceSavedMemories:
+      typeof settings.referenceSavedMemories === "boolean"
+        ? settings.referenceSavedMemories
+        : defaultAppSettings.memory.referenceSavedMemories,
+    nickname: normalizeMemoryText(settings.nickname, 120),
+    occupation: normalizeMemoryText(settings.occupation, 160),
+    stylePreferences: normalizeMemoryText(settings.stylePreferences, 800),
+    moreAboutYou: normalizeMemoryText(settings.moreAboutYou, 1200),
+  };
+}
+
 export function readAppSettings(): AppSettings {
   const stored = localStorageAdapter.get<Partial<AppSettings>>(
     APP_SETTINGS_KEY,
@@ -197,8 +245,8 @@ export function readAppSettings(): AppSettings {
     notifications: normalizeNotificationSettings(stored.notifications),
     startup: normalizeStartupSettings(stored.startup),
     accessibility: normalizeAccessibilitySettings(stored.accessibility),
-    showGenerationDebug:
-      stored.showGenerationDebug === undefined ? true : Boolean(stored.showGenerationDebug),
+    memory: normalizeMemorySettings(stored.memory),
+    showGenerationDebug: false,
     mockDataEnabled:
       stored.mockDataEnabled === undefined
         ? defaultAppSettings.mockDataEnabled
@@ -228,7 +276,8 @@ export function writeAppSettings(settings: AppSettings) {
     notifications: normalizeNotificationSettings(settings.notifications),
     startup: normalizeStartupSettings(settings.startup),
     accessibility: normalizeAccessibilitySettings(settings.accessibility),
-    showGenerationDebug: Boolean(settings.showGenerationDebug),
+    memory: normalizeMemorySettings(settings.memory),
+    showGenerationDebug: false,
     mockDataEnabled: Boolean(settings.mockDataEnabled),
     hasSeenFirstBookmarkFeedback: Boolean(settings.hasSeenFirstBookmarkFeedback),
     growthEventCount: Math.max(0, Math.floor(settings.growthEventCount)),

@@ -40,14 +40,18 @@ import type {
   QuickAskResult,
   RegenerateFromResponseInput,
   RemoveReferenceInput,
+  RetryUserMessageInput,
   RenameLoomInput,
   RecordHistoryInput,
   ResolveAddressInput,
   ResolveAddressResult,
   LoomServiceRuntimeConfig,
+  RuntimeModelDownloadJob,
+  RuntimeModelsResult,
   ServiceConfigUpdateResult,
   ServiceConfigStatus,
   SpeechProviderHealth,
+  SpeechSetupStatus,
   ServiceHealthStatus,
   SendMessageInput,
   SaveUiStateInput,
@@ -70,7 +74,14 @@ export interface LoomEngineClient {
   getServiceConfigStatus(): Promise<ServiceConfigStatus>;
   getServiceConfig(): Promise<LoomServiceRuntimeConfig>;
   updateServiceConfig(input: UpdateServiceConfigInput): Promise<ServiceConfigUpdateResult>;
+  getRuntimeModels(): Promise<RuntimeModelsResult>;
+  startModelDownload(modelName: string): Promise<RuntimeModelDownloadJob>;
+  getModelDownload(jobId: string): Promise<RuntimeModelDownloadJob>;
+  cancelModelDownload(jobId: string): Promise<RuntimeModelDownloadJob>;
   getSpeechProviderHealth(): Promise<SpeechProviderHealth>;
+  getSpeechSetupStatus(): Promise<SpeechSetupStatus>;
+  downloadSpeechSetupModel(): Promise<SpeechSetupStatus>;
+  configureSpeechSetup(): Promise<SpeechSetupStatus>;
   getCapabilitySummary(): Promise<CapabilitySummary>;
   listLooms(): Promise<LoomSummary[]>;
   getLoom(loomId: string): Promise<LoomDetail>;
@@ -80,6 +91,7 @@ export interface LoomEngineClient {
   deleteLoom(input: DeleteLoomInput): Promise<void>;
   sendMessage(input: SendMessageInput): AsyncIterable<EngineResponseEvent>;
   regenerateFromResponse(input: RegenerateFromResponseInput): AsyncIterable<EngineResponseEvent>;
+  retryUserMessage(input: RetryUserMessageInput): AsyncIterable<EngineResponseEvent>;
   cancelMessage(input: CancelMessageInput): Promise<CancelMessageResult>;
   getGenerationResponseState(workflowRunId: string): Promise<GenerationResponseStateResult>;
   quickAsk(input: QuickAskInput): Promise<QuickAskResult>;

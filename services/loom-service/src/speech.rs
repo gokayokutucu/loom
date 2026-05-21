@@ -13,6 +13,7 @@ use std::{
 pub const DEFAULT_MAX_AUDIO_BYTES: u64 = 10 * 1024 * 1024;
 pub const DEFAULT_LOCAL_COMMAND_TIMEOUT_MS: u64 = 120_000;
 pub const DEFAULT_LOCAL_COMMAND_TRANSCRIPT_FILE_EXTENSION: &str = "txt";
+const MAX_LOCAL_COMMAND_STDERR_SUMMARY_CHARS: usize = 800;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -258,7 +259,7 @@ impl LocalCommandSpeechToTextProvider {
         else {
             return Err(SpeechToTextError::new(
                 SpeechToTextErrorKind::ProviderUnavailable,
-                "Local speech-to-text provider is not configured.",
+                "Speech-to-Text is not configured yet. Open Settings → Capability → Speech-to-Text and run Auto-configure.",
             ));
         };
         if command.contains(std::path::MAIN_SEPARATOR) && !Path::new(command).exists() {
@@ -340,7 +341,7 @@ impl LocalCommandSpeechToTextProvider {
             .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::piped())
             .spawn()
             .map_err(|error| command_spawn_error(error))?;
 
@@ -378,11 +379,31 @@ impl LocalCommandSpeechToTextProvider {
                 )
             })?;
         }
+        let mut stderr = String::new();
+        if let Some(mut output) = child.stderr.take() {
+            output.read_to_string(&mut stderr).map_err(|error| {
+                SpeechToTextError::new(
+                    SpeechToTextErrorKind::TranscriptionFailed,
+                    format!("Failed to read local speech-to-text diagnostics: {error}"),
+                )
+            })?;
+        }
 
         if !status.success() {
+            let stderr_summary = bounded_command_stderr_summary(&stderr);
+            if !stderr_summary.is_empty() {
+                tracing::warn!(
+                    stderr_summary = %stderr_summary,
+                    "local speech-to-text command failed"
+                );
+            }
             return Err(SpeechToTextError::new(
                 SpeechToTextErrorKind::TranscriptionFailed,
-                "Local speech-to-text provider failed.",
+                if stderr_summary.is_empty() {
+                    "Local speech-to-text provider failed.".to_string()
+                } else {
+                    format!("Local speech-to-text provider failed: {stderr_summary}")
+                },
             ));
         }
 
@@ -427,7 +448,7 @@ impl LocalCommandSpeechToTextProvider {
             return SpeechProviderHealth::unavailable(
                 provider_kind,
                 "missing_command",
-                "Local speech-to-text provider is not configured.",
+                "Speech-to-Text is not configured yet. Open Settings → Capability → Speech-to-Text and run Auto-configure.",
             );
         };
         if command.contains(std::path::MAIN_SEPARATOR) {
@@ -841,8 +862,8 @@ fn is_executable(path: &Path) -> bool {
     path.is_file()
 }
 
-fn audio_extension_for_mime(mime_type: &str) -> &'static str {
-    match mime_type.to_ascii_lowercase().as_str() {
+pub(crate) fn audio_extension_for_mime(mime_type: &str) -> &'static str {
+    match normalized_mime_type(mime_type).as_str() {
         "audio/webm" => "webm",
         "audio/wav" | "audio/x-wav" => "wav",
         "audio/mpeg" | "audio/mp3" => "mp3",
@@ -850,6 +871,28 @@ fn audio_extension_for_mime(mime_type: &str) -> &'static str {
         "audio/ogg" => "ogg",
         _ => "audio",
     }
+}
+
+pub(crate) fn normalized_mime_type(mime_type: &str) -> String {
+    mime_type
+        .split(';')
+        .next()
+        .unwrap_or(mime_type)
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn bounded_command_stderr_summary(stderr: &str) -> String {
+    let normalized = stderr
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    normalized
+        .chars()
+        .take(MAX_LOCAL_COMMAND_STDERR_SUMMARY_CHARS)
+        .collect()
 }
 
 pub fn validate_request_limits(
@@ -869,9 +912,10 @@ pub fn validate_request_limits(
             "Audio payload exceeds the configured size limit.",
         ));
     }
+    let request_mime_type = normalized_mime_type(&request.mime_type);
     if !allowed_mime_types
         .iter()
-        .any(|allowed| allowed.eq_ignore_ascii_case(&request.mime_type))
+        .any(|allowed| normalized_mime_type(allowed) == request_mime_type)
     {
         return Err(SpeechToTextError::new(
             SpeechToTextErrorKind::UnsupportedAudioType,
@@ -1017,6 +1061,9 @@ mod tests {
         };
         validate_transcribe_request(&config, &request).expect("allowed mime");
 
+        request.mime_type = "audio/webm;codecs=opus".to_string();
+        validate_transcribe_request(&config, &request).expect("allowed mime with codec parameter");
+
         request.mime_type = "text/plain".to_string();
         assert_eq!(
             validate_transcribe_request(&config, &request)
@@ -1087,6 +1134,36 @@ mod tests {
         assert!(!result.retention.audio_persisted);
         assert!(!result.retention.transcript_persisted);
         assert_eq!(count_temp_audio_files(&temp_dir), 0);
+        let _ = fs::remove_dir_all(temp_dir);
+    }
+
+    #[test]
+    fn local_command_failure_includes_bounded_stderr_summary() {
+        let temp_dir = temp_test_dir("stderr-summary");
+        let long_diagnostic = "decode failed ".repeat(120);
+        let config = SpeechToTextConfig {
+            local_command_args: vec![
+                "-c".to_string(),
+                format!("printf '%s' '{}' 1>&2; exit 2", long_diagnostic),
+            ],
+            local_temp_dir: Some(temp_dir.to_string_lossy().to_string()),
+            ..enabled_local_command_config(Some("/bin/sh".to_string()))
+        };
+        let provider = LocalCommandSpeechToTextProvider::from_config(&config);
+        let error = provider
+            .transcribe(SpeechToTextProviderRequest {
+                audio_bytes: b"audio".to_vec(),
+                mime_type: "audio/wav".to_string(),
+                language: None,
+                provider_profile_id: None,
+                metadata: None,
+            })
+            .expect_err("command failure");
+
+        assert_eq!(error.kind, SpeechToTextErrorKind::TranscriptionFailed);
+        assert!(error.message.contains("decode failed"));
+        assert!(error.message.len() <= "Local speech-to-text provider failed: ".len() + 800);
+        assert_eq!(count_temp_speech_files(&temp_dir), 0);
         let _ = fs::remove_dir_all(temp_dir);
     }
 

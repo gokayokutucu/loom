@@ -15,7 +15,7 @@ export default defineConfig({
     trace: "retain-on-failure",
   },
   webServer: {
-    command: `VITE_LOOM_ENGINE_MODE=typescript-local npm run dev -- --host 127.0.0.1 --port ${e2ePort} --strictPort`,
+    command: `VITE_LOOM_ENGINE_MODE=typescript-local VITE_ENABLE_MOCK_DATA=true npm run dev -- --host 127.0.0.1 --port ${e2ePort} --strictPort`,
     url: e2eUrl,
     reuseExistingServer: false,
     timeout: 120_000,

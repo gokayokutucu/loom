@@ -102,8 +102,45 @@ export interface SpeechProviderHealth {
   checks: string[];
 }
 
+export interface SpeechSetupBinaryCandidate {
+  path: string;
+  exists: boolean;
+  executable: boolean;
+  preferred: boolean;
+  source: string;
+}
+
+export interface SpeechSetupStatus {
+  state: string;
+  message: string;
+  runningInElectron: boolean;
+  installCommand: string;
+  detectedBinaryPath?: string | null;
+  detectedRuntimeSource: string;
+  runtimeVersion?: string | null;
+  binaryCandidates: SpeechSetupBinaryCandidate[];
+  modelDirectory: string;
+  model: {
+    name: string;
+    path: string;
+    exists: boolean;
+    sizeBytes?: number | null;
+    downloadUrl: string;
+  };
+  recommendedArgs: string[];
+  providerHealth: SpeechProviderHealth;
+}
+
 export interface LoomServiceRuntimeConfig {
   speech: SpeechToTextRuntimeConfig;
+  memory?: {
+    referenceRecentLooms?: boolean;
+    referenceSavedMemories?: boolean;
+  };
+  providers?: {
+    defaultMainModel?: string;
+    defaultQuickModel?: string;
+  };
   database?: { path?: string };
 }
 
@@ -120,6 +157,14 @@ export interface UpdateSpeechToTextConfigInput {
 
 export interface UpdateServiceConfigInput {
   speech?: UpdateSpeechToTextConfigInput;
+  memory?: {
+    referenceRecentLooms?: boolean;
+    referenceSavedMemories?: boolean;
+  };
+  providers?: {
+    defaultMainModel?: string;
+    defaultQuickModel?: string;
+  };
 }
 
 export interface ServiceConfigUpdateResult {
@@ -153,6 +198,62 @@ export interface CapabilitySummary {
   strategyAvailable?: boolean;
   lastCheckedAt?: string;
   error?: string;
+}
+
+export interface RuntimeModelProviderStatus {
+  providerKind: string;
+  providerProfileId: string;
+  status: string;
+  baseUrl?: string;
+  version?: string;
+  modelsEndpointReachable?: boolean;
+  runtimeOwnedBy: string;
+  modelStorePath?: string;
+  supportsDownloads: boolean;
+  supportsStart: boolean;
+  supportsStop: boolean;
+  warnings: string[];
+}
+
+export interface RuntimeModelItem {
+  assetId: string;
+  providerKind: string;
+  providerProfileId?: string | null;
+  modelName: string;
+  displayName: string;
+  installed: boolean;
+  status: "available" | "missing" | "installing" | "error" | string;
+  localPath?: string | null;
+  sizeBytes?: number | null;
+  digest?: string | null;
+  supportsQuick: boolean;
+  supportsMain: boolean;
+  supportsThinking: boolean;
+  source: string;
+}
+
+export interface RuntimeModelDownloadJob {
+  jobId: string;
+  providerKind: string;
+  providerProfileId?: string | null;
+  modelName: string;
+  status: "queued" | "downloading" | "verifying" | "installed" | "failed" | "cancelled" | string;
+  progressPercent: number;
+  downloadedBytes?: number | null;
+  totalBytes?: number | null;
+  digest?: string | null;
+  error?: string | null;
+  cancelRequested: boolean;
+  metadataJson?: JsonValue;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+}
+
+export interface RuntimeModelsResult {
+  provider: RuntimeModelProviderStatus;
+  models: RuntimeModelItem[];
+  jobs: RuntimeModelDownloadJob[];
 }
 
 export interface LoomSummary {
@@ -291,6 +392,21 @@ export interface RegenerateFromResponseInput {
   staleAssistantResponseId?: string;
   responseMode: ModelResponseMode;
   source?: "prompt_edit_regenerate";
+  model?: string;
+  options?: {
+    numCtx?: number;
+    numPredict?: number;
+    temperature?: number;
+  };
+  signal?: AbortSignal;
+}
+
+export interface RetryUserMessageInput {
+  loomId: string;
+  userResponseId: string;
+  responseMode: ModelResponseMode;
+  softDeleteDownstream?: boolean;
+  reason?: "retry_from_user_message";
   model?: string;
   options?: {
     numCtx?: number;
@@ -690,6 +806,7 @@ export interface TypeScriptLocalLoomEngineDependencies {
   regenerateFromResponse?: (
     input: RegenerateFromResponseInput
   ) => AsyncIterable<EngineResponseEvent>;
+  retryUserMessage?: (input: RetryUserMessageInput) => AsyncIterable<EngineResponseEvent>;
   quickAsk?: (input: QuickAskInput) => Promise<QuickAskResult>;
   createOrOpenWeft?: (input: CreateOrOpenWeftInput) => Promise<CreateOrOpenWeftResult>;
   persistWeftTurns?: (input: PersistWeftTurnsInput) => Promise<PersistWeftTurnsResult>;

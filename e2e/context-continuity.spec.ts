@@ -73,16 +73,12 @@ test.describe("[product-service-backed] Event Sourcing context continuity proof"
       expect(retrieval.answer).not.toContain("LoomDB");
 
       const detail = await scenario.client.getLoom(loomId);
-      expect(detail.responses).toHaveLength(8);
+      expect(detail.responses).toHaveLength(4);
       expect(detail.responses.map((response) => response.id)).toEqual(
         expect.arrayContaining([
-          first.userResponseId,
           first.assistantResponseId,
-          second.userResponseId,
           second.assistantResponseId,
-          third.userResponseId,
           third.assistantResponseId,
-          retrieval.userResponseId,
           retrieval.assistantResponseId,
         ])
       );

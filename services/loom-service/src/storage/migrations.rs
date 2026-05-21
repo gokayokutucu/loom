@@ -68,6 +68,16 @@ const MIGRATIONS: &[Migration] = &[
         name: "ui_state",
         sql: include_str!("../../migrations/0012_ui_state.sql"),
     },
+    Migration {
+        version: 13,
+        name: "memory",
+        sql: include_str!("../../migrations/0013_memory.sql"),
+    },
+    Migration {
+        version: 14,
+        name: "model_runtime",
+        sql: include_str!("../../migrations/0014_model_runtime.sql"),
+    },
 ];
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
@@ -162,6 +172,11 @@ mod tests {
             "context_graph_links",
             "navigation_history",
             "ui_state",
+            "memories",
+            "memory_events",
+            "runtime_model_assets",
+            "runtime_model_download_jobs",
+            "runtime_model_download_events",
         ] {
             columns.extend(
                 sqlx::query_scalar::<_, String>(&format!(

@@ -72,6 +72,17 @@ The renderer cannot choose a binary path, port, command, environment, or process
 
 In web mode the restart action is disabled with explanatory copy because browser deployments do not own a local runtime process.
 
+## Desktop Permissions
+
+Electron exposes a narrow permission bridge for desktop-only operating system affordances:
+
+```text
+window.loomDesktop.permissions.microphoneStatus()
+window.loomDesktop.permissions.openMicrophoneSettings()
+```
+
+The bridge reports macOS microphone permission status and can open the macOS Privacy & Security -> Microphone pane when access is denied. It does not grant permissions itself, expose arbitrary system settings, or let the renderer execute commands.
+
 ## Renderer Endpoint
 
 Web mode keeps the default service URL:
@@ -88,6 +99,18 @@ window.loomDesktop.getRuntimeInfo()
 
 The renderer reads `serviceUrl` from that bridge and sends service calls directly to the Electron-started local sidecar. No broad filesystem, process, or secret bridge is exposed.
 
+## Model Runtime Assets
+
+Model inventory, download jobs, and progress are exposed through `loom-service` runtime-manager APIs. The renderer requests approved operations only; it does not call Ollama model-management APIs or manage binaries directly.
+
+For the current external Ollama adapter, model binaries remain in Ollama's own store, usually:
+
+```text
+~/.ollama/models
+```
+
+Packaged Electron runtime assets and future Loom-owned GGUF/Whisper assets should live under the app user data directory instead of SQLite. Electron may report and prepare those directories later, but `loom-service` remains the authority for manifests, checksums, installed state, and job progress.
+
 ## Security Defaults
 
 The Electron window uses:
@@ -95,7 +118,7 @@ The Electron window uses:
 - `contextIsolation: true`
 - `nodeIntegration: false`
 - `sandbox: true`
-- a narrow preload surface for runtime info/status/restart and window controls only
+- a narrow preload surface for runtime info/status/restart, desktop permission affordances, and window controls only
 
 The renderer cannot execute arbitrary commands or manage SQLite directly.
 

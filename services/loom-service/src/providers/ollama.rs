@@ -232,6 +232,51 @@ impl OllamaRuntime {
         Ok(response)
     }
 
+    pub async fn post_pull_stream(&self, model: &str) -> Result<Response, OllamaRuntimeError> {
+        let client = self.client()?;
+        let response = client
+            .post(self.pull_url())
+            .json(&serde_json::json!({ "model": model, "stream": true }))
+            .send()
+            .await
+            .map_err(|error| {
+                if error.is_connect() {
+                    OllamaRuntimeError::new(
+                        OllamaRuntimeErrorKind::RuntimeUnavailable,
+                        "Ollama is not reachable.",
+                        true,
+                    )
+                } else if error.is_timeout() {
+                    OllamaRuntimeError::new(
+                        OllamaRuntimeErrorKind::TimeoutBeforeFirstChunk,
+                        "Ollama model download timed out.",
+                        true,
+                    )
+                } else {
+                    OllamaRuntimeError::new(
+                        OllamaRuntimeErrorKind::UnexpectedResponse,
+                        "Ollama returned an unexpected model download response.",
+                        true,
+                    )
+                }
+            })?;
+
+        let status = response.status();
+        if !status.is_success() {
+            let body_preview = response.text().await.unwrap_or_default();
+            let preview = safe_preview(&body_preview);
+            let kind = classify_http_failure(status.as_u16(), &preview);
+            return Err(OllamaRuntimeError::new(
+                kind,
+                "Ollama rejected the model download request.",
+                true,
+            )
+            .with_status(status.as_u16()));
+        }
+
+        Ok(response)
+    }
+
     pub fn register_cancellation(&self, request_id: &str) -> watch::Receiver<bool> {
         self.cancellations.register(request_id)
     }
@@ -254,6 +299,10 @@ impl OllamaRuntime {
 
     fn version_url(&self) -> String {
         format!("{}/api/version", self.config.base_url)
+    }
+
+    fn pull_url(&self) -> String {
+        format!("{}/api/pull", self.config.base_url)
     }
 
     fn client(&self) -> Result<&Client, OllamaRuntimeError> {

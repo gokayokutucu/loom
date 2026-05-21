@@ -4,6 +4,8 @@ import {
   speechToTextTransitionTable,
   type SpeechToTextState,
 } from "../src/state/speechToTextMachine";
+import { speechSetupRemediationMessage } from "../src/hooks/useSpeechToTextRecorder";
+import { encodePcm16WavFromChannels } from "../src/services/audioWav";
 
 test.describe("[pure-state] Speech-to-Text recorder lifecycle machine", () => {
   test("idle requests permission and reaches recording", () => {
@@ -60,12 +62,27 @@ test.describe("[pure-state] Speech-to-Text recorder lifecycle machine", () => {
     expect(
       reduceSpeechToText(
         { status: "transcribing", error: null },
-        { type: "TRANSCRIBE_FAILED", error: "Local speech-to-text provider is not configured." }
+        { type: "TRANSCRIBE_FAILED", error: "Speech-to-Text setup required." }
       )
     ).toEqual({
       status: "error",
-      error: "Local speech-to-text provider is not configured.",
+      error: "Speech-to-Text setup required.",
     });
+  });
+
+  test("setup-aware recorder remediation replaces generic provider errors", () => {
+    expect(speechSetupRemediationMessage({ state: "whisper_not_found" } as never)).toBe(
+      "Local Speech Engine is not installed. Open Settings → Capability → Speech-to-Text and install the local speech engine."
+    );
+    expect(speechSetupRemediationMessage({ state: "model_missing" } as never)).toBe(
+      "Local Speech Engine is installed, but no speech model is available. Open Settings → Capability → Speech-to-Text and download/select a model."
+    );
+    expect(speechSetupRemediationMessage({ state: "model_ready" } as never)).toBe(
+      "Speech-to-Text is not configured yet. Open Settings → Capability → Speech-to-Text and run Auto-configure."
+    );
+    expect(speechSetupRemediationMessage({ state: "ready" } as never)).toBe(
+      "Speech-to-Text is configured, but the local command failed. Open Settings → Capability → Speech-to-Text and run Check Provider."
+    );
   });
 
   test("recording can be cancelled", () => {
@@ -103,5 +120,21 @@ test.describe("[pure-state] Speech-to-Text recorder lifecycle machine", () => {
       "stopping",
       "transcribing",
     ]);
+  });
+
+  test("PCM WAV encoder emits a valid RIFF/WAVE payload", () => {
+    const wav = encodePcm16WavFromChannels([new Float32Array([0, 0.5, -0.5, 1, -1])], 16_000);
+    const header = String.fromCharCode(...wav.slice(0, 4));
+    const wave = String.fromCharCode(...wav.slice(8, 12));
+    const data = String.fromCharCode(...wav.slice(36, 40));
+    const view = new DataView(wav.buffer);
+
+    expect(header).toBe("RIFF");
+    expect(wave).toBe("WAVE");
+    expect(data).toBe("data");
+    expect(view.getUint16(20, true)).toBe(1);
+    expect(view.getUint16(22, true)).toBe(1);
+    expect(view.getUint32(24, true)).toBe(16_000);
+    expect(view.getUint32(40, true)).toBe(10);
   });
 });

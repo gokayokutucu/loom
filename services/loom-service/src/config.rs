@@ -68,6 +68,7 @@ pub struct LoomServiceConfig {
     pub ollama: OllamaSection,
     pub providers: ProviderSection,
     pub speech: SpeechToTextConfig,
+    pub memory: MemorySection,
     pub context: ContextSection,
     pub runtime: RuntimeSection,
     pub features: FeatureSection,
@@ -117,6 +118,13 @@ pub struct ContextSection {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct MemorySection {
+    pub reference_recent_looms: bool,
+    pub reference_saved_memories: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct RuntimeSection {
     pub event_heartbeat_ms: u64,
     pub max_active_generations: u32,
@@ -150,6 +158,7 @@ pub struct ConfigPatch {
     pub ollama: Option<OllamaPatch>,
     pub providers: Option<ProviderPatch>,
     pub speech: Option<SpeechToTextPatch>,
+    pub memory: Option<MemoryPatch>,
     pub context: Option<ContextPatch>,
     pub runtime: Option<RuntimePatch>,
     pub features: Option<FeaturePatch>,
@@ -195,6 +204,13 @@ pub struct ContextPatch {
     pub default_num_ctx_small: Option<u32>,
     pub default_num_ctx_medium: Option<u32>,
     pub default_num_ctx_large: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryPatch {
+    pub reference_recent_looms: Option<bool>,
+    pub reference_saved_memories: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -280,6 +296,10 @@ impl Default for LoomServiceConfig {
                 )],
             },
             speech: SpeechToTextConfig::default(),
+            memory: MemorySection {
+                reference_recent_looms: true,
+                reference_saved_memories: false,
+            },
             context: ContextSection {
                 max_context_length: 8_192,
                 default_num_ctx_small: 2_048,
@@ -652,6 +672,20 @@ fn serialize_config(config: &LoomServiceConfig) -> String {
         format_toml_string_array(&config.speech.warnings)
     )
     .expect("write speech warnings");
+
+    writeln!(&mut output, "\n[memory]").expect("write memory config");
+    writeln!(
+        &mut output,
+        "referenceRecentLooms = {}",
+        config.memory.reference_recent_looms
+    )
+    .expect("write reference recent Looms");
+    writeln!(
+        &mut output,
+        "referenceSavedMemories = {}",
+        config.memory.reference_saved_memories
+    )
+    .expect("write reference saved memories");
 
     writeln!(&mut output, "\n[context]").expect("write context config");
     writeln!(
@@ -1039,6 +1073,12 @@ fn set_config_value(
         }
         ("speech", "warnings") => {
             config.speech.warnings = parse_toml_string_array(value, line_number)?;
+        }
+        ("memory", "referenceRecentLooms") => {
+            config.memory.reference_recent_looms = parse_toml_bool(value, line_number)?;
+        }
+        ("memory", "referenceSavedMemories") => {
+            config.memory.reference_saved_memories = parse_toml_bool(value, line_number)?;
         }
         ("context", "maxContextLength") => {
             config.context.max_context_length = parse_toml_u32(value, line_number)?;
@@ -1527,6 +1567,14 @@ fn apply_patch(config: &mut LoomServiceConfig, patch: ConfigPatch) {
     if let Some(speech) = patch.speech {
         apply_speech_patch(&mut config.speech, speech);
     }
+    if let Some(memory) = patch.memory {
+        if let Some(value) = memory.reference_recent_looms {
+            config.memory.reference_recent_looms = value;
+        }
+        if let Some(value) = memory.reference_saved_memories {
+            config.memory.reference_saved_memories = value;
+        }
+    }
     if let Some(context) = patch.context {
         if let Some(value) = context.max_context_length {
             config.context.max_context_length = value;
@@ -1681,6 +1729,7 @@ pub fn classify_restart_requirement(
         );
     }
     check!("speech", current.speech, candidate.speech, false);
+    check!("memory", current.memory, candidate.memory, false);
     check!(
         "context.maxContextLength",
         current.context.max_context_length,
@@ -1789,7 +1838,7 @@ mod tests {
     use super::{
         apply_env_overrides_from, classify_restart_requirement, load_or_create_config,
         serialize_config, validate_config, write_config_atomic, ConfigManager, ConfigPatch,
-        LoomServiceConfig, ProviderPatch, ServicePatch,
+        LoomServiceConfig, MemoryPatch, ProviderPatch, ServicePatch,
     };
     use crate::providers::config::{
         classify_provider_config_change, normalize_provider_request_options,
@@ -1975,6 +2024,35 @@ mod tests {
             ]
         );
         assert_eq!(loaded.speech.local_command_timeout_ms, 60_000);
+    }
+
+    #[test]
+    fn memory_config_parses_and_patches_without_restart() {
+        let mut config = LoomServiceConfig::default();
+        config.memory.reference_recent_looms = false;
+        config.memory.reference_saved_memories = true;
+        let path = test_path("memory-config");
+        write_config_atomic(&path, &config).expect("write config");
+
+        let loaded = load_or_create_config(&path).expect("load config");
+        assert!(!loaded.memory.reference_recent_looms);
+        assert!(loaded.memory.reference_saved_memories);
+
+        let manager = ConfigManager::new(path, loaded);
+        let result = manager
+            .patch(ConfigPatch {
+                memory: Some(MemoryPatch {
+                    reference_recent_looms: Some(true),
+                    reference_saved_memories: Some(false),
+                }),
+                ..ConfigPatch::default()
+            })
+            .expect("patch memory config");
+
+        assert!(!result.restart.restart_required);
+        assert_eq!(result.restart.changed_paths, vec!["memory".to_string()]);
+        assert!(result.config.memory.reference_recent_looms);
+        assert!(!result.config.memory.reference_saved_memories);
     }
 
     #[test]
