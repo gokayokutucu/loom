@@ -91,6 +91,125 @@ function expectCleanGraphLabels(graph: ServiceGraphProjection) {
 }
 
 test.describe("[product-service-backed] Graph projection product proof", () => {
+  test("[product-service-backed] clamps long response questions in graph nodes while modal keeps full content", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+    const longQuestion = [
+      "Please analyze a deliberately long graph node question preview for Loom.",
+      "It should mention addressable responses, Weft branches, explicit references, attachment lineage, provenance, replayable retrieval diagnostics, local-first runtime boundaries, graph navigation, and compact card readability.",
+      "The graph card should stay readable even when the user writes a very long prompt with multiple clauses, but the response detail modal must preserve the full original question text for reading, copying, and review.",
+      "Confirm that the compact preview does not remove Bookmark, Link, Weft, or Open actions.",
+      "Add enough follow-up detail to force the response preview modal question area past ten visual lines on a desktop viewport while still keeping the answer section available below it.",
+      "The modal should behave like a reading surface with progressive disclosure: collapsed by default for scanning, expandable for exact wording, and reversible with a Show less control.",
+      "This final sentence exists only to make the question visibly longer than the modal threshold without changing stored prompt content or graph projection semantics.",
+    ].join(" ");
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(page, longQuestion);
+      await expect(
+        page.getByText("Deterministic E2E provider only answers").first()
+      ).toBeVisible({ timeout: 30_000 });
+
+      await page.getByRole("button", { name: "Toggle Graph View" }).click();
+      await expect(page.getByRole("heading", { name: "Weft-aware Loom graph" })).toBeVisible();
+
+      const graphNode = page.locator(".loom-graph-node--response").filter({
+        hasText: "deliberately long graph node question preview",
+      });
+      await expect(graphNode).toHaveCount(1);
+      await expect(graphNode).toBeVisible();
+
+      const questionPreview = graphNode.locator(".loom-graph-node-question-preview");
+      await expect(questionPreview).toBeVisible();
+      await expect(questionPreview).toContainText("compact preview does not remove");
+
+      const previewMetrics = await questionPreview.evaluate((element) => {
+        const styles = window.getComputedStyle(element);
+        const lineHeight = Number.parseFloat(styles.lineHeight);
+        const height = element.getBoundingClientRect().height;
+        return {
+          display: styles.display,
+          lineClamp: styles.webkitLineClamp,
+          lineHeight,
+          height,
+          clientHeight: (element as HTMLElement).clientHeight,
+          scrollHeight: (element as HTMLElement).scrollHeight,
+        };
+      });
+      expect(previewMetrics.lineClamp).toBe("10");
+      expect(previewMetrics.clientHeight).toBeLessThanOrEqual(
+        previewMetrics.lineHeight * 10 + 3
+      );
+      expect(previewMetrics.scrollHeight).toBeGreaterThan(previewMetrics.clientHeight);
+
+      const graphNodeMetrics = await graphNode.evaluate((element) => ({
+        height: element.getBoundingClientRect().height,
+        clientHeight: (element as HTMLElement).clientHeight,
+      }));
+      expect(graphNodeMetrics.clientHeight).toBeLessThanOrEqual(360);
+
+      await expect(graphNode.locator(".loom-graph-node-bookmark")).toBeVisible();
+      await expect(graphNode.getByRole("button", { name: "Link", exact: true })).toBeVisible();
+      await expect(graphNode.locator(".loom-graph-node-weft")).toBeVisible();
+      await expect(graphNode.locator(".loom-graph-node-open")).toBeVisible();
+
+      await graphNode.click();
+      const preview = page.locator(".graph-response-preview-modal");
+      await expect(preview).toBeVisible();
+      const modalQuestion = preview.locator(".graph-response-preview-question-content p");
+      const modalQuestionToggle = preview.locator(".graph-response-preview-question-toggle");
+      await expect(modalQuestion).toContainText(
+        longQuestion
+      );
+      await expect(modalQuestion).toHaveClass(/is-clamped/);
+      await expect(modalQuestionToggle).toHaveText("Show full message");
+      await expect(preview.locator(".graph-response-preview-answer")).toContainText(
+        "Deterministic E2E provider only answers"
+      );
+      const previewScroll = preview.locator(".graph-response-preview-scroll");
+      await expect(previewScroll.locator(".graph-response-preview-question")).toBeVisible();
+      await expect(previewScroll.locator(".graph-response-preview-answer")).toBeVisible();
+      await expect(preview.locator(".graph-response-preview-toolbar")).toBeVisible();
+      await modalQuestionToggle.click();
+      await expect(modalQuestion).not.toHaveClass(/is-clamped/);
+      await expect(modalQuestionToggle).toHaveText("Show less");
+      await expect(modalQuestion).toContainText(longQuestion);
+      const modalLayout = await preview.evaluate((element) => {
+        const modal = element as HTMLElement;
+        const toolbar = modal.querySelector(".graph-response-preview-toolbar");
+        const scroll = modal.querySelector(".graph-response-preview-scroll") as HTMLElement | null;
+        const question = modal.querySelector(".graph-response-preview-question");
+        const answer = modal.querySelector(".graph-response-preview-answer");
+        return {
+          questionInScroll: Boolean(scroll?.contains(question)),
+          answerInScroll: Boolean(scroll?.contains(answer)),
+          questionInToolbar: Boolean(toolbar?.contains(question)),
+          scrollOverflowing: scroll ? scroll.scrollHeight > scroll.clientHeight : false,
+        };
+      });
+      expect(modalLayout.questionInScroll).toBe(true);
+      expect(modalLayout.answerInScroll).toBe(true);
+      expect(modalLayout.questionInToolbar).toBe(false);
+      expect(modalLayout.scrollOverflowing).toBe(true);
+
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
   test("[product-service-backed] renders service-created Loom graph data with Weft, Reference, and Bookmark coverage", async ({
     page,
   }) => {

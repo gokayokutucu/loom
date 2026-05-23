@@ -1,9 +1,11 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
 } from "react";
 import {
@@ -87,6 +89,7 @@ const GRAPH_NODE_WIDTH = 292;
 const GRAPH_COMPOSER_WIDTH = 620;
 const GRAPH_COMPOSER_NODE_GAP = 60;
 const GRAPH_FALLBACK_NODE_HEIGHT = 220;
+const GRAPH_PREVIEW_QUESTION_COLLAPSE_LINES = 10;
 
 interface LoomGraphComposerNodeData extends Record<string, unknown> {
   content: ReactNode;
@@ -215,6 +218,65 @@ function LoomGraphComposerNode({ data }: NodeProps<LoomGraphComposerFlowNode>) {
       </button>
       {data.content}
     </section>
+  );
+}
+
+function GraphResponsePreviewQuestion({ question }: { question: string }) {
+  const questionRef = useRef<HTMLParagraphElement | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [collapsible, setCollapsible] = useState(false);
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [question]);
+
+  useLayoutEffect(() => {
+    const element = questionRef.current;
+    if (!element) return;
+
+    function measure() {
+      if (!element) return;
+      const overflowing = element.scrollHeight > element.clientHeight + 2;
+      setCollapsible((current) => (expanded ? current || overflowing : overflowing));
+    }
+
+    measure();
+    const resizeObserver =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    resizeObserver?.observe(element);
+    return () => resizeObserver?.disconnect();
+  }, [question, expanded]);
+
+  return (
+    <div
+      className="graph-response-preview-question-content"
+      data-expanded={expanded ? "true" : "false"}
+    >
+      <p
+        ref={questionRef}
+        className={expanded ? undefined : "is-clamped"}
+        style={
+          expanded
+            ? undefined
+            : ({
+                "--graph-preview-question-clamp-lines":
+                  GRAPH_PREVIEW_QUESTION_COLLAPSE_LINES,
+              } as CSSProperties)
+        }
+      >
+        {question}
+      </p>
+      {collapsible && (
+        <button
+          type="button"
+          className="graph-response-preview-question-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? "Show less" : "Show full message"}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -1125,12 +1187,8 @@ function GraphViewInner({
               aria-modal="true"
               aria-label="Response question and answer"
             >
-              <div className="graph-response-preview-header">
-                <div className="graph-response-preview-block graph-response-preview-question">
-                  <span>Question</span>
-                  <p>{responsePreview.question}</p>
-                </div>
-                {responsePreviewTarget && (
+              {responsePreviewTarget && (
+                <div className="graph-response-preview-toolbar">
                   <div className="graph-response-preview-actions" aria-label="Response actions">
                     <div className="graph-response-preview-action-group">
                       <button
@@ -1282,9 +1340,13 @@ function GraphViewInner({
                       </button>
                     </div>
                   </div>
-                )}
-              </div>
-              <div className="graph-response-preview-scroll">
+                </div>
+              )}
+              <article className="graph-response-preview-scroll">
+                <div className="graph-response-preview-block graph-response-preview-question">
+                  <span>Question</span>
+                  <GraphResponsePreviewQuestion question={responsePreview.question} />
+                </div>
                 <div className="graph-response-preview-block graph-response-preview-answer">
                   <span>Answer</span>
                   {responsePreviewPending ? (
@@ -1296,7 +1358,7 @@ function GraphViewInner({
                     <AssistantMarkdownContent markdown={responsePreview.answerMarkdown} />
                   )}
                 </div>
-              </div>
+              </article>
             </section>
           </div>
         )}
