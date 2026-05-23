@@ -168,6 +168,8 @@ pub fn router(
                 .patch(looms::patch_loom)
                 .delete(looms::delete_loom),
         )
+        .route("/looms/:loom_id/archive", post(looms::archive_loom))
+        .route("/looms/:loom_id/restore", post(looms::restore_loom))
         .route("/looms/:loom_id/wefts", get(wefts::list_wefts_for_loom))
         .route(
             "/responses/:response_id/wefts",

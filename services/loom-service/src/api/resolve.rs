@@ -78,9 +78,10 @@ pub(crate) async fn resolve_address(
     if !is_supported_loom_address(address) {
         return Ok(invalid_response("Address must use the loom:// scheme"));
     }
+    let lookup_address = address.split_once('#').map_or(address, |(base, _)| base);
 
     let addresses = AddressRepository::new(database);
-    if let Some(alias) = addresses.resolve_alias(address).await? {
+    if let Some(alias) = addresses.resolve_alias(lookup_address).await? {
         let Some(record) = addresses.resolve_address(&alias.canonical_uri).await? else {
             return Ok(ResolveAddressResponse {
                 status: ResolveAddressStatus::Missing,
@@ -95,10 +96,10 @@ pub(crate) async fn resolve_address(
         return resolve_record(database, record, ResolveAddressStatus::AliasResolved).await;
     }
 
-    let Some(record) = addresses.resolve_address(address).await? else {
+    let Some(record) = addresses.resolve_address(lookup_address).await? else {
         return Ok(ResolveAddressResponse {
             status: ResolveAddressStatus::Missing,
-            canonical_uri: Some(address.to_string()),
+            canonical_uri: Some(lookup_address.to_string()),
             object_kind: None,
             object_id: None,
             destination: None,
@@ -376,6 +377,36 @@ mod tests {
             .expect("resolve");
 
         assert_eq!(response.status, ResolveAddressStatus::Resolved);
+        assert_eq!(response.object_kind.as_deref(), Some("response"));
+        let destination = response.destination.expect("destination");
+        assert_eq!(destination.loom_id, "loom-1");
+        assert_eq!(
+            destination.scroll_target_response_id.as_deref(),
+            Some("response-1")
+        );
+        assert_eq!(destination.scroll_mode.as_deref(), Some("exact"));
+    }
+
+    #[tokio::test]
+    async fn reference_selector_address_resolves_to_parent_response_address() {
+        let database = test_database().await;
+        insert_loom(&database, "loom-1", "loom", None, None).await;
+        insert_response(&database, "response-1", "loom-1", None).await;
+        insert_address(
+            &database,
+            "address-1",
+            "response",
+            "response-1",
+            "loom://response-1",
+        )
+        .await;
+
+        let response = resolve_address(&database, "loom://response-1#fragment=abc123")
+            .await
+            .expect("resolve");
+
+        assert_eq!(response.status, ResolveAddressStatus::Resolved);
+        assert_eq!(response.canonical_uri.as_deref(), Some("loom://response-1"));
         assert_eq!(response.object_kind.as_deref(), Some("response"));
         let destination = response.destination.expect("destination");
         assert_eq!(destination.loom_id, "loom-1");

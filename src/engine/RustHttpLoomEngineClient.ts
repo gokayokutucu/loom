@@ -2,6 +2,7 @@ import type { LoomEngineClient } from "./LoomEngineClient";
 import type {
   AddReferenceInput,
   AddReferenceResult,
+  ArchiveLoomInput,
   BookmarkResponseInput,
   BookmarkResult,
   CancelMessageInput,
@@ -41,6 +42,7 @@ import type {
   OpenReferenceInput,
   ListBookmarksResult,
   ListHistoryResult,
+  ListLoomsInput,
   ListReferencesInput,
   ListReferencesResult,
   ListAttachmentsInput,
@@ -55,6 +57,7 @@ import type {
   RemoveReferenceInput,
   RetryUserMessageInput,
   RenameLoomInput,
+  RestoreLoomInput,
   ResolveAddressInput,
   ResolveAddressResult,
   RustHttpLoomEngineClientOptions,
@@ -597,6 +600,7 @@ function validateLoomSummary(value: unknown, endpoint: string): LoomSummary {
     weftKind: weftKindFromMetadata(metadata),
     createdAt: stringValue(value, "createdAt"),
     updatedAt: stringValue(value, "updatedAt"),
+    archivedAt: stringValue(value, "archivedAt"),
     metadata,
   };
 }
@@ -2745,14 +2749,15 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     };
   }
 
-  async listLooms(): Promise<LoomSummary[]> {
-    const response = await this.requestJson<unknown>("/looms", { method: "GET" });
+  async listLooms(input: ListLoomsInput = {}): Promise<LoomSummary[]> {
+    const endpoint = input.archived ? "/looms?archived=true" : "/looms";
+    const response = await this.requestJson<unknown>(endpoint, { method: "GET" });
     if (!isRecord(response) || !Array.isArray(response.looms)) {
       throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Loom list.", {
-        endpoint: "/looms",
+        endpoint,
       });
     }
-    return response.looms.map((loom) => validateLoomSummary(loom, "/looms"));
+    return response.looms.map((loom) => validateLoomSummary(loom, endpoint));
   }
 
   async getLoom(loomId: string): Promise<LoomDetail> {
@@ -2780,6 +2785,18 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
       method: "PATCH",
       body: JSON.stringify(patch),
     });
+    return validateLoomEnvelope(response, endpoint);
+  }
+
+  async archiveLoom(input: ArchiveLoomInput): Promise<CreateLoomResult> {
+    const endpoint = `/looms/${encodeURIComponent(input.loomId)}/archive`;
+    const response = await this.requestJson<unknown>(endpoint, { method: "POST" });
+    return validateLoomEnvelope(response, endpoint);
+  }
+
+  async restoreLoom(input: RestoreLoomInput): Promise<CreateLoomResult> {
+    const endpoint = `/looms/${encodeURIComponent(input.loomId)}/restore`;
+    const response = await this.requestJson<unknown>(endpoint, { method: "POST" });
     return validateLoomEnvelope(response, endpoint);
   }
 

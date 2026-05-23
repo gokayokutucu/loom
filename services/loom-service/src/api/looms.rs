@@ -10,7 +10,7 @@ use crate::{
     },
 };
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     Json,
 };
@@ -53,6 +53,12 @@ pub struct UpdateLoomRequest {
     pub metadata: Option<Value>,
 }
 
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct ListLoomsQuery {
+    pub archived: Option<bool>,
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct LoomResponse {
@@ -79,6 +85,7 @@ pub struct LoomDto {
     pub display_code: String,
     pub created_at: String,
     pub updated_at: String,
+    pub archived_at: Option<String>,
     pub metadata: Option<Value>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub responses: Vec<ResponseDto>,
@@ -123,11 +130,15 @@ pub struct LoomApiError {
 
 pub async fn list_looms(
     State(state): State<AppState>,
+    Query(query): Query<ListLoomsQuery>,
 ) -> Result<Json<LoomListResponse>, (StatusCode, Json<LoomApiError>)> {
-    let looms = LoomRepository::new(&state.database)
-        .list_looms()
-        .await
-        .map_err(storage_error)?;
+    let repository = LoomRepository::new(&state.database);
+    let looms = if query.archived.unwrap_or(false) {
+        repository.list_archived_looms().await
+    } else {
+        repository.list_looms().await
+    }
+    .map_err(storage_error)?;
     Ok(Json(LoomListResponse {
         looms: looms
             .into_iter()
@@ -282,6 +293,46 @@ pub async fn patch_loom(
     }))
 }
 
+pub async fn archive_loom(
+    State(state): State<AppState>,
+    Path(loom_id): Path<String>,
+) -> Result<Json<LoomResponse>, (StatusCode, Json<LoomApiError>)> {
+    let Some(loom) = LoomRepository::new(&state.database)
+        .archive_loom(&loom_id, &timestamp())
+        .await
+        .map_err(storage_error)?
+    else {
+        return Err(not_found());
+    };
+    if loom.is_deleted {
+        return Err(not_found());
+    }
+
+    Ok(Json(LoomResponse {
+        loom: loom_to_dto(loom, Vec::new()),
+    }))
+}
+
+pub async fn restore_loom(
+    State(state): State<AppState>,
+    Path(loom_id): Path<String>,
+) -> Result<Json<LoomResponse>, (StatusCode, Json<LoomApiError>)> {
+    let Some(loom) = LoomRepository::new(&state.database)
+        .restore_loom(&loom_id, &timestamp())
+        .await
+        .map_err(storage_error)?
+    else {
+        return Err(not_found());
+    };
+    if loom.is_deleted {
+        return Err(not_found());
+    }
+
+    Ok(Json(LoomResponse {
+        loom: loom_to_dto(loom, Vec::new()),
+    }))
+}
+
 pub async fn delete_loom(
     State(state): State<AppState>,
     Path(loom_id): Path<String>,
@@ -393,6 +444,7 @@ fn loom_to_dto(loom: LoomRecord, responses: Vec<ResponseDto>) -> LoomDto {
         display_code,
         created_at: loom.created_at,
         updated_at: loom.updated_at,
+        archived_at: loom.archived_at,
         metadata: loom
             .metadata_json
             .as_deref()
@@ -592,8 +644,8 @@ fn stable_suffix(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_loom, delete_loom, get_loom, list_looms, patch_loom, CreateLoomRequest,
-        UpdateLoomRequest,
+        archive_loom, create_loom, delete_loom, get_loom, list_looms, patch_loom, restore_loom,
+        CreateLoomRequest, ListLoomsQuery, UpdateLoomRequest,
     };
     use crate::{
         api::{resolve::resolve_address, state::AppState},
@@ -603,7 +655,7 @@ mod tests {
         storage::db::test_database,
     };
     use axum::{
-        extract::{Path, State},
+        extract::{Path, Query, State},
         http::StatusCode,
         Json,
     };
@@ -669,10 +721,59 @@ mod tests {
         assert_eq!(detail.loom.loom_id, "loom-1");
         assert!(detail.loom.display_code.starts_with("L-"));
 
-        let list = list_looms(State(state)).await.expect("list Looms").0;
+        let list = list_looms(State(state), Query(ListLoomsQuery::default()))
+            .await
+            .expect("list Looms")
+            .0;
         assert_eq!(list.looms.len(), 1);
         assert_eq!(list.looms[0].loom_id, "loom-1");
         assert_eq!(list.looms[0].display_code, detail.loom.display_code);
+    }
+
+    #[tokio::test]
+    async fn archive_and_restore_loom_moves_between_active_and_archived_lists() {
+        let state = test_state().await;
+        let _ = create_loom(State(state.clone()), Json(create_request("loom-1")))
+            .await
+            .expect("create Loom");
+
+        let archived = archive_loom(State(state.clone()), Path("loom-1".to_string()))
+            .await
+            .expect("archive Loom")
+            .0;
+        assert_eq!(archived.loom.loom_id, "loom-1");
+        assert!(archived.loom.archived_at.is_some());
+
+        let active_list = list_looms(State(state.clone()), Query(ListLoomsQuery::default()))
+            .await
+            .expect("list active Looms")
+            .0;
+        assert!(active_list.looms.is_empty());
+
+        let archived_list = list_looms(
+            State(state.clone()),
+            Query(ListLoomsQuery {
+                archived: Some(true),
+            }),
+        )
+        .await
+        .expect("list archived Looms")
+        .0;
+        assert_eq!(archived_list.looms.len(), 1);
+        assert_eq!(archived_list.looms[0].loom_id, "loom-1");
+
+        let restored = restore_loom(State(state.clone()), Path("loom-1".to_string()))
+            .await
+            .expect("restore Loom")
+            .0;
+        assert_eq!(restored.loom.loom_id, "loom-1");
+        assert!(restored.loom.archived_at.is_none());
+
+        let active_list = list_looms(State(state), Query(ListLoomsQuery::default()))
+            .await
+            .expect("list active Looms after restore")
+            .0;
+        assert_eq!(active_list.looms.len(), 1);
     }
 
     #[tokio::test]
@@ -716,7 +817,7 @@ mod tests {
             .expect("delete Loom");
         assert_eq!(status, StatusCode::NO_CONTENT);
 
-        let list = list_looms(State(state.clone()))
+        let list = list_looms(State(state.clone()), Query(ListLoomsQuery::default()))
             .await
             .expect("list Looms")
             .0;

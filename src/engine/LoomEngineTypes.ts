@@ -319,7 +319,12 @@ export interface LoomSummary {
   weftKind?: "exploration" | "revision";
   createdAt?: string;
   updatedAt?: string;
+  archivedAt?: string;
   metadata?: JsonValue;
+}
+
+export interface ListLoomsInput {
+  archived?: boolean;
 }
 
 export interface LoomDetail extends LoomSummary {
@@ -385,6 +390,14 @@ export interface UpdateLoomInput {
 }
 
 export interface DeleteLoomInput {
+  loomId: string;
+}
+
+export interface ArchiveLoomInput {
+  loomId: string;
+}
+
+export interface RestoreLoomInput {
   loomId: string;
 }
 
@@ -916,6 +929,8 @@ export interface TypeScriptLocalLoomEngineDependencies {
   createOrOpenWeft?: (input: CreateOrOpenWeftInput) => Promise<CreateOrOpenWeftResult>;
   persistWeftTurns?: (input: PersistWeftTurnsInput) => Promise<PersistWeftTurnsResult>;
   updateResponse?: (input: UpdateResponseInput) => Promise<UpdateResponseResult>;
+  archiveLoom?: (input: ArchiveLoomInput) => Promise<CreateLoomResult>;
+  restoreLoom?: (input: RestoreLoomInput) => Promise<CreateLoomResult>;
   deleteLoom?: (input: DeleteLoomInput) => Promise<void>;
   addReference?: (input: AddReferenceInput) => Promise<AddReferenceResult>;
   removeReference?: (input: RemoveReferenceInput) => Promise<void>;
