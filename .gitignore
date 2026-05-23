@@ -1,15 +1,28 @@
 node_modules/
 dist/
 dist-electron/
+release/
+*m-main/
 .DS_Store
 *.log
+*.db
+*.sqlite
+*.sqlite3
+*.db-*
+*.sqlite-*
+*.tmp
+*.bak
+*.orig
 .env
 .env.*
+.vite/
 .playwright-mcp/
 playwright-report/
 test-results/
 services/loom-service/target/
 services/loom-service/.data/
+public/LoomMacIcon.iconset/
+*.rw.dmg
 
 # Local investigation sources. Do not stage, commit, or push.
 *Chat/

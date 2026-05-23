@@ -145,3 +145,19 @@ dist-electron/Loom.app
 ```
 
 This is a developer artifact only. It is not signed, notarized, or wrapped in a DMG. Production signing, notarization, auto-update, Ollama onboarding, and Whisper/STT binary onboarding remain future work.
+
+macOS arm64 distribution packaging is available as a one-target desktop artifact:
+
+```text
+npm run electron:package:mac:arm64
+npm run electron:dist:mac:arm64
+```
+
+The macOS arm64 package builds the React production bundle, builds `loom-service` with `--release --target aarch64-apple-darwin`, copies the release sidecar into `Loom.app/Contents/Resources/loom-service/loom-service`, and writes packaged runtime config/SQLite data under Electron `userData`:
+
+```text
+~/Library/Application Support/loom-ai/loom-service/loom-service.toml
+~/Library/Application Support/loom-ai/loom-service/loom.db
+```
+
+The distribution command creates a drag-to-Applications DMG under `release/`. The app remains ad-hoc signed only and is not notarized until `MACOS-CODESIGN-NOTARIZATION-001`.
