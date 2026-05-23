@@ -28,8 +28,9 @@ Use this order:
 6. Validate `main`.
 7. Tag `main` with `v<package.json version>`.
 8. Push the tag.
-9. Let GitHub Actions build the macOS arm64 artifact.
-10. Publish the release manually after reviewing the workflow artifact.
+9. Let GitHub Actions build the macOS arm64 artifact and draft GitHub Release.
+10. Review the draft release and attached DMG.
+11. Publish the release manually only after approval.
 
 Do not tag from feature branches. Do not publish a release before the artifact from the tag workflow has been reviewed.
 
@@ -151,8 +152,15 @@ The workflow:
 - packages `Loom.app`
 - creates the DMG
 - uploads `release/Loom-*-mac-arm64.dmg` as a workflow artifact
+- verifies tag `vX.Y.Z` matches `package.json` version `X.Y.Z`
+- creates or updates a draft GitHub Release on matching tag builds
+- attaches `release/Loom-X.Y.Z-mac-arm64.dmg` to the draft release
 
 It does not publish a GitHub Release, notarize the app, create tags, or use Apple signing credentials.
+
+Manual `workflow_dispatch` runs are artifact-only by default. They can create or update a draft release only when `createDraftRelease` is explicitly enabled and the workflow is run from the matching `vX.Y.Z` tag.
+
+Do not configure main pushes to create tags automatically. Tags remain maintainer-owned release decisions.
 
 ## Branch Protection Recommendations
 

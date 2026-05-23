@@ -2,6 +2,12 @@ name: macOS arm64 release artifact
 
 on:
   workflow_dispatch:
+    inputs:
+      createDraftRelease:
+        description: "Create or update a draft GitHub Release. Requires running this workflow from a vX.Y.Z tag."
+        required: false
+        type: boolean
+        default: false
   push:
     tags:
       - "v*"
@@ -14,6 +20,11 @@ jobs:
     name: Build Loom macOS arm64 DMG
     runs-on: macos-14
     timeout-minutes: 45
+    outputs:
+      version: ${{ steps.release_meta.outputs.version }}
+      expected_tag: ${{ steps.release_meta.outputs.expected_tag }}
+      dmg_path: ${{ steps.release_meta.outputs.dmg_path }}
+      artifact_name: ${{ steps.release_meta.outputs.artifact_name }}
 
     steps:
       - name: Checkout
@@ -28,6 +39,30 @@ jobs:
         with:
           node-version: "22"
           cache: npm
+
+      - name: Resolve release metadata
+        id: release_meta
+        run: |
+          VERSION="$(node -p "require('./package.json').version")"
+          EXPECTED_TAG="v${VERSION}"
+          DMG_PATH="release/Loom-${VERSION}-mac-arm64.dmg"
+          ARTIFACT_NAME="Loom-${EXPECTED_TAG}-mac-arm64-dmg"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "expected_tag=${EXPECTED_TAG}" >> "$GITHUB_OUTPUT"
+          echo "dmg_path=${DMG_PATH}" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=${ARTIFACT_NAME}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify tag matches package version
+        if: github.event_name == 'push' || inputs.createDraftRelease == true
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "::error title=Draft release requires a tag::Draft releases must run from tag ${{ steps.release_meta.outputs.expected_tag }}."
+            exit 1
+          fi
+          if [ "${GITHUB_REF_NAME}" != "${{ steps.release_meta.outputs.expected_tag }}" ]; then
+            echo "::error title=Tag/version mismatch::package.json version ${{ steps.release_meta.outputs.version }} requires tag ${{ steps.release_meta.outputs.expected_tag }}, but this workflow is running for ${GITHUB_REF_NAME}."
+            exit 1
+          fi
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -64,7 +99,7 @@ jobs:
       - name: Verify release hygiene
         run: |
           git diff --check
-          test -f release/Loom-$(node -p "require('./package.json').version")-mac-arm64.dmg
+          test -f "${{ steps.release_meta.outputs.dmg_path }}"
           test ! -e services/loom-service/.data/loom.db
           test ! -e services/loom-service/.data/loom-service.toml
           find release -maxdepth 1 -type f -name "*.dmg" -print
@@ -72,7 +107,60 @@ jobs:
       - name: Upload DMG artifact
         uses: actions/upload-artifact@v4
         with:
-          name: Loom-${{ github.ref_name }}-mac-arm64-dmg
-          path: release/Loom-*-mac-arm64.dmg
+          name: ${{ steps.release_meta.outputs.artifact_name }}
+          path: ${{ steps.release_meta.outputs.dmg_path }}
           if-no-files-found: error
           retention-days: 14
+
+  draft-github-release:
+    name: Create draft GitHub Release
+    needs: build-macos-arm64
+    if: |
+      (github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) ||
+      (github.event_name == 'workflow_dispatch' && inputs.createDraftRelease == true)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: write
+
+    steps:
+      - name: Verify release tag
+        run: |
+          if [ "${GITHUB_REF_TYPE}" != "tag" ]; then
+            echo "::error title=Draft release requires a tag::Run this workflow from ${{ needs.build-macos-arm64.outputs.expected_tag }} or push that tag."
+            exit 1
+          fi
+          if [ "${GITHUB_REF_NAME}" != "${{ needs.build-macos-arm64.outputs.expected_tag }}" ]; then
+            echo "::error title=Tag/version mismatch::package.json version ${{ needs.build-macos-arm64.outputs.version }} requires tag ${{ needs.build-macos-arm64.outputs.expected_tag }}, but this workflow is running for ${GITHUB_REF_NAME}."
+            exit 1
+          fi
+
+      - name: Download DMG artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build-macos-arm64.outputs.artifact_name }}
+          path: release
+
+      - name: Create or update draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ github.ref_name }}
+          VERSION: ${{ needs.build-macos-arm64.outputs.version }}
+          DMG_PATH: ${{ needs.build-macos-arm64.outputs.dmg_path }}
+        run: |
+          test -f "${DMG_PATH}"
+          cat > release-notes.md <<EOF
+          Draft macOS arm64 release for Loom ${VERSION}.
+
+          Artifact:
+          - Loom-${VERSION}-mac-arm64.dmg
+
+          This build is not notarized yet. Review the DMG artifact before publishing this release.
+          EOF
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            gh release edit "${TAG_NAME}" --draft=true --title "Loom ${TAG_NAME}" --notes-file release-notes.md
+            gh release upload "${TAG_NAME}" "${DMG_PATH}" --clobber
+          else
+            gh release create "${TAG_NAME}" "${DMG_PATH}" --draft --title "Loom ${TAG_NAME}" --notes-file release-notes.md
+          fi

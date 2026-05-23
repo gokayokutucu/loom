@@ -34,7 +34,24 @@ The workflow is:
 
 It runs on `workflow_dispatch` and `v*` tag pushes. It validates the frontend, Rust service, Electron package, and DMG creation, then uploads the DMG as a GitHub Actions artifact.
 
-The workflow does not publish a GitHub Release, create tags, notarize the app, or use Apple signing credentials.
+For `v*` tag pushes, the workflow also verifies that the tag matches `package.json`:
+
+```text
+package.json version: X.Y.Z
+tag: vX.Y.Z
+```
+
+If the tag and version do not match, the workflow fails before creating release artifacts.
+
+After a successful tag build, the workflow creates or updates a draft GitHub Release and uploads:
+
+```text
+release/Loom-X.Y.Z-mac-arm64.dmg
+```
+
+`workflow_dispatch` remains artifact-only by default. It can create or update a draft release only when the `createDraftRelease` input is explicitly enabled and the workflow is run from the matching `vX.Y.Z` tag.
+
+The workflow does not create tags, publish a GitHub Release, notarize the app, or use Apple signing credentials.
 
 ## Artifact Hygiene
 
@@ -48,7 +65,7 @@ services/loom-service/target/
 services/loom-service/.data/
 ```
 
-The workflow uploads only:
+The workflow uploads the DMG as a GitHub Actions artifact and, on tag builds, attaches the same DMG to a draft GitHub Release:
 
 ```text
 release/Loom-*-mac-arm64.dmg
