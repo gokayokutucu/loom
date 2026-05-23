@@ -335,6 +335,7 @@ export function AskPopup({
   onLoom,
   onSubmit,
   onStop,
+  showDebug,
 }: {
   state: AskPopupState;
   onUpdate: (state: AskPopupState) => void;
@@ -342,6 +343,7 @@ export function AskPopup({
   onLoom: () => void;
   onSubmit: () => void;
   onStop: () => void;
+  showDebug: boolean;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const answerListRef = useRef<HTMLDivElement | null>(null);
@@ -468,7 +470,7 @@ export function AskPopup({
             })}
           </div>
         )}
-        {latestDebugTrace !== undefined && latestDebugTrace !== null && (
+        {showDebug && latestDebugTrace !== undefined && latestDebugTrace !== null && (
           <QuickAskDebugPanel trace={latestDebugTrace} />
         )}
         <textarea

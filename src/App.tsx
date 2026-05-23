@@ -46,8 +46,8 @@ import {
   Layers,
   Lightbulb,
   Link2,
+  LoaderCircle,
   Lock,
-  LogOut,
   Map,
   Maximize2,
   MessageSquare,
@@ -137,6 +137,9 @@ import {
   type AddressBarEvent,
 } from "./state/addressBarMachine";
 import {
+  getAvatarInitial,
+  getDisplayProfileName,
+  getDisplayWorkspaceName,
   isMockDataEnabled,
   readAppSettings,
   writeAppSettings,
@@ -158,7 +161,11 @@ import {
 } from "./services/exportService";
 import { formatRelativeTimestamp } from "./services/timeLabels";
 import { formatBadgeCode } from "./services/displayCode";
-import { getElectronRuntimeInfo, getElectronWindowControls } from "./electronRuntime";
+import {
+  getElectronPermissionsBridge,
+  getElectronRuntimeInfo,
+  getElectronWindowControls,
+} from "./electronRuntime";
 import {
   applyMetadataRefinement,
   buildRuntimeMetadataRecord,
@@ -270,7 +277,10 @@ import { useSpeechToTextRecorder } from "./hooks/useSpeechToTextRecorder";
 import { AppShell } from "./components/AppShell";
 import { AddressBar } from "./components/AddressBar";
 import { AddressMetadataBadge } from "./components/AddressMetadataBadge";
-import { AIProviderSettingsModal } from "./components/AIProviderSettings";
+import {
+  AIProviderSettingsModal,
+  type SettingsCategoryId,
+} from "./components/AIProviderSettings";
 import { AddressHintPopover } from "./components/AddressHintPopover";
 import { AskPopup, type AskPopupState } from "./components/AskPopup";
 import { AssistantMarkdownContent } from "./components/AssistantMarkdownContent";
@@ -283,6 +293,7 @@ import { GroupColorPopover } from "./components/GroupColorPopover";
 import { GraphView } from "./components/GraphView";
 import { HistoryView } from "./components/HistoryView";
 import { ReferencesListBox } from "./components/ReferencesListBox";
+import { RetryConfirmationDialog } from "./components/RetryConfirmationDialog";
 import { SelectionPopover } from "./components/SelectionPopover";
 import { TopBar } from "./components/TopBar";
 import {
@@ -316,6 +327,7 @@ const iconForType: Record<LoomObjectType, typeof Globe2> = {
   loom: GitBranch,
   response: FileText,
   fragment: FileText,
+  attachment: Paperclip,
   bookmark: Bookmark,
   semantic: Sparkles,
   recent: Clock3,
@@ -560,9 +572,27 @@ interface AttachContentItem extends LoomLink {
 
 interface ComposerAttachment {
   id: string;
+  attachmentId?: string;
+  loomId?: string;
   name: string;
   size: number;
   type: string;
+  extension?: string;
+  kind?: string;
+  parseStatus?:
+    | "queued"
+    | "parsing"
+    | "extracting_text"
+    | "ocr_needed"
+    | "ocr_running"
+    | "ready"
+    | "failed"
+    | "unsupported";
+  parser?: string;
+  error?: string;
+  thumbnailDataUrl?: string;
+  parsedCharCount?: number;
+  metadataJson?: JsonValue;
   lastModified: number;
   attachedAt?: number;
 }
@@ -744,10 +774,42 @@ const attachContentTabs: Array<{
   { id: "files", label: "Files", Icon: Paperclip },
 ];
 
+const MAX_COMPOSER_ATTACHMENTS = 10;
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+const MAX_ATTACHMENT_SIZE_LABEL = "25 MB";
+
 function formatAttachmentSize(size: number) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatAttachmentDisplayName(fileName: string, maxLength = 22) {
+  if (fileName.length <= maxLength) return fileName;
+  const dotIndex = fileName.lastIndexOf(".");
+  const hasExtension = dotIndex > 0 && dotIndex < fileName.length - 1;
+  const extension = hasExtension ? fileName.slice(dotIndex) : "";
+  const baseName = hasExtension ? fileName.slice(0, dotIndex) : fileName;
+  const availableNameLength = Math.max(8, maxLength - extension.length - 3);
+  const suffixLength = Math.min(6, Math.max(4, Math.floor(availableNameLength * 0.4)));
+  const prefixLength = Math.max(4, availableNameLength - suffixLength);
+  return `${baseName.slice(0, prefixLength)}...${baseName.slice(-suffixLength)}${extension}`;
+}
+
+function isAttachmentReferenceLink(link: Pick<LoomLink, "type" | "targetKind">) {
+  return link.type === "attachment" || link.targetKind === "attachment";
+}
+
+function composerReferenceTokenText(
+  link: LoomLink,
+  fallbackDisplayMode: ReferenceDisplayMode
+) {
+  if (!isAttachmentReferenceLink(link)) {
+    return referenceTokenText(link, fallbackDisplayMode);
+  }
+  const displayMode = referenceDisplayModeForLink(link, fallbackDisplayMode);
+  const label = referenceLabelForMode(link, displayMode);
+  return `[[${formatAttachmentDisplayName(label, 26)}]]`;
 }
 
 function runtimeGraphObjectIdFor(kind: LoomObjectKind, id: string) {
@@ -823,6 +885,7 @@ function fragmentQuoteText(link: LoomLink) {
 function stripAttachedReferenceTokens(text: string, references?: LoomLink[]) {
   const withoutReferenceTokens = splitPromptReferences(references).attached.reduce((current, link) => {
     const labels = new Set([
+      composerReferenceTokenText(link, link.referenceDisplayMode ?? "title"),
       referenceTokenText(link, link.referenceDisplayMode ?? "title"),
       referenceTokenText(link, "title"),
       referenceTokenText(link, "code"),
@@ -885,6 +948,7 @@ function textFromComposerHtml(html: string, preserveLineBreaks: boolean) {
 function tokenTextsForQuestionGroupReference(link: LoomLink) {
   return Array.from(
     new Set([
+      composerReferenceTokenText(link, link.referenceDisplayMode ?? "title"),
       referenceTokenText(link, link.referenceDisplayMode ?? "title"),
       referenceTokenText(link, "title"),
       referenceTokenText(link, "code"),
@@ -1096,6 +1160,63 @@ function sortAttachmentsBySelection(attachments: ComposerAttachment[]) {
   return [...attachments].sort(
     (a, b) =>
       (b.attachedAt ?? b.lastModified) - (a.attachedAt ?? a.lastModified)
+  );
+}
+
+function attachmentToLoomLink(attachment: ComposerAttachment): LoomLink {
+  const attachmentId = attachment.attachmentId ?? attachment.id;
+  const path = attachment.loomId
+    ? `loom://${attachment.loomId}/attachments/${attachmentId}`
+    : `loom://attachments/${attachmentId}`;
+  return {
+    id: attachmentId,
+    type: "attachment",
+    title: attachment.name,
+    path,
+    badge:
+      attachment.parseStatus === "unsupported"
+        ? "Unsupported file"
+        : attachment.kind === "image"
+          ? "Image"
+          : "File",
+    targetObjectId: attachmentId,
+    targetKind: "attachment",
+    canonicalUri: path,
+  };
+}
+
+function attachmentStatusLabel(attachment: ComposerAttachment) {
+  const ocrNeededPages = attachmentOcrNeededPageCount(attachment.metadataJson);
+  if (attachment.parseStatus === "ready" && ocrNeededPages > 0) {
+    return `Ready · OCR needed ${ocrNeededPages} ${ocrNeededPages === 1 ? "page" : "pages"}`;
+  }
+  if (attachment.parseStatus === "queued") return "Queued";
+  if (attachment.parseStatus === "ready") return "Ready";
+  if (attachment.parseStatus === "parsing") return "Parsing";
+  if (attachment.parseStatus === "extracting_text") return "Extracting text";
+  if (attachment.parseStatus === "ocr_needed") {
+    return ocrNeededPages > 0
+      ? `OCR needed · ${ocrNeededPages} ${ocrNeededPages === 1 ? "page" : "pages"}`
+      : "OCR needed";
+  }
+  if (attachment.parseStatus === "ocr_running") return "OCR running";
+  if (attachment.parseStatus === "failed") return "Failed";
+  if (attachment.parseStatus === "unsupported") return "Unsupported";
+  return "Pending";
+}
+
+function attachmentOcrNeededPageCount(metadata: JsonValue | undefined) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return 0;
+  const pages = metadata.ocrNeededPages;
+  return Array.isArray(pages) ? pages.length : 0;
+}
+
+function attachmentParseActive(attachment: ComposerAttachment) {
+  return (
+    attachment.parseStatus === "queued" ||
+    attachment.parseStatus === "parsing" ||
+    attachment.parseStatus === "extracting_text" ||
+    attachment.parseStatus === "ocr_running"
   );
 }
 
@@ -1531,6 +1652,7 @@ const typeLabel: Record<LoomObjectType, string> = {
   loom: "Weft",
   response: "Response",
   fragment: "Fragment",
+  attachment: "Attachment",
   bookmark: "Bookmark",
   semantic: "Semantic",
   recent: "Recent",
@@ -1658,9 +1780,10 @@ function inlineReferenceTokenHtml(
     )
     .join(" ");
   const tokenText = escapeInlineReferenceHtml(
-    referenceTokenText(displayLink, referenceDisplayMode)
+    composerReferenceTokenText(displayLink, referenceDisplayMode)
   );
-  return `<span class="inline-loom-token" contenteditable="false" draggable="true" ${serializedAttributes}>${tokenText}</span>`;
+  const title = escapeInlineReferenceAttribute(displayLink.title);
+  return `<span class="inline-loom-token" contenteditable="false" draggable="true" title="${title}" ${serializedAttributes}>${tokenText}</span>`;
 }
 
 function appendInlineReferenceTokenHtml(
@@ -1954,12 +2077,47 @@ function conversationFromServiceLoom(loom: LoomSummary): Conversation {
   };
 }
 
+function tabOrderTimestamp(value?: string | null) {
+  if (!value) return 0n;
+  if (/^\d+$/.test(value)) return BigInt(value);
+  const parsed = Date.parse(value);
+  return Number.isNaN(parsed) ? 0n : BigInt(parsed) * 1_000_000n;
+}
+
+function compareServiceLoomDetailsByTabOrder(left: LoomDetail, right: LoomDetail) {
+  const leftTime = tabOrderTimestamp(left.createdAt ?? left.updatedAt);
+  const rightTime = tabOrderTimestamp(right.createdAt ?? right.updatedAt);
+  if (leftTime !== rightTime) return leftTime < rightTime ? -1 : 1;
+  return left.loomId.localeCompare(right.loomId);
+}
+
+function appendConversationInTabOrder(
+  current: Conversation[],
+  conversation: Conversation
+) {
+  return [
+    ...current.filter((item) => item.id !== conversation.id),
+    conversation,
+  ];
+}
+
+function appendTabGroupConversationId(group: TabGroup, conversationId: string) {
+  return {
+    ...group,
+    conversationIds: [
+      ...group.conversationIds.filter((item) => item !== conversationId),
+      conversationId,
+    ],
+  };
+}
+
 function serviceLoomDetailsToState(details: LoomDetail[]) {
-  const conversations = details.map(conversationFromServiceLoom);
+  const sortedDetails = [...details].sort(compareServiceLoomDetailsByTabOrder);
+  const conversations = sortedDetails.map(conversationFromServiceLoom);
   const responses = Object.fromEntries(
-    details.map((detail) => [detail.loomId, detail.responses])
+    sortedDetails.map((detail) => [detail.loomId, detail.responses])
   );
-  const forkRecords: ForkRecord[] = details
+  const forkRecords: ForkRecord[] = sortedDetails
     .filter(
       (detail) =>
         detail.kind === "weft" &&
@@ -2188,12 +2346,19 @@ function App() {
     useState<SelectionReferenceState | null>(null);
   const selectionHighlightRef = useRef<HTMLSpanElement | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
+  const [retryConfirmTarget, setRetryConfirmTarget] = useState<{
+    loomId: string;
+    responseId: string;
+    returnFocus: HTMLElement | null;
+  } | null>(null);
   const [iconPickerTarget, setIconPickerTarget] = useState<Conversation | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [providerSettings, setProviderSettings] = useState<AIProviderSettings>(() =>
     readAIProviderSettings()
   );
   const [providerSettingsOpen, setProviderSettingsOpen] = useState(false);
+  const [providerSettingsInitialCategory, setProviderSettingsInitialCategory] =
+    useState<SettingsCategoryId>("runtime");
   const [appSettings, setAppSettings] = useState<AppSettings>(
     initialAppSettingsSnapshot
   );
@@ -4697,6 +4862,20 @@ function App() {
     source: LoomNavigationDestination["source"]
   ): LoomNavigationDestination {
     const next: LoomNavigationDestination = { ...navigationDestination, source };
+    if (next.scrollTargetResponseId) {
+      const responses = conversationResponses[next.loomId];
+      const targetStillVisible = responses?.some(
+        (response) => response.id === next.scrollTargetResponseId
+      );
+      if (responses && !targetStillVisible) {
+        const latest = responses[responses.length - 1];
+        return {
+          ...next,
+          scrollTargetResponseId: latest?.id,
+          scrollMode: latest ? "lastResponse" : undefined,
+        };
+      }
+    }
     if (next.scrollMode || next.scrollTargetResponseId) return next;
     const responseTarget = findLocalResponseTarget(destination);
     if (responseTarget) {
@@ -5107,6 +5286,9 @@ function App() {
       (resolution.status === "not_found" || resolution.status === "missing") &&
       (options.allowUnresolved || hasLocalNavigationTarget(destination))
     ) {
+      return { ok: true, destination };
+    }
+    if (resolution.status === "deleted" && hasLocalNavigationTarget(destination)) {
       return { ok: true, destination };
     }
     if (options.allowUnresolved && hasLocalNavigationTarget(destination)) {
@@ -5537,6 +5719,20 @@ function App() {
       }
 
       if (
+        pendingDestination?.scrollTargetResponseId &&
+        !serviceLoomsLoading &&
+        activeConversationId === pendingDestination.loomId
+      ) {
+        const latest = lastResponseInLoom(pendingDestination.loomId);
+        const transcript = transcriptForLoom(pendingDestination.loomId);
+        if (latest && scrollTranscriptToEnd(transcript)) return;
+        if (transcript) {
+          completePendingScroll();
+          return;
+        }
+      }
+
+      if (
         pendingPath &&
         scrollToResponse(
           transcriptRef.current,
@@ -5593,7 +5789,7 @@ function App() {
 
   function restoreConversation(conversation: Conversation) {
     setArchived((current) => current.filter((item) => item.id !== conversation.id));
-    setConversations((current) => [...current, conversation]);
+    setConversations((current) => appendConversationInTabOrder(current, conversation));
     setActiveConversationId(conversation.id);
     setActiveObjectTitle(conversation.title);
     closeUnpinnedUtilityOverlays();
@@ -6621,11 +6817,14 @@ function App() {
       summary: "New grouped conversation tab.",
       iconKey: "compass",
     };
-    setConversations((current) => [...current, conversation]);
+    setConversations((current) => appendConversationInTabOrder(current, conversation));
     setTabGroups((current) =>
       current.map((group) =>
         group.id === groupId
-          ? { ...group, collapsed: false, conversationIds: [...group.conversationIds, id] }
+          ? {
+              ...appendTabGroupConversationId(group, id),
+              collapsed: false,
+            }
           : group
       )
     );
@@ -6699,7 +6898,7 @@ function App() {
         }),
       }),
     };
-    setConversations((current) => [conversation, ...current]);
+    setConversations((current) => appendConversationInTabOrder(current, conversation));
     setComposerDrafts((current) => {
       const { [EPHEMERAL_DRAFT_ID]: _discard, ...rest } = current;
       return {
@@ -6839,15 +7038,7 @@ function App() {
         promotedSeedResponses = [];
         setConversations((current) => {
           if (current.some((item) => item.id === promotedConversation.id)) return current;
-          const sourceIndex = current.findIndex(
-            (item) => item.id === originConversationForPromotion.id
-          );
-          if (sourceIndex < 0) return [promotedConversation, ...current];
-          return [
-            ...current.slice(0, sourceIndex),
-            promotedConversation,
-            ...current.slice(sourceIndex),
-          ];
+          return appendConversationInTabOrder(current, promotedConversation);
         });
         setTabGroups((current) =>
           current.map((group) => {
@@ -6856,14 +7047,7 @@ function App() {
               originConversationForPromotion.id
             );
             if (sourceIndex < 0) return group;
-            return {
-              ...group,
-              conversationIds: [
-                ...group.conversationIds.slice(0, sourceIndex),
-                promotedConversation.id,
-                ...group.conversationIds.slice(sourceIndex),
-              ],
-            };
+            return appendTabGroupConversationId(group, promotedConversation.id);
           })
         );
         setConversationResponses((current) => {
@@ -6956,7 +7140,7 @@ function App() {
         };
         promotedTargetConversation = promotedConversation;
         promotedSeedResponses = [];
-        setConversations((current) => [promotedConversation, ...current]);
+        setConversations((current) => appendConversationInTabOrder(current, promotedConversation));
         setConversationResponses((current) => {
           const { [temporaryTargetWeft.temporaryId]: _discard, ...rest } = current;
           return {
@@ -7076,7 +7260,7 @@ function App() {
     const materializingNewLoom = targetLoomId === EPHEMERAL_DRAFT_ID || !existingTargetConversation;
 
     if (materializingNewLoom) {
-      setConversations((current) => [...current, targetConversation]);
+      setConversations((current) => appendConversationInTabOrder(current, targetConversation));
       setDraftConversation(null);
       setActiveConversationId(targetConversation.id);
       setActiveObjectTitle(targetConversation.title);
@@ -7190,7 +7374,8 @@ function App() {
       let serviceResponseId = response.id;
       let serviceFinalContent = "";
       let persistedUserResponseId: string | undefined;
-      const mainModelName = getProfileModel(providerSettings, "main").name;
+      const mainModel = getProfileModel(providerSettings, "main");
+      const mainModelName = mainModel.name;
       const retainServiceWorkflowRunId = (workflowRunId?: string) => {
         if (!workflowRunId) return;
         mainServiceCancellationRef.current = {
@@ -7319,7 +7504,7 @@ function App() {
           responseMode: selectedResponseMode,
           focusedResponseId: lastResponseInLoom(targetConversation.id)?.id,
           source: "composer",
-          model: mainModelName,
+          model: mainModel.id,
           options: {
             numCtx: providerSettings.ollama.contextLength,
           },
@@ -7753,7 +7938,8 @@ function App() {
       "Loom context built",
       `${loomContext.context.length} context blocks, strategy:${answerPlan.contextStrategy}`
     );
-    const mainModelName = getProfileModel(providerSettings, "main").name;
+    const mainModel = getProfileModel(providerSettings, "main");
+    const mainModelName = mainModel.name;
     setComposerRuntimeState({
       running: true,
       message: `Sending to ${mainModelName}...`,
@@ -8441,9 +8627,18 @@ function App() {
     const buildConversationNode = (
       conversation: Conversation,
       asLoom: boolean,
-      forkTitle?: string
+      forkTitle?: string,
+      forkSubtitle?: string
     ): LineageNode => {
       const responses = conversationResponses[conversation.id] ?? [];
+      const responseMatchesForkParent = (response: ResponseItem, record: ForkRecord) =>
+        record.parentResponseId === response.id ||
+        record.parentResponseId === response.serviceUserResponseId;
+      const orphanForkRecords = forkRecords.filter(
+        (record) =>
+          record.parentConversationId === conversation.id &&
+          !responses.some((response) => responseMatchesForkParent(response, record))
+      );
       return {
         id: `${asLoom ? "loom" : "conversation"}-${conversation.id}`,
         type: asLoom ? "loom" : "conversation",
@@ -8452,33 +8647,48 @@ function App() {
         canonicalUri: conversation.meta?.canonicalUri,
         referenceCode: conversation.meta?.code,
         meta: conversation.meta,
-        subtitle: asLoom ? conversation.title : "Conversation root",
+        subtitle: forkSubtitle ?? (asLoom ? conversation.title : "Conversation root"),
         conversationId: conversation.id,
-        children: responses.map((response) => ({
-          id: `response-${conversation.id}-${response.id}`,
-          type: "response" as const,
-          title: response.title,
-          path: response.address,
-          canonicalUri: response.meta?.canonicalUri,
-          referenceCode: response.meta?.code,
-          meta: response.meta,
-          subtitle: "Response",
-          conversationId: conversation.id,
-          responseId: response.id,
-          children: forkRecords
-            .filter(
-              (record) =>
-                record.parentConversationId === conversation.id &&
-                record.parentResponseId === response.id
-            )
+        children: [
+          ...responses.map((response) => ({
+            id: `response-${conversation.id}-${response.id}`,
+            type: "response" as const,
+            title: response.title,
+            path: response.address,
+            canonicalUri: response.meta?.canonicalUri,
+            referenceCode: response.meta?.code,
+            meta: response.meta,
+            subtitle: "Response",
+            conversationId: conversation.id,
+            responseId: response.id,
+            children: forkRecords
+              .filter(
+                (record) =>
+                  record.parentConversationId === conversation.id &&
+                  responseMatchesForkParent(response, record)
+              )
+              .map((record) => {
+                const childConversation = conversationsById.get(record.childConversationId);
+                return childConversation
+                  ? buildConversationNode(childConversation, true, record.title)
+                  : null;
+              })
+              .filter((node): node is LineageNode => Boolean(node)),
+          })),
+          ...orphanForkRecords
             .map((record) => {
               const childConversation = conversationsById.get(record.childConversationId);
               return childConversation
-                ? buildConversationNode(childConversation, true, record.title)
+                ? buildConversationNode(
+                    childConversation,
+                    true,
+                    record.title,
+                    "Original response no longer available"
+                  )
                 : null;
             })
             .filter((node): node is LineageNode => Boolean(node)),
-        })),
+        ],
       };
     };
 
@@ -9108,27 +9318,14 @@ function App() {
         });
         setConversations((current) => {
           if (current.some((item) => item.id === serviceWeftConversation.id)) return current;
-          const sourceIndex = current.findIndex((item) => item.id === sourceConversation.id);
-          if (sourceIndex < 0) return [serviceWeftConversation, ...current];
-          return [
-            ...current.slice(0, sourceIndex),
-            serviceWeftConversation,
-            ...current.slice(sourceIndex),
-          ];
+          return appendConversationInTabOrder(current, serviceWeftConversation);
         });
         setTabGroups((current) =>
           current.map((group) => {
             if (group.conversationIds.includes(serviceWeftConversation.id)) return group;
             const sourceIndex = group.conversationIds.indexOf(sourceConversation.id);
             if (sourceIndex < 0) return group;
-            return {
-              ...group,
-              conversationIds: [
-                ...group.conversationIds.slice(0, sourceIndex),
-                serviceWeftConversation.id,
-                ...group.conversationIds.slice(sourceIndex),
-              ],
-            };
+            return appendTabGroupConversationId(group, serviceWeftConversation.id);
           })
         );
         setConversationResponses((current) => {
@@ -9292,27 +9489,12 @@ function App() {
       askResponseFromTurn(turn, path, lineage.length + index + 1)
     );
     const weftResponses = initialAskResponses.length > 0 ? initialAskResponses : lineage;
-    setConversations((current) => {
-      const sourceIndex = current.findIndex((item) => item.id === sourceConversation.id);
-      if (sourceIndex < 0) return [conversation, ...current];
-      return [
-        ...current.slice(0, sourceIndex),
-        conversation,
-        ...current.slice(sourceIndex),
-      ];
-    });
+    setConversations((current) => appendConversationInTabOrder(current, conversation));
     setTabGroups((current) =>
       current.map((group) => {
         const sourceIndex = group.conversationIds.indexOf(sourceConversation.id);
         if (sourceIndex < 0) return group;
-        return {
-          ...group,
-          conversationIds: [
-            ...group.conversationIds.slice(0, sourceIndex),
-            id,
-            ...group.conversationIds.slice(sourceIndex),
-          ],
-        };
+        return appendTabGroupConversationId(group, id);
       })
     );
     setConversationResponses((current) => ({
@@ -9358,6 +9540,18 @@ function App() {
   function returnToOrigin(options: { keepPromptRevisionSelection?: boolean } = {}) {
     const origin = getWeftOrigin(activeConversationId);
     if (!origin) return;
+    const originConversation = conversations.find(
+      (conversation) => conversation.id === origin.originLoomId
+    );
+    if (!originConversation) {
+      showToast({
+        title: "Return unavailable",
+        message: "The original Loom is no longer available.",
+        color: "neutral",
+        icon: "weft",
+      });
+      return;
+    }
     const activeRevisionRecord = forkRecords.find(
       (record) => record.kind === "revision" && record.childConversationId === activeConversationId
     );
@@ -9370,28 +9564,39 @@ function App() {
       }));
     }
     const originResponse = findResponseInLoom(origin.originLoomId, originResponseId);
+    const fallbackResponse = originResponse ?? lastResponseInLoom(origin.originLoomId);
+    if (!originResponse) {
+      showToast({
+        title: "Origin response unavailable",
+        message: "The original response is no longer available.",
+        color: "neutral",
+        icon: "weft",
+      });
+    }
     const destination: LoomNavigationDestination = {
       loomId: origin.originLoomId,
       mode: canShowWeftSplit ? "split" : "full",
-      scrollTargetResponseId: originResponseId,
-      scrollMode: "origin",
+      scrollTargetResponseId: fallbackResponse?.id,
+      scrollMode: originResponse ? "origin" : fallbackResponse ? "lastResponse" : undefined,
       source: "returnToOrigin",
     };
-    const link = originResponse
-      ? responseLinkForNavigation(origin.originLoomId, originResponse)
+    const link = fallbackResponse
+      ? responseLinkForNavigation(origin.originLoomId, fallbackResponse)
       : loomLinkForId(origin.originLoomId);
     if (canShowWeftSplit) {
       setActiveConversationId(activeConversationId);
       setActiveSplitPanel("origin");
       pendingScrollDestinationRef.current = destination;
-      pendingScrollHighlightRef.current = true;
+      pendingScrollHighlightRef.current = Boolean(originResponse);
       focusComposerAfterNavigation();
-      window.requestAnimationFrame(() => {
-        scrollTranscriptPromptToStart(originTranscriptRef.current, originResponseId);
-        window.setTimeout(() => {
+      if (originResponse) {
+        window.requestAnimationFrame(() => {
           scrollTranscriptPromptToStart(originTranscriptRef.current, originResponseId);
-        }, 160);
-      });
+          window.setTimeout(() => {
+            scrollTranscriptPromptToStart(originTranscriptRef.current, originResponseId);
+          }, 160);
+        });
+      }
     } else {
       restoreDestination(link, destination);
     }
@@ -9563,13 +9768,7 @@ function App() {
 
     setConversations((current) => {
       if (current.some((conversation) => conversation.id === weftConversation.id)) return current;
-      const sourcePosition = current.findIndex((conversation) => conversation.id === sourceConversation.id);
-      if (sourcePosition < 0) return [weftConversation, ...current];
-      return [
-        ...current.slice(0, sourcePosition + 1),
-        weftConversation,
-        ...current.slice(sourcePosition + 1),
-      ];
+      return appendConversationInTabOrder(current, weftConversation);
     });
     setConversationResponses((current) => ({
       ...current,
@@ -9641,7 +9840,8 @@ function App() {
     mainAbortRef.current = controller;
     let activeResponseId = localResponseId;
     let finalContent = "";
-    const mainModelName = getProfileModel(providerSettings, "main").name;
+    const mainModel = getProfileModel(providerSettings, "main");
+    const mainModelName = mainModel.name;
     setComposerRuntimeState({
       running: true,
       message: `Writing Revision Weft with ${mainModelName}...`,
@@ -9671,7 +9871,7 @@ function App() {
         responseMode: appSettings.modelResponseMode,
         focusedResponseId: seedItems[seedItems.length - 1]?.id,
         source: "composer",
-        model: mainModelName,
+        model: mainModel.id,
         options: {
           numCtx: providerSettings.ollama.contextLength,
         },
@@ -9800,7 +10000,8 @@ function App() {
     const localResponseId = `regenerated-${sourceResponse.id}-${Date.now()}`;
     let activeResponseId = localResponseId;
     let finalContent = "";
-    const mainModelName = getProfileModel(providerSettings, "main").name;
+    const mainModel = getProfileModel(providerSettings, "main");
+    const mainModelName = mainModel.name;
     const regeneratedResponse: ResponseItem = {
       ...sourceResponse,
       id: localResponseId,
@@ -9856,7 +10057,7 @@ function App() {
         staleAssistantResponseId: sourceResponse.id,
         responseMode: appSettings.modelResponseMode,
         source: "prompt_edit_regenerate",
-        model: mainModelName,
+        model: mainModel.id,
         options: {
           numCtx: providerSettings.ollama.contextLength,
         },
@@ -10022,6 +10223,300 @@ function App() {
       mainAbortRef.current = null;
       mainServiceCancellationRef.current = null;
     }
+  }
+
+  async function retryFromUserMessage(
+    loomId: string,
+    responseId: string,
+    returnFocus: HTMLElement | null = null
+  ) {
+    const responses = conversationResponses[loomId] ?? [];
+    const sourceIndex = responses.findIndex((response) => response.id === responseId);
+    const sourceResponse = responses[sourceIndex];
+    if (!sourceResponse?.serviceUserResponseId) {
+      showToast({
+        title: "Retry unavailable",
+        message: "This prompt is not persisted in loom-service yet.",
+        color: "sunset",
+      });
+      return;
+    }
+    const hasDownstreamActiveMessages = sourceIndex >= 0 && sourceIndex < responses.length - 1;
+    if (hasDownstreamActiveMessages) {
+      setRetryConfirmTarget({ loomId, responseId, returnFocus });
+      return;
+    }
+
+    await executeRetryFromUserMessage(loomId, responseId);
+  }
+
+  async function executeRetryFromUserMessage(loomId: string, responseId: string) {
+    const responses = conversationResponses[loomId] ?? [];
+    const sourceIndex = responses.findIndex((response) => response.id === responseId);
+    const sourceResponse = responses[sourceIndex];
+    if (!sourceResponse?.serviceUserResponseId) {
+      showToast({
+        title: "Retry unavailable",
+        message: "This prompt is not persisted in loom-service yet.",
+        color: "sunset",
+      });
+      return;
+    }
+
+    const generationId = mainGenerationRef.current + 1;
+    mainGenerationRef.current = generationId;
+    const controller = new AbortController();
+    mainAbortRef.current = controller;
+    const localResponseId = `retry-${sourceResponse.id}-${Date.now()}`;
+    let activeResponseId = localResponseId;
+    let finalContent = "";
+    const mainModel = getProfileModel(providerSettings, "main");
+    const mainModelName = mainModel.name;
+    const retryResponse: ResponseItem = {
+      ...sourceResponse,
+      id: localResponseId,
+      address: `${sourceResponse.address}/retry-${Date.now().toString(36)}`,
+      answer: [],
+      finalContent: undefined,
+      answerStale: false,
+      workflowRunId: undefined,
+      visiblePlan: undefined,
+      visibleProgress: createOrchestrationVisibleProgress(),
+      doneReason: undefined,
+      truncated: false,
+      bookmarked: false,
+    };
+    setConversationResponses((current) => ({
+      ...current,
+      [loomId]: replaceResponseAndPruneTail(current[loomId] ?? [], sourceResponse, retryResponse),
+    }));
+    setGeneratingResponseId(localResponseId);
+    setComposerRuntimeState({
+      running: true,
+      message: `Retrying through loom-service with ${mainModelName}...`,
+    });
+    mainServiceCancellationRef.current = {
+      loomId,
+      responseId: localResponseId,
+      cancelRequested: false,
+    };
+
+    const replaceActiveResponseId = (nextResponseId: string) => {
+      if (nextResponseId === activeResponseId) return;
+      const previousResponseId = activeResponseId;
+      activeResponseId = nextResponseId;
+      setGeneratingResponseId(nextResponseId);
+      if (mainServiceCancellationRef.current) {
+        mainServiceCancellationRef.current = {
+          ...mainServiceCancellationRef.current,
+          responseId: nextResponseId,
+        };
+      }
+      setConversationResponses((current) => ({
+        ...current,
+        [loomId]: (current[loomId] ?? []).map((item) =>
+          item.id === previousResponseId ? { ...item, id: nextResponseId } : item
+        ),
+      }));
+    };
+
+    try {
+      for await (const event of loomEngineClient.retryUserMessage({
+        loomId,
+        userResponseId: sourceResponse.serviceUserResponseId,
+        responseMode: appSettings.modelResponseMode,
+        softDeleteDownstream: true,
+        reason: "retry_from_user_message",
+        model: mainModel.id,
+        options: {
+          numCtx: providerSettings.ollama.contextLength,
+        },
+        signal: controller.signal,
+      })) {
+        if (controller.signal.aborted || mainGenerationRef.current !== generationId) return;
+        if (event.type === "user_message_created") {
+          if (event.payload.workflowRunId) {
+            mainServiceCancellationRef.current = {
+              loomId,
+              responseId: activeResponseId,
+              workflowRunId: event.payload.workflowRunId,
+              cancelRequested: false,
+            };
+          }
+          continue;
+        }
+        if (event.type === "assistant_placeholder_created") {
+          if (event.payload.workflowRunId) {
+            mainServiceCancellationRef.current = {
+              loomId,
+              responseId: event.payload.responseId,
+              workflowRunId: event.payload.workflowRunId,
+              cancelRequested: false,
+            };
+          }
+          replaceActiveResponseId(event.payload.responseId);
+          continue;
+        }
+        if (event.type === "context_ready") {
+          updateResponseVisibleProgress(
+            loomId,
+            activeResponseId,
+            activateVisibleAnswerStage(
+              retryResponse.visibleProgress ?? createOrchestrationVisibleProgress(),
+              "context",
+              "Building Loom context..."
+            )
+          );
+          continue;
+        }
+        if (event.type === "thinking_status") {
+          updateResponseThinking(loomId, activeResponseId, {
+            thinkingStartedAt: new Date().toISOString(),
+            elapsedThinkingSeconds:
+              event.payload.durationMs !== undefined
+                ? Math.round(event.payload.durationMs / 1000)
+                : undefined,
+          });
+          continue;
+        }
+        if (event.type === "content_delta") {
+          if (event.payload.responseId) replaceActiveResponseId(event.payload.responseId);
+          finalContent += event.payload.delta;
+          const firstFinalStartedAt = new Date().toISOString();
+          updateResponseThinking(loomId, activeResponseId, {
+            finalStartedAt: firstFinalStartedAt,
+            thinkingEndedAt: firstFinalStartedAt,
+          });
+          updateResponseVisiblePlanAndProgress(loomId, activeResponseId, undefined, undefined);
+          updateResponseMarkdown(loomId, activeResponseId, finalContent);
+          continue;
+        }
+        if (event.type === "response_completed" || event.type === "response_truncated") {
+          replaceActiveResponseId(event.payload.responseId);
+          const sanitizedFinalContent = sanitizeModelAnswer(finalContent);
+          const answer = answerParagraphs(sanitizedFinalContent);
+          const completedResponse: ResponseItem = {
+            ...retryResponse,
+            id: activeResponseId,
+            answer,
+            finalContent: sanitizedFinalContent,
+            doneReason: event.payload.doneReason,
+            truncated: event.type === "response_truncated",
+            workflowRunId: mainServiceCancellationRef.current?.workflowRunId,
+            visibleProgress: undefined,
+            meta: createDraftResponseMetadata({
+              id: createMetadataUuid(),
+              title: sourceResponse.title,
+              text: metadataTextForResponse({
+                title: sourceResponse.title,
+                question: sourceResponse.question,
+                answer,
+              }),
+            }),
+          };
+          updateResponseThinking(loomId, activeResponseId, {
+            finalContent: sanitizedFinalContent,
+            doneReason: event.payload.doneReason,
+            truncated: event.type === "response_truncated",
+            done: true,
+          });
+          setConversationResponses((current) => ({
+            ...current,
+            [loomId]: (current[loomId] ?? []).map((item) =>
+              item.id === activeResponseId
+                ? {
+                    ...item,
+                    ...completedResponse,
+                    thinkingEndedAt:
+                      item.thinkingStartedAt && !item.thinkingEndedAt
+                        ? new Date().toISOString()
+                        : item.thinkingEndedAt,
+                  }
+                : item
+            ),
+          }));
+          setComposerRuntimeState({ running: false, message: "Message retried." });
+          setGeneratingResponseId(null);
+          showResponseCompletionActions(activeResponseId);
+          queueResponseMetadataGeneration(loomId, completedResponse);
+          mainAbortRef.current = null;
+          mainServiceCancellationRef.current = null;
+          return;
+        }
+        if (event.type === "response_error") {
+          if (event.payload.responseId) replaceActiveResponseId(event.payload.responseId);
+          const message = event.payload.message;
+          updateResponseThinking(loomId, activeResponseId, { done: true });
+          updateResponseAnswer(loomId, activeResponseId, [message]);
+          updateResponseVisiblePlanAndProgress(loomId, activeResponseId, undefined, undefined);
+          setComposerRuntimeState({ running: false, message });
+          setGeneratingResponseId(null);
+          showResponseCompletionActions(activeResponseId);
+          mainAbortRef.current = null;
+          mainServiceCancellationRef.current = null;
+          return;
+        }
+        if (event.type === "response_cancelled") {
+          updateResponseThinking(loomId, activeResponseId, { done: true });
+          setComposerRuntimeState({ running: false, message: "Response stopped." });
+          setGeneratingResponseId(null);
+          showResponseCompletionActions(activeResponseId);
+          mainAbortRef.current = null;
+          mainServiceCancellationRef.current = null;
+          return;
+        }
+      }
+    } catch (error) {
+      const message = providerErrorMessage(error);
+      showToast({
+        title: "Retry failed",
+        message,
+        color: "sunset",
+      });
+      setConversationResponses((current) => ({
+        ...current,
+        [loomId]: (current[loomId] ?? []).map((item) =>
+          item.id === activeResponseId
+            ? {
+                ...sourceResponse,
+                id: activeResponseId,
+                answer: [message],
+                finalContent: message,
+                answerStale: false,
+                visibleProgress: undefined,
+              }
+            : item
+        ),
+      }));
+      setGeneratingResponseId(null);
+      setComposerRuntimeState({ running: false, message });
+      mainAbortRef.current = null;
+      mainServiceCancellationRef.current = null;
+    }
+  }
+
+  function restoreRetryConfirmationFocus(target: HTMLElement | null) {
+    window.requestAnimationFrame(() => {
+      if (target?.isConnected) {
+        target.focus();
+        return;
+      }
+      composerFocusRef.current?.();
+    });
+  }
+
+  function cancelRetryConfirmation() {
+    const target = retryConfirmTarget;
+    setRetryConfirmTarget(null);
+    restoreRetryConfirmationFocus(target?.returnFocus ?? null);
+  }
+
+  function confirmRetryFromDialog() {
+    const target = retryConfirmTarget;
+    setRetryConfirmTarget(null);
+    restoreRetryConfirmationFocus(target?.returnFocus ?? null);
+    if (!target) return;
+    void executeRetryFromUserMessage(target.loomId, target.responseId);
   }
 
   function bookmarkSuggestedLinks(response: ResponseItem) {
@@ -10368,11 +10863,13 @@ function App() {
         payloadReport: exchange.payloadReport as AskExchange["payloadReport"],
       }))
     );
-    const quickModelName = getProfileModel(providerSettings, "quick").name;
+    const quickModel = getProfileModel(providerSettings, "quick");
+    const mainModel = getProfileModel(providerSettings, "main");
+    const quickModelName = quickModel.name;
     const quickServiceModel =
-      quickModelName === getProfileModel(providerSettings, "main").name
+      quickModel.id === mainModel.id
         ? undefined
-        : quickModelName;
+        : quickModel.id;
     const quickAskInput = {
       sessionId: askState.sessionId ?? `ask-${askState.response.id}`,
       quickAskTraceId,
@@ -11014,27 +11511,36 @@ function App() {
         activeWeftOrigin.originLoomId,
         activeWeftOrigin.originResponseId
       );
+      const fallbackResponse = originResponse ?? lastResponseInLoom(activeWeftOrigin.originLoomId);
       const originConversationForClose = conversations.find(
         (conversation) => conversation.id === activeWeftOrigin.originLoomId
       );
       const destination: LoomNavigationDestination = {
         loomId: activeWeftOrigin.originLoomId,
         mode: "full",
-        scrollTargetResponseId: activeWeftOrigin.originResponseId,
-        scrollMode: "origin",
+        scrollTargetResponseId: fallbackResponse?.id,
+        scrollMode: originResponse ? "origin" : fallbackResponse ? "lastResponse" : undefined,
         source: "userNavigation",
       };
-      const link = originResponse
-        ? responseLinkForNavigation(activeWeftOrigin.originLoomId, originResponse)
+      const link = fallbackResponse
+        ? responseLinkForNavigation(activeWeftOrigin.originLoomId, fallbackResponse)
         : loomLinkForId(activeWeftOrigin.originLoomId);
+      if (!originResponse) {
+        showToast({
+          title: "Origin response unavailable",
+          message: "The original response is no longer available.",
+          color: "neutral",
+          icon: "weft",
+        });
+      }
       dispatchSplitFocus({ type: "SPLIT_CLOSED" });
       dispatchSplitFocus({ type: "NAVIGATED_FULL" });
       setActiveConversationId(activeWeftOrigin.originLoomId);
-      setActiveObjectTitle(originResponse?.title ?? originConversationForClose?.title ?? link.title);
+      setActiveObjectTitle(fallbackResponse?.title ?? originConversationForClose?.title ?? link.title);
       restoreDestination(link, destination);
       pushNavigationEntry(link, destination);
       pendingScrollDestinationRef.current = destination;
-      pendingScrollHighlightRef.current = true;
+      pendingScrollHighlightRef.current = Boolean(originResponse);
       focusComposerAfterNavigation();
       return;
     }
@@ -11177,6 +11683,7 @@ function App() {
           collapsed={sidebarCollapsed && !sidebarFlyoutVisible}
           flyout={sidebarFlyoutVisible}
           archivedCount={archived.length}
+          appSettings={appSettings}
           activeConversationId={
             showWeftSplit && activeAddressableConversation
               ? activeAddressableConversation.id
@@ -11221,7 +11728,10 @@ function App() {
           onOpenContextMenu={openConversationMenu}
           onOpenGroupContextMenu={openGroupMenu}
           onDeleteRequest={setDeleteTarget}
-          onOpenSettings={() => setProviderSettingsOpen(true)}
+          onOpenSettings={(category = "runtime") => {
+            setProviderSettingsInitialCategory(category);
+            setProviderSettingsOpen(true);
+          }}
           onHoverExpandStart={() => {
             if (sidebarCollapsed) setSidebarFlyoutOpen(true);
           }}
@@ -11524,6 +12034,7 @@ function App() {
                             onContinueTruncatedResponse={continueTruncatedResponse}
                             onEditPrompt={updateResponsePrompt}
                             onRegenerateFromPrompt={regenerateFromEditedPrompt}
+                            onRetryPrompt={retryFromUserMessage}
                             showGenerationDebug={appSettings.showGenerationDebug}
                           />
                           {renderPanelComposer(originConversation.id, "origin")}
@@ -11605,6 +12116,7 @@ function App() {
                             onContinueTruncatedResponse={continueTruncatedResponse}
                             onEditPrompt={updateResponsePrompt}
                             onRegenerateFromPrompt={regenerateFromEditedPrompt}
+                            onRetryPrompt={retryFromUserMessage}
                             showGenerationDebug={appSettings.showGenerationDebug}
                           />
                           {renderPanelComposer(activeConversation.id, "weft")}
@@ -11710,6 +12222,7 @@ function App() {
                     onContinueTruncatedResponse={continueTruncatedResponse}
                     onEditPrompt={updateResponsePrompt}
                     onRegenerateFromPrompt={regenerateFromEditedPrompt}
+                    onRetryPrompt={retryFromUserMessage}
                     showGenerationDebug={appSettings.showGenerationDebug}
                   />
                 )}
@@ -11905,6 +12418,7 @@ function App() {
           }}
           onSubmit={submitQuickQuestion}
           onStop={stopQuickAskResponse}
+          showDebug={false}
         />
       )}
 
@@ -11914,6 +12428,7 @@ function App() {
           appSettings={appSettings}
           runtimeHealth={activeComposerRuntimeHealth}
           engineClient={loomEngineClient}
+          initialCategory={providerSettingsInitialCategory}
           onSave={saveProviderSettings}
           onAppSettingsSave={saveAppSettings}
           onClose={() => setProviderSettingsOpen(false)}
@@ -11925,6 +12440,13 @@ function App() {
           conversation={deleteTarget}
           onCancel={() => setDeleteTarget(null)}
           onConfirm={() => deleteConversation(deleteTarget)}
+        />
+      )}
+
+      {retryConfirmTarget && (
+        <RetryConfirmationDialog
+          onCancel={cancelRetryConfirmation}
+          onConfirm={confirmRetryFromDialog}
         />
       )}
     </AppShell>
@@ -11939,6 +12461,7 @@ interface SidebarProps {
   collapsed: boolean;
   flyout: boolean;
   archivedCount: number;
+  appSettings: AppSettings;
   activeConversationId: string;
   activePanel: ActivePanel;
   bookmarksNavPulse: boolean;
@@ -11957,7 +12480,7 @@ interface SidebarProps {
   onOpenContextMenu: (event: React.MouseEvent, conversation: Conversation) => void;
   onOpenGroupContextMenu: (event: React.MouseEvent, group: TabGroup) => void;
   onDeleteRequest: (conversation: Conversation) => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (category?: SettingsCategoryId) => void;
   onHoverExpandStart: () => void;
   onHoverExpandEnd: () => void;
   onFlyoutDragStart: () => void;
@@ -11972,6 +12495,7 @@ function Sidebar({
   collapsed,
   flyout,
   archivedCount,
+  appSettings,
   activeConversationId,
   activePanel,
   bookmarksNavPulse,
@@ -12020,6 +12544,12 @@ function Sidebar({
       removeFromGroups: onRemoveFromGroups,
     },
   });
+  const [profileInfoPanel, setProfileInfoPanel] = useState<"help" | "about" | null>(
+    null
+  );
+  const profileName = getDisplayProfileName(appSettings);
+  const workspaceName = getDisplayWorkspaceName(appSettings);
+  const avatarInitial = getAvatarInitial(profileName);
 
   useLayoutEffect(() => {
     const folderList = folderListRef.current;
@@ -12059,9 +12589,15 @@ function Sidebar({
     };
   }, [profileMenuOpen]);
 
-  function openSettingsFromProfile() {
+  function openSettingsFromProfile(category: SettingsCategoryId = "runtime") {
     setProfileMenuOpen(false);
-    onOpenSettings();
+    setProfileInfoPanel(null);
+    onOpenSettings(category);
+  }
+
+  function openProfileInfoPanel(panel: "help" | "about") {
+    setProfileMenuOpen(false);
+    setProfileInfoPanel(panel);
   }
 
   function conversationToLink(conversation: Conversation): LoomLink {
@@ -12150,14 +12686,16 @@ function Sidebar({
           </span>
         </button>
         <div className="conversation-tab-actions">
-          <button
-            className="icon-button subtle"
-            onClick={() => onArchive(conversation)}
-            aria-label={`Archive ${displayTitle}`}
-            title="Archive conversation"
-          >
-            <X size={12} />
-          </button>
+          <Tooltip label="Archive" placement="bottom-right">
+            <button
+              className="icon-button subtle"
+              onClick={() => onArchive(conversation)}
+              aria-label={`Archive ${displayTitle}`}
+              title="Archive conversation"
+            >
+              <X size={12} />
+            </button>
+          </Tooltip>
         </div>
       </div>
     );
@@ -12211,6 +12749,8 @@ function Sidebar({
             event.preventDefault();
             onDropBookmark(link);
           }}
+          aria-label="Open Bookmarks"
+          title="Open Bookmarks"
         >
           <Bookmark size={16} />
           Bookmarks
@@ -12218,6 +12758,8 @@ function Sidebar({
         <button
           className={activePanel === "history" ? "nav-row active" : "nav-row"}
           onClick={() => onOpenPanel("history")}
+          aria-label="Open Loom History"
+          title="Open Loom History"
         >
           <History size={16} />
           Loom History
@@ -12225,6 +12767,8 @@ function Sidebar({
         <button
           className={activePanel === "archive" ? "nav-row active" : "nav-row"}
           onClick={() => onOpenPanel("archive")}
+          aria-label="Open Archive"
+          title="Open Archive"
         >
           <Archive size={16} />
           Archive
@@ -12322,7 +12866,12 @@ function Sidebar({
       </div>
 
       <div className="sidebar-bottom">
-        <button className="new-chat-button" onClick={onNewConversation}>
+        <button
+          className="new-chat-button"
+          onClick={onNewConversation}
+          aria-label="New Loom"
+          title="Open a new Loom"
+        >
           <Plus size={16} />
           <span>New Loom</span>
           <kbd>{primaryCompactShortcutLabel("new-loom")}</kbd>
@@ -12338,19 +12887,19 @@ function Sidebar({
           aria-expanded={profileMenuOpen}
           onClick={() => setProfileMenuOpen((current) => !current)}
         >
-          <div className="profile-dot">G</div>
+          <div className="profile-dot">{avatarInitial}</div>
           <div>
-            <div className="footer-title">Gokay</div>
-            <div className="footer-caption">Personal Web</div>
+            <div className="footer-title">{profileName}</div>
+            <div className="footer-caption">{workspaceName}</div>
           </div>
         </button>
         {profileMenuOpen && (
           <div className="profile-menu" role="menu" aria-label="Profile menu">
             <div className="profile-menu-header">
-              <div className="profile-dot">G</div>
+              <div className="profile-dot">{avatarInitial}</div>
               <div>
-                <strong>Gokay</strong>
-                <span>Personal Web</span>
+                <strong>{profileName}</strong>
+                <span>{workspaceName}</span>
               </div>
             </div>
             <div className="profile-menu-section">
@@ -12358,42 +12907,131 @@ function Sidebar({
                 type="button"
                 role="menuitem"
                 data-testid="open-app-settings"
-                onClick={openSettingsFromProfile}
+                onClick={() => openSettingsFromProfile("runtime")}
               >
                 <Settings size={14} />
                 <span>Settings</span>
               </button>
             </div>
             <div className="profile-menu-section">
-              <button type="button" role="menuitem" onClick={openSettingsFromProfile}>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => openSettingsFromProfile("ai-providers")}
+              >
                 <Cpu size={14} />
                 <span>AI Providers</span>
               </button>
-              <button type="button" role="menuitem" onClick={openSettingsFromProfile}>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => openSettingsFromProfile("models")}
+              >
                 <Settings size={14} />
                 <span>Model settings</span>
               </button>
             </div>
             <div className="profile-menu-section">
-              <button type="button" role="menuitem">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => openProfileInfoPanel("help")}
+              >
                 <HelpCircle size={14} />
                 <span>Help</span>
               </button>
-              <button type="button" role="menuitem">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => openProfileInfoPanel("about")}
+              >
                 <Info size={14} />
                 <span>About Loom</span>
               </button>
             </div>
             <div className="profile-menu-section profile-menu-footer">
-              <button type="button" role="menuitem">
-                <LogOut size={14} />
-                <span>Log out</span>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => openSettingsFromProfile("context-memory")}
+              >
+                <Settings size={14} />
+                <span>Manage local profile</span>
               </button>
             </div>
           </div>
         )}
       </div>
+      {profileInfoPanel && (
+        <ProfileInfoDialog
+          panel={profileInfoPanel}
+          onClose={() => setProfileInfoPanel(null)}
+        />
+      )}
     </aside>
+  );
+}
+
+function ProfileInfoDialog({
+  panel,
+  onClose,
+}: {
+  panel: "help" | "about";
+  onClose: () => void;
+}) {
+  const isHelp = panel === "help";
+  return (
+    <div className="profile-info-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="profile-info-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={isHelp ? "Loom Help" : "About Loom"}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="profile-info-header">
+          <div>
+            <span>{isHelp ? "Help" : "About"}</span>
+            <h2>{isHelp ? "Using Loom" : "Loom AI"}</h2>
+          </div>
+          <button type="button" className="icon-button subtle" onClick={onClose} aria-label="Close">
+            <X size={14} />
+          </button>
+        </div>
+        {isHelp ? (
+          <div className="profile-info-body">
+            <p>
+              Loom is a local-first AI browser.
+            </p>
+            <p>Use the address bar to move between Looms.</p>
+            <p>
+              Type <strong>#</strong> in the composer to reference Looms inline.
+            </p>
+            <p>Create Wefts from responses when you want to branch a thought.</p>
+            <p>
+              Everything stays connected to its origin while remaining independently
+              navigable.
+            </p>
+          </div>
+        ) : (
+          <div className="profile-info-body">
+            <p>Build your personal web from AI conversations.</p>
+            <p>
+              Loom turns linear AI chats into a Personal Web.
+            </p>
+            <p>Every answer becomes addressable.</p>
+            <p>Every response can be bookmarked, referenced, and reused.</p>
+            <p>
+              Every idea can branch into a new path while staying tied to its origin.
+            </p>
+            <p>Loom is your personal, writable, navigable AI web.</p>
+            <p>Browse your thinking.</p>
+            <p>Connect it.</p>
+            <p>Build on it.</p>
+          </div>
+        )}
+      </section>
+    </div>
   );
 }
 
@@ -12862,14 +13500,16 @@ function TopBrowserBar({
       </div>
 
       <AddressBar addressBarRef={addressBarRef} focused={addressFocused}>
-        <button
-          className={currentBookmarked ? "icon-button address-bookmark-button active" : "icon-button address-bookmark-button"}
-          onClick={onBookmarkCurrent}
-          aria-label={currentBookmarked ? "Loom address bookmarked" : "Bookmark current Loom address"}
-          title={currentBookmarked ? "Loom address bookmarked" : "Bookmark current Loom address"}
-        >
-          <Bookmark size={15} />
-        </button>
+        <Tooltip label={currentBookmarked ? "Bookmarked" : "Bookmark"}>
+          <button
+            className={currentBookmarked ? "icon-button address-bookmark-button active" : "icon-button address-bookmark-button"}
+            onClick={onBookmarkCurrent}
+            aria-label={currentBookmarked ? "Loom address bookmarked" : "Bookmark current Loom address"}
+            title={currentBookmarked ? "Loom address bookmarked" : "Bookmark current Loom address"}
+          >
+            <Bookmark size={15} />
+          </button>
+        </Tooltip>
         <div className="address-shell">
           <span
             className={
@@ -12930,16 +13570,19 @@ function TopBrowserBar({
             />
           )}
         </div>
-        <button
-          ref={shareButtonRef}
-          className="icon-button address-share-button"
-          aria-label="Share"
-          aria-haspopup="menu"
-          aria-expanded={Boolean(shareMenuPosition)}
-          onClick={toggleShareMenu}
-        >
-          <Share size={16} />
-        </button>
+        <Tooltip label="Share">
+          <button
+            ref={shareButtonRef}
+            className="icon-button address-share-button"
+            aria-label="Share"
+            title="Share"
+            aria-haspopup="menu"
+            aria-expanded={Boolean(shareMenuPosition)}
+            onClick={toggleShareMenu}
+          >
+            <Share size={16} />
+          </button>
+        </Tooltip>
         {shareMenuPosition &&
           createPortal(
             <ShareMenu
@@ -12953,30 +13596,36 @@ function TopBrowserBar({
       </AddressBar>
 
       <div className="top-actions">
-        <button
-          className={activePanel === "history" ? "chrome-button history-icon-button active" : "chrome-button history-icon-button"}
-          onClick={() => onTogglePanel("history")}
-          aria-label="Open Loom History"
-          title="History"
-        >
-          <History size={16} />
-        </button>
-        <button
-          className={activePanel === "looms" ? "chrome-button active" : "chrome-button"}
-          onClick={() => onTogglePanel("looms")}
-          aria-label="Open Flow"
-          title="Flow"
-        >
-          <GitBranch size={16} />
-        </button>
-        <button
-          className={graphMode ? "chrome-button active" : "chrome-button"}
-          onClick={onToggleGraph}
-          aria-label="Toggle Graph View"
-          title="Graph"
-        >
-          <Map size={16} />
-        </button>
+        <Tooltip label="History">
+          <button
+            className={activePanel === "history" ? "chrome-button history-icon-button active" : "chrome-button history-icon-button"}
+            onClick={() => onTogglePanel("history")}
+            aria-label="Open Loom History"
+            title="History"
+          >
+            <History size={16} />
+          </button>
+        </Tooltip>
+        <Tooltip label="Flow">
+          <button
+            className={activePanel === "looms" ? "chrome-button active" : "chrome-button"}
+            onClick={() => onTogglePanel("looms")}
+            aria-label="Open Flow"
+            title="Flow"
+          >
+            <GitBranch size={16} />
+          </button>
+        </Tooltip>
+        <Tooltip label="Graph">
+          <button
+            className={graphMode ? "chrome-button active" : "chrome-button"}
+            onClick={onToggleGraph}
+            aria-label="Toggle Graph View"
+            title="Graph"
+          >
+            <Map size={16} />
+          </button>
+        </Tooltip>
       </div>
     </TopBar>
   );
@@ -13469,6 +14118,7 @@ function ThinkingPanel({
   onStop: (responseId: string) => void;
 }) {
   const [continuedAt, setContinuedAt] = useState<number | null>(null);
+  const hasVisibleProgress = Boolean(visibleProgress);
   const [expanded, setExpanded] = useState(false);
   const [now, setNow] = useState(Date.now());
   const hasThinking = Boolean(
@@ -13507,7 +14157,7 @@ function ThinkingPanel({
     return () => window.clearInterval(timer);
   }, [hasThinking, thinkingRunning]);
 
-  if (!hasThinking) return null;
+  if (!hasThinking && !hasVisibleProgress) return null;
   if (finalStarted && !showGuardControls && !response.thinkingStopped) return null;
 
   const liveElapsed =
@@ -13515,12 +14165,19 @@ function ThinkingPanel({
       ? Math.max(0, (now - Date.parse(response.thinkingStartedAt)) / 1000)
       : response.elapsedThinkingSeconds;
   const elapsedLabel = formatThinkingSeconds(liveElapsed);
+  const visibleTask = visibleProgress?.tasks.find(
+    (task) => task.id === visibleProgress.activeTaskId
+  );
+  const visibleStatusLabel =
+    visibleProgress?.statusText || (visibleTask ? `${visibleTask.title}...` : undefined);
   const label = thinkingRunning
     ? showGuardControls
       ? "Still thinking..."
       : elapsedLabel
       ? `Thinking for ${elapsedLabel} seconds`
       : "Thinking..."
+    : visibleStatusLabel
+      ? "Thinking"
     : elapsedLabel
       ? `Thought for ${elapsedLabel} seconds`
       : "Thought";
@@ -13536,6 +14193,9 @@ function ThinkingPanel({
       >
         <Lightbulb size={13} />
         <span>{label}</span>
+        {!thinkingRunning && visibleStatusLabel && (
+          <small>{visibleStatusLabel}</small>
+        )}
       </button>
       {expanded && !showGuardControls && !response.thinkingStopped && (
         <div className="thinking-panel-detail">
@@ -13647,6 +14307,7 @@ function UserPromptContent({
     remainingReferences.forEach((link, referenceIndex) => {
       const tokenCandidates = Array.from(
         new Set([
+          composerReferenceTokenText(link, link.referenceDisplayMode ?? "title"),
           referenceTokenText(link, link.referenceDisplayMode ?? "title"),
           referenceTokenText(link, "title"),
           referenceTokenText(link, "code"),
@@ -13679,10 +14340,18 @@ function UserPromptContent({
         title={nextMatch.link.selectedText ?? nextMatch.link.title}
       >
         <span>
-          {referenceLabelForMode(
-            nextMatch.link,
-            nextMatch.link.referenceDisplayMode ?? "title"
-          )}
+          {isAttachmentReferenceLink(nextMatch.link)
+            ? formatAttachmentDisplayName(
+                referenceLabelForMode(
+                  nextMatch.link,
+                  nextMatch.link.referenceDisplayMode ?? "title"
+                ),
+                26
+              )
+            : referenceLabelForMode(
+                nextMatch.link,
+                nextMatch.link.referenceDisplayMode ?? "title"
+              )}
         </span>
       </button>
     );
@@ -13705,7 +14374,14 @@ function UserPromptContent({
           onBlur={onReferenceHintClose}
           title={link.selectedText ?? link.title}
         >
-          <span>{referenceLabelForMode(link, link.referenceDisplayMode ?? "title")}</span>
+          <span>
+            {isAttachmentReferenceLink(link)
+              ? formatAttachmentDisplayName(
+                  referenceLabelForMode(link, link.referenceDisplayMode ?? "title"),
+                  26
+                )
+              : referenceLabelForMode(link, link.referenceDisplayMode ?? "title")}
+          </span>
         </button>
       ))}
       {remainingReferences.length > 0 && text ? " " : ""}
@@ -13881,6 +14557,7 @@ function ChatTranscript({
   onContinueTruncatedResponse,
   onEditPrompt,
   onRegenerateFromPrompt,
+  onRetryPrompt,
   showGenerationDebug,
 }: {
   transcriptRef?: (node: HTMLElement | null) => void;
@@ -13927,6 +14604,11 @@ function ChatTranscript({
   onContinueTruncatedResponse: (responseId: string) => void;
   onEditPrompt: (loomId: string, responseId: string, nextPrompt: string) => Promise<boolean>;
   onRegenerateFromPrompt: (loomId: string, responseId: string) => void;
+  onRetryPrompt: (
+    loomId: string,
+    responseId: string,
+    returnFocus?: HTMLElement | null
+  ) => void;
   showGenerationDebug: boolean;
 }) {
   const [sentReferenceHint, setSentReferenceHint] = useState<{
@@ -14211,20 +14893,6 @@ function ChatTranscript({
           displayResponse.id === completionActionRevealResponseId;
         const displayResponseTitle =
           cleanMarkdownDisplayTitle(displayResponse.title) || displayResponse.title;
-        const responseAnswerText = displayResponse.answer.join("\n\n").trim();
-        const responseFinalText = displayResponse.finalContent?.trim() ?? "";
-        const thinkingBeforeFinalAnswer =
-          displayResponse.thinkingStartedAt &&
-          !displayResponse.finalStartedAt &&
-          !responseAnswerText &&
-          !responseFinalText;
-        const showResponseProgress =
-          isGeneratingResponse &&
-          Boolean(displayResponse.visibleProgress) &&
-          !thinkingBeforeFinalAnswer &&
-          !displayResponse.finalStartedAt &&
-          !responseAnswerText &&
-          !responseFinalText;
         const responseUrl = responseAddressForConversation(conversation, displayResponse);
         const responseLink: LoomLink = {
           id: displayResponse.id,
@@ -14420,6 +15088,22 @@ function ChatTranscript({
                       <Edit3 size={16} />
                     </button>
                   </Tooltip>
+                  {conversation && displayResponse.serviceUserResponseId && (
+                    <Tooltip label="Retry" placement="bottom-right">
+                      <button
+                        type="button"
+                        className="prompt-action-button prompt-retry-trigger"
+                        aria-label="Retry from this message"
+                        data-testid={`retry-prompt-${displayResponse.id}`}
+                        title="Retry"
+                        onClick={(event) => {
+                          onRetryPrompt(conversation.id, displayResponse.id, event.currentTarget);
+                        }}
+                      >
+                        <RotateCcw size={16} />
+                      </button>
+                    </Tooltip>
+                  )}
                 </div>
               )}
             </div>
@@ -14458,12 +15142,6 @@ function ChatTranscript({
                 />
               )}
               <div className="assistant-body">
-                {showResponseProgress && displayResponse.visibleProgress && (
-                  <ResponseProgressChecklist
-                    progress={displayResponse.visibleProgress}
-                    showDebug={showGenerationDebug}
-                  />
-                )}
                 <ThinkingPanel
                   response={displayResponse}
                   visibleProgress={displayResponse.visibleProgress}
@@ -14623,15 +15301,13 @@ function ChatTranscript({
                               {conversationTitlesById[record.childConversationId] ??
                                 record.title}
                             </strong>
-                            <em>
-                              {[
-                                `${branchIndex + 1} of ${explorationWeftCount}`,
-                                formatRelativeTimestamp(
-                                  record.createdAt || record.updatedAt || new Date().toISOString()
-                                ),
-                              ]
-                                .filter(Boolean)
-                                .join(" · ")}
+                            <em className="weft-branch-picker-meta">
+                              <span>{branchIndex + 1} of {explorationWeftCount}</span>
+                              <span>
+                                {formatRelativeTimestamp(record.createdAt) ||
+                                  formatRelativeTimestamp(record.updatedAt) ||
+                                  formatRelativeTimestamp(new Date().toISOString())}
+                              </span>
                             </em>
                           </span>
                         </button>
@@ -14768,6 +15444,7 @@ function PromptComposer({
   const modelButtonRef = useRef<HTMLButtonElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const mentionMenuRef = useRef<HTMLDivElement>(null);
+  const draftRef = useRef(draft);
   const insertedPathsRef = useRef<Set<string>>(new Set());
   const activeDraftKeyRef = useRef("");
   const historiesRef = useRef<Record<string, ComposerHistoryState>>({});
@@ -14787,6 +15464,7 @@ function PromptComposer({
     left: number;
     top: number;
     minWidth: number;
+    height: number;
     placement: "top" | "bottom";
   } | null>(null);
   const [referencePickerOpen, setReferencePickerOpen] = useState(false);
@@ -14857,6 +15535,7 @@ function PromptComposer({
             : null;
   const speechRecorder = useSpeechToTextRecorder(engineClient);
   const speechActive = speechRecorder.status !== "idle";
+  const electronPermissions = getElectronPermissionsBridge();
 
   function setMainModel(modelId: string) {
     onProviderSettingsChange({
@@ -14972,6 +15651,51 @@ function PromptComposer({
     () => sortAttachmentsBySelection(draft.attachments ?? []),
     [draft.attachments]
   );
+  useEffect(() => {
+    if (!currentAttachments.some(attachmentParseActive)) return;
+    let cancelled = false;
+    const refreshAttachments = async () => {
+      try {
+        const result = await engineClient.listAttachments({ loomId: draftKey });
+        if (cancelled) return;
+        const byId = new globalThis.Map(
+          result.attachments.map((attachment) => [attachment.attachmentId, attachment])
+        );
+        const nextAttachments = (draftRef.current.attachments ?? []).map((attachment) => {
+          const attachmentId = attachment.attachmentId ?? attachment.id;
+          const stored = byId.get(attachmentId);
+          return stored
+            ? {
+                ...attachment,
+                id: stored.attachmentId,
+                attachmentId: stored.attachmentId,
+                loomId: stored.loomId,
+                name: stored.fileName,
+                size: stored.sizeBytes,
+                type: stored.mimeType ?? attachment.type,
+                extension: stored.extension,
+                kind: stored.kind,
+                parseStatus: stored.parseStatus,
+                parser: stored.parser,
+                error: stored.error,
+                thumbnailDataUrl: stored.thumbnailDataUrl,
+                parsedCharCount: stored.parsedCharCount,
+                metadataJson: stored.metadataJson,
+              }
+            : attachment;
+        });
+        updateDraftAttachments(nextAttachments);
+      } catch {
+        // Keep current chip state; upload error handling already reports failures.
+      }
+    };
+    void refreshAttachments();
+    const interval = window.setInterval(refreshAttachments, 900);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [currentAttachments, draftKey, engineClient]);
   const draftAttachedReferences = useMemo(
     () => splitPromptReferences(draft.links).attached,
     [draft.links]
@@ -15025,6 +15749,10 @@ function PromptComposer({
     });
     return ranks;
   }, [visibleAttachedReferences, draftInlineReferences]);
+
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
 
   const filteredAttachItems = useMemo(() => {
     const query = attachSearch.trim().toLowerCase();
@@ -15270,29 +15998,39 @@ function PromptComposer({
 
       const buttonRect = button.getBoundingClientRect();
       const menuRect = menu.getBoundingClientRect();
+      const topBarRect = document.querySelector(".top-browser-bar")?.getBoundingClientRect();
       const viewportPadding = 12;
+      const topBoundary = Math.max(viewportPadding, (topBarRect?.bottom ?? 0) + 8);
       const gap = 6;
       const minWidth = Math.max(buttonRect.width, 430);
-      const fixedMenuHeight = Math.min(360, window.innerHeight - viewportPadding * 2);
+      const desiredMenuHeight = 360;
+      const minimumMenuHeight = 220;
+      const availableAbove = Math.max(0, buttonRect.top - gap - topBoundary);
+      const availableBelow = Math.max(
+        0,
+        window.innerHeight - viewportPadding - buttonRect.bottom - gap
+      );
+      const openAbove =
+        availableAbove >= minimumMenuHeight || availableAbove >= availableBelow;
+      const fixedMenuHeight = openAbove
+        ? Math.min(desiredMenuHeight, Math.max(minimumMenuHeight, availableAbove))
+        : Math.min(desiredMenuHeight, Math.max(minimumMenuHeight, availableBelow));
 
       let left = buttonRect.left;
-      let top = buttonRect.bottom + gap;
-      let placement: "top" | "bottom" = "bottom";
-
-      if (top + fixedMenuHeight > window.innerHeight - viewportPadding) {
-        const aboveTop = buttonRect.top - gap - fixedMenuHeight;
-        if (aboveTop >= viewportPadding) {
-          top = aboveTop;
-          placement = "top";
-        }
-      }
+      const top = openAbove
+        ? Math.max(topBoundary, buttonRect.top - gap - fixedMenuHeight)
+        : Math.min(
+            buttonRect.bottom + gap,
+            window.innerHeight - viewportPadding - fixedMenuHeight
+          );
+      const placement: "top" | "bottom" = openAbove ? "top" : "bottom";
 
       const width = Math.max(menuRect.width, minWidth);
       if (left + width > window.innerWidth - viewportPadding) {
         left = Math.max(viewportPadding, window.innerWidth - width - viewportPadding);
       }
 
-      setAttachPopoverStyle({ left, top, minWidth: width, placement });
+      setAttachPopoverStyle({ left, top, minWidth: width, height: fixedMenuHeight, placement });
     }
 
     const raf = window.requestAnimationFrame(updateAttachPopoverPosition);
@@ -15543,7 +16281,8 @@ function PromptComposer({
     token.dataset.loomDisplayMode = displayMode;
     if (nextLink.referenceCode) token.dataset.loomCode = nextLink.referenceCode;
     delete token.dataset.loomCustomLabel;
-    token.textContent = referenceTokenText(nextLink, referenceDisplayMode);
+    token.title = nextLink.title;
+    token.textContent = composerReferenceTokenText(nextLink, referenceDisplayMode);
     window.requestAnimationFrame(() => commitDraftChange("external-reference"));
   }
 
@@ -15626,7 +16365,8 @@ function PromptComposer({
     };
     token.dataset.loomCustomLabel = customLabel;
     if (nextLink.referenceCode) token.dataset.loomCode = nextLink.referenceCode;
-    token.textContent = referenceTokenText(nextLink, referenceDisplayMode);
+    token.title = nextLink.title;
+    token.textContent = composerReferenceTokenText(nextLink, referenceDisplayMode);
     setTokenRenamePopover(null);
     window.requestAnimationFrame(() => commitDraftChange("external-reference"));
   }
@@ -15945,7 +16685,8 @@ function PromptComposer({
     if (displayLink.sourceCanonicalUri) token.dataset.loomSourceCanonicalUri = displayLink.sourceCanonicalUri;
     if (displayLink.fragmentHash) token.dataset.loomFragmentHash = displayLink.fragmentHash;
     if (displayLink.createdAt) token.dataset.loomCreatedAt = String(displayLink.createdAt);
-    token.textContent = referenceTokenText(displayLink, referenceDisplayMode);
+    token.title = displayLink.title;
+    token.textContent = composerReferenceTokenText(displayLink, referenceDisplayMode);
     token.addEventListener("mouseenter", () => scheduleAddressHintForToken(token));
     token.addEventListener("mouseover", () => scheduleAddressHintForToken(token));
     token.addEventListener("mousemove", () => scheduleAddressHintForToken(token));
@@ -16005,8 +16746,8 @@ function PromptComposer({
     } else {
       delete token.dataset.loomSourceCanonicalUri;
     }
-    token.removeAttribute("title");
-    token.textContent = referenceTokenText(displayLink, referenceDisplayMode);
+    token.title = displayLink.title;
+    token.textContent = composerReferenceTokenText(displayLink, referenceDisplayMode);
   }
 
   function normalizeEditorReferenceTokens() {
@@ -16212,6 +16953,10 @@ function PromptComposer({
   async function retrySpeechRecording() {
     restoreSpeechSnapshotFocus();
     await startSpeechRecording();
+  }
+
+  async function openMicrophoneSettings() {
+    await electronPermissions?.openMicrophoneSettings();
   }
 
   function insertSpeechTranscript(transcript: string) {
@@ -16637,6 +17382,7 @@ function PromptComposer({
       ...extractDraftFromEditor(),
       attachments: nextAttachments,
     };
+    draftRef.current = nextDraft;
     const history = getHistoryState();
     const entries = history.entries.slice(0, history.index + 1);
     history.entries = [...entries, nextDraft];
@@ -16650,34 +17396,124 @@ function PromptComposer({
     onDraftChange(nextDraft);
   }
 
+  function readFileAsBase64(file: File) {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("File could not be read."));
+      reader.onload = () => {
+        const result = typeof reader.result === "string" ? reader.result : "";
+        resolve(result.includes(",") ? result.split(",").pop() ?? "" : result);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function uploadAttachment(file: File, pendingAttachment: ComposerAttachment) {
+    try {
+      const contentBase64 = await readFileAsBase64(file);
+      const result = await engineClient.createAttachment({
+        loomId: draftKey,
+        fileName: file.name,
+        mimeType: file.type || undefined,
+        sizeBytes: file.size,
+        contentBase64,
+      });
+      const stored = result.attachment;
+      updateDraftAttachments(
+        (draftRef.current.attachments ?? []).map((attachment) =>
+          attachment.id === pendingAttachment.id
+            ? {
+                ...attachment,
+                id: stored.attachmentId,
+                attachmentId: stored.attachmentId,
+                loomId: stored.loomId,
+                name: stored.fileName,
+                size: stored.sizeBytes,
+                type: stored.mimeType ?? file.type ?? "File",
+                extension: stored.extension,
+                kind: stored.kind,
+                parseStatus: stored.parseStatus,
+                parser: stored.parser,
+                error: stored.error,
+                thumbnailDataUrl: stored.thumbnailDataUrl,
+                parsedCharCount: stored.parsedCharCount,
+                metadataJson: stored.metadataJson,
+              }
+            : attachment
+        )
+      );
+    } catch (error) {
+      updateDraftAttachments(
+        (draftRef.current.attachments ?? []).map((attachment) =>
+          attachment.id === pendingAttachment.id
+            ? {
+                ...attachment,
+                parseStatus: "failed",
+                error: error instanceof Error ? error.message : "Attachment failed.",
+              }
+            : attachment
+        )
+      );
+    }
+  }
+
   function addAttachments(files: FileList | null) {
     if (!files || files.length === 0) return;
-    const existing = draft.attachments ?? [];
+    const existing = draftRef.current.attachments ?? [];
+    const availableSlots = MAX_COMPOSER_ATTACHMENTS - existing.length;
+    if (availableSlots <= 0) {
+      setAttachFeedback(`You can attach up to ${MAX_COMPOSER_ATTACHMENTS} files.`);
+      return;
+    }
     const seen = new Set(
       existing.map((attachment) => `${attachment.name}:${attachment.size}:${attachment.lastModified}`)
     );
     const next = [...existing];
-    Array.from(files).forEach((file) => {
+    const pendingUploads: Array<{ file: File; attachment: ComposerAttachment }> = [];
+    const selectedFiles = Array.from(files);
+    const acceptedFiles = selectedFiles.slice(0, availableSlots);
+    if (selectedFiles.length > acceptedFiles.length) {
+      setAttachFeedback(`You can attach up to ${MAX_COMPOSER_ATTACHMENTS} files.`);
+    }
+    acceptedFiles.forEach((file) => {
       const key = `${file.name}:${file.size}:${file.lastModified}`;
       if (seen.has(key)) return;
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setAttachFeedback(`File is too large. Files can be up to ${MAX_ATTACHMENT_SIZE_LABEL}.`);
+        return;
+      }
       seen.add(key);
       const attachedAt = Date.now() + next.length;
-      next.push({
+      const pendingAttachment: ComposerAttachment = {
         id: key,
         name: file.name,
         size: file.size,
         type: file.type || "File",
+        parseStatus: "parsing",
         lastModified: file.lastModified,
         attachedAt,
-      });
+      };
+      next.push(pendingAttachment);
+      pendingUploads.push({ file, attachment: pendingAttachment });
     });
     updateDraftAttachments(next);
+    pendingUploads.forEach(({ file, attachment }) => {
+      void uploadAttachment(file, attachment);
+    });
   }
 
   function removeAttachment(attachmentId: string) {
+    const attachment = (draftRef.current.attachments ?? []).find((item) => item.id === attachmentId);
+    if (attachment?.attachmentId) {
+      void engineClient.deleteAttachment({ attachmentId: attachment.attachmentId });
+    }
+    const attachmentLink = attachment ? attachmentToLoomLink(attachment) : null;
     updateDraftAttachments(
-      (draft.attachments ?? []).filter((attachment) => attachment.id !== attachmentId)
+      (draftRef.current.attachments ?? []).filter((attachment) => attachment.id !== attachmentId)
     );
+    if (attachmentLink) {
+      onRemoveLink(attachmentLink);
+    }
   }
 
   async function submitComposer() {
@@ -16705,8 +17541,7 @@ function PromptComposer({
       draftForSend.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     const meaningful =
       promptText.length > 0 ||
-      draftForSend.links.length > 0 ||
-      Boolean(draftForSend.attachments?.length);
+      draftForSend.links.length > 0;
     if (!meaningful) return;
     onUserTyping();
     attachedReferences.forEach((link) => onRemoveAttachedReference(link));
@@ -16946,16 +17781,50 @@ function PromptComposer({
           <div className="attached-file-row" aria-label="File attachments">
             {currentAttachments.map((attachment) => (
               <span
-                className="file-attachment-chip"
+                role="button"
+                tabIndex={0}
+                className={`file-attachment-chip attachment-status-${attachment.parseStatus ?? "pending"}`}
                 key={attachment.id}
-                title={`${attachment.name} (${formatAttachmentSize(attachment.size)})`}
+                data-testid={`attachment-token-${attachment.name}`}
+                title={`${attachment.name} (${formatAttachmentSize(attachment.size)}) · ${attachmentStatusLabel(attachment)}`}
+                draggable
+                onDragStart={(event) => setLoomDragPayload(event, attachmentToLoomLink(attachment))}
+                onClick={() => {
+                  if (!attachment.attachmentId) {
+                    setAttachFeedback("File is still uploading");
+                    return;
+                  }
+                  if (attachment.parseStatus !== "ready") {
+                    setAttachFeedback(
+                      attachment.error ?? "This file is not ready for prompt context."
+                    );
+                    return;
+                  }
+                  const link = attachmentToLoomLink(attachment);
+                  if (isReferenceSelected(link)) return;
+                  const resolvedLink = insertTokenAtEnd(link);
+                  onDropLink(resolvedLink);
+                  window.requestAnimationFrame(() => commitDraftChange("reference-insert"));
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  event.currentTarget.click();
+                }}
               >
-                <Paperclip size={13} />
-                <span>{attachment.name}</span>
-                <small>{formatAttachmentSize(attachment.size)}</small>
+                {attachmentParseActive(attachment) ? (
+                  <LoaderCircle className="attachment-spinner" size={13} />
+                ) : (
+                  <Paperclip size={13} />
+                )}
+                <span>{formatAttachmentDisplayName(attachment.name)}</span>
+                <small>{attachmentStatusLabel(attachment)} · {formatAttachmentSize(attachment.size)}</small>
                 <button
                   type="button"
-                  onClick={() => removeAttachment(attachment.id)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    removeAttachment(attachment.id);
+                  }}
                   aria-label={`Remove ${attachment.name}`}
                 >
                   <X size={12} />
@@ -16972,6 +17841,9 @@ function PromptComposer({
             onCancel={cancelSpeechRecording}
             onStop={stopSpeechRecording}
             onRetry={retrySpeechRecording}
+            onOpenMicrophoneSettings={
+              electronPermissions ? openMicrophoneSettings : undefined
+            }
           />
         )}
         <div
@@ -17165,26 +18037,28 @@ function PromptComposer({
         )}
 
         <div className="composer-footer">
-          <button
-            ref={attachButtonRef}
-            className="composer-icon-action"
-            aria-label="Attach"
-            title="Attach"
-            aria-haspopup="dialog"
-            aria-expanded={attachPickerOpen}
-            onClick={() => {
-              setAttachPickerOpen((current) => {
-                const next = !current;
-                if (!next) {
-                  setAttachPopoverStyle(null);
-                  setAttachFeedback(null);
-                }
-                return next;
-              });
-            }}
-          >
-            <Plus size={16} />
-          </button>
+          <Tooltip label="Attach" placement="bottom-right">
+            <button
+              ref={attachButtonRef}
+              className={attachPickerOpen ? "composer-icon-action active" : "composer-icon-action"}
+              aria-label="Attach"
+              title="Attach"
+              aria-haspopup="dialog"
+              aria-expanded={attachPickerOpen}
+              onClick={() => {
+                setAttachPickerOpen((current) => {
+                  const next = !current;
+                  if (!next) {
+                    setAttachPopoverStyle(null);
+                    setAttachFeedback(null);
+                  }
+                  return next;
+                });
+              }}
+            >
+              <Plus size={16} />
+            </button>
+          </Tooltip>
           {attachPickerOpen && createPortal(
             <AttachContentDropdown
               menuRef={attachMenuRef}
@@ -17194,12 +18068,14 @@ function PromptComposer({
                       left: attachPopoverStyle.left,
                       top: attachPopoverStyle.top,
                       minWidth: attachPopoverStyle.minWidth,
+                      height: attachPopoverStyle.height,
                       visibility: "visible",
                     }
                   : {
                       left: 0,
                       top: 0,
                       minWidth: 430,
+                      height: 360,
                       visibility: "hidden",
                     }
               }
@@ -17231,42 +18107,44 @@ function PromptComposer({
             document.body
           )}
           <div className="linked-reference-anchor">
-            <button
-              ref={referenceButtonRef}
-              className={referencePickerOpen ? "reference-globe active" : "reference-globe"}
-              onClick={() => {
-                setReferencePickerOpen((current) => {
-                  const next = !current;
-                  if (!next) setReferencePopoverStyle(null);
-                  if (!next) setReferenceOpenError(null);
-                  if (next) setReferenceSelectedIndex(0);
-                  return next;
-                });
-              }}
-              onKeyDown={(event) => {
-                if (!referencePickerOpen) return;
-                if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
-                event.preventDefault();
-                setReferenceSelectedIndex((current) =>
-                  event.key === "ArrowDown"
-                    ? Math.min(current + 1, Math.max(filteredLinkedReferences.length - 1, 0))
-                    : Math.max(current - 1, 0)
-                );
-                referenceMenuRef.current
-                  ?.querySelector<HTMLInputElement>("input[aria-label='Search linked references']")
-                  ?.focus();
-              }}
-              aria-label="References"
-              title="References"
-              aria-haspopup="listbox"
-              aria-expanded={referencePickerOpen}
-            >
-              <Globe2 size={15} />
-              <span>References</span>
-              {draft.links.length + attachedReferences.length > 0 && (
-                <em>{draft.links.length + attachedReferences.length}</em>
-              )}
-            </button>
+            <Tooltip label="References" placement="bottom-right">
+              <button
+                ref={referenceButtonRef}
+                className={referencePickerOpen ? "reference-globe active" : "reference-globe"}
+                onClick={() => {
+                  setReferencePickerOpen((current) => {
+                    const next = !current;
+                    if (!next) setReferencePopoverStyle(null);
+                    if (!next) setReferenceOpenError(null);
+                    if (next) setReferenceSelectedIndex(0);
+                    return next;
+                  });
+                }}
+                onKeyDown={(event) => {
+                  if (!referencePickerOpen) return;
+                  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+                  event.preventDefault();
+                  setReferenceSelectedIndex((current) =>
+                    event.key === "ArrowDown"
+                      ? Math.min(current + 1, Math.max(filteredLinkedReferences.length - 1, 0))
+                      : Math.max(current - 1, 0)
+                  );
+                  referenceMenuRef.current
+                    ?.querySelector<HTMLInputElement>("input[aria-label='Search linked references']")
+                    ?.focus();
+                }}
+                aria-label="References"
+                title="References"
+                aria-haspopup="listbox"
+                aria-expanded={referencePickerOpen}
+              >
+                <Globe2 size={15} />
+                <span>References</span>
+                {draft.links.length + attachedReferences.length > 0 && (
+                  <em>{draft.links.length + attachedReferences.length}</em>
+                )}
+              </button>
+            </Tooltip>
             {referencePickerOpen && createPortal(
               <LinkedReferenceDropdown
                 menuRef={referenceMenuRef}
@@ -17317,21 +18195,26 @@ function PromptComposer({
             )}
           </div>
           <span>Type # to insert Loom references inline.</span>
-          <button
-            ref={modelButtonRef}
-            type="button"
-            className="model-picker-button"
-            onClick={() => setModelPickerOpen((current) => !current)}
-            aria-haspopup="menu"
-            aria-expanded={modelPickerOpen}
-            aria-label="Select model"
-            title={`Main model: ${mainModel.name}. Response mode: ${
-              modelResponseModes.find((mode) => mode.id === modelResponseMode)?.label ?? "Auto"
-            }`}
+          <Tooltip
+            label={`Model: ${mainModel.name}`}
+            placement="bottom-right"
           >
-            <span>{mainModel.name}</span>
-            <ChevronDown size={15} />
-          </button>
+            <button
+              ref={modelButtonRef}
+              type="button"
+              className="model-picker-button"
+              onClick={() => setModelPickerOpen((current) => !current)}
+              aria-haspopup="menu"
+              aria-expanded={modelPickerOpen}
+              aria-label="Select model"
+              title={`Main model: ${mainModel.name}. Response mode: ${
+                modelResponseModes.find((mode) => mode.id === modelResponseMode)?.label ?? "Auto"
+              }`}
+            >
+              <span>{mainModel.name}</span>
+              <ChevronDown size={15} />
+            </button>
+          </Tooltip>
           {modelPickerOpen && createPortal(
             <div
               ref={modelMenuRef}
@@ -17403,21 +18286,23 @@ function PromptComposer({
             </div>,
             document.body
           )}
-          <button
-            type="button"
-            className={speechActive ? "composer-icon-action active" : "composer-icon-action"}
-            aria-label="Voice input"
-            title="Voice input"
-            aria-pressed={speechRecorder.status === "recording"}
-            disabled={runtimeState.running || speechRecorder.status === "transcribing"}
-            onClick={() => {
-              if (speechRecorder.status === "recording") void stopSpeechRecording();
-              else if (speechRecorder.status === "error") void retrySpeechRecording();
-              else void startSpeechRecording();
-            }}
-          >
-            <Mic size={15} />
-          </button>
+          <Tooltip label="Voice input" placement="bottom-right">
+            <button
+              type="button"
+              className={speechActive ? "composer-icon-action active" : "composer-icon-action"}
+              aria-label="Voice input"
+              title="Voice input"
+              aria-pressed={speechRecorder.status === "recording"}
+              disabled={runtimeState.running || speechRecorder.status === "transcribing"}
+              onClick={() => {
+                if (speechRecorder.status === "recording") void stopSpeechRecording();
+                else if (speechRecorder.status === "error") void retrySpeechRecording();
+                else void startSpeechRecording();
+              }}
+            >
+              <Mic size={15} />
+            </button>
+          </Tooltip>
           <button
             className="send-button"
             aria-label={runtimeState.running ? "Stop response" : "Send"}
@@ -17455,6 +18340,7 @@ function SpeechListeningBar({
   onCancel,
   onStop,
   onRetry,
+  onOpenMicrophoneSettings,
 }: {
   status:
     | "idle"
@@ -17470,15 +18356,21 @@ function SpeechListeningBar({
   onCancel: () => void;
   onStop: () => void;
   onRetry: () => void;
+  onOpenMicrophoneSettings?: () => void;
 }) {
   const isRecording = status === "recording";
   const isTranscribing = status === "transcribing";
   const isError = status === "error";
+  const isPermissionError = /permission|denied|access/i.test(error ?? "");
   const label = isError
     ? error ?? "Microphone error. Please retry."
     : isTranscribing
       ? "Transcribing..."
       : "Listening...";
+  const showPermissionSettings =
+    isError &&
+    Boolean(onOpenMicrophoneSettings) &&
+    isPermissionError;
   return (
     <div
       className={[
@@ -17496,28 +18388,39 @@ function SpeechListeningBar({
         }
       }}
     >
-      <button
-        type="button"
-        className="speech-bar-action"
-        aria-label="Cancel voice input"
-        title="Cancel voice input"
-        onClick={onCancel}
-      >
-        <X size={15} />
-      </button>
       <SpeechWaveform values={waveform} subdued={isTranscribing || isError} />
       <span className="speech-listening-label">{label}</span>
       <SpeechWaveform values={waveform.slice().reverse()} subdued={isTranscribing || isError} />
-      <button
-        type="button"
-        className="speech-bar-action speech-bar-stop"
-        aria-label={isError ? "Retry voice input" : "Stop and transcribe voice input"}
-        title={isError ? "Retry voice input" : "Stop and transcribe voice input"}
-        disabled={isTranscribing}
-        onClick={isError ? onRetry : onStop}
-      >
-        {isError ? <Mic size={15} /> : <Square size={12} fill={isRecording ? "currentColor" : "none"} />}
-      </button>
+      <div className="speech-listening-actions">
+        {showPermissionSettings && (
+          <button
+            type="button"
+            className="speech-permission-settings-button"
+            onClick={onOpenMicrophoneSettings}
+          >
+            Open Microphone Settings
+          </button>
+        )}
+        <button
+          type="button"
+          className="speech-bar-action"
+          aria-label="Cancel voice input"
+          title="Cancel voice input"
+          onClick={onCancel}
+        >
+          <X size={15} />
+        </button>
+        <button
+          type="button"
+          className="speech-bar-action speech-bar-stop"
+          aria-label={isError ? "Retry voice input" : "Stop and transcribe voice input"}
+          title={isError ? "Retry voice input" : "Stop and transcribe voice input"}
+          disabled={isTranscribing}
+          onClick={isError ? onRetry : onStop}
+        >
+          {isError ? <Mic size={15} /> : <Square size={12} fill={isRecording ? "currentColor" : "none"} />}
+        </button>
+      </div>
     </div>
   );
 }
@@ -17966,17 +18869,23 @@ function AttachContentDropdown({
                 </div>
               );
             })}
-            <AttachFilesSection
-              attachments={attachments}
-              fileInputRef={fileInputRef}
-              onAddFiles={onAddFiles}
-              onRemoveAttachment={onRemoveAttachment}
-            />
+            {attachments.length > 0 && (
+              <AttachFilesSection
+                attachments={attachments}
+                fileInputRef={fileInputRef}
+                allowUpload={false}
+                allowRemove={false}
+                onAddFiles={onAddFiles}
+                onRemoveAttachment={onRemoveAttachment}
+              />
+            )}
           </>
         ) : tab === "files" ? (
           <AttachFilesSection
             attachments={attachments}
             fileInputRef={fileInputRef}
+            allowUpload={true}
+            allowRemove={true}
             onAddFiles={onAddFiles}
             onRemoveAttachment={onRemoveAttachment}
           />
@@ -17994,53 +18903,72 @@ function AttachContentDropdown({
 function AttachFilesSection({
   attachments,
   fileInputRef,
+  allowUpload,
+  allowRemove,
   onAddFiles,
   onRemoveAttachment,
 }: {
   attachments: ComposerAttachment[];
   fileInputRef: RefObject<HTMLInputElement>;
+  allowUpload: boolean;
+  allowRemove: boolean;
   onAddFiles: (files: FileList | null) => void;
   onRemoveAttachment: (attachmentId: string) => void;
 }) {
   return (
     <div className="attach-content-section">
       <h3>Files</h3>
-      <button
-        type="button"
-        className="attach-file-action"
-        onClick={() => fileInputRef.current?.click()}
-      >
-        <Paperclip size={14} />
-        <span>Add file</span>
-      </button>
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        className="visually-hidden-file-input"
-        onChange={(event) => {
-          onAddFiles(event.currentTarget.files);
-          event.currentTarget.value = "";
-        }}
-      />
+      {allowUpload && (
+        <>
+          <button
+            type="button"
+            className="attach-file-action"
+            title="Attach local file"
+            aria-label="Attach local file"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Paperclip size={14} />
+            <span>Add file</span>
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="visually-hidden-file-input"
+            onChange={(event) => {
+              onAddFiles(event.currentTarget.files);
+              event.currentTarget.value = "";
+            }}
+          />
+        </>
+      )}
       {attachments.length === 0 ? (
         <div className="attach-file-empty">No files attached.</div>
       ) : (
         attachments.map((attachment) => (
-          <div className="attach-file-row" key={attachment.id}>
-            <Paperclip size={14} />
+          <div
+            className={`attach-file-row attachment-status-${attachment.parseStatus ?? "pending"}`}
+            key={attachment.id}
+          >
+            {attachmentParseActive(attachment) ? (
+              <LoaderCircle className="attachment-spinner" size={14} />
+            ) : (
+              <Paperclip size={14} />
+            )}
             <span>
-              <strong>{attachment.name}</strong>
-              <small>{formatAttachmentSize(attachment.size)}</small>
+              <strong title={attachment.name}>{formatAttachmentDisplayName(attachment.name)}</strong>
+              <small>{attachmentStatusLabel(attachment)} · {formatAttachmentSize(attachment.size)}</small>
             </span>
-            <button
-              type="button"
-              onClick={() => onRemoveAttachment(attachment.id)}
-              aria-label={`Remove ${attachment.name}`}
-              title="Remove file"
-            >
-              <X size={13} />
-            </button>
+            {allowRemove && (
+              <button
+                type="button"
+                onClick={() => onRemoveAttachment(attachment.id)}
+                aria-label={`Remove ${attachment.name}`}
+                title="Remove file"
+              >
+                <X size={13} />
+              </button>
+            )}
           </div>
         ))
       )}

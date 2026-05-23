@@ -7,6 +7,8 @@ import type { LoomEngineClient } from "./LoomEngineClient";
 import type {
   AddReferenceInput,
   AddReferenceResult,
+  CreateAttachmentInput,
+  CreateAttachmentResult,
   BookmarkResponseInput,
   BookmarkResult,
   CancelMessageInput,
@@ -27,6 +29,7 @@ import type {
   GetUiStateInput,
   GetUiStateResult,
   DeleteBookmarkInput,
+  DeleteAttachmentInput,
   DeleteLoomInput,
   GetBookmarkForTargetInput,
   GetBookmarkInput,
@@ -34,6 +37,8 @@ import type {
   GraphProjectionResult,
   ListReferencesInput,
   ListReferencesResult,
+  ListAttachmentsInput,
+  ListAttachmentsResult,
   ListCodeSnippetsInput,
   ListCodeSnippetsResult,
   ListBookmarksResult,
@@ -48,13 +53,17 @@ import type {
   RegenerateFromResponseInput,
   RecordHistoryInput,
   RemoveReferenceInput,
+  RetryUserMessageInput,
   RenameLoomInput,
   ResolveAddressInput,
   ResolveAddressResult,
   LoomServiceRuntimeConfig,
+  RuntimeModelDownloadJob,
+  RuntimeModelsResult,
   ServiceConfigUpdateResult,
   ServiceConfigStatus,
   SpeechProviderHealth,
+  SpeechSetupStatus,
   ServiceHealthStatus,
   SendMessageInput,
   SaveUiStateInput,
@@ -117,6 +126,36 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
     throw new Error("Speech-to-text provider configuration requires the Rust service runtime.");
   }
 
+  async getRuntimeModels(): Promise<RuntimeModelsResult> {
+    throw new Error("Model runtime management requires the Rust service runtime.");
+  }
+
+  async startModelDownload(): Promise<RuntimeModelDownloadJob> {
+    throw new Error("Model downloads require the Rust service runtime.");
+  }
+
+  async getModelDownload(): Promise<RuntimeModelDownloadJob> {
+    throw new Error("Model download status requires the Rust service runtime.");
+  }
+
+  async cancelModelDownload(): Promise<RuntimeModelDownloadJob> {
+    throw new Error("Model download cancellation requires the Rust service runtime.");
+  }
+
+  async getOcrProviderHealth() {
+    return {
+      status: "unavailable",
+      provider: "typescript_local",
+      enabled: false,
+      commandPath: null,
+      rasterizerCommandPath: null,
+      language: "eng",
+      dpi: 200,
+      message: "OCR provider diagnostics require the Rust service runtime.",
+      warnings: ["rust_service_required"],
+    };
+  }
+
   async getSpeechProviderHealth(): Promise<SpeechProviderHealth> {
     return {
       status: "provider_unavailable",
@@ -124,6 +163,18 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
       message: "Speech-to-text requires the Rust service runtime.",
       checks: [],
     };
+  }
+
+  async getSpeechSetupStatus(): Promise<SpeechSetupStatus> {
+    throw new Error("Speech-to-text setup requires the Rust service runtime.");
+  }
+
+  async downloadSpeechSetupModel(): Promise<SpeechSetupStatus> {
+    throw new Error("Speech-to-text model download requires the Rust service runtime.");
+  }
+
+  async configureSpeechSetup(): Promise<SpeechSetupStatus> {
+    throw new Error("Speech-to-text setup requires the Rust service runtime.");
   }
 
   async getCapabilitySummary(): Promise<CapabilitySummary> {
@@ -174,11 +225,62 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
     return notImplementedStream("sendMessage");
   }
 
+  async createAttachment(input: CreateAttachmentInput): Promise<CreateAttachmentResult> {
+    if (this.dependencies.createAttachment) {
+      return this.dependencies.createAttachment(input);
+    }
+    const now = Date.now().toString();
+    const extension = input.fileName.includes(".")
+      ? input.fileName.split(".").pop()?.toLowerCase()
+      : undefined;
+    const isImage = input.mimeType?.startsWith("image/");
+    const isText =
+      input.mimeType?.startsWith("text/") ||
+      ["txt", "md", "csv", "xml", "json"].includes(extension ?? "");
+    return {
+      attachment: {
+        attachmentId: `local-att-${now}`,
+        loomId: input.loomId,
+        fileName: input.fileName,
+        mimeType: input.mimeType,
+        extension,
+        sizeBytes: input.sizeBytes,
+        kind: isImage ? "image" : isText ? "text" : "unsupported",
+        parseStatus: isImage || isText ? "ready" : "unsupported",
+        parser: isImage ? "image_metadata_v1" : isText ? "utf8_text_v1" : undefined,
+        error: isImage || isText ? undefined : "This file type is visible but unsupported for parsing.",
+        thumbnailDataUrl: isImage ? `data:${input.mimeType};base64,${input.contentBase64}` : undefined,
+        createdAt: now,
+        updatedAt: now,
+      },
+    };
+  }
+
+  async listAttachments(input: ListAttachmentsInput): Promise<ListAttachmentsResult> {
+    if (this.dependencies.listAttachments) {
+      return this.dependencies.listAttachments(input);
+    }
+    return { attachments: [] };
+  }
+
+  async deleteAttachment(input: DeleteAttachmentInput): Promise<void> {
+    if (this.dependencies.deleteAttachment) {
+      return this.dependencies.deleteAttachment(input);
+    }
+  }
+
   regenerateFromResponse(input: RegenerateFromResponseInput): AsyncIterable<EngineResponseEvent> {
     if (this.dependencies.regenerateFromResponse) {
       return this.dependencies.regenerateFromResponse(input);
     }
     return notImplementedStream("regenerateFromResponse");
+  }
+
+  retryUserMessage(input: RetryUserMessageInput): AsyncIterable<EngineResponseEvent> {
+    if (this.dependencies.retryUserMessage) {
+      return this.dependencies.retryUserMessage(input);
+    }
+    return notImplementedStream("retryUserMessage");
   }
 
   async cancelMessage(input: CancelMessageInput): Promise<CancelMessageResult> {

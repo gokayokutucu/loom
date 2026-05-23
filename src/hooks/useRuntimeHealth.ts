@@ -17,6 +17,12 @@ import {
 function baseHealth(settings: AIProviderSettings, profile: ModelProfileId): RuntimeHealthState {
   const selectedModel = getProfileModel(settings, profile);
   const installedModels = settings.ollama.models.filter((model) => model.installed);
+  const status =
+    settings.ollama.lastConnectionStatus === "connected"
+      ? "ready"
+      : settings.ollama.lastConnectionStatus === "offline"
+        ? "not_running"
+        : "unknown";
   const checkedAtMs = settings.ollama.lastCheckedAt
     ? Date.parse(settings.ollama.lastCheckedAt)
     : 0;
@@ -26,11 +32,8 @@ function baseHealth(settings: AIProviderSettings, profile: ModelProfileId): Runt
     ollama_running: settings.ollama.lastConnectionStatus === "connected",
     models_available: installedModels.length > 0,
     selected_model_ready: Boolean(selectedModel.installed),
-    status: settings.ollama.lastConnectionStatus === "connected" ? "ready" : "unknown",
-    message: runtimeHealthMessage(
-      settings.ollama.lastConnectionStatus === "connected" ? "ready" : "unknown",
-      settings.ollama.baseUrl
-    ),
+    status,
+    message: runtimeHealthMessage(status, settings.ollama.baseUrl),
     checkedAt: settings.ollama.lastCheckedAt,
     ollama: {
       runtimeReachable: settings.ollama.lastConnectionStatus === "connected",

@@ -1,6 +1,8 @@
-import { app, BrowserWindow, ipcMain, nativeImage } from "electron";
+import { app, BrowserWindow, ipcMain, nativeImage, shell, systemPreferences } from "electron";
+import crypto from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createAppLogger } from "./app-logger.mjs";
 import { LoomServiceSidecarManager } from "./sidecar-manager.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,6 +14,37 @@ const devServerUrl = process.env.LOOM_ELECTRON_DEV_SERVER_URL;
 let mainWindow;
 let sidecar;
 let quitInProgress = false;
+const appSessionId = crypto.randomUUID();
+let appLogger;
+
+function sanitizeLogValue(value, depth = 0) {
+  if (value == null) return value;
+  if (typeof value === "string") return value.length > 500 ? `${value.slice(0, 500)}...` : value;
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+    };
+  }
+  if (depth >= 3) return "[truncated]";
+  if (Array.isArray(value)) {
+    return value.slice(0, 20).map((entry) => sanitizeLogValue(entry, depth + 1));
+  }
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .slice(0, 40)
+        .map(([key, entry]) => [key, sanitizeLogValue(entry, depth + 1)])
+    );
+  }
+  return String(value);
+}
+
+function sanitizeRendererLogPayload(payload) {
+  if (!payload || typeof payload !== "object") return {};
+  return sanitizeLogValue(payload);
+}
 
 function getAppIconPath() {
   const extension = process.platform === "darwin" ? "icns" : "ico";
@@ -112,6 +145,10 @@ function errorHtml(message) {
 function createWindow(runtimeStatus) {
   const serviceUrl = runtimeStatus.serviceUrl ?? "http://127.0.0.1:17633";
   const appIcon = getAppIcon();
+  appLogger?.info("window.create", {
+    serviceUrl,
+    runtimeState: runtimeStatus?.state,
+  });
   mainWindow = new BrowserWindow({
     width: 1280,
     height: 860,
@@ -132,7 +169,17 @@ function createWindow(runtimeStatus) {
     },
   });
 
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    if (permission !== "media") {
+      callback(false);
+      return;
+    }
+    const mediaTypes = Array.isArray(details?.mediaTypes) ? details.mediaTypes : [];
+    callback(mediaTypes.length === 0 || mediaTypes.includes("audio"));
+  });
+
   mainWindow.once("ready-to-show", () => {
+    appLogger?.info("window.ready_to_show");
     mainWindow?.show();
   });
 
@@ -147,9 +194,11 @@ function createWindow(runtimeStatus) {
 async function loadRenderer() {
   if (!mainWindow) return;
   if (devServerUrl) {
+    appLogger?.info("renderer.load.dev", { url: devServerUrl });
     await mainWindow.loadURL(devServerUrl);
     return;
   }
+  appLogger?.info("renderer.load.file", { file: path.join(repoRoot, "dist", "index.html") });
   await mainWindow.loadFile(path.join(repoRoot, "dist", "index.html"));
 }
 
@@ -167,6 +216,17 @@ ipcMain.handle("loom:runtime-restart", async () => {
   });
   mainWindow?.webContents.send("loom:runtime-status-changed", status);
   return status;
+});
+
+ipcMain.handle("loom:app-log", (_event, payload) => {
+  const entry = sanitizeRendererLogPayload(payload);
+  const level = entry.level === "warn" || entry.level === "error" ? entry.level : "info";
+  const event = typeof entry.event === "string" ? entry.event : "renderer.event";
+  const data = entry.data && typeof entry.data === "object" ? entry.data : {};
+  appLogger?.[level](event, {
+    source: "renderer",
+    ...data,
+  });
 });
 
 ipcMain.handle("loom:window-minimize", () => {
@@ -187,13 +247,46 @@ ipcMain.handle("loom:window-close", () => {
   BrowserWindow.getFocusedWindow()?.close();
 });
 
+ipcMain.handle("loom:microphone-permission-status", () => {
+  if (process.platform !== "darwin") {
+    return { platform: process.platform, status: "unsupported" };
+  }
+  return {
+    platform: process.platform,
+    status: systemPreferences.getMediaAccessStatus("microphone"),
+  };
+});
+
+ipcMain.handle("loom:open-microphone-settings", async () => {
+  if (process.platform !== "darwin") {
+    return { platform: process.platform, opened: false, status: "unsupported" };
+  }
+  await shell.openExternal(
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+  );
+  return {
+    platform: process.platform,
+    opened: true,
+    status: systemPreferences.getMediaAccessStatus("microphone"),
+  };
+});
+
 app.whenReady().then(async () => {
+  appLogger = createAppLogger({ app, sessionId: appSessionId });
+  appLogger.info("app.session_started", {
+    appVersion: app.getVersion(),
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    pid: process.pid,
+    repoRoot,
+    devServerUrl,
+  });
   const appIcon = getAppIcon();
   if (process.platform === "darwin" && appIcon && app.dock) {
     app.dock.setIcon(appIcon);
   }
 
-  sidecar = new LoomServiceSidecarManager({ app, repoRoot });
+  sidecar = new LoomServiceSidecarManager({ app, repoRoot, logger: appLogger });
   try {
     const runtimeStatus = await sidecar.start({
       onStarting: (startingStatus) => {
@@ -203,9 +296,15 @@ app.whenReady().then(async () => {
     if (mainWindow?.webContents) {
       mainWindow.webContents.send("loom:runtime-ready", runtimeStatus);
     }
+    appLogger.info("app.runtime_ready", {
+      serviceUrl: runtimeStatus.serviceUrl,
+      pid: runtimeStatus.pid,
+      startedByElectron: runtimeStatus.startedByElectron,
+    });
     await loadRenderer();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    appLogger.error("app.start_failed", { error });
     if (!mainWindow) createWindow({ serviceUrl: undefined });
     await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(errorHtml(message))}`);
     mainWindow.show();
@@ -226,9 +325,11 @@ app.on("before-quit", async (event) => {
   if (!sidecar || sidecar.getStatus().state === "stopped") return;
   event.preventDefault();
   quitInProgress = true;
+  appLogger?.info("app.before_quit", { runtimeState: sidecar.getStatus().state });
   try {
     await sidecar.stop();
   } finally {
+    appLogger?.info("app.session_ended");
     sidecar = null;
     app.quit();
   }

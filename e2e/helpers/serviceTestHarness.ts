@@ -10,6 +10,7 @@ export type DeterministicProviderMode = "event-sourcing";
 
 export interface ServiceTestHarnessOptions {
   deterministicProvider?: DeterministicProviderMode;
+  deterministicFailInitialPrompt?: string;
   forceGenericQuickAskFirstAttempt?: boolean;
   deterministicThinkingDelayMs?: number;
   deterministicStreamChunkDelayMs?: number;
@@ -104,6 +105,9 @@ export async function createServiceTestHarness(
         : {}),
       ...(options.forceGenericQuickAskFirstAttempt
         ? { LOOM_SERVICE_E2E_QUICK_GENERIC_FIRST: "true" }
+        : {}),
+      ...(options.deterministicFailInitialPrompt
+        ? { LOOM_SERVICE_E2E_FAIL_INITIAL_PROMPT: options.deterministicFailInitialPrompt }
         : {}),
       ...(options.deterministicThinkingDelayMs
         ? { LOOM_SERVICE_E2E_THINKING_DELAY_MS: String(options.deterministicThinkingDelayMs) }

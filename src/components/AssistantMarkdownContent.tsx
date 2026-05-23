@@ -198,6 +198,9 @@ function CodeBlock({
               disabled={!canCopy}
               onClick={copyCode}
               aria-label={copied ? "Copied" : `Copy ${language} code`}
+              data-tooltip={
+                canCopy ? (copied ? "Copied" : "Copy code") : "Copy unavailable"
+              }
               title={
                 canCopy ? (copied ? "Copied" : "Copy") : "Copy unavailable until code block completes"
               }
@@ -219,6 +222,13 @@ function CodeBlock({
               disabled={!canAddReference}
               onClick={addCodeReference}
               aria-label={`Add ${language} code block as Reference`}
+              data-tooltip={
+                canAddReference
+                  ? referenced
+                    ? "Reference added"
+                    : "Add Reference"
+                  : "Reference unavailable"
+              }
               title={
                 canAddReference
                   ? referenced

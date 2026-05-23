@@ -375,7 +375,21 @@ export function mergeOllamaModels(models: ModelDescriptor[]) {
 }
 
 export function normalizeOllamaModelId(modelId: string) {
-  return modelId.endsWith(":latest") ? modelId.slice(0, -":latest".length) : modelId;
+  const trimmed = modelId.trim();
+  const withoutLatest = trimmed.endsWith(":latest")
+    ? trimmed.slice(0, -":latest".length)
+    : trimmed;
+  const displayNameAliases: Record<string, string> = {
+    "qwen 3.5 9b": "qwen3.5:9b",
+    "llama 3.2 3b": "llama3.2",
+    "codeqwen 7b code": "codeqwen:7b-code",
+    "qwen 7b": "qwen:7b",
+    "llama 3.1 8b": "llama3.1:8b",
+    "qwen 2.5 7b": "qwen2.5:7b",
+    "mistral 7b": "mistral:7b",
+    "nomic embed text": "nomic-embed-text",
+  };
+  return displayNameAliases[withoutLatest.toLowerCase()] ?? withoutLatest;
 }
 
 export function displayNameForOllamaModel(modelId: string) {
@@ -748,7 +762,7 @@ function effortOptions(effort: ModelEffort | undefined) {
 }
 
 function providerUnavailableMessage(baseUrl: string) {
-  return `Ollama is not running or not reachable at ${baseUrl}. Start Ollama, then retry. You can also open AI Providers and use Test Runtime.`;
+  return `Local model provider is offline at ${baseUrl}. Loom is running normally. Start or install Ollama, then retry the connection.`;
 }
 
 export function mapOllamaError(error: unknown): RuntimeHealthStatus {
@@ -772,12 +786,12 @@ function ollamaErrorKind(error: unknown): OllamaRuntimeErrorKind {
 }
 
 export function runtimeHealthMessage(status: RuntimeHealthStatus, baseUrl: string) {
-  if (status === "ready") return "Ollama runtime is ready.";
+  if (status === "ready") return "Local model provider is connected.";
   if (status === "not_running") {
-    return `Ollama is not reachable at ${baseUrl}. Install or start Ollama, then test the runtime.`;
+    return `Local model provider is offline at ${baseUrl}. Loom is running normally. Start or install Ollama to use local models.`;
   }
-  if (status === "degraded") return "Ollama responded slowly or unexpectedly. Runtime is degraded.";
-  return "Runtime has not been tested yet.";
+  if (status === "degraded") return "Last connection attempt failed or returned an unexpected response.";
+  return "Connection not tested yet.";
 }
 
 export async function fetchWithTimeout(
@@ -944,22 +958,13 @@ export class OllamaProvider implements ModelProvider {
   }
 
   async pullModel(settings: AIProviderSettings, modelId: string) {
-    const baseUrl = normalizeBaseUrl(settings.ollama.baseUrl);
-    assertSafeOllamaBaseUrl(baseUrl);
-    const trustedModel = suggestedOllamaModels.some((model) => model.id === modelId);
-    if (!trustedModel) {
-      throw new ModelProviderError(
-        "ollama",
-        "request_failed",
-        "Model pull is limited to curated Ollama model names."
-      );
-    }
-    const response = await fetchWithTimeout(`${baseUrl}/api/pull`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ model: modelId, stream: false }),
-    }, 120000);
-    if (!response.ok) throw new Error(`Ollama returned ${response.status}`);
+    void settings;
+    void modelId;
+    throw new ModelProviderError(
+      "ollama",
+      "provider_not_implemented",
+      "Model downloads are owned by loom-service runtime manager."
+    );
   }
 
   async execute(settings: AIProviderSettings, request: ModelExecutionRequest) {

@@ -284,15 +284,13 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
                     <GitFork size={13} />
                     <span>
                       <strong>{record.title}</strong>
-                      <em>
-                        {[
-                          `${branchIndex + 1} of ${weftRecords.length}`,
-                          formatRelativeTimestamp(
-                            record.createdAt || record.updatedAt || new Date().toISOString()
-                          ),
-                        ]
-                          .filter(Boolean)
-                          .join(" · ")}
+                      <em className="weft-branch-picker-meta">
+                        <span>{branchIndex + 1} of {weftRecords.length}</span>
+                        <span>
+                          {formatRelativeTimestamp(record.createdAt) ||
+                            formatRelativeTimestamp(record.updatedAt) ||
+                            formatRelativeTimestamp(new Date().toISOString())}
+                        </span>
                       </em>
                     </span>
                   </button>

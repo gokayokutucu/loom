@@ -35,6 +35,10 @@ function createMockRustClient(
     getServiceConfigStatus: async () => ({ status: "ready" }),
     getServiceConfig: async () => unsupportedMockMethod("getServiceConfig"),
     updateServiceConfig: async () => unsupportedMockMethod("updateServiceConfig"),
+    getRuntimeModels: async () => unsupportedMockMethod("getRuntimeModels"),
+    startModelDownload: async () => unsupportedMockMethod("startModelDownload"),
+    getModelDownload: async () => unsupportedMockMethod("getModelDownload"),
+    cancelModelDownload: async () => unsupportedMockMethod("cancelModelDownload"),
     getCapabilitySummary: async () => ({ status: "unknown", strategyAvailable: false }),
     resolveAddress,
     getGraphProjection:
@@ -47,6 +51,7 @@ function createMockRustClient(
     updateLoomMetadata: async () => unsupportedMockMethod("updateLoomMetadata"),
     sendMessage: () => unsupportedMockMethod("sendMessage"),
     regenerateFromResponse: () => unsupportedMockMethod("regenerateFromResponse"),
+    retryUserMessage: () => unsupportedMockMethod("retryUserMessage"),
     cancelMessage: async () => unsupportedMockMethod("cancelMessage"),
     quickAsk: async () => unsupportedMockMethod("quickAsk"),
     createOrOpenWeft: async () => unsupportedMockMethod("createOrOpenWeft"),
@@ -89,6 +94,13 @@ function sseResponse(events: unknown[]) {
     }),
     { status: 200, headers: { "Content-Type": "text/event-stream" } }
   );
+}
+
+function jsonResponse(payload: unknown, status = 200) {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 const graphConversation = {
@@ -1719,6 +1731,77 @@ test.describe("[engine-contract] Loom engine client selection", () => {
     expect(JSON.stringify(events)).not.toContain("hidden");
   });
 
+  test("Rust HTTP client retries user message through POST /responses/:id/retry", async () => {
+    const client = new RustHttpLoomEngineClient({
+      serviceUrl: "http://127.0.0.1:17633",
+      fetch: async (input, init) => {
+        expect(String(input)).toBe("http://127.0.0.1:17633/responses/user-1/retry");
+        expect(init?.method).toBe("POST");
+        expect(JSON.parse(String(init?.body))).toMatchObject({
+          responseMode: "auto",
+          softDeleteDownstream: true,
+          reason: "retry_from_user_message",
+          model: "qwen3:latest",
+          options: {
+            numCtx: 2048,
+          },
+        });
+        return sseResponse([
+          {
+            type: "response.placeholder_created",
+            payload: {
+              runId: "run-retry",
+              loomId: "loom-1",
+              userResponseId: "user-1",
+              assistantResponseId: "assistant-retry",
+            },
+          },
+          {
+            type: "response.delta",
+            payload: {
+              runId: "run-retry",
+              assistantResponseId: "assistant-retry",
+              delta: "Retried answer",
+            },
+          },
+          {
+            type: "response.completed",
+            payload: {
+              runId: "run-retry",
+              assistantResponseId: "assistant-retry",
+              doneReason: "stop",
+            },
+          },
+        ]);
+      },
+    });
+
+    const events = [];
+    for await (const event of client.retryUserMessage({
+      loomId: "loom-1",
+      userResponseId: "user-1",
+      responseMode: "auto",
+      softDeleteDownstream: true,
+      model: "qwen3:latest",
+      options: { numCtx: 2048 },
+    })) {
+      events.push(event);
+    }
+
+    expect(events).toMatchObject([
+      {
+        type: "user_message_created",
+        payload: { loomId: "loom-1", responseId: "user-1", workflowRunId: "run-retry" },
+      },
+      {
+        type: "assistant_placeholder_created",
+        payload: { loomId: "loom-1", responseId: "assistant-retry", workflowRunId: "run-retry" },
+      },
+      { type: "content_delta", payload: { responseId: "assistant-retry", delta: "Retried answer" } },
+      { type: "response_completed", payload: { responseId: "assistant-retry", doneReason: "stop" } },
+    ]);
+  });
+
   test("rust-service regenerateFromResponse does not silently fallback", async () => {
     const engine = createLoomEngineClient({
       mode: "rust-service",
@@ -2810,6 +2893,92 @@ test.describe("[engine-contract] Loom engine client selection", () => {
     await expect(client.getCapabilitySummary()).resolves.toMatchObject({ status: "unavailable" });
   });
 
+  test("Rust HTTP client maps service-owned model runtime endpoints", async () => {
+    const calls: string[] = [];
+    const client = new RustHttpLoomEngineClient({
+      serviceUrl: "http://127.0.0.1:17633",
+      fetch: async (input, init) => {
+        calls.push(`${init?.method ?? "GET"} ${String(input)}`);
+        const url = String(input);
+        if (url.endsWith("/runtime/models") && !init?.method) {
+          return jsonResponse({
+            provider: {
+              providerKind: "ollama",
+              providerProfileId: "ollama-local",
+              status: "ready",
+              runtimeOwnedBy: "external_ollama",
+              supportsDownloads: true,
+              supportsStart: false,
+              supportsStop: false,
+              warnings: [],
+            },
+            models: [
+              {
+                assetId: "ollama:ollama-local:qwen3.5:9b",
+                providerKind: "ollama",
+                providerProfileId: "ollama-local",
+                modelName: "qwen3.5:9b",
+                displayName: "Qwen 3.5 9B",
+                installed: false,
+                status: "missing",
+                supportsQuick: true,
+                supportsMain: true,
+                supportsThinking: true,
+                source: "curated_manifest",
+              },
+            ],
+            jobs: [],
+          });
+        }
+        if (url.endsWith("/runtime/models/qwen3.5%3A9b/download")) {
+          expect(init?.method).toBe("POST");
+          return jsonResponse({
+            job: {
+              jobId: "job-1",
+              providerKind: "ollama",
+              providerProfileId: "ollama-local",
+              modelName: "qwen3.5:9b",
+              status: "queued",
+              progressPercent: 0,
+              cancelRequested: false,
+              metadataJson: {},
+              createdAt: "1",
+              updatedAt: "1",
+            },
+          });
+        }
+        if (url.endsWith("/runtime/downloads/job-1/cancel")) {
+          expect(init?.method).toBe("POST");
+          return jsonResponse({
+            jobId: "job-1",
+            providerKind: "ollama",
+            modelName: "qwen3.5:9b",
+            status: "cancelled",
+            progressPercent: 12,
+            cancelRequested: true,
+            metadataJson: {},
+            createdAt: "1",
+            updatedAt: "2",
+          });
+        }
+        return jsonResponse({}, 404);
+      },
+    });
+
+    await expect(client.getRuntimeModels()).resolves.toMatchObject({
+      provider: { providerKind: "ollama", supportsDownloads: true },
+      models: [{ modelName: "qwen3.5:9b", supportsQuick: true, supportsMain: true }],
+    });
+    const job = await client.startModelDownload("qwen3.5:9b");
+    expect(job.status).toBe("queued");
+    await expect(client.cancelModelDownload(job.jobId)).resolves.toMatchObject({
+      status: "cancelled",
+      cancelRequested: true,
+    });
+    expect(calls).toContain("GET http://127.0.0.1:17633/runtime/models");
+    expect(calls).toContain("POST http://127.0.0.1:17633/runtime/models/qwen3.5%3A9b/download");
+  });
+
   test("Rust HTTP client patches speech config through the service config boundary", async () => {
     let capturedBody: unknown;
     const client = new RustHttpLoomEngineClient({
@@ -2895,7 +3064,8 @@ test.describe("[engine-contract] Loom engine client selection", () => {
             JSON.stringify({
               status: "missing_command",
               providerKind: "local_command",
-              message: "Local speech-to-text provider is not configured.",
+              message:
+                "Speech-to-Text is not configured yet. Open Settings → Capability → Speech-to-Text and run Auto-configure.",
               checks: [],
             }),
             { status: 200 }
@@ -2908,7 +3078,8 @@ test.describe("[engine-contract] Loom engine client selection", () => {
     await expect(client.getSpeechProviderHealth()).resolves.toMatchObject({
       status: "missing_command",
       providerKind: "local_command",
-      message: "Local speech-to-text provider is not configured.",
+      message:
+        "Speech-to-Text is not configured yet. Open Settings → Capability → Speech-to-Text and run Auto-configure.",
     });
   });
 

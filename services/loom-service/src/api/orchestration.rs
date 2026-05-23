@@ -5,8 +5,9 @@ use crate::{
         manager::ContextManager,
         readiness::{ContextReadinessGate, ContextReadinessInput},
         types::{
-            AttachedReferenceInput, BuildContextInput, ContextMessage, ContextMessageRole,
-            ContextSource, ReferenceContext, ResponseMode as ContextResponseMode,
+            AttachedReferenceInput, AttachmentContext, BuildContextInput, ContextMessage,
+            ContextMessageRole, ContextSource, ReferenceContext,
+            ResponseMode as ContextResponseMode,
         },
     },
     events::types::{service_event, LoomServiceEvent},
@@ -30,7 +31,9 @@ use crate::{
     },
     runtime::OperationKind,
     storage::repositories::{
+        attachments::AttachmentRepository,
         looms::{LoomMetadataUpdate, LoomRepository},
+        memory::MemoryRepository,
         responses::{NewResponse, ResponseRecord, ResponseRepository},
     },
 };
@@ -53,7 +56,9 @@ use std::{
 };
 use tokio::time::{sleep, timeout};
 
-const MAX_RECENT_CONTEXT_MESSAGES: usize = 10;
+const DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES: usize = 24;
+const MAX_MEMORY_CONTEXT_MESSAGES: usize = 8;
+const MAX_MEMORY_CONTEXT_CHARS: usize = 1_200;
 const FORBIDDEN_CONTEXT_KEYS: [&str; 4] = [
     "raw_thinking",
     "thinking_text",
@@ -126,6 +131,19 @@ pub async fn regenerate_response(
         return runtime_draining_response();
     }
     Sse::new(regenerate_response_stream(state, response_id, input))
+        .keep_alive(KeepAlive::default())
+        .into_response()
+}
+
+pub async fn retry_response(
+    State(state): State<crate::api::state::AppState>,
+    Path(response_id): Path<String>,
+    Json(input): Json<RetryResponseInput>,
+) -> Response {
+    if state.restart.is_draining() {
+        return runtime_draining_response();
+    }
+    Sse::new(retry_response_stream(state, response_id, input))
         .keep_alive(KeepAlive::default())
         .into_response()
 }
@@ -701,6 +719,18 @@ pub struct RegenerateResponseInput {
     pub replace_stale: bool,
     #[serde(default = "default_regenerate_source")]
     pub source: String,
+    pub model: Option<String>,
+    pub options: Option<OrchestrationExecuteOptions>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RetryResponseInput {
+    pub response_mode: ResponseMode,
+    #[serde(default)]
+    pub soft_delete_downstream: bool,
+    #[serde(default = "default_retry_reason")]
+    pub reason: String,
     pub model: Option<String>,
     pub options: Option<OrchestrationExecuteOptions>,
 }
@@ -1656,10 +1686,27 @@ fn ollama_error_event(
     ))
 }
 
-fn attached_references(references: &[PlannerReference]) -> Vec<AttachedReferenceInput> {
-    references
-        .iter()
-        .map(|reference| AttachedReferenceInput {
+async fn attached_references(
+    database: &crate::storage::db::Database,
+    loom_id: &str,
+    prompt: &str,
+    references: &[PlannerReference],
+) -> Result<Vec<AttachedReferenceInput>, crate::error::ServiceError> {
+    let attachment_repository = AttachmentRepository::new(database);
+    let mut attached_references = Vec::with_capacity(references.len());
+    for reference in references {
+        let attachment = if reference.target_kind == "attachment" {
+            match reference.target_id.as_deref() {
+                Some(attachment_id) => attachment_repository
+                    .get_referenced_attachment_content(loom_id, attachment_id, prompt)
+                    .await?
+                    .map(attachment_context_from_record),
+                None => None,
+            }
+        } else {
+            None
+        };
+        attached_references.push(AttachedReferenceInput {
             reference: ReferenceContext {
                 reference_id: reference.reference_id.clone(),
                 target_kind: reference.target_kind.clone(),
@@ -1670,12 +1717,36 @@ fn attached_references(references: &[PlannerReference]) -> Vec<AttachedReference
                 capsule_summary: None,
             },
             response_capsule: None,
-        })
-        .collect()
+            attachment,
+        });
+    }
+    Ok(attached_references)
+}
+
+fn attachment_context_from_record(
+    record: crate::storage::repositories::attachments::AttachmentRecord,
+) -> AttachmentContext {
+    let parsed = record.parsed_content;
+    AttachmentContext {
+        attachment_id: record.attachment_id,
+        loom_id: record.loom_id,
+        file_name: record.file_name,
+        mime_type: record.mime_type,
+        kind: record.kind,
+        parse_status: record.parse_status,
+        parser: record.parser,
+        content_text: parsed.as_ref().map(|content| content.content_text.clone()),
+        content_kind: parsed.as_ref().map(|content| content.content_kind.clone()),
+        char_count: parsed.map(|content| content.char_count),
+    }
 }
 
 fn default_regenerate_source() -> String {
     "prompt_edit_regenerate".to_string()
+}
+
+fn default_retry_reason() -> String {
+    "retry_from_user_message".to_string()
 }
 
 fn regenerate_response_stream(
@@ -1735,6 +1806,90 @@ fn regenerate_response_stream(
             regenerate_from_response_id: Some(user.response_id),
             stale_assistant_response_id: stale_assistant,
             source: Some(input.source),
+        };
+        let inner = execute_stream(state, execute_input);
+        futures_util::pin_mut!(inner);
+        while let Some(event) = inner.next().await {
+            yield event;
+        }
+    }
+}
+
+fn retry_response_stream(
+    state: crate::api::state::AppState,
+    response_id: String,
+    input: RetryResponseInput,
+) -> impl Stream<Item = Result<Event, Infallible>> {
+    stream! {
+        let repository = ResponseRepository::new(&state.database);
+        let user = match repository.get_response(&response_id).await {
+            Ok(Some(response)) => response,
+            Ok(None) => {
+                yield Ok(to_sse_event(service_event(response_id.clone(), "response.error", json!({
+                    "runId": Value::Null,
+                    "stage": "retry",
+                    "kind": "not_found",
+                    "message": "Response was not found."
+                }))));
+                return;
+            }
+            Err(error) => {
+                yield Ok(to_sse_event(service_event(response_id.clone(), "response.error", json!({
+                    "runId": Value::Null,
+                    "stage": "retry",
+                    "kind": "response_lookup_error",
+                    "message": error.to_string()
+                }))));
+                return;
+            }
+        };
+        if user.role != "user" {
+            yield Ok(to_sse_event(service_event(response_id.clone(), "response.error", json!({
+                "runId": Value::Null,
+                "stage": "retry",
+                "kind": "unsupported_response_retry",
+                "message": "Retry requires a user Response."
+            }))));
+            return;
+        }
+        let stale_assistant = match repository
+            .next_assistant_after(&user.loom_id, user.sequence_index)
+            .await
+        {
+            Ok(value) => value.map(|response| response.response_id),
+            Err(_) => None,
+        };
+        if input.soft_delete_downstream {
+            if let Err(error) = repository
+                .soft_delete_responses_after(
+                    &user.loom_id,
+                    user.sequence_index,
+                    &input.reason,
+                    &user.response_id,
+                )
+                .await
+            {
+                yield Ok(to_sse_event(service_event(user.response_id.clone(), "response.error", json!({
+                    "runId": Value::Null,
+                    "stage": "retry",
+                    "kind": "downstream_soft_delete_failed",
+                    "message": error.to_string()
+                }))));
+                return;
+            }
+        }
+        let execute_input = OrchestrationExecuteInput {
+            loom_id: Some(user.loom_id.clone()),
+            response_id: Some(user.response_id.clone()),
+            prompt: user.content.clone(),
+            references: references_from_response_metadata(user.metadata_json.as_deref()),
+            response_mode: input.response_mode,
+            model: input.model.unwrap_or_else(|| "qwen3:latest".to_string()),
+            options: input.options,
+            persist_workflow: true,
+            regenerate_from_response_id: Some(user.response_id),
+            stale_assistant_response_id: stale_assistant,
+            source: Some(input.reason),
         };
         let inner = execute_stream(state, execute_input);
         futures_util::pin_mut!(inner);
@@ -1818,6 +1973,7 @@ async fn recent_messages_before_response(
     database: &crate::storage::db::Database,
     loom_id: &str,
     response_id: Option<&str>,
+    max_candidate_responses: usize,
 ) -> Result<Vec<ContextMessage>, crate::error::ServiceError> {
     let Some(response_id) = response_id else {
         return Ok(Vec::new());
@@ -1827,12 +1983,13 @@ async fn recent_messages_before_response(
         return Ok(Vec::new());
     };
     let responses = repository.list_responses_for_loom(loom_id).await?;
-    Ok(limit_recent_context_messages(
+    Ok(limit_recent_candidate_responses(
         responses
             .into_iter()
             .filter(|response| response.sequence_index < head.sequence_index)
             .filter_map(response_to_recent_context_message)
             .collect(),
+        max_candidate_responses,
     ))
 }
 
@@ -1841,21 +1998,124 @@ async fn recent_messages_for_execution(
     loom_id: &str,
     input: &OrchestrationExecuteInput,
     lifecycle: Option<&PersistedResponseLifecycle>,
+    max_candidate_responses: usize,
 ) -> Result<Vec<ContextMessage>, crate::error::ServiceError> {
     if input.regenerate_from_response_id.is_some() {
-        return recent_messages_before_response(database, loom_id, input.response_id.as_deref())
-            .await;
+        return recent_messages_before_response(
+            database,
+            loom_id,
+            input.response_id.as_deref(),
+            max_candidate_responses,
+        )
+        .await;
     }
 
     let Some(lifecycle) = lifecycle else {
         return Ok(Vec::new());
     };
-    recent_messages_before_response(database, loom_id, Some(&lifecycle.user_response_id)).await
+    recent_messages_before_response(
+        database,
+        loom_id,
+        Some(&lifecycle.user_response_id),
+        max_candidate_responses,
+    )
+    .await
 }
 
-fn limit_recent_context_messages(mut messages: Vec<ContextMessage>) -> Vec<ContextMessage> {
-    if messages.len() > MAX_RECENT_CONTEXT_MESSAGES {
-        messages.drain(0..messages.len() - MAX_RECENT_CONTEXT_MESSAGES);
+async fn memory_messages_for_execution(
+    database: &crate::storage::db::Database,
+    config: &LoomServiceConfig,
+) -> Result<Vec<ContextMessage>, crate::error::ServiceError> {
+    if !config.memory.enabled {
+        return Ok(Vec::new());
+    }
+
+    let mut messages = Vec::new();
+    let mut profile_lines = Vec::new();
+    push_profile_line(&mut profile_lines, "Nickname", &config.memory.nickname);
+    push_profile_line(&mut profile_lines, "Occupation", &config.memory.occupation);
+    push_profile_line(
+        &mut profile_lines,
+        "Answer preferences",
+        &config.memory.style_preferences,
+    );
+    push_profile_line(
+        &mut profile_lines,
+        "About the user",
+        &config.memory.more_about_you,
+    );
+    if !profile_lines.is_empty() {
+        messages.push(ContextMessage::new(
+            ContextMessageRole::System,
+            format!(
+                "Use this explicit local user profile only when it is relevant. Do not mention it unless it helps answer the user's question.\n{}",
+                profile_lines.join("\n")
+            ),
+            Some(crate::context::types::ContextSourceKind::RetrievedMemory),
+            Some("local-profile-settings".to_string()),
+        ));
+    }
+
+    if config.memory.reference_saved_memories {
+        let repository = MemoryRepository::new(database);
+        for memory in repository.list_memories(None).await? {
+            if !memory.user_confirmed || contains_forbidden_context_key(&memory.content) {
+                continue;
+            }
+            if !matches!(
+                memory.memory_type.as_str(),
+                "explicit_user_memory" | "profile_preference"
+            ) {
+                continue;
+            }
+            messages.push(ContextMessage::new(
+                ContextMessageRole::System,
+                format!(
+                    "Saved Memory ({}): {}",
+                    memory.memory_type,
+                    truncate_context_text(&memory.content, MAX_MEMORY_CONTEXT_CHARS)
+                ),
+                Some(crate::context::types::ContextSourceKind::RetrievedMemory),
+                Some(memory.memory_id),
+            ));
+            if messages.len() >= MAX_MEMORY_CONTEXT_MESSAGES {
+                break;
+            }
+        }
+    }
+
+    Ok(messages)
+}
+
+fn push_profile_line(lines: &mut Vec<String>, label: &str, value: &str) {
+    let value = value.trim();
+    if value.is_empty() || contains_forbidden_context_key(value) {
+        return;
+    }
+    lines.push(format!(
+        "{label}: {}",
+        truncate_context_text(value, MAX_MEMORY_CONTEXT_CHARS)
+    ));
+}
+
+fn truncate_context_text(value: &str, max_chars: usize) -> String {
+    let mut output = String::new();
+    for character in value.chars().take(max_chars) {
+        output.push(character);
+    }
+    if value.chars().count() > max_chars {
+        output.push_str("...");
+    }
+    output
+}
+
+fn limit_recent_candidate_responses(
+    mut messages: Vec<ContextMessage>,
+    max_candidate_responses: usize,
+) -> Vec<ContextMessage> {
+    let max_candidate_responses = max_candidate_responses.max(2);
+    if messages.len() > max_candidate_responses {
+        messages.drain(0..messages.len() - max_candidate_responses);
     }
     messages
 }
@@ -2059,6 +2319,14 @@ fn deterministic_e2e_answer(
     if prompt.contains("blue otter") && prompt.contains("event sourcing") {
         return Some("Blue Otter is the project codename. In the Event Sourcing explanation, Blue Otter uses an Event Store as the source of truth and can replay events to rebuild projections.".to_string());
     }
+    if prompt.contains("teknik geçmişime") || prompt.contains("technical background") {
+        if context_text.contains("software architect")
+            && context_text.contains(".net engineer")
+            && context_text.contains("turkish answers")
+        {
+            return Some("Teknik geçmişine göre bunu bir Software architect / .NET engineer bakışıyla değerlendirmelisin: domain boundaries, local-first runtime, service ownership ve long-term architecture trade-off'larına odaklan. Loom ve local-first AI runtime ilgini dikkate alarak, kararlarını privacy, operability ve maintainability üzerinden tart.".to_string());
+        }
+    }
     if prompt.contains("project codename") || prompt.contains("codename") {
         return Some(
             if context_text.contains("blue otter") && context_text.contains("event sourcing") {
@@ -2119,6 +2387,22 @@ fn deterministic_e2e_answer(
     }
 
     Some("Deterministic E2E provider only answers the Event Sourcing proof scenario.".to_string())
+}
+
+fn should_fail_initial_e2e_prompt(input: &OrchestrationExecuteInput) -> bool {
+    let Ok(marker) = std::env::var("LOOM_SERVICE_E2E_FAIL_INITIAL_PROMPT") else {
+        return false;
+    };
+    let marker = marker.trim().to_lowercase();
+    if marker.is_empty() {
+        return false;
+    }
+    let is_retry = input
+        .source
+        .as_deref()
+        .map(|source| source == "retry_from_user_message")
+        .unwrap_or(false);
+    !is_retry && input.prompt.to_lowercase().contains(&marker)
 }
 
 fn deterministic_e2e_thinking_delay_ms() -> u64 {
@@ -2430,7 +2714,21 @@ fn execute_stream(
             }
         }
 
-        let attached_references = attached_references(&execution_input.references);
+        let attached_references = match attached_references(
+            &state.database,
+            &workflow_loom_id,
+            &execution_input.prompt,
+            &execution_input.references,
+        )
+        .await
+        {
+            Ok(references) => references,
+            Err(error) => {
+                let _ = runner.mark_stage_failed(&run_id, "prepare_context", &error.to_string()).await;
+                yield Ok(workflow_error_event(&run_id, "prepare_context", error.to_string()));
+                return;
+            }
+        };
         let (is_weft, origin_loom_id, origin_response_id) = match resolve_context_scope(
             &state.database,
             &workflow_loom_id,
@@ -2485,11 +2783,18 @@ fn execute_stream(
             "readiness": readiness
         }))));
 
+        let service_config = state.config.current();
+        let max_recent_candidate_responses = service_config
+            .context
+            .max_recent_candidate_responses
+            .try_into()
+            .unwrap_or(DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES);
         let recent_messages = match recent_messages_for_execution(
             &state.database,
             &workflow_loom_id,
             &execution_input,
             persisted_lifecycle.as_ref(),
+            max_recent_candidate_responses,
         )
         .await
         {
@@ -2511,6 +2816,17 @@ fn execute_stream(
                 return;
             }
         };
+        let memory_messages = match memory_messages_for_execution(&state.database, &service_config).await {
+            Ok(messages) => messages,
+            Err(error) => {
+                yield Ok(to_sse_event(service_event(run_id.clone(), "context.ready", json!({
+                    "runId": run_id,
+                    "warning": "memory_context_unavailable",
+                    "message": error.to_string()
+                }))));
+                Vec::new()
+            }
+        };
         let context_input = BuildContextInput {
             loom_id: workflow_loom_id.clone(),
             current_head_response_id: persisted_lifecycle
@@ -2525,6 +2841,7 @@ fn execute_stream(
             source: if is_weft { ContextSource::Weft } else { ContextSource::Composer },
             weft_origin: None,
             checkpoint: None,
+            memory_messages,
             recent_messages,
         };
         let strategy_decision = match resolve_service_execution_strategy(
@@ -2544,7 +2861,7 @@ fn execute_stream(
             }
         };
         let context_repository = crate::storage::repositories::context_artifacts::ContextArtifactsRepository::new(&state.database);
-        let context_manager = ContextManager::with_repository(Some(state.config.current().context), context_repository);
+        let context_manager = ContextManager::with_repository(Some(service_config.context), context_repository);
         let built_context = match context_manager
             .build_context_with_repositories_and_strategy(context_input, strategy_decision.as_ref())
             .await
@@ -2583,6 +2900,40 @@ fn execute_stream(
                 yield Ok(workflow_error_event(&run_id, "generate", error.to_string()));
                 return;
             }
+        }
+
+        if should_fail_initial_e2e_prompt(&execution_input) {
+            let message = "Deterministic E2E failed placeholder requested.";
+            let _ = runner.mark_stage_failed(&run_id, "generate", "e2e_failed_placeholder").await;
+            if let Some(lifecycle) = persisted_lifecycle.as_ref() {
+                let _ = update_persisted_assistant_status(
+                    &state.database,
+                    lifecycle,
+                    "error",
+                    Some("error"),
+                    Some("e2e_failed_placeholder"),
+                    Some(message),
+                )
+                .await;
+            }
+            schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
+            let payload = merge_response_ids(json!({
+                "runId": run_id,
+                "stage": "generate",
+                "kind": "e2e_failed_placeholder",
+                "message": message,
+                "elapsedMs": started.elapsed().as_millis()
+            }), persisted_lifecycle.as_ref());
+            let _ = runner
+                .persist_event(
+                    run_id.clone(),
+                    "response.error".to_string(),
+                    Some("generate".to_string()),
+                    payload.to_string(),
+                )
+                .await;
+            yield Ok(to_sse_event(service_event(run_id.clone(), "response.error", payload)));
+            return;
         }
 
         if let Some(answer) = deterministic_e2e_answer(&execution_input, &built_context) {
@@ -3763,12 +4114,12 @@ mod tests {
         build_generation_response_state, build_generation_status, configured_quick_model,
         context_built_event_payload, create_persisted_response_lifecycle,
         ensure_main_model_configured, eval_prompt, eval_strategy_decision,
-        fallback_auto_router_decision, minimum_successful_drafts, parse_auto_router_decision,
-        parse_ndjson_bytes, plan, recent_messages_before_response, recent_messages_for_execution,
-        references_from_response_metadata, resolve_context_scope, sanitize_generation_value,
-        synthesis_prompt, update_persisted_assistant_content, update_persisted_assistant_status,
-        DeepSynthesisEvalPrompt, OrchestrationExecuteInput, ResponseModeResolution,
-        MAX_RECENT_CONTEXT_MESSAGES,
+        fallback_auto_router_decision, memory_messages_for_execution, minimum_successful_drafts,
+        parse_auto_router_decision, parse_ndjson_bytes, plan, recent_messages_before_response,
+        recent_messages_for_execution, references_from_response_metadata, resolve_context_scope,
+        sanitize_generation_value, synthesis_prompt, update_persisted_assistant_content,
+        update_persisted_assistant_status, DeepSynthesisEvalPrompt, OrchestrationExecuteInput,
+        ResponseModeResolution, DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES,
     };
     use crate::{
         api::state::AppState,
@@ -3796,6 +4147,7 @@ mod tests {
             repositories::{
                 code_blocks::ResponseCodeBlockRepository,
                 looms::{LoomRepository, NewLoom},
+                memory::{MemoryRepository, NewMemory},
                 orchestration::{
                     NewOrchestrationEvent, NewWorkflowRun, NewWorkflowStage,
                     OrchestrationEventRepository, WorkflowRunRepository, WorkflowStageRepository,
@@ -4011,6 +4363,14 @@ mod tests {
         assert_eq!(
             payload["budgetDiagnostics"]["hardTrimThreshold"],
             built_context.budget_plan.hard_trim_threshold
+        );
+        assert_eq!(
+            payload["budgetDiagnostics"]["recentResponseLimit"],
+            built_context.budget_plan.recent_full_response_limit
+        );
+        assert_eq!(
+            payload["budgetDiagnostics"]["recentSelectedResponses"],
+            built_context.budget_diagnostics.recent_selected_responses
         );
         let serialized = payload.to_string();
         for forbidden in [
@@ -4589,9 +4949,14 @@ mod tests {
                 .expect("insert response");
         }
 
-        let recent = recent_messages_before_response(&database, "loom-1", Some("edited-user"))
-            .await
-            .expect("recent messages");
+        let recent = recent_messages_before_response(
+            &database,
+            "loom-1",
+            Some("edited-user"),
+            DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES,
+        )
+        .await
+        .expect("recent messages");
         let joined = recent
             .iter()
             .map(|message| message.content.as_str())
@@ -4629,9 +4994,15 @@ mod tests {
         .await
         .expect("lifecycle persists")
         .expect("lifecycle exists");
-        let recent = recent_messages_for_execution(&database, "loom-1", &input, Some(&lifecycle))
-            .await
-            .expect("recent messages");
+        let recent = recent_messages_for_execution(
+            &database,
+            "loom-1",
+            &input,
+            Some(&lifecycle),
+            DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES,
+        )
+        .await
+        .expect("recent messages");
 
         assert_eq!(recent.len(), 2);
         assert_eq!(recent[0].role, ContextMessageRole::User);
@@ -4656,6 +5027,7 @@ mod tests {
             source: ContextSource::Composer,
             weft_origin: None,
             checkpoint: None,
+            memory_messages: Vec::new(),
             recent_messages: recent,
         });
         let context_text = built
@@ -4673,6 +5045,127 @@ mod tests {
         assert!(context_text.contains("Avantaj ve dezavantajları tablo"));
         assert!(context_text.contains("infer it from the recent conversation"));
         assert!(!context_text.contains("raw_thinking"));
+    }
+
+    #[tokio::test]
+    async fn recent_candidate_pool_exceeds_final_budget_plan_selection() {
+        let database = test_database().await;
+        insert_test_loom(&database).await;
+        let repository = ResponseRepository::new(&database);
+        for index in 0..30 {
+            let content = format!("Valid recent response {index}");
+            let mut metadata_json = None;
+            if index == 3 {
+                sqlx::query(
+                    "INSERT INTO responses (
+                        response_id, loom_id, role, content, created_at, updated_at,
+                        sequence_index, metadata_json
+                    ) VALUES (?1, 'loom-1', 'user', ?2, ?3, ?3, ?4, NULL)",
+                )
+                .bind(format!("recent-{index}"))
+                .bind("raw_thinking must never enter recent context")
+                .bind(index.to_string())
+                .bind(index)
+                .execute(database.pool())
+                .await
+                .expect("insert raw-thinking fixture directly");
+                continue;
+            }
+            if index == 4 {
+                metadata_json = Some(serde_json::json!({ "stale": true }).to_string());
+            }
+            repository
+                .insert_response(&NewResponse {
+                    response_id: format!("recent-{index}"),
+                    loom_id: "loom-1".to_string(),
+                    role: if index % 2 == 0 {
+                        "assistant".to_string()
+                    } else {
+                        "user".to_string()
+                    },
+                    content,
+                    title: None,
+                    code: None,
+                    canonical_uri: None,
+                    created_at: index.to_string(),
+                    updated_at: index.to_string(),
+                    sequence_index: index,
+                    metadata_json,
+                })
+                .await
+                .expect("insert recent response");
+        }
+        sqlx::query("UPDATE responses SET is_deleted = 1 WHERE response_id = 'recent-5'")
+            .execute(database.pool())
+            .await
+            .expect("mark deleted");
+        repository
+            .insert_response(&NewResponse {
+                response_id: "current-user".to_string(),
+                loom_id: "loom-1".to_string(),
+                role: "user".to_string(),
+                content: "Use recent context".to_string(),
+                title: None,
+                code: None,
+                canonical_uri: None,
+                created_at: "31".to_string(),
+                updated_at: "31".to_string(),
+                sequence_index: 31,
+                metadata_json: None,
+            })
+            .await
+            .expect("insert current response");
+
+        let recent = recent_messages_before_response(
+            &database,
+            "loom-1",
+            Some("current-user"),
+            DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES,
+        )
+        .await
+        .expect("recent candidates");
+        let joined = recent
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(recent.len(), 24);
+        assert!(!joined.contains("raw_thinking"));
+        assert!(!joined.contains("stale"));
+        assert!(!joined.contains("recent response 5"));
+
+        let built = ContextManager::default().build_context_with_contributors_and_strategy(
+            BuildContextInput {
+                loom_id: "loom-1".to_string(),
+                current_head_response_id: Some("current-user".to_string()),
+                user_prompt: "Use recent context".to_string(),
+                attached_references: Vec::new(),
+                response_mode: ContextResponseMode::Auto,
+                resolved_num_ctx: 16_384,
+                answer_plan: None,
+                source: ContextSource::Composer,
+                weft_origin: None,
+                checkpoint: None,
+                memory_messages: Vec::new(),
+                recent_messages: recent,
+            },
+            vec![Box::new(
+                crate::context::contributors::RecentTurnsContributor,
+            )],
+            Some(&strategy_decision(
+                ExecutionStrategy::Parallel2DraftSynthesize,
+                2,
+                true,
+            )),
+        );
+
+        assert_eq!(built.budget_diagnostics.recent_candidate_responses, 24);
+        assert_eq!(built.budget_diagnostics.recent_response_limit, 20);
+        assert_eq!(built.budget_diagnostics.recent_selected_responses, 20);
+        assert_eq!(
+            built.budget_diagnostics.recent_selected_response_ids.len(),
+            20
+        );
     }
 
     #[tokio::test]
@@ -4701,9 +5194,15 @@ mod tests {
         .await
         .expect("lifecycle persists")
         .expect("lifecycle exists");
-        let recent = recent_messages_for_execution(&database, "loom-1", &input, Some(&lifecycle))
-            .await
-            .expect("recent messages");
+        let recent = recent_messages_for_execution(
+            &database,
+            "loom-1",
+            &input,
+            Some(&lifecycle),
+            DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES,
+        )
+        .await
+        .expect("recent messages");
         let built = ContextManager::default().build_context(BuildContextInput {
             loom_id: "loom-1".to_string(),
             current_head_response_id: Some(lifecycle.user_response_id),
@@ -4715,6 +5214,7 @@ mod tests {
             source: ContextSource::Composer,
             weft_origin: None,
             checkpoint: None,
+            memory_messages: Vec::new(),
             recent_messages: recent,
         });
         let context_text = built
@@ -4739,10 +5239,14 @@ mod tests {
         insert_test_loom(&database).await;
         insert_event_sourcing_proof_turns(&database).await;
 
-        let turn_two_context =
-            recent_messages_before_response(&database, "loom-1", Some("event-user-2"))
-                .await
-                .expect("turn two recent context");
+        let turn_two_context = recent_messages_before_response(
+            &database,
+            "loom-1",
+            Some("event-user-2"),
+            DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES,
+        )
+        .await
+        .expect("turn two recent context");
         let turn_two_built = ContextManager::default().build_context(BuildContextInput {
             loom_id: "loom-1".to_string(),
             current_head_response_id: Some("event-user-2".to_string()),
@@ -4755,6 +5259,7 @@ mod tests {
             source: ContextSource::Composer,
             weft_origin: None,
             checkpoint: None,
+            memory_messages: Vec::new(),
             recent_messages: turn_two_context,
         });
         let turn_two_text = context_text(&turn_two_built);
@@ -4766,10 +5271,14 @@ mod tests {
         assert!(!turn_two_text.contains("LoomDB"));
         assert_no_forbidden_context_keys(&turn_two_text);
 
-        let turn_three_context =
-            recent_messages_before_response(&database, "loom-1", Some("event-user-3"))
-                .await
-                .expect("turn three recent context");
+        let turn_three_context = recent_messages_before_response(
+            &database,
+            "loom-1",
+            Some("event-user-3"),
+            DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES,
+        )
+        .await
+        .expect("turn three recent context");
         let turn_three_built = ContextManager::default().build_context(BuildContextInput {
             loom_id: "loom-1".to_string(),
             current_head_response_id: Some("event-user-3".to_string()),
@@ -4781,6 +5290,7 @@ mod tests {
             source: ContextSource::Composer,
             weft_origin: None,
             checkpoint: None,
+            memory_messages: Vec::new(),
             recent_messages: turn_three_context,
         });
         let turn_three_text = context_text(&turn_three_built);
@@ -4867,7 +5377,7 @@ mod tests {
         let database = test_database().await;
         insert_test_loom(&database).await;
         let repository = ResponseRepository::new(&database);
-        for index in 0..12 {
+        for index in 0..13 {
             repository
                 .insert_response(&NewResponse {
                     response_id: format!("user-{index}"),
@@ -4910,21 +5420,26 @@ mod tests {
                 title: None,
                 code: None,
                 canonical_uri: None,
-                created_at: "24".to_string(),
-                updated_at: "24".to_string(),
-                sequence_index: 24,
+                created_at: "26".to_string(),
+                updated_at: "26".to_string(),
+                sequence_index: 26,
                 metadata_json: None,
             })
             .await
             .expect("insert current user");
 
-        let recent = recent_messages_before_response(&database, "loom-1", Some("current-user"))
-            .await
-            .expect("recent messages");
+        let recent = recent_messages_before_response(
+            &database,
+            "loom-1",
+            Some("current-user"),
+            DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES,
+        )
+        .await
+        .expect("recent messages");
 
-        assert_eq!(recent.len(), MAX_RECENT_CONTEXT_MESSAGES);
-        assert_eq!(recent[recent.len() - 2].content, "Older question 11");
-        assert_eq!(recent[recent.len() - 1].content, "Older answer 11");
+        assert_eq!(recent.len(), DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES);
+        assert_eq!(recent[recent.len() - 2].content, "Older question 12");
+        assert_eq!(recent[recent.len() - 1].content, "Older answer 12");
         assert!(!recent
             .iter()
             .any(|message| message.content == "Older question 0"));
@@ -5011,9 +5526,14 @@ mod tests {
         .await
         .expect("insert legacy raw response");
 
-        let recent = recent_messages_before_response(&database, "loom-1", Some("current-user"))
-            .await
-            .expect("recent messages");
+        let recent = recent_messages_before_response(
+            &database,
+            "loom-1",
+            Some("current-user"),
+            DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES,
+        )
+        .await
+        .expect("recent messages");
         let joined = recent
             .iter()
             .map(|message| message.content.as_str())
@@ -5022,6 +5542,85 @@ mod tests {
         assert!(joined.contains("Event Sourcing güvenli bağlamdır"));
         assert!(!joined.contains("stale answer"));
         assert!(!joined.contains("raw_thinking"));
+    }
+
+    #[tokio::test]
+    async fn memory_context_includes_profile_and_confirmed_saved_memories() {
+        let database = test_database().await;
+        let mut config = LoomServiceConfig::default();
+        config.memory.enabled = true;
+        config.memory.reference_saved_memories = true;
+        config.memory.occupation = "Software architect / .NET engineer".to_string();
+        config.memory.style_preferences = "Turkish answers, English technical terms".to_string();
+        config.memory.more_about_you =
+            "Interests: local-first AI runtime, Loom, architecture".to_string();
+
+        MemoryRepository::new(&database)
+            .insert_memory(&NewMemory {
+                memory_id: "memory-explicit-1".to_string(),
+                memory_type: "explicit_user_memory".to_string(),
+                content: "The user is evaluating local-first AI runtime architecture.".to_string(),
+                normalized_content: "the user is evaluating local-first ai runtime architecture."
+                    .to_string(),
+                created_at: "1".to_string(),
+                updated_at: "1".to_string(),
+                source_loom_id: None,
+                source_response_id: None,
+                user_confirmed: true,
+                metadata_json: None,
+            })
+            .await
+            .expect("insert memory");
+
+        let messages = memory_messages_for_execution(&database, &config)
+            .await
+            .expect("memory context");
+        let joined = messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Software architect / .NET engineer"));
+        assert!(joined.contains("Turkish answers, English technical terms"));
+        assert!(joined.contains("local-first AI runtime"));
+        assert!(!joined.contains("raw_thinking"));
+    }
+
+    #[tokio::test]
+    async fn memory_context_respects_reference_saved_memories_toggle() {
+        let database = test_database().await;
+        let mut config = LoomServiceConfig::default();
+        config.memory.enabled = true;
+        config.memory.reference_saved_memories = false;
+        config.memory.occupation = "Software architect".to_string();
+
+        MemoryRepository::new(&database)
+            .insert_memory(&NewMemory {
+                memory_id: "memory-hidden-1".to_string(),
+                memory_type: "explicit_user_memory".to_string(),
+                content: "Saved Memory should be hidden when the toggle is off.".to_string(),
+                normalized_content: "saved memory should be hidden when the toggle is off."
+                    .to_string(),
+                created_at: "1".to_string(),
+                updated_at: "1".to_string(),
+                source_loom_id: None,
+                source_response_id: None,
+                user_confirmed: true,
+                metadata_json: None,
+            })
+            .await
+            .expect("insert memory");
+
+        let messages = memory_messages_for_execution(&database, &config)
+            .await
+            .expect("memory context");
+        let joined = messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("Software architect"));
+        assert!(!joined.contains("Saved Memory should be hidden"));
     }
 
     #[test]
@@ -5454,6 +6053,7 @@ mod tests {
             source: ContextSource::Composer,
             weft_origin: None,
             checkpoint: None,
+            memory_messages: Vec::new(),
             recent_messages: Vec::new(),
         }
     }

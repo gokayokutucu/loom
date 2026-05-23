@@ -1068,7 +1068,7 @@ function GraphViewInner({
             variant={BackgroundVariant.Dots}
             gap={28}
             size={1}
-            color="rgba(229, 225, 190, 0.12)"
+            color="var(--loom-graph-grid)"
           />
           <GraphControls
             onFirst={() => centerNode(projection.firstNodeId)}
@@ -1248,15 +1248,13 @@ function GraphViewInner({
                                   <GitFork size={13} />
                                   <span>
                                     <strong>{record.title}</strong>
-                                    <em>
-                                      {[
-                                        `${branchIndex + 1} of ${responsePreviewTarget.weftCount}`,
-                                        formatRelativeTimestamp(
-                                          record.createdAt || record.updatedAt || new Date().toISOString()
-                                        ),
-                                      ]
-                                        .filter(Boolean)
-                                        .join(" · ")}
+                                    <em className="weft-branch-picker-meta">
+                                      <span>{branchIndex + 1} of {responsePreviewTarget.weftCount}</span>
+                                      <span>
+                                        {formatRelativeTimestamp(record.createdAt) ||
+                                          formatRelativeTimestamp(record.updatedAt) ||
+                                          formatRelativeTimestamp(new Date().toISOString())}
+                                      </span>
                                     </em>
                                   </span>
                                 </button>

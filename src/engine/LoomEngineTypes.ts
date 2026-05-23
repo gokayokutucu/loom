@@ -102,8 +102,76 @@ export interface SpeechProviderHealth {
   checks: string[];
 }
 
+export interface SpeechSetupBinaryCandidate {
+  path: string;
+  exists: boolean;
+  executable: boolean;
+  preferred: boolean;
+  source: string;
+}
+
+export interface SpeechSetupStatus {
+  state: string;
+  message: string;
+  runningInElectron: boolean;
+  installCommand: string;
+  detectedBinaryPath?: string | null;
+  detectedRuntimeSource: string;
+  runtimeVersion?: string | null;
+  binaryCandidates: SpeechSetupBinaryCandidate[];
+  modelDirectory: string;
+  model: {
+    name: string;
+    path: string;
+    exists: boolean;
+    sizeBytes?: number | null;
+    downloadUrl: string;
+  };
+  recommendedArgs: string[];
+  providerHealth: SpeechProviderHealth;
+}
+
+export interface OcrRuntimeConfig {
+  enabled: boolean;
+  provider: string;
+  commandPath?: string | null;
+  pdfRasterizerCommandPath?: string | null;
+  language: string;
+  dpi: number;
+  timeoutSeconds: number;
+  maxPagesPerFile: number;
+  maxImagePixels: number;
+  tempDir?: string | null;
+}
+
+export interface OcrProviderHealth {
+  status: "disabled" | "configured" | "unavailable" | string;
+  provider: string;
+  enabled: boolean;
+  commandPath?: string | null;
+  rasterizerCommandPath?: string | null;
+  language: string;
+  dpi: number;
+  message: string;
+  warnings: string[];
+}
+
 export interface LoomServiceRuntimeConfig {
   speech: SpeechToTextRuntimeConfig;
+  ocr?: OcrRuntimeConfig;
+  memory?: {
+    enabled?: boolean;
+    referenceRecentLooms?: boolean;
+    referenceSavedMemories?: boolean;
+    nickname?: string;
+    occupation?: string;
+    stylePreferences?: string;
+    moreAboutYou?: string;
+  };
+  providers?: {
+    defaultMainModel?: string;
+    defaultQuickModel?: string;
+  };
   database?: { path?: string };
 }
 
@@ -118,8 +186,35 @@ export interface UpdateSpeechToTextConfigInput {
   localCommandTranscriptFileExtension?: string;
 }
 
+export interface UpdateOcrConfigInput {
+  enabled?: boolean;
+  provider?: string;
+  commandPath?: string | null;
+  pdfRasterizerCommandPath?: string | null;
+  language?: string;
+  dpi?: number;
+  timeoutSeconds?: number;
+  maxPagesPerFile?: number;
+  maxImagePixels?: number;
+  tempDir?: string | null;
+}
+
 export interface UpdateServiceConfigInput {
   speech?: UpdateSpeechToTextConfigInput;
+  ocr?: UpdateOcrConfigInput;
+  memory?: {
+    enabled?: boolean;
+    referenceRecentLooms?: boolean;
+    referenceSavedMemories?: boolean;
+    nickname?: string;
+    occupation?: string;
+    stylePreferences?: string;
+    moreAboutYou?: string;
+  };
+  providers?: {
+    defaultMainModel?: string;
+    defaultQuickModel?: string;
+  };
 }
 
 export interface ServiceConfigUpdateResult {
@@ -153,6 +248,62 @@ export interface CapabilitySummary {
   strategyAvailable?: boolean;
   lastCheckedAt?: string;
   error?: string;
+}
+
+export interface RuntimeModelProviderStatus {
+  providerKind: string;
+  providerProfileId: string;
+  status: string;
+  baseUrl?: string;
+  version?: string;
+  modelsEndpointReachable?: boolean;
+  runtimeOwnedBy: string;
+  modelStorePath?: string;
+  supportsDownloads: boolean;
+  supportsStart: boolean;
+  supportsStop: boolean;
+  warnings: string[];
+}
+
+export interface RuntimeModelItem {
+  assetId: string;
+  providerKind: string;
+  providerProfileId?: string | null;
+  modelName: string;
+  displayName: string;
+  installed: boolean;
+  status: "available" | "missing" | "installing" | "error" | string;
+  localPath?: string | null;
+  sizeBytes?: number | null;
+  digest?: string | null;
+  supportsQuick: boolean;
+  supportsMain: boolean;
+  supportsThinking: boolean;
+  source: string;
+}
+
+export interface RuntimeModelDownloadJob {
+  jobId: string;
+  providerKind: string;
+  providerProfileId?: string | null;
+  modelName: string;
+  status: "queued" | "downloading" | "verifying" | "installed" | "failed" | "cancelled" | string;
+  progressPercent: number;
+  downloadedBytes?: number | null;
+  totalBytes?: number | null;
+  digest?: string | null;
+  error?: string | null;
+  cancelRequested: boolean;
+  metadataJson?: JsonValue;
+  createdAt: string;
+  updatedAt: string;
+  completedAt?: string | null;
+}
+
+export interface RuntimeModelsResult {
+  provider: RuntimeModelProviderStatus;
+  models: RuntimeModelItem[];
+  jobs: RuntimeModelDownloadJob[];
 }
 
 export interface LoomSummary {
@@ -285,12 +436,79 @@ export interface SendMessageInput {
   signal?: AbortSignal;
 }
 
+export type AttachmentParseStatus =
+  | "queued"
+  | "parsing"
+  | "extracting_text"
+  | "ocr_needed"
+  | "ocr_running"
+  | "ready"
+  | "failed"
+  | "unsupported";
+
+export interface AttachmentItem {
+  attachmentId: string;
+  loomId: string;
+  fileName: string;
+  mimeType?: string;
+  extension?: string;
+  sizeBytes: number;
+  kind: string;
+  parseStatus: AttachmentParseStatus;
+  parser?: string;
+  error?: string;
+  thumbnailDataUrl?: string;
+  parsedCharCount?: number;
+  metadataJson?: JsonValue;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateAttachmentInput {
+  loomId: string;
+  fileName: string;
+  mimeType?: string;
+  sizeBytes: number;
+  contentBase64: string;
+}
+
+export interface CreateAttachmentResult {
+  attachment: AttachmentItem;
+}
+
+export interface ListAttachmentsInput {
+  loomId: string;
+}
+
+export interface ListAttachmentsResult {
+  attachments: AttachmentItem[];
+}
+
+export interface DeleteAttachmentInput {
+  attachmentId: string;
+}
+
 export interface RegenerateFromResponseInput {
   loomId: string;
   userResponseId: string;
   staleAssistantResponseId?: string;
   responseMode: ModelResponseMode;
   source?: "prompt_edit_regenerate";
+  model?: string;
+  options?: {
+    numCtx?: number;
+    numPredict?: number;
+    temperature?: number;
+  };
+  signal?: AbortSignal;
+}
+
+export interface RetryUserMessageInput {
+  loomId: string;
+  userResponseId: string;
+  responseMode: ModelResponseMode;
+  softDeleteDownstream?: boolean;
+  reason?: "retry_from_user_message";
   model?: string;
   options?: {
     numCtx?: number;
@@ -687,9 +905,13 @@ export interface ExportLoomResult {
 export interface TypeScriptLocalLoomEngineDependencies {
   graphRepository?: LoomGraphRepository;
   sendMessage?: (input: SendMessageInput) => AsyncIterable<EngineResponseEvent>;
+  createAttachment?: (input: CreateAttachmentInput) => Promise<CreateAttachmentResult>;
+  listAttachments?: (input: ListAttachmentsInput) => Promise<ListAttachmentsResult>;
+  deleteAttachment?: (input: DeleteAttachmentInput) => Promise<void>;
   regenerateFromResponse?: (
     input: RegenerateFromResponseInput
   ) => AsyncIterable<EngineResponseEvent>;
+  retryUserMessage?: (input: RetryUserMessageInput) => AsyncIterable<EngineResponseEvent>;
   quickAsk?: (input: QuickAskInput) => Promise<QuickAskResult>;
   createOrOpenWeft?: (input: CreateOrOpenWeftInput) => Promise<CreateOrOpenWeftResult>;
   persistWeftTurns?: (input: PersistWeftTurnsInput) => Promise<PersistWeftTurnsResult>;

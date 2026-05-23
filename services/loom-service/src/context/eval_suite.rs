@@ -255,6 +255,7 @@ fn eval_capsule_and_checkpoint_context_are_selected_and_accounted() {
                 generator: Some("context_eval".to_string()),
                 status: ArtifactStatus::Ready,
             }),
+            attachment: None,
         }],
         ..EvalFixture::static_input("Event Store ve Replay ilişkisini açıkla.")
     };
@@ -471,6 +472,7 @@ fn eval_budget_diagnostics_track_pressure_overflow_and_safe_records() {
                 capsule_summary: None,
             },
             response_capsule: None,
+            attachment: None,
         });
     }
     let input = BuildContextInput {
@@ -735,6 +737,7 @@ impl EvalFixture {
             source: ContextSource::Composer,
             weft_origin: None,
             checkpoint: None,
+            memory_messages: Vec::new(),
             recent_messages: Vec::new(),
         }
     }
@@ -751,6 +754,7 @@ impl EvalFixture {
             source: ContextSource::Composer,
             weft_origin: None,
             checkpoint: None,
+            memory_messages: Vec::new(),
             recent_messages: Vec::new(),
         }
     }
@@ -804,6 +808,7 @@ impl EvalFixture {
                 capsule_summary: None,
             },
             response_capsule: None,
+            attachment: None,
         }
     }
 }
