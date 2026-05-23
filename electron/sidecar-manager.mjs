@@ -140,6 +140,16 @@ function resolveBinaryPath(repoRoot, app) {
 }
 
 function resolveElectronDataPaths(repoRoot, app) {
+  if (app?.isPackaged || isPackagedRuntime()) {
+    const dataDir = path.join(app.getPath("userData"), "loom-service");
+    return {
+      dataMode: "packaged",
+      dataDir,
+      configPath: path.join(dataDir, "loom-service.toml"),
+      dbPath: path.join(dataDir, "loom.db"),
+    };
+  }
+
   const devRuntime = readDevRuntimeMetadata(repoRoot);
   if (devRuntime) {
     const serviceDataDir = path.join(devRuntime.repoRoot, "services", "loom-service", ".data");
@@ -152,16 +162,6 @@ function resolveElectronDataPaths(repoRoot, app) {
         devRuntime.dataMode === "shared-dev"
           ? path.join(serviceDataDir, "loom.db")
           : path.join(electronConfigDir, "loom.db"),
-    };
-  }
-
-  if (app?.isPackaged || isPackagedRuntime()) {
-    const dataDir = path.join(app.getPath("userData"), "loom-service");
-    return {
-      dataMode: "packaged",
-      dataDir,
-      configPath: path.join(dataDir, "loom-service.toml"),
-      dbPath: path.join(dataDir, "loom.db"),
     };
   }
 

@@ -1,0 +1,78 @@
+name: macOS arm64 release artifact
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  build-macos-arm64:
+    name: Build Loom macOS arm64 DMG
+    runs-on: macos-14
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Verify arm64 runner
+        run: |
+          test "$(uname -m)" = "arm64"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-apple-darwin
+
+      - name: Install Node dependencies
+        run: npm ci
+
+      - name: Build frontend
+        run: npm run build
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path services/loom-service/Cargo.toml --check
+
+      - name: Check Rust service
+        run: cargo check --manifest-path services/loom-service/Cargo.toml
+
+      - name: Test Rust service
+        run: cargo test --manifest-path services/loom-service/Cargo.toml
+
+      - name: Check service script
+        run: npm run service:check
+
+      - name: Test service script
+        run: npm run service:test
+
+      - name: Package Electron app
+        run: npm run electron:package:mac:arm64
+
+      - name: Build DMG
+        run: npm run electron:dist:mac:arm64
+
+      - name: Verify release hygiene
+        run: |
+          git diff --check
+          test -f release/Loom-$(node -p "require('./package.json').version")-mac-arm64.dmg
+          test ! -e services/loom-service/.data/loom.db
+          test ! -e services/loom-service/.data/loom-service.toml
+          find release -maxdepth 1 -type f -name "*.dmg" -print
+
+      - name: Upload DMG artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Loom-${{ github.ref_name }}-mac-arm64-dmg
+          path: release/Loom-*-mac-arm64.dmg
+          if-no-files-found: error
+          retention-days: 14
