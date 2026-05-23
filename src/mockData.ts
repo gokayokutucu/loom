@@ -6,6 +6,13 @@ import type {
   ResponseItem,
 } from "./types";
 
+function mockTimestamp(daysAgo: number, hour: number, minute: number) {
+  const date = new Date();
+  date.setDate(date.getDate() - daysAgo);
+  date.setHours(hour, minute, 0, 0);
+  return date.toISOString();
+}
+
 export const conversations: Conversation[] = [
   {
     id: "c-architecture",
@@ -36,7 +43,7 @@ export const conversations: Conversation[] = [
   },
   {
     id: "c-security",
-    title: "Security review threads",
+    title: "Security review Looms",
     path: "loom://engineering/security-review",
     folder: "Engineering",
     summary: "Threat modeling and mitigation Q+A history.",
@@ -68,11 +75,35 @@ export const conversations: Conversation[] = [
   },
   {
     id: "c-graph-map",
-    title: "Graph view as secondary site map",
+    title: "Weft-aware Loom graph",
     path: "loom://product/graph-view-site-map",
     folder: "Product systems",
-    summary: "Graph mode boundaries and navigation back to browser mode.",
+    summary: "Top-down Graph View behavior, Weft branches, and continuation flow.",
     iconKey: "network",
+  },
+  {
+    id: "c-graph-spacing",
+    title: "Graph spacing and edge labels",
+    path: "loom://product/graph-view-site-map/weft/spacing",
+    folder: "Product systems",
+    summary: "Readable prompt labels, branch spacing, and node hierarchy in Graph View.",
+    iconKey: "network",
+  },
+  {
+    id: "c-graph-continuation",
+    title: "Graph continuation composer behavior",
+    path: "loom://product/graph-view-site-map/weft/continuation",
+    folder: "Product systems",
+    summary: "Continuing the active Loom from the latest Response inside Graph View.",
+    iconKey: "terminal",
+  },
+  {
+    id: "c-graph-continuation-errors",
+    title: "Graph continuation error states",
+    path: "loom://product/graph-view-site-map/weft/continuation/errors",
+    folder: "Product systems",
+    summary: "Runtime failure, draft preservation, and focused graph recovery.",
+    iconKey: "shield",
   },
   {
     id: "c-browser-shell",
@@ -115,6 +146,14 @@ export const conversations: Conversation[] = [
     iconKey: "puzzle",
   },
   {
+    id: "c-integrations-mcp-tools",
+    title: "MCP tool execution Weft",
+    path: "loom://engineering/mcp-plugin-integration/weft/tool-execution",
+    folder: "Engineering",
+    summary: "Branch on plugin invocation, artifacts, and provenance.",
+    iconKey: "workflow",
+  },
+  {
     id: "c-privacy",
     title: "Private local address resolution",
     path: "loom://engineering/private-address-resolution",
@@ -145,7 +184,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
     {
       id: "r-address-bar",
       title: "Address Bar as local AI web navigator",
-      address: "loom://loom-ai/navigation-architecture/thread/browser/r-address-bar",
+      address: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
       question:
         "How should the address bar work if Loom AI is a browser for conversations?",
       answer: [
@@ -158,7 +197,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
           id: "s-semantic-memory",
           type: "semantic",
           title: "Semantic memory ranking",
-          path: "loom://research/synthesis-workflow/thread/search/r-ranking",
+          path: "loom://research/synthesis-workflow/loom/search/r-ranking",
           badge: "Suggested",
         },
       ],
@@ -167,7 +206,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
           id: "p-inline-references",
           type: "response",
           title: "Inline reference composition rules",
-          path: "loom://loom-ai/navigation-architecture/thread/composer/r-inline-references",
+          path: "loom://loom-ai/navigation-architecture/loom/composer/r-inline-references",
           badge: "Linked",
         },
       ],
@@ -176,7 +215,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
     {
       id: "r-archive-delete",
       title: "Archive is a browser close, delete is destructive",
-      address: "loom://loom-ai/navigation-architecture/thread/lifecycle/r-archive-delete",
+      address: "loom://loom-ai/navigation-architecture/loom/lifecycle/r-archive-delete",
       question:
         "What should happen when someone closes a conversation tab?",
       answer: [
@@ -186,9 +225,9 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
       suggestedLinks: [
         {
           id: "s-broken-links",
-          type: "thread",
+          type: "loom",
           title: "Broken reference recovery",
-          path: "loom://engineering/security-review/thread/data-trust",
+          path: "loom://engineering/security-review/loom/data-trust",
           badge: "Suggested",
         },
       ],
@@ -197,7 +236,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
     {
       id: "r-composer",
       title: "Hypertext composer beats copy-paste",
-      address: "loom://loom-ai/navigation-architecture/thread/composer/r-inline-references",
+      address: "loom://loom-ai/navigation-architecture/loom/composer/r-inline-references",
       question:
         "How should prompt composition work when users reuse prior answers?",
       answer: [
@@ -220,7 +259,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
     {
       id: "r-synthesis",
       title: "Research answers need durable destinations",
-      address: "loom://research/synthesis-workflow/thread/revisitability/r-synthesis",
+      address: "loom://research/synthesis-workflow/loom/revisitability/r-synthesis",
       question: "Why does research work benefit from Loom addresses?",
       answer: [
         "Research conversations frequently produce answers that are useful days later. A stable destination lets the user revisit the exact reasoning without scrolling through a transcript or copying fragments into a notes app.",
@@ -235,10 +274,10 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
     {
       id: "r-library",
       title: "Prompt patterns as reusable bookmarks",
-      address: "loom://prompts/reuse-library/thread/patterns/r-library",
+      address: "loom://prompts/reuse-library/loom/patterns/r-library",
       question: "How should prompt reuse appear in the UI?",
       answer: [
-        "Prompt patterns should appear as saved destinations, not static snippets. The user should be able to drag them into the composer alongside prior responses and threads.",
+        "Prompt patterns should appear as saved destinations, not static snippets. The user should be able to drag them into the composer alongside prior responses and Looms.",
       ],
       suggestedLinks: [],
       bookmarkedLinks: [],
@@ -248,7 +287,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
     {
       id: "r-threats",
       title: "Data trust and broken reference handling",
-      address: "loom://engineering/security-review/thread/data-trust/r-threats",
+      address: "loom://engineering/security-review/loom/data-trust/r-threats",
       question: "What breaks when references are deleted?",
       answer: [
         "Deleted objects can leave unresolved Loom references. The UI should show a clear broken-reference state and avoid silent disappearance.",
@@ -261,7 +300,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
     {
       id: "r-positioning",
       title: "The browser metaphor is the launch hook",
-      address: "loom://go-to-market/launch-narrative/thread/v1/r-positioning",
+      address: "loom://go-to-market/launch-narrative/loom/v1/r-positioning",
       question: "What is the shortest V1 product promise?",
       answer: [
         "Navigate, search, bookmark, link, and revisit AI conversations like a browser.",
@@ -271,15 +310,534 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
       bookmarked: true,
     },
   ],
+  "c-onboarding": [
+    {
+      id: "r-empty-start",
+      title: "Empty start should feel like a browser search surface",
+      address: "loom://product/onboarding-browser-flow/loom/empty-state/r-empty-start",
+      question: "How should a new Loom begin before there is a transcript?",
+      answer: [
+        "The new conversation state should feel closer to a focused browser/search page than a blank chat log. The composer can sit centered until the first ask materializes the Loom.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-first-reference",
+      title: "First reference teaches the web model",
+      address: "loom://product/onboarding-browser-flow/loom/references/r-first-reference",
+      question: "What should the first reusable reference teach?",
+      answer: [
+        "The first inserted reference should show that prior answers are destinations, not pasted text. It should remain lightweight and clearly removable.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-bookmarks": [
+    {
+      id: "r-bookmark-panel",
+      title: "Bookmark panel as saved destinations",
+      address: "loom://product/bookmark-interaction-polish/loom/panel/r-bookmark-panel",
+      question: "How should bookmarks feel in Loom AI?",
+      answer: [
+        "Bookmarks should behave like browser destinations with stable titles, readable paths, right-click menus, and drag-to-reference behavior.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-bookmark-card-actions",
+      title: "Bookmark cards keep actions off the content",
+      address: "loom://product/bookmark-interaction-polish/loom/cards/r-bookmark-card-actions",
+      question: "Where should bookmark actions live?",
+      answer: [
+        "Primary reading metadata belongs in the card body. Destructive actions should stay in a compact rail or context menu so the destination remains scannable.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-graph-map": [
+    {
+      id: "r-site-map",
+      title: "Graph View starts as a readable Loom map",
+      address: "loom://product/graph-view-site-map/loom/site-map/r-site-map",
+      question: "What should the default Graph View demonstrate?",
+      createdAt: mockTimestamp(2, 9, 44),
+      answer: [
+        "The default graph should immediately explain the Loom mental model: a root Loom at the top, Responses flowing downward, and Weft branches splitting sideways without breaking hierarchy. It should feel like a browser site map for an AI object, not a decorative mind map.",
+        "The first screen should include enough real structure to test scanning: bookmarked Responses, linked answers from other Looms, at least two Weft branches, and one Weft that itself has a Weft. That gives the renderer realistic topology without changing the canonical graph model.",
+        "A useful demo graph also makes product rules visible. Continuing the Loom should append below the latest Response, Ask from a node should stay contextual, and Open should still navigate back to the normal Loom surface.",
+      ],
+      suggestedLinks: [
+        {
+          id: "s-address-bar-from-graph",
+          type: "response",
+          title: "Address Bar as local AI web navigator",
+          path: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
+          badge: "Suggested",
+        },
+      ],
+      bookmarkedLinks: [
+        {
+          id: "p-inline-reference-from-graph",
+          type: "response",
+          title: "Hypertext composer beats copy-paste",
+          path: "loom://loom-ai/navigation-architecture/loom/composer/r-inline-references",
+          badge: "Linked",
+        },
+      ],
+      bookmarked: true,
+    },
+    {
+      id: "r-evidence-map",
+      title: "Linked Responses preserve graph provenance",
+      address: "loom://product/graph-view-site-map/loom/evidence/r-evidence-map",
+      question: "How should Graph View show evidence from other Looms?",
+      createdAt: mockTimestamp(1, 16, 18),
+      questionReferences: [
+        {
+          id: "fragment:c-graph-map:r-site-map:demo-quote",
+          type: "fragment",
+          title: "Responses flowing downward",
+          path: "loom://product/graph-view-site-map/loom/site-map/r-site-map#fragment=demo-quote",
+          badge: "Fragment",
+          selectedAt: Date.now(),
+          sourceLoomId: "c-graph-map",
+          sourceResponseId: "r-site-map",
+          selectedText: "Responses flowing downward, and Weft branches splitting sideways without breaking hierarchy",
+          sourceResponseTitle: "Graph View starts as a readable Loom map",
+          fragmentHash: "demo-quote",
+          createdAt: Date.now(),
+        },
+      ],
+      answer: [
+        "Graph View should let a Response carry links to useful answers from other Looms without cloning those answers. A link to research synthesis, citation provenance, or browser navigation remains a Reference usage; the target Response keeps its own address and identity.",
+        "This matters for provenance. If the graph demo includes links from the Graph View Loom to the research and navigation Looms, users can see that composition works across Looms while the active top-down path remains uncluttered.",
+        "The Link action should still feel lightweight: it attaches a prior Response to a prompt or answer as reusable context, then the graph can project that relationship without pretending the linked Response was written in this Loom.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [
+        {
+          id: "p-research-durable-from-graph",
+          type: "response",
+          title: "Research answers need durable destinations",
+          path: "loom://research/synthesis-workflow/loom/revisitability/r-synthesis",
+          badge: "Linked",
+        },
+        {
+          id: "p-citation-provenance-from-graph",
+          type: "response",
+          title: "Selected text becomes a reusable reference",
+          path: "loom://research/citation-provenance-review/loom/selection/r-provenance",
+          badge: "Linked",
+        },
+      ],
+    },
+    {
+      id: "r-graph-continuation",
+      title: "Continue Loom appends below the latest Response",
+      address: "loom://product/graph-view-site-map/loom/continuation/r-graph-continuation",
+      question: "How should normal continuation work inside Graph View?",
+      createdAt: mockTimestamp(0, 10, 12),
+      answer: [
+        "Continue Loom is normal Loom continuation, not a Quick Ask and not a Weft. The active Loom's latest Response is focused near the top of the graph, the floating composer collects the next prompt, and the Main Model answer is appended to the same Loom.",
+        "After submit, the projection recomputes from Loom state. The new Response appears below the previous latest Response, the edge label carries the prompt, and focus moves to the newly created Response using the same top-centered positioning.",
+        "The behavior should be chainable: a second continuation starts from the new latest Response, while existing Weft branches remain visible as sideways/downward context.",
+      ],
+      suggestedLinks: [
+        {
+          id: "s-shell-shortcuts-from-graph",
+          type: "response",
+          title: "Browser shell keyboard shortcuts",
+          path: "loom://product/browser-shell-keyboard-navigation/loom/shortcuts/r-shell-shortcuts",
+          badge: "Suggested",
+        },
+      ],
+      bookmarkedLinks: [],
+      bookmarked: true,
+    },
+    {
+      id: "r-graph-focus",
+      title: "Focused graph positioning keeps work oriented",
+      address: "loom://product/graph-view-site-map/loom/focus/r-graph-focus",
+      question: "Where should Graph View focus after continuation?",
+      createdAt: mockTimestamp(0, 10, 29),
+      answer: [
+        "The focused Response should land near the top edge of the graph viewport with equal space left and right. That makes the previous path feel above the user and leaves room below for the next continuation or Weft branch.",
+        "This is a product-level projection rule. React Flow renders the graph, but Loom projection owns hierarchy, selected node identity, and the deterministic viewport target.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [
+        {
+          id: "p-history-menu-from-graph",
+          type: "response",
+          title: "Right-click history menus build confidence",
+          path: "loom://product/browser-shell-keyboard-navigation/loom/history-menu/r-history-menu",
+          badge: "Linked",
+        },
+      ],
+    },
+  ],
+  "c-graph-spacing": [
+    {
+      id: "r-spacing-rules",
+      title: "Spacing makes prompt labels readable",
+      address: "loom://product/graph-view-site-map/weft/spacing/r-spacing-rules",
+      question: "Where should prompt labels sit on graph edges?",
+      answer: [
+        "Prompt labels should sit on edges with enough distance from source and target cards. The graph needs breathing room between source Response, question label, and target Response so the user can read the path without mistaking labels for node content.",
+        "Weft branches should split sideways but continue downward. Orthogonal edges help preserve the top-down mental model because no parent-to-child connection appears to travel upward.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [
+        {
+          id: "p-bookmark-panel-from-spacing",
+          type: "response",
+          title: "Bookmark panel as saved destinations",
+          path: "loom://product/bookmark-interaction-polish/loom/panel/r-bookmark-panel",
+          badge: "Linked",
+        },
+      ],
+    },
+    {
+      id: "r-label-backgrounds",
+      title: "Question labels need their own surface",
+      address: "loom://product/graph-view-site-map/weft/spacing/r-label-backgrounds",
+      question: "How should long edge questions remain readable?",
+      answer: [
+        "Long questions should wrap inside a compact label with a readable background. The label should not overlap handles or touch Response cards, even when the branch edge runs horizontally before turning downward.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-graph-continuation": [
+    {
+      id: "r-continuation-main-route",
+      title: "Graph continuation uses the Main Model route",
+      address: "loom://product/graph-view-site-map/weft/continuation/r-continuation-main-route",
+      question: "Which model route should Graph continuation use?",
+      answer: [
+        "Graph continuation should call the same Main Model append path as the normal Loom composer. The floating graph composer is a projection-specific entry point, but it should not create a second business system for Responses.",
+        "The result is a normal Response in the active Loom. That means Address Bar navigation, Back/Forward behavior, bookmarks, links, metadata, code display, and future persistence all see the same object shape.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [
+        {
+          id: "p-composer-rules-from-continuation",
+          type: "response",
+          title: "Hypertext composer beats copy-paste",
+          path: "loom://loom-ai/navigation-architecture/loom/composer/r-inline-references",
+          badge: "Linked",
+        },
+      ],
+    },
+    {
+      id: "r-continuation-draft",
+      title: "Floating drafts should stay scoped to the Graph View",
+      address: "loom://product/graph-view-site-map/weft/continuation/r-continuation-draft",
+      question: "How should draft text behave if the popup closes?",
+      answer: [
+        "For the V1 graph composer, closing the popup should not navigate away or mutate the Loom. If a later version stores drafts, it should follow the existing Loom-scoped composer model instead of introducing a global draft bucket.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+      bookmarked: true,
+    },
+  ],
+  "c-graph-continuation-errors": [
+    {
+      id: "r-runtime-unavailable",
+      title: "Runtime errors keep the graph composer open",
+      address: "loom://product/graph-view-site-map/weft/continuation/errors/r-runtime-unavailable",
+      question: "What happens if the Main Model runtime is unavailable?",
+      answer: [
+        "The graph composer should keep the draft visible and report the existing model readiness error. The user remains in Graph View, with the focused Response still selected, so they can retry after switching provider settings or enabling Demo Responses.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-browser-shell": [
+    {
+      id: "r-shell-shortcuts",
+      title: "Browser shell keyboard shortcuts",
+      address: "loom://product/browser-shell-keyboard-navigation/loom/shortcuts/r-shell-shortcuts",
+      question: "Which shortcuts make Loom feel browser-native?",
+      answer: [
+        "Back, Forward, Address Bar focus, and context menu shortcuts should follow browser expectations while remaining scoped to Loom destinations.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-history-menu",
+      title: "Right-click history menus build confidence",
+      address: "loom://product/browser-shell-keyboard-navigation/loom/history-menu/r-history-menu",
+      question: "Why should Back and Forward have menus?",
+      answer: [
+        "Right-click history menus let users inspect where they will go before navigating. This is critical when destinations are responses and Loom branches.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-memory": [
+    {
+      id: "r-ranking",
+      title: "Semantic ranking needs browser confidence",
+      address: "loom://research/semantic-memory-ranking/loom/ranking/r-ranking",
+      question: "How should semantic matches appear in the omnibox?",
+      answer: [
+        "Semantic results should look navigable and accountable: type, title, path, and confidence badge all matter.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-recency",
+      title: "Recency is a navigation signal",
+      address: "loom://research/semantic-memory-ranking/loom/recency/r-recency",
+      question: "How does recent activity affect search?",
+      answer: [
+        "Recent destinations should rank as browser memory, not as a separate database filter.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-citations": [
+    {
+      id: "r-provenance",
+      title: "Selected text becomes a reusable reference",
+      address: "loom://research/citation-provenance-review/loom/selection/r-provenance",
+      question: "How should selected text move into composition?",
+      answer: [
+        "Selected text can become an attached Loom reference without forcing it into the sentence body. Provenance stays visible and removable.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-citation-audit",
+      title: "Citation audit trails stay addressable",
+      address: "loom://research/citation-provenance-review/loom/audit/r-citation-audit",
+      question: "How should citation audits be revisited?",
+      answer: [
+        "Audit trails should remain addressable so a user can revisit why a reference entered a prompt and which answer it came from.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-drafts": [
+    {
+      id: "r-workspace",
+      title: "Draft workspace composes from live Loom references",
+      address: "loom://writing/draft-workspace-comparisons/loom/workspace/r-workspace",
+      question: "How should drafting reuse prior conversations?",
+      answer: [
+        "A drafting workspace should accept live Loom references inline and preserve their source paths under the hood.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-editing-history",
+      title: "Editor history must understand references",
+      address: "loom://writing/draft-workspace-comparisons/loom/history/r-editing-history",
+      question: "What makes undo feel natural?",
+      answer: [
+        "Text bursts can coalesce, but Loom reference insertion, deletion, and movement should remain distinct undo boundaries.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-integrations": [
+    {
+      id: "r-host-shell",
+      title: "Host shell adapters keep Electron optional",
+      address: "loom://engineering/mcp-plugin-integration/loom/host-shell/r-host-shell",
+      question: "How should the web prototype stay Electron-ready?",
+      answer: [
+        "Keep the renderer written as if it is running in a browser, and put every host-specific capability behind a narrow adapter. The Loom surface should ask for capabilities such as opening a file, resolving a local address, copying a canonical URI, or starting an MCP session. It should not know whether those capabilities are backed by Electron, a browser API, or a test double.",
+        "A practical adapter shape is small and boring. The important part is that the Graph, Address Bar, composer, and Weft flows call the same interface instead of branching on runtime details.",
+        "```ts",
+        "export interface HostShellAdapter {",
+        "  openExternal(uri: string): Promise<void>;",
+        "  readClipboard(): Promise<string>;",
+        "  writeClipboard(value: string): Promise<void>;",
+        "  resolveLocalAddress(uri: string): Promise<LoomResolutionResult>;",
+        "  listAvailableTools(): Promise<HostToolDescriptor[]>;",
+        "}",
+        "```",
+        "In the web prototype this adapter can be backed by localStorage, navigator.clipboard, and mock tool descriptors. In Electron the same adapter can delegate to the main process with IPC. That keeps product behavior stable while allowing the shell to grow into desktop-only capabilities later.",
+        "The key rule is that adapters return Loom objects or tool descriptors, not UI instructions. The UI can project those into windows, menus, graph nodes, or composer references without the shell leaking presentation decisions.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-plugin-boundary",
+      title: "Plugin boundary should not leak shell assumptions",
+      address: "loom://engineering/mcp-plugin-integration/loom/plugin-boundary/r-plugin-boundary",
+      question: "Where should plugin behavior attach?",
+      answer: [
+        "Plugins should attach to Loom objects and declared capabilities. They should not patch the browser chrome, own navigation, or write directly into the graph store. A plugin can contribute a command, a reference resolver, a renderer hint, or an MCP-backed tool, but the Loom runtime decides how that contribution becomes a Response, Reference, Bookmark, or Window projection.",
+        "For MCP, treat each server as a capability source. Discovery can produce tool descriptors, but invocation still goes through a Loom-aware execution boundary so outputs are captured as addressable Responses with provenance.",
+        "```ts",
+        "type PluginContribution =",
+        "  | { kind: 'command'; id: string; title: string; run: CommandHandler }",
+        "  | { kind: 'resolver'; scheme: string; resolve: AddressResolver }",
+        "  | { kind: 'mcp-tool'; serverId: string; toolName: string; intent: 'quick' | 'main' };",
+        "```",
+        "A concrete example: a GitHub MCP plugin should not add a permanent GitHub panel to the shell. It should expose actions like Search Issues, Summarize PR, or Link Repository Object. When the user invokes one from a Response or composer Reference, the result becomes a normal Loom Response and the source issue or PR is stored as a Reference.",
+        "That boundary keeps plugin work graph-first. The plugin supplies capability and provenance; Loom owns navigation, Weft creation, addressability, and promotion.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-mcp-execution-boundary",
+      title: "MCP tool execution becomes a Loom Response",
+      address:
+        "loom://engineering/mcp-plugin-integration/loom/tool-execution/r-mcp-execution-boundary",
+      question: "What happens when a plugin tool is invoked?",
+      answer: [
+        "An MCP tool invocation should start from a Loom object: a Response action, a Reference in the prompt surface, or a selected fragment. The runtime builds a capability request that includes intent, source Loom, source Response, selected text, and safe Reference metadata. It should not pass hidden browser state or raw provider internals to the plugin.",
+        "The host or service boundary executes the tool and returns a typed result. Loom then captures the result as an addressable Response with provenance: which server/tool ran, what user-visible input summary was used, which artifacts were produced, and whether the result is safe to reuse as context.",
+        "A typical invocation path is: the user chooses a tool action from a Response, Loom builds a typed capability request, the host validates permissions and input shape, the MCP server runs the tool, and the returned result is normalized before it reaches the graph. The normalized result can include a concise answer, structured metadata, artifact handles, source links, and recoverable diagnostics.",
+        "The important boundary is that tool execution does not become an invisible side effect. If a GitHub plugin summarizes a pull request, the PR URL should become a Reference, the generated summary should become Response content, and any generated file should remain an artifact with a stable handle. If a database or design plugin reads external data, Loom should record the safe user-visible summary and provenance without storing provider secrets or raw hidden payloads.",
+        "The invocation should also be cancellable and explainable. Timeouts, permission denials, missing tool servers, invalid JSON, unsafe output, and artifact write failures should map to typed failure states. The user should see what failed, what can be retried, and whether any partial artifact was produced. That keeps the Weft honest because failed tool work is still part of the reasoning path, but it is not confused with a successful answer.",
+        "For future Electron/native integrations, this same shape can be reused with stronger local capabilities. Native secret storage can supply credentials by reference, file system tools can return artifact handles instead of raw files, and local-only tools can be marked as safe to reuse. The renderer still should not own secrets, raw tool payloads, or direct graph writes.",
+        "Failures should also become safe Loom state. A tool timeout, missing permission, or provider error should be visible as a recoverable Response/error event instead of a silent side effect. Provider secrets stay outside renderer/config storage, and raw model thinking is never stored, exported, graphed, or injected into future context.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-plugin-artifacts",
+      title: "Tool artifacts stay attached as References",
+      address: "loom://engineering/mcp-plugin-integration/loom/artifacts/r-plugin-artifacts",
+      question: "Where should plugin outputs and files live?",
+      answer: [
+        "Plugin outputs should become explicit References or artifacts attached to a Response, not hidden mutations in the conversation. A search result, generated file, fetched issue, or analysis report needs a source URI, tool identity, timestamp, and a compact summary that can be shown in the Loom surface.",
+        "Large files and documents should remain artifacts with stable handles. The graph can show that a Response used or produced an artifact without copying the artifact into every prompt. Window projections can render the artifact when the user opens it, while the ContextManager decides what safe summary enters future model context.",
+        "This keeps MCP useful without turning plugins into uncontrolled data pipes. The plugin contributes capability and provenance; Loom owns addressability, References, Wefts, and user-visible recovery.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-integrations-mcp-tools": [
+    {
+      id: "r-mcp-invocation-flow",
+      title: "Invocation flow stays Loom-aware",
+      address:
+        "loom://engineering/mcp-plugin-integration/weft/tool-execution/r-mcp-invocation-flow",
+      question: "What should the MCP invocation flow look like?",
+      answer: [
+        "The flow should be: user action, Loom capability request, host/service execution, typed tool result, Response capture, and optional Reference promotion. Each step keeps the current Loom, source Response, and selected Reference metadata attached so the result can be traced later.",
+        "For example, a GitHub MCP action from a selected Response can run `Summarize PR`, return a compact report plus source links, and create a new Response under the MCP tool execution Weft. The PR URL becomes a Reference; the generated summary becomes Response content; any files remain artifacts.",
+        "The important constraint is that tool execution is not a shortcut around Loom. It is a way to create addressable AI objects with provenance.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-mcp-error-boundary",
+      title: "Tool errors become safe Responses",
+      address:
+        "loom://engineering/mcp-plugin-integration/weft/tool-execution/r-mcp-error-boundary",
+      question: "How should MCP failures appear?",
+      answer: [
+        "MCP failures should be typed and recoverable: unavailable server, missing permission, timeout, invalid tool result, artifact write failure, or unsafe output. The user should see what failed and what can be retried without leaking secrets, prompts, raw provider payloads, or raw thinking.",
+        "A failed invocation can still be useful as a Response because it preserves the attempted action, source context, and safe diagnostic class. That makes the Weft honest: it shows where the workflow branched, where a tool failed, and what the next retry or fallback should do.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-privacy": [
+    {
+      id: "r-local-resolution",
+      title: "Local address resolution protects private memory",
+      address: "loom://engineering/private-address-resolution/loom/local/r-local-resolution",
+      question: "How should Loom addresses resolve privately?",
+      answer: [
+        "The resolver should prefer local state and explicit user action before any external lookup.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-release": [
+    {
+      id: "r-release-risk",
+      title: "Release checklist needs broken-reference coverage",
+      address: "loom://go-to-market/v1-release-checklist/loom/risk/r-release-risk",
+      question: "What must be tested before launch?",
+      answer: [
+        "Archive, restore, delete warnings, broken references, Back/Forward, and bookmarked destinations need full lifecycle coverage.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
+  "c-support": [
+    {
+      id: "r-recovery",
+      title: "Broken reference recovery should explain next steps",
+      address: "loom://support/broken-reference-workflows/loom/recovery/r-recovery",
+      question: "What should users see when a reference breaks?",
+      answer: [
+        "The UI should explain whether the target was archived, deleted, or moved, and offer recovery paths where possible.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+    {
+      id: "r-restore-paths",
+      title: "Archive restore keeps destinations intact",
+      address: "loom://support/broken-reference-workflows/loom/archive/r-restore-paths",
+      question: "How should archive restoration behave?",
+      answer: [
+        "Restoring from archive should bring the conversation back without changing its address or breaking existing Loom references.",
+      ],
+      suggestedLinks: [],
+      bookmarkedLinks: [],
+    },
+  ],
 };
 
 export const bookmarks: BookmarkItem[] = [
+  {
+    id: "b-graph-default",
+    type: "conversation",
+    title: "Weft-aware Loom graph",
+    editableTitle: "Default Graph View demo",
+    path: "loom://product/graph-view-site-map",
+    badge: "Loom",
+    lastUsed: "Now",
+  },
+  {
+    id: "b-graph-continuation",
+    type: "response",
+    title: "Continue Loom appends below the latest Response",
+    editableTitle: "Graph continuation rule",
+    path: "loom://product/graph-view-site-map/loom/continuation/r-graph-continuation",
+    badge: "Response",
+    lastUsed: "Used today",
+  },
   {
     id: "b-address",
     type: "response",
     title: "Address Bar as local AI web navigator",
     editableTitle: "Address Bar navigator rules",
-    path: "loom://loom-ai/navigation-architecture/thread/browser/r-address-bar",
+    path: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
     badge: "Response",
     lastUsed: "Used 12 min ago",
   },
@@ -288,17 +846,17 @@ export const bookmarks: BookmarkItem[] = [
     type: "response",
     title: "Hypertext composer beats copy-paste",
     editableTitle: "Inline reference composition model",
-    path: "loom://loom-ai/navigation-architecture/thread/composer/r-inline-references",
+    path: "loom://loom-ai/navigation-architecture/loom/composer/r-inline-references",
     badge: "Response",
     lastUsed: "Used today",
   },
   {
     id: "b-research",
-    type: "thread",
+    type: "loom",
     title: "Research answers need durable destinations",
-    editableTitle: "Research revisitability thread",
-    path: "loom://research/synthesis-workflow/thread/revisitability",
-    badge: "Thread",
+    editableTitle: "Research revisitability loom",
+    path: "loom://research/synthesis-workflow/loom/revisitability",
+    badge: "Weft",
     lastUsed: "Yesterday",
   },
   {
@@ -307,7 +865,7 @@ export const bookmarks: BookmarkItem[] = [
     title: "Launch narrative options",
     editableTitle: "V1 launch promise",
     path: "loom://go-to-market/launch-narrative",
-    badge: "Conversation",
+    badge: "Loom",
     lastUsed: "Apr 24",
   },
 ];
@@ -317,7 +875,7 @@ export const initialHistory: HistoryEntry[] = [
     id: "h-1",
     type: "response",
     title: "Address Bar as local AI web navigator",
-    path: "loom://loom-ai/navigation-architecture/thread/browser/r-address-bar",
+    path: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
     visitedAt: "Now",
   },
   {
@@ -329,9 +887,9 @@ export const initialHistory: HistoryEntry[] = [
   },
   {
     id: "h-3",
-    type: "thread",
+    type: "loom",
     title: "Inline reference composition rules",
-    path: "loom://loom-ai/navigation-architecture/thread/composer",
+    path: "loom://loom-ai/navigation-architecture/loom/composer",
     visitedAt: "22 min ago",
   },
   {
@@ -348,17 +906,17 @@ export const addressSuggestions: AddressSuggestion[] = [
     id: "a-1",
     type: "conversation",
     title: "Loom AI navigation architecture",
-    subtitle: "Conversation",
+    subtitle: "Loom",
     path: "loom://loom-ai/navigation-architecture",
     badge: "Recent",
-    iconLabel: "Conversation",
+    iconLabel: "Loom",
   },
   {
     id: "a-2",
     type: "response",
     title: "Address Bar as local AI web navigator",
-    subtitle: "Q+A item in Browser thread",
-    path: "loom://loom-ai/navigation-architecture/thread/browser/r-address-bar",
+    subtitle: "Q+A item in Browser loom",
+    path: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
     badge: "Bookmark",
     iconLabel: "Response",
   },
@@ -367,7 +925,7 @@ export const addressSuggestions: AddressSuggestion[] = [
     type: "bookmark",
     title: "Inline reference composition model",
     subtitle: "Saved destination",
-    path: "loom://loom-ai/navigation-architecture/thread/composer/r-inline-references",
+    path: "loom://loom-ai/navigation-architecture/loom/composer/r-inline-references",
     badge: "Bookmark",
     iconLabel: "Bookmark",
   },
@@ -376,7 +934,7 @@ export const addressSuggestions: AddressSuggestion[] = [
     type: "semantic",
     title: "Search and navigation are the same action",
     subtitle: "Semantic match from response body",
-    path: "loom://loom-ai/navigation-architecture/thread/browser/r-address-bar",
+    path: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
     badge: "Semantic",
     iconLabel: "Semantic",
   },

@@ -4,6 +4,7 @@ export type ContextMenuKind =
   | "conversation"
   | "response"
   | "bookmark"
+  | "history-entry"
   | "group"
   | "history-back"
   | "history-forward";
@@ -14,9 +15,13 @@ export type ContextMenuAction =
   | "unpin"
   | "rename"
   | "change-icon"
+  | "set-group-color"
   | "bookmark"
   | "copy-address"
   | "copy-markdown"
+  | "copy-answer-markdown"
+  | "copy-answer-rich"
+  | "copy-answer-plain"
   | "archive"
   | "delete"
   | "ask"
@@ -25,6 +30,7 @@ export type ContextMenuAction =
   | "open-graph"
   | "insert"
   | "remove"
+  | "move-to-group"
   | "new-tab-group"
   | "move-group-window"
   | "ungroup"
@@ -38,12 +44,15 @@ export interface ContextMenuItem {
   disabled?: boolean;
   separatorBefore?: boolean;
   detail?: string;
+  targetGroupId?: string;
+  children?: ContextMenuItem[];
 }
 
 export type ContextMenuPayload =
   | { kind: "conversation"; conversation: Conversation; pinned: boolean }
   | { kind: "response"; response: ResponseItem }
   | { kind: "bookmark"; bookmark: BookmarkItem }
+  | { kind: "history-entry"; entry: HistoryEntry }
   | { kind: "group"; group: TabGroup }
   | { kind: "history-back" | "history-forward"; entries: HistoryEntry[] };
 
@@ -68,10 +77,11 @@ export function getContextMenuItems(payload: ContextMenuPayload): ContextMenuIte
     case "response":
       return [
         { id: "ask", label: "Ask" },
-        { id: "link", label: "Link" },
-        { id: "bookmark", label: "Bookmark" },
         { id: "copy-address", label: "Copy Loom Address" },
-        { id: "copy-markdown", label: "Copy as Loom Markdown" },
+        { id: "copy-markdown", label: "Copy Loom Markdown Link" },
+        { id: "copy-answer-rich", label: "Copy" },
+        { id: "copy-answer-markdown", label: "Copy as Markdown" },
+        { id: "copy-answer-plain", label: "Copy plain text" },
         {
           id: "bookmark-suggested",
           label: "Bookmark suggested links",
@@ -88,9 +98,17 @@ export function getContextMenuItems(payload: ContextMenuPayload): ContextMenuIte
         { id: "copy-address", label: "Copy Loom Address" },
         { id: "remove", label: "Remove bookmark", danger: true, separatorBefore: true },
       ];
+    case "history-entry":
+      return [
+        { id: "open", label: "Open" },
+        { id: "insert", label: "Link" },
+        { id: "bookmark", label: "Bookmark" },
+        { id: "copy-address", label: "Copy Loom Address" },
+      ];
     case "group":
       return [
         { id: "rename", label: "Edit / Rename Group" },
+        { id: "set-group-color", label: "Set Color..." },
         { id: "new-tab-group", label: "New Tab in Group" },
         {
           id: "move-group-window",
@@ -125,5 +143,10 @@ export function toLinkFromResponse(response: ResponseItem): LoomLink {
     title: response.title,
     path: response.address,
     badge: "Linked",
+    canonicalUri: response.meta?.canonicalUri,
+    meta: response.meta,
+    referenceCode: response.meta?.code,
+    sourceResponseId: response.id,
+    sourceCanonicalUri: response.meta?.canonicalUri ?? response.address,
   };
 }

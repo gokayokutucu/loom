@@ -1,0 +1,223 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
+
+const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const execFileAsync = promisify(execFile);
+const electronTemplateApp = path.join(
+  repoRoot,
+  "node_modules",
+  "electron",
+  "dist",
+  "Electron.app"
+);
+const packageRoot = path.join(repoRoot, "dist-electron");
+const appPath = path.join(packageRoot, "Loom.app");
+const resourcesPath = path.join(appPath, "Contents", "Resources");
+const appResourcesPath = path.join(resourcesPath, "app");
+const sidecarResourcesPath = path.join(resourcesPath, "loom-service");
+const bundledWhisperSourcePath = path.join(repoRoot, "resources", "bin", "whisper");
+const bundledWhisperResourcesPath = path.join(resourcesPath, "bin", "whisper");
+const iconSourcePath = path.join(repoRoot, "public", "loom_logo.icns");
+const bundleIconFile = "loom_logo.icns";
+const bundleIconPath = path.join(resourcesPath, bundleIconFile);
+const macEntitlementsPath = path.join(repoRoot, "electron", "entitlements.mac.plist");
+const microphoneUsageDescription =
+  "Loom AI needs microphone access for speech-to-text and voice AI interactions.";
+const serviceBinaryPath = path.join(
+  repoRoot,
+  "services",
+  "loom-service",
+  "target",
+  "debug",
+  "loom-service"
+);
+
+async function assertExists(target, label) {
+  try {
+    await fs.access(target);
+  } catch {
+    throw new Error(`${label} is missing at ${target}`);
+  }
+}
+
+async function writePackageManifest() {
+  const manifest = {
+    name: "loom-ai",
+    version: "0.1.0",
+    private: true,
+    type: "module",
+    main: "electron/main.mjs",
+  };
+  await fs.writeFile(
+    path.join(appResourcesPath, "package.json"),
+    `${JSON.stringify(manifest, null, 2)}\n`
+  );
+}
+
+async function writeDevRuntimeMetadata() {
+  const metadata = {
+    kind: "loom-electron-dev-runtime",
+    repoRoot,
+    dataMode: process.env.LOOM_ELECTRON_DATA_MODE === "isolated-dev" ? "isolated-dev" : "shared-dev",
+  };
+  await fs.writeFile(
+    path.join(appResourcesPath, "electron-dev-runtime.json"),
+    `${JSON.stringify(metadata, null, 2)}\n`
+  );
+}
+
+async function createMacBundleIcon() {
+  await assertExists(iconSourcePath, "Loom app icon");
+  await fs.copyFile(iconSourcePath, bundleIconPath);
+}
+
+async function assertMissing(target, label) {
+  try {
+    await fs.access(target);
+  } catch {
+    return;
+  }
+  throw new Error(`${label} should not exist at ${target}`);
+}
+
+async function assertFilesEqual(left, right, label) {
+  const [leftBuffer, rightBuffer] = await Promise.all([
+    fs.readFile(left),
+    fs.readFile(right),
+  ]);
+  if (!leftBuffer.equals(rightBuffer)) {
+    throw new Error(`${label} mismatch: ${left} differs from ${right}`);
+  }
+}
+
+async function patchInfoPlist() {
+  const plistPath = path.join(appPath, "Contents", "Info.plist");
+  const original = await fs.readFile(plistPath, "utf8");
+  let patched = original
+    .replace(
+      /(<key>CFBundleDisplayName<\/key>\s*<string>)[^<]+(<\/string>)/,
+      "$1Loom$2"
+    )
+    .replace(
+      /(<key>CFBundleName<\/key>\s*<string>)[^<]+(<\/string>)/,
+      "$1Loom$2"
+    )
+    .replace(
+      /(<key>CFBundleIdentifier<\/key>\s*<string>)[^<]+(<\/string>)/,
+      "$1ai.loom.dev$2"
+    )
+    .replace(
+      /(<key>CFBundleIconFile<\/key>\s*<string>)[^<]+(<\/string>)/,
+      `$1${bundleIconFile}$2`
+    );
+  if (patched.includes("<key>NSMicrophoneUsageDescription</key>")) {
+    patched = patched.replace(
+      /(<key>NSMicrophoneUsageDescription<\/key>\s*<string>)[^<]*(<\/string>)/,
+      `$1${microphoneUsageDescription}$2`
+    );
+  } else {
+    patched = patched.replace(
+      /<\/dict>\s*<\/plist>\s*$/,
+      `\t<key>NSMicrophoneUsageDescription</key>\n\t<string>${microphoneUsageDescription}</string>\n</dict>\n</plist>\n`
+    );
+  }
+  await fs.writeFile(plistPath, patched);
+}
+
+async function verifyMacBundleIcon() {
+  const plistPath = path.join(appPath, "Contents", "Info.plist");
+  const plist = await fs.readFile(plistPath, "utf8");
+  await assertExists(bundleIconPath, "Packaged Loom app icon");
+  await assertMissing(path.join(resourcesPath, "electron.icns"), "Old Electron app icon");
+  if (!plist.includes(`<key>CFBundleIconFile</key>\n\t<string>${bundleIconFile}</string>`)) {
+    throw new Error(`Info.plist does not point CFBundleIconFile at ${bundleIconFile}`);
+  }
+  await assertFilesEqual(iconSourcePath, bundleIconPath, "Packaged Loom app icon");
+}
+
+async function signMacAppWithEntitlements() {
+  await assertExists(macEntitlementsPath, "macOS entitlements");
+  await execFileAsync("/usr/bin/codesign", [
+    "--force",
+    "--deep",
+    "--sign",
+    "-",
+    "--entitlements",
+    macEntitlementsPath,
+    appPath,
+  ]);
+}
+
+async function copyBundledWhisperRuntimeIfPresent() {
+  try {
+    await fs.access(bundledWhisperSourcePath);
+  } catch {
+    return false;
+  }
+  await fs.mkdir(path.dirname(bundledWhisperResourcesPath), { recursive: true });
+  await fs.cp(bundledWhisperSourcePath, bundledWhisperResourcesPath, {
+    recursive: true,
+  });
+  return true;
+}
+
+async function packageDevApp() {
+  await assertExists(electronTemplateApp, "Electron app template");
+  await assertExists(path.join(repoRoot, "dist", "index.html"), "React build");
+  await assertExists(serviceBinaryPath, "loom-service debug binary");
+
+  await fs.rm(packageRoot, { recursive: true, force: true });
+  await fs.mkdir(packageRoot, { recursive: true });
+  await fs.cp(electronTemplateApp, appPath, {
+    recursive: true,
+    verbatimSymlinks: true,
+  });
+  await fs.rm(path.join(resourcesPath, "electron.icns"), { force: true });
+
+  await fs.rm(appResourcesPath, { recursive: true, force: true });
+  await fs.mkdir(path.join(appResourcesPath, "electron"), { recursive: true });
+  await fs.cp(path.join(repoRoot, "dist"), path.join(appResourcesPath, "dist"), {
+    recursive: true,
+  });
+  await fs.copyFile(
+    path.join(repoRoot, "electron", "main.mjs"),
+    path.join(appResourcesPath, "electron", "main.mjs")
+  );
+  await fs.copyFile(
+    path.join(repoRoot, "electron", "app-logger.mjs"),
+    path.join(appResourcesPath, "electron", "app-logger.mjs")
+  );
+  await fs.copyFile(
+    path.join(repoRoot, "electron", "preload.cjs"),
+    path.join(appResourcesPath, "electron", "preload.cjs")
+  );
+  await fs.copyFile(
+    path.join(repoRoot, "electron", "sidecar-manager.mjs"),
+    path.join(appResourcesPath, "electron", "sidecar-manager.mjs")
+  );
+  await fs.copyFile(
+    path.join(repoRoot, "electron", "sidecar-lifecycle.mjs"),
+    path.join(appResourcesPath, "electron", "sidecar-lifecycle.mjs")
+  );
+  await writePackageManifest();
+  await writeDevRuntimeMetadata();
+  await createMacBundleIcon();
+  const bundledWhisperCopied = await copyBundledWhisperRuntimeIfPresent();
+
+  await fs.mkdir(sidecarResourcesPath, { recursive: true });
+  await fs.copyFile(serviceBinaryPath, path.join(sidecarResourcesPath, "loom-service"));
+  await fs.chmod(path.join(sidecarResourcesPath, "loom-service"), 0o755);
+  await patchInfoPlist();
+  await signMacAppWithEntitlements();
+  await verifyMacBundleIcon();
+
+  console.log(`Packaged Loom dev app: ${appPath}`);
+  if (!bundledWhisperCopied) {
+    console.log(`No bundled Whisper runtime found at ${bundledWhisperSourcePath}`);
+  }
+}
+
+await packageDevApp();
