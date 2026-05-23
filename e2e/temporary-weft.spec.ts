@@ -1,7 +1,11 @@
 // E2E data authority classification:
 // - PRODUCT_SERVICE_BACKED: temp SQLite DB, fresh loom-service binary, product UI flow.
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { expect, type Page, test } from "@playwright/test";
 import { createServiceTestHarness } from "./helpers/serviceTestHarness";
+
+const execFileAsync = promisify(execFile);
 
 async function sendMainPrompt(page: Page, prompt: string) {
   const editor = page.getByRole("textbox", { name: "Prompt" }).first();
@@ -69,6 +73,21 @@ async function closeAddressBarToComposer(page: Page) {
   const addressBar = page.getByLabel("Loom Address Bar");
   await addressBar.press("Escape");
   await addressBar.press("Escape");
+}
+
+function sqliteString(value: string) {
+  return `'${value.replaceAll("'", "''")}'`;
+}
+
+async function sqliteJsonRows<T>(dbPath: string, sql: string): Promise<T[]> {
+  const { stdout } = await execFileAsync("/usr/bin/sqlite3", ["-json", dbPath, sql]);
+  const trimmed = stdout.trim();
+  return trimmed.length > 0 ? (JSON.parse(trimmed) as T[]) : [];
+}
+
+async function sqliteDump(dbPath: string) {
+  const { stdout } = await execFileAsync("/usr/bin/sqlite3", [dbPath, ".dump"]);
+  return stdout;
 }
 
 test.describe("[product-service-backed] Temporary Weft workspace", () => {
@@ -337,6 +356,100 @@ test.describe("[product-service-backed] Temporary Weft workspace", () => {
         "Loom: İkinci olasılığı güvenlik açısından değerlendir."
       );
       await expect(graphWeftPicker).toContainText(/Today .*:/);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("newly promoted Temporary Weft uses hidden origin context for first product prompt", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+    const uniqueFact = "The project codename is Blue Otter.";
+    const originPrompt = `${uniqueFact} Explain Event Sourcing with this codename.`;
+    const weftPrompt = "What is the project codename?";
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(page, originPrompt);
+      await expect(page.locator(".qa-item")).toHaveCount(1, { timeout: 30_000 });
+      await expect(page.locator(".assistant-message").first()).toContainText("Blue Otter", {
+        timeout: 30_000,
+      });
+
+      await page.getByRole("button", { name: /Start Weft from/i }).first().click();
+      const weftPanel = page.locator(".weft-split-panel");
+      await expect(weftPanel).toBeVisible();
+      const weftEditor = weftPanel.getByRole("textbox", { name: "Prompt" });
+      await expect(weftEditor).toBeFocused();
+      await page.keyboard.insertText(weftPrompt);
+      await weftPanel.getByRole("button", { name: "Send" }).click();
+
+      const [weft] = await waitForWeftCount(scenario, 1);
+      await expect(weftPanel.locator(".assistant-message").first()).toContainText("Blue Otter", {
+        timeout: 30_000,
+      });
+      await expect(weftPanel.locator(".assistant-message").first()).toContainText(
+        "Event Sourcing"
+      );
+
+      const hydratedWeft = await scenario.client.getLoom(weft.loomId);
+      expect(hydratedWeft.responses).toHaveLength(1);
+      expect(hydratedWeft.responses[0].question).toContain(weftPrompt);
+      expect(
+        hydratedWeft.responses.map((response) => response.question).join("\n")
+      ).not.toContain(originPrompt);
+      await expect(weftPanel.locator(".qa-item")).toHaveCount(1);
+      await expect(weftPanel.locator(".user-turn")).not.toContainText(originPrompt);
+
+      const originContexts = await sqliteJsonRows<{
+        context_id: string;
+        weft_loom_id: string;
+        origin_loom_id: string;
+        origin_response_id: string;
+        origin_capsule_id: string | null;
+        origin_summary: string;
+        status: string;
+      }>(
+        scenario.dbPath,
+        `SELECT context_id, weft_loom_id, origin_loom_id, origin_response_id, origin_capsule_id, origin_summary, status
+         FROM weft_origin_contexts
+         WHERE weft_loom_id = ${sqliteString(weft.loomId)}`
+      );
+      expect(originContexts).toHaveLength(1);
+      expect(originContexts[0].status).toBe("ready");
+      expect(originContexts[0].origin_summary).toContain("Blue Otter");
+      const originSnapshot = JSON.parse(originContexts[0].origin_summary) as Record<string, unknown>;
+      const serializedSnapshot = JSON.stringify(originSnapshot);
+      expect(serializedSnapshot).toContain("originResponse");
+      expect(serializedSnapshot).toContain("previousUserResponse");
+      expect(serializedSnapshot).toContain(uniqueFact);
+      expect(serializedSnapshot).toContain("Event Sourcing");
+
+      const proofText = JSON.stringify(await scenario.getProof(weft.loomId));
+      const databaseDump = await sqliteDump(scenario.dbPath);
+      for (const forbidden of [
+        "raw_thinking",
+        "thinking_text",
+        "chain_of_thought",
+        "hidden_reasoning",
+      ]) {
+        expect(proofText).not.toContain(forbidden);
+        expect(serializedSnapshot).not.toContain(forbidden);
+        expect(databaseDump).not.toContain(forbidden);
+      }
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+      expect(scenario.configPath).toContain(scenario.tempDir);
     } finally {
       const cleanup = await scenario.cleanup();
       expect(cleanup.serviceStopped).toBe(true);

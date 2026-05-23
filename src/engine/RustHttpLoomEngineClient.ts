@@ -7,12 +7,16 @@ import type {
   CancelMessageInput,
   CancelMessageResult,
   CapabilitySummary,
+  AttachmentItem,
+  CreateAttachmentInput,
+  CreateAttachmentResult,
   CreateBookmarkInput,
   CreateLoomInput,
   CreateLoomResult,
   CreateOrOpenWeftInput,
   CreateOrOpenWeftResult,
   DeleteLoomInput,
+  DeleteAttachmentInput,
   EngineHealth,
   EngineResponseEvent,
   ExportLoomInput,
@@ -39,6 +43,8 @@ import type {
   ListHistoryResult,
   ListReferencesInput,
   ListReferencesResult,
+  ListAttachmentsInput,
+  ListAttachmentsResult,
   PersistedWeftTurn,
   PersistWeftTurnsInput,
   PersistWeftTurnsResult,
@@ -53,6 +59,7 @@ import type {
   ResolveAddressResult,
   RustHttpLoomEngineClientOptions,
   LoomServiceRuntimeConfig,
+  OcrProviderHealth,
   RuntimeModelDownloadJob,
   RuntimeModelItem,
   RuntimeModelProviderStatus,
@@ -105,6 +112,10 @@ export type RustHttpLoomEngineErrorKind =
   | "provider_error"
   | "invalid_config"
   | "model_missing"
+  | "no_speech_detected"
+  | "payload_too_large"
+  | "provider_timeout"
+  | "unsupported_audio"
   | "request_failed"
   | "request_aborted"
   | "unsupported_method"
@@ -185,20 +196,25 @@ async function serviceErrorFromResponse(
   }
   const sanitizedPayload = sanitizeEnginePayload(payload);
   if (isRecord(sanitizedPayload)) {
-    const serviceKind = stringValue(sanitizedPayload, "kind");
+    const serviceKind = stringValue(sanitizedPayload, "code") ?? stringValue(sanitizedPayload, "kind");
     const message =
       stringValue(sanitizedPayload, "message") ??
       messageForHttpStatus(response.status, path);
     const details = isRecord(sanitizedPayload.details)
       ? sanitizeEnginePayload(sanitizedPayload.details)
       : undefined;
+    const diagnostics = isRecord(sanitizedPayload.diagnostics)
+      ? sanitizeEnginePayload(sanitizedPayload.diagnostics)
+      : undefined;
     return new RustHttpLoomEngineError(mapServiceErrorKind(serviceKind, response.status), message, {
       ...baseDetails,
       serviceKind,
+      serviceErrorCode: stringValue(sanitizedPayload, "code"),
       providerErrorKind: serviceKind,
       retryable: booleanValue(sanitizedPayload, "retryable"),
       correlationId: stringValue(sanitizedPayload, "correlationId"),
       details,
+      diagnostics,
     });
   }
   return new RustHttpLoomEngineError(mapServiceErrorKind(undefined, response.status), messageForHttpStatus(response.status, path), {
@@ -212,6 +228,20 @@ function mapServiceErrorKind(
   status: number
 ): RustHttpLoomEngineErrorKind {
   switch (serviceKind) {
+    case "audio_too_large":
+    case "payload_too_large":
+    case "ATTACHMENT_TOO_LARGE":
+      return "payload_too_large";
+    case "no_speech_detected":
+      return "no_speech_detected";
+    case "provider_timeout":
+      return "provider_timeout";
+    case "unsupported_audio":
+    case "unsupported_audio_type":
+      return "unsupported_audio";
+    case "provider_failed":
+    case "transcription_failed":
+      return "provider_error";
     case "invalid_config":
       return "invalid_config";
     case "runtime_unavailable":
@@ -228,6 +258,7 @@ function mapServiceErrorKind(
     case "aborted":
       return "request_aborted";
     default:
+      if (status === 413) return "payload_too_large";
       if (status === 408 || status === 504) return "timeout";
       if (status === 502 || status === 503) return "provider_unavailable";
       if (status === 400 || status === 422) return "request_failed";
@@ -236,6 +267,9 @@ function mapServiceErrorKind(
 }
 
 function messageForHttpStatus(status: number, path: string): string {
+  if (status === 413 && path === "/speech/transcribe") {
+    return "Recording is too long. Try a shorter recording.";
+  }
   if (status === 502 || status === 503) {
     return `loom-service provider request failed for ${path}.`;
   }
@@ -745,6 +779,7 @@ function loomObjectTypeValue(value: unknown): LoomLink["type"] | undefined {
     value === "loom" ||
     value === "response" ||
     value === "fragment" ||
+    value === "attachment" ||
     value === "bookmark" ||
     value === "semantic" ||
     value === "recent"
@@ -761,6 +796,7 @@ function referenceTargetKindValue(value: unknown): LoomLink["targetKind"] | unde
     value === "weft" ||
     value === "fragment" ||
     value === "code_block" ||
+    value === "attachment" ||
     value === "external"
   ) {
     return value;
@@ -1269,8 +1305,13 @@ function validateServiceConfig(value: unknown): LoomServiceRuntimeConfig {
     : undefined;
   const memory = isRecord(value.memory)
     ? {
+        enabled: booleanValue(value.memory, "enabled"),
         referenceRecentLooms: booleanValue(value.memory, "referenceRecentLooms"),
         referenceSavedMemories: booleanValue(value.memory, "referenceSavedMemories"),
+        nickname: stringValue(value.memory, "nickname"),
+        occupation: stringValue(value.memory, "occupation"),
+        stylePreferences: stringValue(value.memory, "stylePreferences"),
+        moreAboutYou: stringValue(value.memory, "moreAboutYou"),
       }
     : undefined;
   const providers = isRecord(value.providers)
@@ -1279,11 +1320,45 @@ function validateServiceConfig(value: unknown): LoomServiceRuntimeConfig {
         defaultQuickModel: stringValue(value.providers, "defaultQuickModel"),
       }
     : undefined;
+  const ocr = isRecord(value.ocr)
+    ? {
+        enabled: Boolean(booleanValue(value.ocr, "enabled")),
+        provider: stringValue(value.ocr, "provider") ?? "tesseract",
+        commandPath: nullableStringValue(value.ocr, "commandPath"),
+        pdfRasterizerCommandPath: nullableStringValue(value.ocr, "pdfRasterizerCommandPath"),
+        language: stringValue(value.ocr, "language") ?? "eng",
+        dpi: numberValue(value.ocr, "dpi") ?? 200,
+        timeoutSeconds: numberValue(value.ocr, "timeoutSeconds") ?? 60,
+        maxPagesPerFile: numberValue(value.ocr, "maxPagesPerFile") ?? 20,
+        maxImagePixels: numberValue(value.ocr, "maxImagePixels") ?? 24_000_000,
+        tempDir: nullableStringValue(value.ocr, "tempDir"),
+      }
+    : undefined;
   return {
     speech: validateSpeechConfig(value.speech),
+    ocr,
     memory,
     providers,
     database,
+  };
+}
+
+function validateOcrProviderHealth(value: unknown): OcrProviderHealth {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid OCR provider health.", {
+      endpoint: "/ocr/provider/health",
+    });
+  }
+  return {
+    status: stringValue(value, "status") ?? "unavailable",
+    provider: stringValue(value, "provider") ?? "tesseract",
+    enabled: Boolean(booleanValue(value, "enabled")),
+    commandPath: nullableStringValue(value, "commandPath"),
+    rasterizerCommandPath: nullableStringValue(value, "rasterizerCommandPath"),
+    language: stringValue(value, "language") ?? "eng",
+    dpi: numberValue(value, "dpi") ?? 200,
+    message: stringValue(value, "message") ?? "OCR provider health is unavailable.",
+    warnings: arrayOfStrings(value.warnings),
   };
 }
 
@@ -1332,6 +1407,77 @@ function mapReferenceForService(reference: LoomLink) {
     targetId: reference.targetObjectId ?? reference.id,
     sourceResponseCode: reference.sourceResponseCode,
     sourceTitle: reference.title,
+  };
+}
+
+function attachmentParseStatusValue(value: unknown): AttachmentItem["parseStatus"] {
+  if (
+    value === "queued" ||
+    value === "parsing" ||
+    value === "extracting_text" ||
+    value === "ocr_needed" ||
+    value === "ocr_running" ||
+    value === "ready" ||
+    value === "failed" ||
+    value === "unsupported"
+  ) {
+    return value;
+  }
+  return "failed";
+}
+
+function validateAttachment(value: unknown, endpoint: string): AttachmentItem {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Attachment.", {
+      endpoint,
+    });
+  }
+  const attachmentId = stringValue(value, "attachmentId");
+  const loomId = stringValue(value, "loomId");
+  const fileName = stringValue(value, "fileName");
+  const sizeBytes = numberValue(value, "sizeBytes");
+  const kind = stringValue(value, "kind");
+  if (!attachmentId || !loomId || !fileName || sizeBytes === undefined || !kind) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service Attachment was missing required fields.", {
+      endpoint,
+    });
+  }
+  return {
+    attachmentId,
+    loomId,
+    fileName,
+    mimeType: stringValue(value, "mimeType"),
+    extension: stringValue(value, "extension"),
+    sizeBytes,
+    kind,
+    parseStatus: attachmentParseStatusValue(value.parseStatus),
+    parser: stringValue(value, "parser"),
+    error: stringValue(value, "error"),
+    thumbnailDataUrl: stringValue(value, "thumbnailDataUrl"),
+    parsedCharCount: numberValue(value, "parsedCharCount"),
+    metadataJson: isJsonValue(value.metadataJson) ? value.metadataJson : undefined,
+    createdAt: stringValue(value, "createdAt") ?? "",
+    updatedAt: stringValue(value, "updatedAt") ?? "",
+  };
+}
+
+function validateAttachmentEnvelope(value: unknown, endpoint: string): CreateAttachmentResult {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Attachment envelope.", {
+      endpoint,
+    });
+  }
+  return { attachment: validateAttachment(value.attachment, endpoint) };
+}
+
+function validateAttachmentList(value: unknown, endpoint: string): ListAttachmentsResult {
+  if (!isRecord(value) || !Array.isArray(value.attachments)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Attachment list.", {
+      endpoint,
+    });
+  }
+  return {
+    attachments: value.attachments.map((attachment) => validateAttachment(attachment, endpoint)),
   };
 }
 
@@ -1761,7 +1907,8 @@ function quickAskTransportDiagnostics(
   }) as JsonValue;
 }
 
-function referenceTargetKind(link: LoomLink): "loom" | "response" | "weft" | "fragment" | "external" {
+function referenceTargetKind(link: LoomLink): "loom" | "response" | "weft" | "fragment" | "attachment" | "external" {
+  if (link.targetKind === "attachment" || link.type === "attachment") return "attachment";
   if (link.type === "fragment") return "fragment";
   if (link.type === "response") return "response";
   if (link.type === "conversation" || link.type === "loom") return "loom";
@@ -2465,6 +2612,11 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     return validateRuntimeModelDownloadJob(response);
   }
 
+  async getOcrProviderHealth(): Promise<OcrProviderHealth> {
+    const response = await this.requestJson<unknown>("/ocr/provider/health");
+    return validateOcrProviderHealth(response);
+  }
+
   async getSpeechProviderHealth(): Promise<SpeechProviderHealth> {
     const response = await this.requestJson<unknown>("/speech/provider/health");
     return validateSpeechProviderHealth(response);
@@ -3123,6 +3275,31 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
       body: JSON.stringify(createReferencePayload(input)),
     });
     return validateReferenceEnvelope(response, "/references");
+  }
+
+  async createAttachment(input: CreateAttachmentInput): Promise<CreateAttachmentResult> {
+    const endpoint = `/looms/${encodeURIComponent(input.loomId)}/attachments`;
+    const response = await this.requestJson<unknown>(endpoint, {
+      method: "POST",
+      body: JSON.stringify({
+        fileName: input.fileName,
+        mimeType: input.mimeType,
+        sizeBytes: input.sizeBytes,
+        contentBase64: input.contentBase64,
+      }),
+    });
+    return validateAttachmentEnvelope(response, endpoint);
+  }
+
+  async listAttachments(input: ListAttachmentsInput): Promise<ListAttachmentsResult> {
+    const endpoint = `/looms/${encodeURIComponent(input.loomId)}/attachments`;
+    const response = await this.requestJson<unknown>(endpoint, { method: "GET" });
+    return validateAttachmentList(response, endpoint);
+  }
+
+  async deleteAttachment(input: DeleteAttachmentInput): Promise<void> {
+    const endpoint = `/attachments/${encodeURIComponent(input.attachmentId)}`;
+    await this.requestJson<unknown>(endpoint, { method: "DELETE" });
   }
 
   async removeReference(input: RemoveReferenceInput): Promise<void> {

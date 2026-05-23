@@ -28,6 +28,7 @@ const WHISPER_SYSTEM_CANDIDATES: &[&str] = &[
     "/usr/local/bin/whisper-cli",
     "/usr/local/bin/whisper-cpp",
 ];
+pub(crate) const SPEECH_TRANSCRIBE_HTTP_BODY_LIMIT_BYTES: usize = 48 * 1024 * 1024;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,8 +45,10 @@ pub struct SpeechTranscribeRequest {
 #[serde(rename_all = "camelCase")]
 pub struct SpeechTranscribeErrorPayload {
     pub kind: SpeechToTextErrorKind,
+    pub code: String,
     pub message: String,
     pub warnings: Vec<String>,
+    pub diagnostics: Value,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -110,6 +113,7 @@ pub async fn transcribe(
         return Err(speech_error(error));
     }
     let config = state.config.current().speech;
+    let request_metadata = input.metadata.clone();
     let request = SpeechToTextProviderRequest {
         audio_bytes: input.audio_bytes,
         mime_type: input.mime_type,
@@ -124,6 +128,14 @@ pub async fn transcribe(
     let mime_type = request.mime_type.clone();
     let normalized_mime = normalized_mime_type(&mime_type);
     let audio_extension = audio_extension_for_mime(&mime_type);
+    let request_diagnostics = speech_request_diagnostics(
+        &mime_type,
+        &normalized_mime,
+        audio_extension,
+        audio_byte_len,
+        &provider_kind,
+        request_metadata.as_ref(),
+    );
     tracing::info!(
         provider_kind = ?provider_kind,
         %mime_type,
@@ -143,7 +155,10 @@ pub async fn transcribe(
             error_kind = ?error.kind,
             "speech transcription rejected"
         );
-        return Err(speech_error(error));
+        return Err(speech_error_with_diagnostics(
+            error,
+            request_diagnostics.clone(),
+        ));
     }
     if let Err(error) = validate_transcribe_request(&config, &request) {
         tracing::warn!(
@@ -155,7 +170,10 @@ pub async fn transcribe(
             error_kind = ?error.kind,
             "speech transcription rejected"
         );
-        return Err(speech_error(error));
+        return Err(speech_error_with_diagnostics(
+            error,
+            request_diagnostics.clone(),
+        ));
     }
 
     match config.default_provider_kind {
@@ -182,7 +200,10 @@ pub async fn transcribe(
                         error_kind = ?error.kind,
                         "speech transcription failed"
                     );
-                    Err(speech_error(error))
+                    Err(speech_error_with_diagnostics(
+                        error,
+                        request_diagnostics.clone(),
+                    ))
                 }
             }
         }
@@ -209,7 +230,10 @@ pub async fn transcribe(
                         error_kind = ?error.kind,
                         "speech transcription failed"
                     );
-                    Err(speech_error(error))
+                    Err(speech_error_with_diagnostics(
+                        error,
+                        request_diagnostics.clone(),
+                    ))
                 }
             }
         }
@@ -227,7 +251,7 @@ pub async fn transcribe(
                 error_kind = ?error.kind,
                 "speech transcription failed"
             );
-            Err(speech_error(error))
+            Err(speech_error_with_diagnostics(error, request_diagnostics))
         }
     }
 }
@@ -374,6 +398,27 @@ fn validate_mode(mode: Option<&str>) -> Result<(), SpeechToTextError> {
 }
 
 fn speech_error(error: SpeechToTextError) -> (StatusCode, Json<SpeechTranscribeErrorPayload>) {
+    speech_error_with_diagnostics(error, serde_json::json!({}))
+}
+
+pub(crate) fn payload_too_large_error(
+    content_length: Option<u64>,
+) -> (StatusCode, Json<SpeechTranscribeErrorPayload>) {
+    let mut error = SpeechToTextError::new(
+        SpeechToTextErrorKind::AudioTooLarge,
+        "Recording is too long. Try a shorter recording.",
+    );
+    error.diagnostics = Some(serde_json::json!({
+        "httpBodyLimitBytes": SPEECH_TRANSCRIBE_HTTP_BODY_LIMIT_BYTES,
+        "contentLength": content_length,
+    }));
+    speech_error(error)
+}
+
+fn speech_error_with_diagnostics(
+    error: SpeechToTextError,
+    request_diagnostics: Value,
+) -> (StatusCode, Json<SpeechTranscribeErrorPayload>) {
     let status = match error.kind {
         SpeechToTextErrorKind::SttDisabled => StatusCode::FORBIDDEN,
         SpeechToTextErrorKind::UnsupportedAudioType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
@@ -382,16 +427,76 @@ fn speech_error(error: SpeechToTextError) -> (StatusCode, Json<SpeechTranscribeE
         SpeechToTextErrorKind::MissingSecret => StatusCode::UNAUTHORIZED,
         SpeechToTextErrorKind::ProviderUnavailable => StatusCode::SERVICE_UNAVAILABLE,
         SpeechToTextErrorKind::InvalidRequest => StatusCode::BAD_REQUEST,
+        SpeechToTextErrorKind::NoSpeechDetected => StatusCode::UNPROCESSABLE_ENTITY,
+        SpeechToTextErrorKind::ProviderTimeout => StatusCode::GATEWAY_TIMEOUT,
         SpeechToTextErrorKind::TranscriptionFailed => StatusCode::BAD_GATEWAY,
     };
+    let code = speech_error_code(&error.kind).to_string();
+    let diagnostics = merge_speech_diagnostics(request_diagnostics, error.diagnostics);
     (
         status,
         Json(SpeechTranscribeErrorPayload {
             kind: error.kind,
+            code,
             message: error.message,
             warnings: error.warnings,
+            diagnostics,
         }),
     )
+}
+
+fn speech_error_code(kind: &SpeechToTextErrorKind) -> &'static str {
+    match kind {
+        SpeechToTextErrorKind::SttDisabled => "stt_disabled",
+        SpeechToTextErrorKind::UnsupportedAudioType => "unsupported_audio",
+        SpeechToTextErrorKind::AudioTooLarge => "payload_too_large",
+        SpeechToTextErrorKind::ProviderUnavailable => "service_unavailable",
+        SpeechToTextErrorKind::MissingSecret => "missing_secret",
+        SpeechToTextErrorKind::CloudSttDisabled => "cloud_stt_disabled",
+        SpeechToTextErrorKind::NoSpeechDetected => "no_speech_detected",
+        SpeechToTextErrorKind::ProviderTimeout => "provider_timeout",
+        SpeechToTextErrorKind::TranscriptionFailed => "provider_failed",
+        SpeechToTextErrorKind::InvalidRequest => "invalid_request",
+    }
+}
+
+fn merge_speech_diagnostics(mut base: Value, extra: Option<Value>) -> Value {
+    if let (Some(base_object), Some(extra_value)) = (base.as_object_mut(), extra) {
+        if let Some(extra_object) = extra_value.as_object() {
+            for (key, value) in extra_object {
+                base_object.insert(key.clone(), value.clone());
+            }
+        }
+    }
+    base
+}
+
+fn speech_request_diagnostics(
+    mime_type: &str,
+    normalized_mime: &str,
+    audio_extension: &str,
+    audio_byte_len: usize,
+    provider_kind: &SpeechToTextProviderKind,
+    metadata: Option<&Value>,
+) -> Value {
+    serde_json::json!({
+        "mimeType": mime_type,
+        "normalizedMimeType": normalized_mime,
+        "extension": audio_extension,
+        "byteLength": audio_byte_len,
+        "durationMs": metadata.and_then(|value| numeric_metadata(value, "durationSeconds")).map(|value| (value * 1000.0).round() as u64),
+        "sampleRate": metadata.and_then(|value| numeric_metadata(value, "sampleRate")),
+        "channelCount": metadata.and_then(|value| numeric_metadata(value, "channelCount")),
+        "sourceSampleRate": metadata.and_then(|value| numeric_metadata(value, "sourceSampleRate")),
+        "sourceChannelCount": metadata.and_then(|value| numeric_metadata(value, "sourceChannelCount")),
+        "sourceByteSize": metadata.and_then(|value| numeric_metadata(value, "sourceByteSize")),
+        "wavByteSize": metadata.and_then(|value| numeric_metadata(value, "wavByteSize")),
+        "providerKind": provider_kind.as_config_str(),
+    })
+}
+
+fn numeric_metadata(value: &Value, key: &str) -> Option<f64> {
+    value.as_object()?.get(key)?.as_f64()
 }
 
 fn default_model_dir() -> PathBuf {
@@ -747,6 +852,28 @@ mod tests {
         }
     }
 
+    fn silent_wav_pcm16(seconds: u32) -> Vec<u8> {
+        let sample_rate = 16_000u32;
+        let sample_count = sample_rate as usize * seconds as usize;
+        let data_byte_len = sample_count * 2;
+        let mut bytes = Vec::with_capacity(44 + data_byte_len);
+        bytes.extend_from_slice(b"RIFF");
+        bytes.extend_from_slice(&(36 + data_byte_len as u32).to_le_bytes());
+        bytes.extend_from_slice(b"WAVE");
+        bytes.extend_from_slice(b"fmt ");
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&sample_rate.to_le_bytes());
+        bytes.extend_from_slice(&(sample_rate * 2).to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&16u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&(data_byte_len as u32).to_le_bytes());
+        bytes.resize(44 + data_byte_len, 0);
+        bytes
+    }
+
     #[tokio::test]
     async fn transcribe_rejects_disabled_stt_without_persistence() {
         let state = test_state(SpeechToTextConfig::default()).await;
@@ -824,6 +951,23 @@ mod tests {
         assert_eq!(
             error.1 .0.message,
             "Speech-to-Text is not configured yet. Open Settings → Capability → Speech-to-Text and run Auto-configure."
+        );
+    }
+
+    #[test]
+    fn payload_too_large_error_is_structured_for_pre_route_rejection() {
+        let (status, payload) =
+            payload_too_large_error(Some((SPEECH_TRANSCRIBE_HTTP_BODY_LIMIT_BYTES + 1) as u64));
+
+        assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(payload.0.code, "payload_too_large");
+        assert_eq!(
+            payload.0.message,
+            "Recording is too long. Try a shorter recording."
+        );
+        assert_eq!(
+            payload.0.diagnostics["httpBodyLimitBytes"],
+            serde_json::json!(SPEECH_TRANSCRIBE_HTTP_BODY_LIMIT_BYTES)
         );
     }
 
@@ -1110,6 +1254,53 @@ mod tests {
         assert_eq!(response.provider, "local_command");
         assert!(!response.retention.audio_persisted);
         assert!(!response.retention.transcript_persisted);
+    }
+
+    #[tokio::test]
+    async fn transcribe_local_command_silent_wav_returns_structured_no_speech() {
+        let dir = unique_test_dir("silent-api");
+        let marker = dir.join("provider-invoked");
+        let config = SpeechToTextConfig {
+            enabled: true,
+            default_provider_kind: SpeechToTextProviderKind::LocalCommand,
+            local_command_path: Some("/bin/sh".to_string()),
+            local_command_args: vec![
+                "-c".to_string(),
+                format!("touch '{}'; printf 'you'", marker.to_string_lossy()),
+            ],
+            local_temp_dir: Some(dir.to_string_lossy().to_string()),
+            ..SpeechToTextConfig::default()
+        };
+        let state = test_state(config).await;
+        let error = transcribe(
+            State(state),
+            Json(SpeechTranscribeRequest {
+                audio_bytes: silent_wav_pcm16(6),
+                mime_type: "audio/wav".to_string(),
+                language: None,
+                provider_profile_id: None,
+                mode: Some("preview".to_string()),
+                metadata: Some(json!({"durationSeconds": 6.0, "sampleRate": 16000})),
+            }),
+        )
+        .await
+        .expect_err("silent wav rejected");
+
+        assert_eq!(error.0, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(error.1 .0.kind, SpeechToTextErrorKind::NoSpeechDetected);
+        assert_eq!(error.1 .0.code, "no_speech_detected");
+        assert_eq!(
+            error.1 .0.message,
+            "No speech was detected. Try speaking a little louder or longer."
+        );
+        assert_eq!(
+            error.1 .0.diagnostics["noSpeechStage"],
+            json!("pre_provider_energy_gate")
+        );
+        assert_eq!(error.1 .0.diagnostics["providerInvoked"], json!(false));
+        assert!(error.1 .0.diagnostics.get("transcript").is_none());
+        assert!(!marker.exists());
+        let _ = fs::remove_dir_all(dir);
     }
 
     #[tokio::test]

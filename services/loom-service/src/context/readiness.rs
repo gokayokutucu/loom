@@ -872,6 +872,7 @@ mod tests {
                 capsule_summary: None,
             },
             response_capsule: None,
+            attachment: None,
         }
     }
 }

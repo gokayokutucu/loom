@@ -49,10 +49,13 @@ import {
   type LoomDesktopRuntimeStatus,
 } from "../electronRuntime";
 import { transcodeRecordedAudioToPcmWav } from "../services/audioWav";
+import { speechTranscriptionErrorMessage } from "../hooks/useSpeechToTextRecorder";
 import type {
   CapabilitySummary,
   LoomEngineClient,
   LoomServiceRuntimeConfig,
+  OcrProviderHealth,
+  OcrRuntimeConfig,
   RuntimeModelDownloadJob,
   RuntimeModelsResult,
   ServiceConfigStatus,
@@ -63,7 +66,7 @@ import type {
   SpeechToTextRuntimeConfig,
 } from "../engine";
 
-type SettingsCategoryId =
+export type SettingsCategoryId =
   | "runtime"
   | "ai-providers"
   | "models"
@@ -104,7 +107,15 @@ const defaultSpeechConfigDraft: SpeechToTextRuntimeConfig = {
   persistAudio: false,
   persistTranscript: false,
   maxAudioBytes: 10 * 1024 * 1024,
-  allowedMimeTypes: ["audio/webm", "audio/wav", "audio/mpeg", "audio/mp4", "audio/ogg"],
+  allowedMimeTypes: [
+    "audio/webm",
+    "audio/wav",
+    "audio/wave",
+    "audio/x-wav",
+    "audio/mpeg",
+    "audio/mp4",
+    "audio/ogg",
+  ],
   defaultLanguage: null,
   providerProfileId: null,
   localCommandPath: null,
@@ -114,6 +125,19 @@ const defaultSpeechConfigDraft: SpeechToTextRuntimeConfig = {
   localCommandOutputMode: "file",
   localCommandTranscriptFileExtension: "txt",
   warnings: [],
+};
+
+const defaultOcrConfigDraft: OcrRuntimeConfig = {
+  enabled: false,
+  provider: "tesseract",
+  commandPath: null,
+  pdfRasterizerCommandPath: null,
+  language: "eng",
+  dpi: 200,
+  timeoutSeconds: 60,
+  maxPagesPerFile: 20,
+  maxImagePixels: 24_000_000,
+  tempDir: null,
 };
 
 function speechArgsText(args: string[]) {
@@ -221,6 +245,7 @@ export function AIProviderSettingsModal({
   onSave,
   onAppSettingsSave,
   onClose,
+  initialCategory = "runtime",
 }: {
   settings: AIProviderSettings;
   appSettings: AppSettings;
@@ -232,9 +257,10 @@ export function AIProviderSettingsModal({
   onSave: (settings: AIProviderSettings) => void;
   onAppSettingsSave: (settings: AppSettings) => void;
   onClose: () => void;
+  initialCategory?: SettingsCategoryId;
 }) {
   const [draft, setDraft] = useState(settings);
-  const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>("runtime");
+  const [activeCategory, setActiveCategory] = useState<SettingsCategoryId>(initialCategory);
   const [query, setQuery] = useState("");
   const [shortcutQuery, setShortcutQuery] = useState("");
   const [working, setWorking] = useState<string | null>(null);
@@ -246,6 +272,8 @@ export function AIProviderSettingsModal({
     configError?: string;
     speechHealth?: SpeechProviderHealth;
     speechHealthError?: string;
+    ocrHealth?: OcrProviderHealth;
+    ocrHealthError?: string;
     capability?: CapabilitySummary;
     loading: boolean;
   }>({ loading: false });
@@ -256,6 +284,7 @@ export function AIProviderSettingsModal({
   const [speechDraft, setSpeechDraft] = useState<SpeechToTextRuntimeConfig>(
     defaultSpeechConfigDraft
   );
+  const [ocrDraft, setOcrDraft] = useState<OcrRuntimeConfig>(defaultOcrConfigDraft);
   const [memoryDraft, setMemoryDraft] = useState<MemorySettings>(appSettings.memory);
   const [runtimeModels, setRuntimeModels] = useState<RuntimeModelsResult | null>(null);
   const [downloadJobs, setDownloadJobs] = useState<Record<string, RuntimeModelDownloadJob>>({});
@@ -280,7 +309,7 @@ export function AIProviderSettingsModal({
 
   async function refreshServiceStatus() {
     setServiceStatus((current) => ({ ...current, loading: true }));
-    const [health, config, capability, speechHealthResult, serviceConfigResult] = await Promise.all([
+    const [health, config, capability, speechHealthResult, ocrHealthResult, serviceConfigResult] = await Promise.all([
       engineClient.getServiceHealth(),
       engineClient.getServiceConfigStatus(),
       engineClient.getCapabilitySummary(),
@@ -290,6 +319,13 @@ export function AIProviderSettingsModal({
         .catch((error: unknown) => ({
           speechHealthError:
             error instanceof Error ? error.message : "speech provider health is unavailable.",
+        })),
+      engineClient
+        .getOcrProviderHealth()
+        .then((ocrHealth) => ({ ocrHealth }))
+        .catch((error: unknown) => ({
+          ocrHealthError:
+            error instanceof Error ? error.message : "OCR provider health is unavailable.",
         })),
       engineClient
         .getServiceConfig()
@@ -308,6 +344,9 @@ export function AIProviderSettingsModal({
       speechHealth: "speechHealth" in speechHealthResult ? speechHealthResult.speechHealth : undefined,
       speechHealthError:
         "speechHealthError" in speechHealthResult ? speechHealthResult.speechHealthError : undefined,
+      ocrHealth: "ocrHealth" in ocrHealthResult ? ocrHealthResult.ocrHealth : undefined,
+      ocrHealthError:
+        "ocrHealthError" in ocrHealthResult ? ocrHealthResult.ocrHealthError : undefined,
       loading: false,
     });
   }
@@ -345,6 +384,9 @@ export function AIProviderSettingsModal({
   useEffect(() => {
     if (serviceStatus.serviceConfig?.speech) {
       setSpeechDraft(serviceStatus.serviceConfig.speech);
+    }
+    if (serviceStatus.serviceConfig?.ocr) {
+      setOcrDraft(serviceStatus.serviceConfig.ocr);
     }
     if (serviceStatus.serviceConfig?.providers) {
       setDraft((current) => ({
@@ -432,8 +474,13 @@ export function AIProviderSettingsModal({
       try {
         const result = await engineClient.updateServiceConfig({
           memory: {
+            enabled: memoryDraft.enabled,
             referenceRecentLooms: memoryDraft.referenceRecentLooms,
             referenceSavedMemories: memoryDraft.referenceSavedMemories,
+            nickname: memoryDraft.nickname,
+            occupation: memoryDraft.occupation,
+            stylePreferences: memoryDraft.stylePreferences,
+            moreAboutYou: memoryDraft.moreAboutYou,
           },
         });
         setServiceStatus((current) => ({
@@ -632,6 +679,70 @@ export function AIProviderSettingsModal({
     }
   }
 
+  async function checkOcrProvider() {
+    setWorking("ocr-check");
+    setMessage(null);
+    try {
+      const health = await engineClient.getOcrProviderHealth();
+      setServiceStatus((current) => ({
+        ...current,
+        ocrHealth: health,
+        ocrHealthError: undefined,
+      }));
+      setMessage(health.message);
+    } catch (error) {
+      setServiceStatus((current) => ({
+        ...current,
+        ocrHealthError: error instanceof Error ? error.message : "OCR provider health is unavailable.",
+      }));
+      setMessage(error instanceof Error ? error.message : "OCR provider health is unavailable.");
+    } finally {
+      setWorking(null);
+    }
+  }
+
+  async function saveOcrConfig() {
+    setWorking("ocr-config");
+    setMessage(null);
+    try {
+      const result = await engineClient.updateServiceConfig({
+        ocr: {
+          enabled: ocrDraft.enabled,
+          provider: ocrDraft.provider,
+          commandPath: ocrDraft.commandPath?.trim() || null,
+          pdfRasterizerCommandPath: ocrDraft.pdfRasterizerCommandPath?.trim() || null,
+          language: ocrDraft.language.trim() || "eng",
+          dpi: ocrDraft.dpi,
+          timeoutSeconds: ocrDraft.timeoutSeconds,
+          maxPagesPerFile: ocrDraft.maxPagesPerFile,
+          maxImagePixels: ocrDraft.maxImagePixels,
+          tempDir: ocrDraft.tempDir?.trim() || null,
+        },
+      });
+      setOcrDraft(result.config.ocr ?? defaultOcrConfigDraft);
+      const health = await engineClient.getOcrProviderHealth();
+      setServiceStatus((current) => ({
+        ...current,
+        serviceConfig: result.config,
+        ocrHealth: health,
+        ocrHealthError: undefined,
+        configError: undefined,
+        config: current.config
+          ? {
+              ...current.config,
+              restartRequired: result.restartStatus?.restartRequired,
+              pendingRestart: result.restartStatus?.pendingRestart,
+            }
+          : current.config,
+      }));
+      setMessage("OCR settings saved.");
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "OCR settings could not be saved.");
+    } finally {
+      setWorking(null);
+    }
+  }
+
   async function refreshSpeechSetupStatus() {
     setSpeechSetupWorking("check");
     try {
@@ -797,6 +908,8 @@ export function AIProviderSettingsModal({
         chunkCount: chunks.length,
         sampleRate: wavAudio.sampleRate,
         channelCount: wavAudio.channelCount,
+        sourceSampleRate: wavAudio.sourceSampleRate,
+        sourceChannelCount: wavAudio.sourceChannelCount,
         durationSeconds: Number(wavAudio.durationSeconds.toFixed(3)),
       });
       const response = await engineClient.transcribeSpeech({
@@ -809,6 +922,9 @@ export function AIProviderSettingsModal({
           audioFormat: "pcm_s16le_wav",
           sampleRate: wavAudio.sampleRate,
           channelCount: wavAudio.channelCount,
+          sourceSampleRate: wavAudio.sourceSampleRate,
+          sourceChannelCount: wavAudio.sourceChannelCount,
+          durationSeconds: wavAudio.durationSeconds,
           sourceByteSize: wavAudio.sourceByteSize,
           wavByteSize: wavAudio.wavByteSize,
         },
@@ -824,12 +940,24 @@ export function AIProviderSettingsModal({
         transcript: response.transcript,
       });
     } catch (error) {
+      const message = await speechTranscriptionErrorMessage(error, engineClient);
+      const details =
+        error instanceof Error ? ((error as Error & { kind?: unknown; details?: unknown }).details ?? {}) : {};
+      const safeDetails =
+        typeof details === "object" && details !== null ? (details as Record<string, unknown>) : {};
       logElectronEvent("warn", "speech.settings_smoke.failed", {
-        message: error instanceof Error ? error.message : "Speech-to-Text smoke test failed.",
+        message,
+        kind: error instanceof Error ? (error as Error & { kind?: unknown }).kind : undefined,
+        serviceErrorCode:
+          typeof safeDetails.serviceErrorCode === "string" ? safeDetails.serviceErrorCode : undefined,
+        serviceKind: typeof safeDetails.serviceKind === "string" ? safeDetails.serviceKind : undefined,
+        status: typeof safeDetails.status === "number" ? safeDetails.status : undefined,
+        path: typeof safeDetails.path === "string" ? safeDetails.path : undefined,
+        diagnostics: safeDetails.diagnostics,
       });
       setSpeechSmoke({
         status: "error",
-        message: error instanceof Error ? error.message : "Speech-to-Text smoke test failed.",
+        message,
       });
     } finally {
       stream?.getTracks().forEach((track) => track.stop());
@@ -2053,6 +2181,226 @@ export function AIProviderSettingsModal({
     );
   }
 
+  function renderOcrRuntimeSettings() {
+    const hasConfig = Boolean(serviceStatus.serviceConfig?.ocr);
+    const ocrHealth = serviceStatus.ocrHealth;
+    const unavailable = serviceStatus.configError ?? (!hasConfig ? "Service config is not loaded." : null);
+    const tesseractDetected = Boolean(ocrHealth?.commandPath);
+    const rasterizerDetected = Boolean(ocrHealth?.rasterizerCommandPath);
+    const ocrReady = ocrHealth?.status === "configured";
+    const ocrUnavailable = ocrDraft.enabled && !ocrReady;
+    const statusText = !ocrDraft.enabled
+      ? "OCR disabled"
+      : ocrReady
+        ? "OCR ready"
+        : "OCR unavailable";
+    const canSave = hasConfig && !serviceStatus.configError && working !== "ocr-config";
+
+    return (
+      <section className="provider-section" data-testid="ocr-settings-section">
+        <div className="provider-section-heading">
+          <div>
+            <span>OCR</span>
+            <h3>Scanned PDF text extraction</h3>
+          </div>
+          <span className={`connection-pill ${ocrReady ? "connected" : "disconnected"}`}>
+            {statusText}
+          </span>
+        </div>
+
+        <div className={`runtime-health-card ${ocrReady ? "ready" : ocrUnavailable ? "degraded" : "info"}`}>
+          <strong>{statusText}</strong>
+          <span>
+            OCR is optional and local-only. Loom does not install Tesseract, does not use cloud OCR,
+            and does not claim image understanding.
+          </span>
+          {ocrHealth ? <span>{ocrHealth.message}</span> : <span>Run Check OCR Runtime to verify local tools.</span>}
+          {unavailable && <span>{unavailable}</span>}
+          {serviceStatus.ocrHealthError && <span>{serviceStatus.ocrHealthError}</span>}
+        </div>
+
+        <div className="speech-setup-summary">
+          <div className={`speech-setup-card ${ocrDraft.enabled ? "ready" : "needs-action"}`}>
+            <strong>OCR</strong>
+            <span>{ocrDraft.enabled ? "Enabled" : "Disabled"}</span>
+          </div>
+          <div className={`speech-setup-card ${tesseractDetected ? "ready" : "needs-action"}`}>
+            <strong>Tesseract</strong>
+            <span>{tesseractDetected ? "Detected" : "Not detected"}</span>
+          </div>
+          <div className={`speech-setup-card ${rasterizerDetected ? "ready" : "needs-action"}`}>
+            <strong>PDF rasterizer</strong>
+            <span>{rasterizerDetected ? "Detected" : "Not detected"}</span>
+          </div>
+        </div>
+
+        <div className="settings-placeholder">
+          <strong>Scanned PDF behavior</strong>
+          <span>OCR disabled or unavailable: scanned pages stay marked OCR needed.</span>
+          <span>OCR ready: only OCR-needed PDF page ranges are rasterized and sent to local Tesseract.</span>
+          <span>Selectable text PDFs continue using native text extraction without OCR.</span>
+        </div>
+
+        <div className="settings-two-column settings-field-grid">
+          <label className="settings-toggle">
+            <input
+              type="checkbox"
+              checked={ocrDraft.enabled}
+              onChange={(event) => setOcrDraft({ ...ocrDraft, enabled: event.target.checked })}
+            />
+            <span>Enable local OCR</span>
+          </label>
+
+          <label className="settings-field">
+            <span>Provider</span>
+            <select
+              value={ocrDraft.provider}
+              onChange={(event) => setOcrDraft({ ...ocrDraft, provider: event.target.value })}
+            >
+              <option value="tesseract">Tesseract</option>
+            </select>
+            <small>Tesseract is the v1 local OCR provider. Cloud OCR is not available here.</small>
+          </label>
+        </div>
+
+        <div className="settings-two-column settings-field-grid">
+          <label className="settings-field">
+            <span>Tesseract path</span>
+            <input
+              value={ocrDraft.commandPath ?? ""}
+              placeholder="/opt/homebrew/bin/tesseract"
+              onChange={(event) => setOcrDraft({ ...ocrDraft, commandPath: event.target.value })}
+            />
+            <small>Leave empty to let loom-service detect Tesseract from common local paths.</small>
+          </label>
+
+          <label className="settings-field">
+            <span>PDF rasterizer path</span>
+            <input
+              value={ocrDraft.pdfRasterizerCommandPath ?? ""}
+              placeholder="/opt/homebrew/bin/pdftoppm"
+              onChange={(event) =>
+                setOcrDraft({ ...ocrDraft, pdfRasterizerCommandPath: event.target.value })
+              }
+            />
+            <small>Uses `pdftoppm`/Poppler-style page rasterization before OCR.</small>
+          </label>
+        </div>
+
+        <div className="settings-two-column settings-field-grid">
+          <label className="settings-field">
+            <span>Language</span>
+            <input
+              value={ocrDraft.language}
+              placeholder="eng"
+              onChange={(event) => setOcrDraft({ ...ocrDraft, language: event.target.value })}
+            />
+            <small>Use Tesseract language codes such as `eng` or `eng+tur`.</small>
+          </label>
+
+          <label className="settings-field">
+            <span>DPI</span>
+            <input
+              type="number"
+              min={100}
+              max={600}
+              step={50}
+              value={ocrDraft.dpi}
+              onChange={(event) =>
+                setOcrDraft({
+                  ...ocrDraft,
+                  dpi: Math.min(600, Math.max(100, Number(event.target.value) || 200)),
+                })
+              }
+            />
+            <small>Higher DPI can improve OCR but costs more CPU and memory.</small>
+          </label>
+        </div>
+
+        <details className="settings-advanced-panel">
+          <summary>Advanced OCR limits</summary>
+          <div className="settings-advanced-content">
+            <div className="settings-two-column settings-field-grid">
+              <label className="settings-field">
+                <span>Timeout seconds</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={600}
+                  value={ocrDraft.timeoutSeconds}
+                  onChange={(event) =>
+                    setOcrDraft({
+                      ...ocrDraft,
+                      timeoutSeconds: Math.min(600, Math.max(1, Number(event.target.value) || 60)),
+                    })
+                  }
+                />
+              </label>
+
+              <label className="settings-field">
+                <span>Max pages per file</span>
+                <input
+                  type="number"
+                  min={1}
+                  max={200}
+                  value={ocrDraft.maxPagesPerFile}
+                  onChange={(event) =>
+                    setOcrDraft({
+                      ...ocrDraft,
+                      maxPagesPerFile: Math.min(200, Math.max(1, Number(event.target.value) || 20)),
+                    })
+                  }
+                />
+              </label>
+            </div>
+
+            <label className="settings-field">
+              <span>Temporary OCR directory</span>
+              <input
+                value={ocrDraft.tempDir ?? ""}
+                placeholder="System temporary directory"
+                onChange={(event) => setOcrDraft({ ...ocrDraft, tempDir: event.target.value })}
+              />
+              <small>Temporary rasterized page images are removed after OCR.</small>
+            </label>
+          </div>
+        </details>
+
+        <div className="settings-placeholder">
+          <strong>Setup help</strong>
+          <span>macOS Homebrew: `brew install tesseract poppler`</span>
+          <span>Optional languages: `brew install tesseract-lang` or install only the language packs you need.</span>
+          <span>Windows support is planned later through explicit local paths or a future bundled runtime.</span>
+        </div>
+
+        {ocrHealth && (
+          <div className="settings-placeholder">
+            <strong>Diagnostics</strong>
+            <span>Provider: {ocrHealth.provider}</span>
+            <span>Tesseract: {ocrHealth.commandPath ?? "Not detected"}</span>
+            <span>Rasterizer: {ocrHealth.rasterizerCommandPath ?? "Not detected"}</span>
+            <span>Language: {ocrHealth.language}</span>
+            <span>DPI: {ocrHealth.dpi}</span>
+            {ocrHealth.warnings.length > 0 && (
+              <small>Warnings: {ocrHealth.warnings.join(", ")}</small>
+            )}
+          </div>
+        )}
+
+        <div className="settings-actions">
+          <button type="button" onClick={() => void checkOcrProvider()} disabled={working === "ocr-check"}>
+            <RefreshCw size={14} />
+            {working === "ocr-check" ? "Checking OCR" : "Check OCR Runtime"}
+          </button>
+          <button type="button" onClick={() => void saveOcrConfig()} disabled={!canSave}>
+            <CheckCircle2 size={14} />
+            {working === "ocr-config" ? "Saving" : "Save OCR Settings"}
+          </button>
+        </div>
+      </section>
+    );
+  }
+
   function renderCapabilitySettings() {
     const capability = serviceStatus.capability;
     const models = capability?.models ?? [];
@@ -2060,6 +2408,7 @@ export function AIProviderSettingsModal({
     return (
       <>
         {renderSpeechToTextSettings()}
+        {renderOcrRuntimeSettings()}
 
         <section className="provider-section">
           <div className="provider-section-heading">

@@ -78,9 +78,31 @@ const MIGRATIONS: &[Migration] = &[
         name: "model_runtime",
         sql: include_str!("../../migrations/0014_model_runtime.sql"),
     },
+    Migration {
+        version: 15,
+        name: "attachments",
+        sql: include_str!("../../migrations/0015_attachments.sql"),
+    },
+    Migration {
+        version: 16,
+        name: "attachment_parse_pipeline",
+        sql: include_str!("../../migrations/0016_attachment_parse_pipeline.sql"),
+    },
+    Migration {
+        version: 17,
+        name: "attachment_checksum_dedupe",
+        sql: include_str!("../../migrations/0017_attachment_checksum_dedupe.sql"),
+    },
+    Migration {
+        version: 18,
+        name: "search_fts",
+        sql: include_str!("../../migrations/0018_search_fts.sql"),
+    },
 ];
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
+    ensure_fts5_available(pool).await?;
+
     pool.execute(
         "CREATE TABLE IF NOT EXISTS schema_migrations (
             version INTEGER PRIMARY KEY,
@@ -134,9 +156,33 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
     Ok(())
 }
 
+pub async fn ensure_fts5_available(pool: &SqlitePool) -> Result<(), ServiceError> {
+    let enabled = sqlx::query_scalar::<_, i64>("SELECT sqlite_compileoption_used('ENABLE_FTS5')")
+        .fetch_one(pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to inspect SQLite FTS5 support: {error}"))
+        })?;
+
+    ensure_fts5_compileoption_enabled(enabled)
+}
+
+fn ensure_fts5_compileoption_enabled(enabled: i64) -> Result<(), ServiceError> {
+    if enabled == 1 {
+        return Ok(());
+    }
+
+    Err(ServiceError::storage(
+        "SQLite FTS5 is not available in this runtime.",
+    ))
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::storage::db::test_database;
+    use crate::storage::{
+        db::test_database,
+        migrations::{ensure_fts5_available, ensure_fts5_compileoption_enabled},
+    };
 
     #[tokio::test]
     async fn migrations_run_on_in_memory_sqlite() {
@@ -149,6 +195,40 @@ mod tests {
         .expect("table query should work");
 
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn fts5_preflight_detects_enabled_runtime() {
+        let database = test_database().await;
+        ensure_fts5_available(database.pool())
+            .await
+            .expect("bundled SQLite must have FTS5");
+    }
+
+    #[test]
+    fn fts5_preflight_fails_clearly_when_compile_option_is_unavailable() {
+        let error = ensure_fts5_compileoption_enabled(0).expect_err("FTS5 must be required");
+        assert!(error
+            .to_string()
+            .contains("SQLite FTS5 is not available in this runtime."));
+    }
+
+    #[tokio::test]
+    async fn migrations_create_search_fts_tables() {
+        let database = test_database().await;
+        for table in [
+            "search_documents",
+            "search_documents_fts",
+            "search_index_state",
+        ] {
+            let count =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sqlite_master WHERE name = ?1")
+                    .bind(table)
+                    .fetch_one(database.pool())
+                    .await
+                    .expect("table query should work");
+            assert_eq!(count, 1, "{table} should exist");
+        }
     }
 
     #[tokio::test]
@@ -177,6 +257,15 @@ mod tests {
             "runtime_model_assets",
             "runtime_model_download_jobs",
             "runtime_model_download_events",
+            "attachments",
+            "attachment_blobs",
+            "attachment_parsed_content",
+            "attachment_blob_objects",
+            "attachment_parse_artifacts",
+            "attachment_parse_artifact_chunks",
+            "attachment_parse_artifact_summaries",
+            "search_documents",
+            "search_index_state",
         ] {
             columns.extend(
                 sqlx::query_scalar::<_, String>(&format!(

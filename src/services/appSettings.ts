@@ -2,6 +2,9 @@ import type { ReferenceDisplayMode } from "../types";
 import { localStorageAdapter } from "./storage";
 
 const APP_SETTINGS_KEY = "loom-ai-app-settings-v1";
+export const DEFAULT_PROFILE_NAME = "Local user";
+export const DEFAULT_WORKSPACE_NAME = "Personal Loom";
+export const DEFAULT_AVATAR_INITIAL = "L";
 
 export type WeftOpenBehavior = "adaptive" | "split-when-possible" | "always-full";
 export type AppFontSize = "very-small" | "small" | "medium" | "large" | "very-large";
@@ -117,6 +120,23 @@ export function isMockDataForced() {
 
 export function isMockDataEnabled(settings: Pick<AppSettings, "mockDataEnabled">) {
   return isMockDataForced() || Boolean(settings.mockDataEnabled);
+}
+
+export function getDisplayProfileName(settings: Pick<AppSettings, "memory">) {
+  const nickname = settings.memory.nickname.trim();
+  return nickname.length > 0 ? nickname : DEFAULT_PROFILE_NAME;
+}
+
+export function getDisplayWorkspaceName(settings: Pick<AppSettings, "memory">) {
+  const occupation = settings.memory.occupation.trim();
+  return occupation.length > 0 ? occupation : DEFAULT_WORKSPACE_NAME;
+}
+
+export function getAvatarInitial(profileName: string) {
+  const firstLetter = Array.from(profileName.trim()).find((character) =>
+    /\p{L}|\p{N}/u.test(character)
+  );
+  return firstLetter ? firstLetter.toLocaleUpperCase() : DEFAULT_AVATAR_INITIAL;
 }
 
 function normalizeReferenceDisplayMode(value: unknown): ReferenceDisplayMode {

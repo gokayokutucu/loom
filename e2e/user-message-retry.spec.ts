@@ -325,17 +325,20 @@ test.describe("[product-service-backed] User message retry", () => {
       expect(weft.originResponseId).toBeTruthy();
       await waitForActiveResponseCount(scenario, weft.loomId, 1);
 
-      page.once("dialog", async (dialog) => {
-        expect(dialog.message()).toContain("remove later messages from this Loom");
-        expect(dialog.message()).toContain("Existing Wefts will be preserved");
-        await dialog.accept();
-      });
       await page.locator(".qa-item").first().locator(".prompt-retry-trigger").evaluate((button) => {
         if (!(button instanceof HTMLButtonElement)) {
           throw new Error("Retry trigger is not a button.");
         }
         button.click();
       });
+      const retryDialog = page.getByRole("alertdialog", {
+        name: "Retry from this message?",
+      });
+      await expect(retryDialog).toBeVisible();
+      await expect(retryDialog).toContainText(
+        "Retrying from this message will remove later messages from this Loom. Existing Wefts will be preserved."
+      );
+      await retryDialog.getByRole("button", { name: "Retry" }).click();
 
       await expect(page.locator(".origin-split-panel .qa-item")).toHaveCount(1, {
         timeout: 30_000,

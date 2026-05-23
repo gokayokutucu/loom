@@ -1,4 +1,5 @@
 export const PCM_WAV_MIME_TYPE = "audio/wav";
+export const DEFAULT_STT_WAV_SAMPLE_RATE = 16_000;
 
 export interface RecordedAudioWav {
   audioBytes: number[];
@@ -8,6 +9,8 @@ export interface RecordedAudioWav {
   wavByteSize: number;
   sampleRate: number;
   channelCount: number;
+  sourceSampleRate: number;
+  sourceChannelCount: number;
   durationSeconds: number;
 }
 
@@ -63,6 +66,31 @@ export function encodePcm16WavFromChannels(channels: Float32Array[], sampleRate:
   return new Uint8Array(buffer);
 }
 
+function downmixAndResampleToMono(decoded: AudioBuffer, targetSampleRate: number) {
+  const targetFrameCount = Math.max(1, Math.round(decoded.duration * targetSampleRate));
+  const sourceChannels = Array.from({ length: decoded.numberOfChannels }, (_, index) =>
+    decoded.getChannelData(index)
+  );
+  const mono = new Float32Array(targetFrameCount);
+  const ratio = decoded.sampleRate / targetSampleRate;
+
+  for (let frame = 0; frame < targetFrameCount; frame += 1) {
+    const sourcePosition = frame * ratio;
+    const leftIndex = Math.floor(sourcePosition);
+    const rightIndex = Math.min(leftIndex + 1, decoded.length - 1);
+    const fraction = sourcePosition - leftIndex;
+    let sample = 0;
+    for (const channel of sourceChannels) {
+      const left = channel[leftIndex] ?? 0;
+      const right = channel[rightIndex] ?? left;
+      sample += left + (right - left) * fraction;
+    }
+    mono[frame] = sample / Math.max(1, sourceChannels.length);
+  }
+
+  return mono;
+}
+
 function createDecodeAudioContext() {
   const AudioContextConstructor =
     window.AudioContext ??
@@ -84,18 +112,18 @@ export async function transcodeRecordedAudioToPcmWav(
   const audioContext = createDecodeAudioContext();
   try {
     const decoded = await audioContext.decodeAudioData(sourceArrayBuffer.slice(0));
-    const channels = Array.from({ length: decoded.numberOfChannels }, (_, index) =>
-      decoded.getChannelData(index)
-    );
-    const wavBytes = encodePcm16WavFromChannels(channels, decoded.sampleRate);
+    const mono = downmixAndResampleToMono(decoded, DEFAULT_STT_WAV_SAMPLE_RATE);
+    const wavBytes = encodePcm16WavFromChannels([mono], DEFAULT_STT_WAV_SAMPLE_RATE);
     return {
       audioBytes: Array.from(wavBytes),
       mimeType: PCM_WAV_MIME_TYPE,
       sourceMimeType,
       sourceByteSize: sourceBlob.size,
       wavByteSize: wavBytes.byteLength,
-      sampleRate: decoded.sampleRate,
-      channelCount: decoded.numberOfChannels,
+      sampleRate: DEFAULT_STT_WAV_SAMPLE_RATE,
+      channelCount: 1,
+      sourceSampleRate: decoded.sampleRate,
+      sourceChannelCount: decoded.numberOfChannels,
       durationSeconds: decoded.duration,
     };
   } catch (error) {

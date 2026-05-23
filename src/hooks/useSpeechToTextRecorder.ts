@@ -5,6 +5,7 @@ import {
   reduceSpeechToText,
   type SpeechToTextStatus,
 } from "../state/speechToTextMachine";
+import { logElectronEvent } from "../electronRuntime";
 import { transcodeRecordedAudioToPcmWav } from "../services/audioWav";
 
 const AUDIO_MIME_CANDIDATES = [
@@ -85,7 +86,72 @@ function isMissingSpeechProviderError(error: unknown) {
   );
 }
 
-async function errorMessageForTranscription(error: unknown, engineClient: LoomEngineClient) {
+function engineErrorDetails(error: unknown) {
+  if (!(error instanceof Error)) return null;
+  const candidate = error as Error & { kind?: unknown; details?: unknown };
+  const kind = typeof candidate.kind === "string" ? candidate.kind : undefined;
+  const details =
+    typeof candidate.details === "object" && candidate.details !== null
+      ? (candidate.details as Record<string, unknown>)
+      : {};
+  const serviceKind = typeof details.serviceKind === "string" ? details.serviceKind : undefined;
+  const serviceErrorCode =
+    typeof details.serviceErrorCode === "string" ? details.serviceErrorCode : undefined;
+  const path = typeof details.path === "string" ? details.path : undefined;
+  const status = typeof details.status === "number" ? details.status : undefined;
+  return {
+    kind,
+    serviceKind,
+    serviceErrorCode,
+    path,
+    status,
+    message: error.message.toLowerCase(),
+  };
+}
+
+export function speechTranscriptionFailureMessage(error: unknown) {
+  const details = engineErrorDetails(error);
+  const code = details?.serviceErrorCode ?? details?.serviceKind ?? details?.kind;
+  const message = details?.message ?? "";
+  if (code === "no_speech_detected" || message.includes("no speech was detected")) {
+    return "No speech was detected. Try speaking a little louder or longer.";
+  }
+  if (code === "provider_timeout" || code === "timeout" || message.includes("timed out")) {
+    return "Speech transcription timed out. Try a shorter recording.";
+  }
+  if (code === "payload_too_large" || code === "audio_too_large") {
+    return "Recording is too long. Try a shorter recording.";
+  }
+  if (details?.status === 413) {
+    return "Recording is too long. Try a shorter recording.";
+  }
+  if (code === "unsupported_audio" || code === "unsupported_audio_type") {
+    return "The recording format is not supported. Try recording again.";
+  }
+  if (code === "service_unavailable" || message.includes("service is not reachable")) {
+    return "Loom service is not reachable. Restart the app or check service status.";
+  }
+  if (
+    code === "provider_failed" ||
+    code === "transcription_failed" ||
+    code === "provider_error" ||
+    message.includes("local speech engine failed")
+  ) {
+    return "Local speech engine failed to process the recording. Check Speech-to-Text settings.";
+  }
+  if (
+    details?.path === "/speech/transcribe" &&
+    (code === "request_failed" || message.includes("request failed for /speech/transcribe"))
+  ) {
+    return "Local speech engine could not process the recording. Check Speech-to-Text settings.";
+  }
+  return null;
+}
+
+export async function speechTranscriptionErrorMessage(
+  error: unknown,
+  engineClient: LoomEngineClient
+) {
   if (isMissingSpeechProviderError(error)) {
     try {
       return speechSetupRemediationMessage(await engineClient.getSpeechSetupStatus());
@@ -93,6 +159,8 @@ async function errorMessageForTranscription(error: unknown, engineClient: LoomEn
       return speechSetupRemediationMessage(null);
     }
   }
+  const mappedMessage = speechTranscriptionFailureMessage(error);
+  if (mappedMessage) return mappedMessage;
   if (error instanceof Error) return error.message;
   return "Speech transcription failed. Please retry.";
 }
@@ -292,6 +360,10 @@ export function useSpeechToTextRecorder(engineClient: LoomEngineClient): SpeechR
       dispatchRecorder({ type: "AUDIO_READY" });
       if (chunks.length === 0) {
         cleanupAudio();
+        logElectronEvent("warn", "speech.recorder.empty_capture", {
+          source: "main_composer_microphone",
+          chunkCount: 0,
+        });
         dispatchRecorder({
           type: "TRANSCRIBE_FAILED",
           error: "No speech was captured. Please retry.",
@@ -301,14 +373,42 @@ export function useSpeechToTextRecorder(engineClient: LoomEngineClient): SpeechR
       const wavAudio = await transcodeRecordedAudioToPcmWav(chunks, mimeType);
       if (wavAudio.wavByteSize > MAX_AUDIO_BYTES) {
         cleanupAudio();
+        logElectronEvent("warn", "speech.recorder.audio_too_large", {
+          source: "main_composer_microphone",
+          sourceMimeType: wavAudio.sourceMimeType,
+          mimeType: wavAudio.mimeType,
+          sourceByteSize: wavAudio.sourceByteSize,
+          byteSize: wavAudio.wavByteSize,
+          chunkCount: chunks.length,
+          sampleRate: wavAudio.sampleRate,
+          channelCount: wavAudio.channelCount,
+          sourceSampleRate: wavAudio.sourceSampleRate,
+          sourceChannelCount: wavAudio.sourceChannelCount,
+          durationSeconds: Number(wavAudio.durationSeconds.toFixed(3)),
+        });
         dispatchRecorder({
           type: "TRANSCRIBE_FAILED",
-          error: "Recording is too large to transcribe. Please retry with a shorter recording.",
+          error: "Recording is too long. Try a shorter recording.",
         });
         return null;
       }
       cleanupAudio();
       dispatchRecorder({ type: "TRANSCRIBE_STARTED" });
+      const requestStartedAt = Date.now();
+      logElectronEvent("info", "speech.recorder.transcribe_requested", {
+        source: "main_composer_microphone",
+        sourceMimeType: wavAudio.sourceMimeType,
+        mimeType: wavAudio.mimeType,
+        extension: "wav",
+        sourceByteSize: wavAudio.sourceByteSize,
+        byteSize: wavAudio.wavByteSize,
+        chunkCount: chunks.length,
+        sampleRate: wavAudio.sampleRate,
+        channelCount: wavAudio.channelCount,
+        sourceSampleRate: wavAudio.sourceSampleRate,
+        sourceChannelCount: wavAudio.sourceChannelCount,
+        durationSeconds: Number(wavAudio.durationSeconds.toFixed(3)),
+      });
       const response = await engineClient.transcribeSpeech({
         audioBytes: wavAudio.audioBytes,
         mimeType: wavAudio.mimeType,
@@ -319,18 +419,35 @@ export function useSpeechToTextRecorder(engineClient: LoomEngineClient): SpeechR
           audioFormat: "pcm_s16le_wav",
           sampleRate: wavAudio.sampleRate,
           channelCount: wavAudio.channelCount,
+          sourceSampleRate: wavAudio.sourceSampleRate,
+          sourceChannelCount: wavAudio.sourceChannelCount,
+          durationSeconds: wavAudio.durationSeconds,
           sourceByteSize: wavAudio.sourceByteSize,
           wavByteSize: wavAudio.wavByteSize,
         },
       });
       const transcript = response.transcript.trim();
       if (!transcript) {
+        logElectronEvent("warn", "speech.recorder.transcribe_empty", {
+          source: "main_composer_microphone",
+          elapsedMs: Date.now() - requestStartedAt,
+          transcriptLength: response.transcript.length,
+          audioPersisted: response.retention.audioPersisted,
+          transcriptPersisted: response.retention.transcriptPersisted,
+        });
         dispatchRecorder({
           type: "TRANSCRIBE_FAILED",
-          error: "Speech transcription was empty. Please retry.",
+          error: "No speech was detected. Try speaking a little louder or longer.",
         });
         return null;
       }
+      logElectronEvent("info", "speech.recorder.transcribe_succeeded", {
+        source: "main_composer_microphone",
+        elapsedMs: Date.now() - requestStartedAt,
+        transcriptLength: response.transcript.length,
+        audioPersisted: response.retention.audioPersisted,
+        transcriptPersisted: response.retention.transcriptPersisted,
+      });
       dispatchRecorder({ type: "TRANSCRIBE_SUCCEEDED" });
       dispatchRecorder({ type: "CLEANUP_DONE" });
       return {
@@ -340,7 +457,27 @@ export function useSpeechToTextRecorder(engineClient: LoomEngineClient): SpeechR
       };
     } catch (transcriptionError) {
       cleanupAudio();
-      const error = await errorMessageForTranscription(transcriptionError, engineClient);
+      const error = await speechTranscriptionErrorMessage(transcriptionError, engineClient);
+      const details =
+        transcriptionError instanceof Error
+          ? ((transcriptionError as Error & { kind?: unknown; details?: unknown }).details ?? {})
+          : {};
+      const safeDetails =
+        typeof details === "object" && details !== null ? (details as Record<string, unknown>) : {};
+      logElectronEvent("warn", "speech.recorder.transcribe_failed", {
+        source: "main_composer_microphone",
+        message: error,
+        kind:
+          transcriptionError instanceof Error
+            ? (transcriptionError as Error & { kind?: unknown }).kind
+            : undefined,
+        serviceErrorCode:
+          typeof safeDetails.serviceErrorCode === "string" ? safeDetails.serviceErrorCode : undefined,
+        serviceKind: typeof safeDetails.serviceKind === "string" ? safeDetails.serviceKind : undefined,
+        status: typeof safeDetails.status === "number" ? safeDetails.status : undefined,
+        path: typeof safeDetails.path === "string" ? safeDetails.path : undefined,
+        diagnostics: safeDetails.diagnostics,
+      });
       dispatchRecorder({
         type: "TRANSCRIBE_FAILED",
         error,

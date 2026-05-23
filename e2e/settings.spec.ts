@@ -25,6 +25,85 @@ async function openSettings(page: Page) {
 }
 
 test.describe("[pure-ui-rendering] Settings information architecture", () => {
+  test("[pure-ui-rendering] uses local profile defaults instead of hardcoded personal identity", async ({
+    page,
+  }) => {
+    await openApp(page);
+
+    const sidebar = page.getByTestId("loom-sidebar");
+    await expect(sidebar.getByText("Local user")).toBeVisible();
+    await expect(sidebar.getByText("Personal Loom")).toBeVisible();
+    await expect(sidebar.locator(".profile-dot").last()).toHaveText("L");
+    await expect(sidebar.getByText(["Go", "kay"].join(""))).toHaveCount(0);
+    await expect(sidebar.getByText(["Personal", "Web"].join(" "))).toHaveCount(0);
+
+    await page.getByTestId("profile-menu-trigger").click();
+    await expect(page.getByRole("menuitem", { name: /Manage local profile/ })).toBeVisible();
+    await expect(page.getByRole("menuitem", { name: new RegExp(["Log", "out"].join(" ")) })).toHaveCount(0);
+  });
+
+  test("[pure-ui-rendering] reflects saved local profile settings in the sidebar", async ({
+    page,
+  }) => {
+    await openApp(page);
+    await openSettings(page);
+
+    await page.getByRole("button", { name: /^Memory/ }).click();
+    await page.getByLabel("Your nickname").fill("Ada Lovelace");
+    await page.getByLabel("Your occupation").fill("Local research workspace");
+    await page.getByTestId("memory-save").click();
+    await expect(page.getByTestId("memory-save")).toBeDisabled();
+    await page.getByRole("button", { name: "Close settings" }).click();
+
+    const sidebar = page.getByTestId("loom-sidebar");
+    await expect(sidebar.getByText("Ada Lovelace")).toBeVisible();
+    await expect(sidebar.getByText("Local research workspace")).toBeVisible();
+    await expect(sidebar.locator(".profile-dot").last()).toHaveText("A");
+  });
+
+  test("[pure-ui-rendering] profile menu shortcuts open concrete destinations", async ({
+    page,
+  }) => {
+    await openApp(page);
+
+    await page.getByTestId("profile-menu-trigger").click();
+    await page.getByRole("menuitem", { name: "Model settings" }).click();
+    await expect(page.getByRole("dialog", { name: /Models/ })).toBeVisible();
+    await expect(page.getByText("Quick Model")).toBeVisible();
+    await page.getByRole("button", { name: "Close settings" }).click();
+
+    await page.getByTestId("profile-menu-trigger").click();
+    await page.getByRole("menuitem", { name: "AI Providers" }).click();
+    await expect(page.getByRole("dialog", { name: /Providers/ })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Local model provider" })).toBeVisible();
+    await page.getByRole("button", { name: "Close settings" }).click();
+
+    await page.getByTestId("profile-menu-trigger").click();
+    await page.getByRole("menuitem", { name: "Help" }).click();
+    await expect(page.getByRole("dialog", { name: "Loom Help" })).toContainText(
+      "local-first AI browser"
+    );
+    await page.getByRole("button", { name: "Close" }).click();
+
+    await page.getByTestId("profile-menu-trigger").click();
+    await page.getByRole("menuitem", { name: "About Loom" }).click();
+    await expect(page.getByRole("dialog", { name: "About Loom" })).toContainText(
+      "Build your personal web from AI conversations."
+    );
+  });
+
+  test("[pure-ui-rendering] file attachments are enabled in attach menu", async ({
+    page,
+  }) => {
+    await openApp(page);
+
+    await page.getByTestId("prompt-surface").getByRole("button", { name: "Attach" }).click();
+    const addFile = page.getByRole("button", { name: "Add file" });
+    await expect(addFile).toBeEnabled();
+    await expect(addFile).toHaveAttribute("title", "Add file");
+    await expect(page.getByText("No files attached.")).toBeVisible();
+  });
+
   test("[pure-ui-rendering] shows category navigation and preserves existing runtime controls", async ({
     page,
   }) => {
@@ -223,7 +302,7 @@ test.describe("[pure-ui-rendering] Settings information architecture", () => {
     await expect(page.getByTestId("memory-save")).toBeDisabled();
 
     await savedMemories.check();
-    await page.getByLabel("Your nickname").fill("Gokay");
+    await page.getByLabel("Your nickname").fill("Ada");
     await page.getByLabel("Your occupation").fill("Builder");
     await expect(page.getByTestId("memory-save")).toBeEnabled();
     await page.getByTestId("memory-save").click();
@@ -233,7 +312,7 @@ test.describe("[pure-ui-rendering] Settings information architecture", () => {
     await openSettings(page);
     await page.getByRole("button", { name: /^Memory/ }).click();
     await expect(page.getByRole("checkbox", { name: /Reference saved memories/ })).toBeChecked();
-    await expect(page.getByLabel("Your nickname")).toHaveValue("Gokay");
+    await expect(page.getByLabel("Your nickname")).toHaveValue("Ada");
     await expect(page.getByLabel("Your occupation")).toHaveValue("Builder");
 
     await expect(page.getByTestId("memory-empty-state")).toContainText("No saved memories yet.");

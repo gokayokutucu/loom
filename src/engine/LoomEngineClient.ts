@@ -6,6 +6,8 @@ import type {
   CancelMessageInput,
   CancelMessageResult,
   CreateBookmarkInput,
+  CreateAttachmentInput,
+  CreateAttachmentResult,
   CreateLoomInput,
   CreateLoomResult,
   CreateOrOpenWeftInput,
@@ -18,6 +20,7 @@ import type {
   ExportResponseInput,
   CapabilitySummary,
   DeleteBookmarkInput,
+  DeleteAttachmentInput,
   GetBookmarkForTargetInput,
   GetBookmarkInput,
   GetReferenceInput,
@@ -27,6 +30,8 @@ import type {
   GraphProjectionResult,
   ListReferencesInput,
   ListReferencesResult,
+  ListAttachmentsInput,
+  ListAttachmentsResult,
   ListCodeSnippetsInput,
   ListCodeSnippetsResult,
   ListHistoryResult,
@@ -46,6 +51,7 @@ import type {
   ResolveAddressInput,
   ResolveAddressResult,
   LoomServiceRuntimeConfig,
+  OcrProviderHealth,
   RuntimeModelDownloadJob,
   RuntimeModelsResult,
   ServiceConfigUpdateResult,
@@ -78,6 +84,7 @@ export interface LoomEngineClient {
   startModelDownload(modelName: string): Promise<RuntimeModelDownloadJob>;
   getModelDownload(jobId: string): Promise<RuntimeModelDownloadJob>;
   cancelModelDownload(jobId: string): Promise<RuntimeModelDownloadJob>;
+  getOcrProviderHealth(): Promise<OcrProviderHealth>;
   getSpeechProviderHealth(): Promise<SpeechProviderHealth>;
   getSpeechSetupStatus(): Promise<SpeechSetupStatus>;
   downloadSpeechSetupModel(): Promise<SpeechSetupStatus>;
@@ -90,6 +97,9 @@ export interface LoomEngineClient {
   updateLoomMetadata(input: UpdateLoomInput): Promise<CreateLoomResult>;
   deleteLoom(input: DeleteLoomInput): Promise<void>;
   sendMessage(input: SendMessageInput): AsyncIterable<EngineResponseEvent>;
+  createAttachment(input: CreateAttachmentInput): Promise<CreateAttachmentResult>;
+  listAttachments(input: ListAttachmentsInput): Promise<ListAttachmentsResult>;
+  deleteAttachment(input: DeleteAttachmentInput): Promise<void>;
   regenerateFromResponse(input: RegenerateFromResponseInput): AsyncIterable<EngineResponseEvent>;
   retryUserMessage(input: RetryUserMessageInput): AsyncIterable<EngineResponseEvent>;
   cancelMessage(input: CancelMessageInput): Promise<CancelMessageResult>;

@@ -5,6 +5,7 @@ export type LoomObjectType =
   | "loom"
   | "response"
   | "fragment"
+  | "attachment"
   | "bookmark"
   | "semantic"
   | "recent";
@@ -255,7 +256,7 @@ export interface LoomLink {
   badge?: string;
   selectedAt?: number;
   targetObjectId?: string;
-  targetKind?: "loom" | "response" | "weft" | "fragment" | "code_block" | "external";
+  targetKind?: "loom" | "response" | "weft" | "fragment" | "code_block" | "attachment" | "external";
   canonicalUri?: string;
   meta?: LoomMetadata;
   referenceCode?: string;

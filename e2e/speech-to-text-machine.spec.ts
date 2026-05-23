@@ -4,8 +4,15 @@ import {
   speechToTextTransitionTable,
   type SpeechToTextState,
 } from "../src/state/speechToTextMachine";
-import { speechSetupRemediationMessage } from "../src/hooks/useSpeechToTextRecorder";
-import { encodePcm16WavFromChannels } from "../src/services/audioWav";
+import {
+  speechSetupRemediationMessage,
+  speechTranscriptionFailureMessage,
+} from "../src/hooks/useSpeechToTextRecorder";
+import {
+  DEFAULT_STT_WAV_SAMPLE_RATE,
+  PCM_WAV_MIME_TYPE,
+  encodePcm16WavFromChannels,
+} from "../src/services/audioWav";
 
 test.describe("[pure-state] Speech-to-Text recorder lifecycle machine", () => {
   test("idle requests permission and reaches recording", () => {
@@ -85,6 +92,81 @@ test.describe("[pure-state] Speech-to-Text recorder lifecycle machine", () => {
     );
   });
 
+  test("structured transcription errors map to user-friendly messages", () => {
+    const noSpeech = Object.assign(new Error("loom-service rejected the request"), {
+      kind: "no_speech_detected",
+      details: {
+        serviceErrorCode: "no_speech_detected",
+        diagnostics: {
+          byteLength: 32044,
+          durationMs: 1000,
+        },
+      },
+    });
+    const providerFailed = Object.assign(new Error("loom-service request failed for /speech/transcribe."), {
+      kind: "provider_error",
+      details: {
+        serviceErrorCode: "provider_failed",
+      },
+    });
+    const payloadTooLarge = Object.assign(new Error("payload too large"), {
+      kind: "payload_too_large",
+      details: {
+        serviceErrorCode: "payload_too_large",
+      },
+    });
+    const genericSpeechRequestFailed = Object.assign(
+      new Error("loom-service request failed for /speech/transcribe."),
+      {
+        kind: "request_failed",
+        details: {
+          path: "/speech/transcribe",
+          status: 422,
+        },
+      }
+    );
+    const statusPayloadTooLarge = Object.assign(
+      new Error("loom-service request failed for /speech/transcribe."),
+      {
+        kind: "request_failed",
+        details: {
+          path: "/speech/transcribe",
+          status: 413,
+        },
+      }
+    );
+    const plainHttpPayloadTooLarge = Object.assign(
+      new Error("Recording is too long. Try a shorter recording."),
+      {
+        kind: "payload_too_large",
+        details: {
+          path: "/speech/transcribe",
+          status: 413,
+          responseBodyPresent: true,
+        },
+      }
+    );
+
+    expect(speechTranscriptionFailureMessage(noSpeech)).toBe(
+      "No speech was detected. Try speaking a little louder or longer."
+    );
+    expect(speechTranscriptionFailureMessage(providerFailed)).toBe(
+      "Local speech engine failed to process the recording. Check Speech-to-Text settings."
+    );
+    expect(speechTranscriptionFailureMessage(payloadTooLarge)).toBe(
+      "Recording is too long. Try a shorter recording."
+    );
+    expect(speechTranscriptionFailureMessage(genericSpeechRequestFailed)).toBe(
+      "Local speech engine could not process the recording. Check Speech-to-Text settings."
+    );
+    expect(speechTranscriptionFailureMessage(statusPayloadTooLarge)).toBe(
+      "Recording is too long. Try a shorter recording."
+    );
+    expect(speechTranscriptionFailureMessage(plainHttpPayloadTooLarge)).toBe(
+      "Recording is too long. Try a shorter recording."
+    );
+  });
+
   test("recording can be cancelled", () => {
     expect(
       reduceSpeechToText(
@@ -136,5 +218,10 @@ test.describe("[pure-state] Speech-to-Text recorder lifecycle machine", () => {
     expect(view.getUint16(22, true)).toBe(1);
     expect(view.getUint32(24, true)).toBe(16_000);
     expect(view.getUint32(40, true)).toBe(10);
+  });
+
+  test("recorder upload normalization targets mono 16 kHz WAV", () => {
+    expect(PCM_WAV_MIME_TYPE).toBe("audio/wav");
+    expect(DEFAULT_STT_WAV_SAMPLE_RATE).toBe(16_000);
   });
 });

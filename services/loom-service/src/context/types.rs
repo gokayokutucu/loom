@@ -48,6 +48,7 @@ pub struct BuildContextInput {
     pub source: ContextSource,
     pub weft_origin: Option<WeftOriginContext>,
     pub checkpoint: Option<LoomCheckpointSummary>,
+    pub memory_messages: Vec<ContextMessage>,
     pub recent_messages: Vec<ContextMessage>,
 }
 
@@ -81,6 +82,7 @@ pub enum ContextSourceKind {
     LoomCheckpoint,
     WeftOrigin,
     Reference,
+    Attachment,
     RetrievedMemory,
 }
 
@@ -139,6 +141,7 @@ pub enum ContextCandidateKind {
     Capsule,
     Checkpoint,
     CodeBlock,
+    Attachment,
     RetrievedMemory,
     WeftOrigin,
 }
@@ -159,8 +162,11 @@ pub struct ContextCandidateBudgetRecord {
     pub candidate_kind: ContextCandidateKind,
     pub candidate_id: Option<String>,
     pub estimated_tokens: usize,
+    pub budget_used_tokens: usize,
     pub decision: ContextCandidateBudgetDecision,
     pub reason: String,
+    pub source_level: Option<String>,
+    pub scoring_reason: Option<String>,
     pub priority: i32,
 }
 
@@ -172,6 +178,10 @@ pub struct ContextBudgetDiagnostics {
     pub remaining_input_budget: usize,
     pub soft_trim_threshold: usize,
     pub hard_trim_threshold: usize,
+    pub recent_candidate_responses: usize,
+    pub recent_response_limit: usize,
+    pub recent_selected_responses: usize,
+    pub recent_selected_response_ids: Vec<String>,
     pub selected_token_estimate: usize,
     pub recent_turns_estimate: usize,
     pub references_estimate: usize,
@@ -260,9 +270,25 @@ pub struct ReferenceContext {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct AttachmentContext {
+    pub attachment_id: String,
+    pub loom_id: String,
+    pub file_name: String,
+    pub mime_type: Option<String>,
+    pub kind: String,
+    pub parse_status: String,
+    pub parser: Option<String>,
+    pub content_text: Option<String>,
+    pub content_kind: Option<String>,
+    pub char_count: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct AttachedReferenceInput {
     pub reference: ReferenceContext,
     pub response_capsule: Option<ResponseContextCapsule>,
+    pub attachment: Option<AttachmentContext>,
 }
 
 impl ContextMessage {

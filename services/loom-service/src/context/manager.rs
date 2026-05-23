@@ -106,9 +106,16 @@ impl ContextManager {
         let strategy = select_context_strategy(&input);
         let mut budget = resolve_context_budget(input.resolved_num_ctx, self.config.as_ref());
         let budget_plan = resolve_context_budget_plan(&input, &budget, strategy_decision);
+        let recent_candidate_responses = input.recent_messages.len();
         let mut input = input;
         input.recent_messages =
             limit_recent_messages_for_plan(&input.recent_messages, &budget_plan);
+        let recent_selected_responses = input.recent_messages.len();
+        let recent_selected_response_ids = input
+            .recent_messages
+            .iter()
+            .filter_map(|message| message.source_id.clone())
+            .collect::<Vec<_>>();
         let mut messages = vec![ContextMessage::new(
             ContextMessageRole::System,
             "Use the provided Loom context, explicit references, and recent conversation to answer the current user question. If the current question omits the topic, infer it from the recent conversation when available. Write valid Markdown only: headings must include heading text, and never emit orphan separators or markers such as `--- ###` or trailing `###`. Never include raw model thinking/internal monologue in context or output.",
@@ -144,6 +151,10 @@ impl ContextManager {
             remaining_input_budget: context_limit,
             soft_trim_threshold: budget_plan.soft_trim_threshold,
             hard_trim_threshold: budget_plan.hard_trim_threshold,
+            recent_candidate_responses,
+            recent_response_limit: budget_plan.recent_full_response_limit,
+            recent_selected_responses,
+            recent_selected_response_ids,
             warnings: budget_plan.warnings.clone(),
             reasons: vec![
                 "response_reserve_not_available_to_input_context".to_string(),
@@ -169,10 +180,13 @@ impl ContextManager {
                         ));
                         diagnostics.record_candidate(ContextCandidateBudgetRecord {
                             candidate_kind,
-                            candidate_id: Some(contribution.source_id),
+                            candidate_id: Some(contribution.source_id.clone()),
                             estimated_tokens: contribution.estimated_tokens,
+                            budget_used_tokens: estimated_used,
                             decision: ContextCandidateBudgetDecision::Dropped,
                             reason: "overflow_after_hard_trim".to_string(),
+                            source_level: source_level_for_contribution(&contribution),
+                            scoring_reason: scoring_reason_for_contribution(&contribution),
                             priority: contributor.priority(),
                         });
                         continue;
@@ -185,12 +199,15 @@ impl ContextManager {
                         candidate_kind: candidate_kind.clone(),
                         candidate_id: Some(contribution.source_id.clone()),
                         estimated_tokens: contribution.estimated_tokens,
+                        budget_used_tokens: estimated_used,
                         decision: ContextCandidateBudgetDecision::Downgraded,
                         reason: if candidate_kind == ContextCandidateKind::CodeBlock {
                             "code_summary_due_to_budget".to_string()
                         } else {
                             "soft_trim_truncated_to_remaining_budget".to_string()
                         },
+                        source_level: source_level_for_contribution(&contribution),
+                        scoring_reason: scoring_reason_for_contribution(&contribution),
                         priority: contributor.priority(),
                     });
                     truncate_to_token_estimate(&contribution.content, remaining_tokens)
@@ -208,8 +225,11 @@ impl ContextManager {
                         candidate_kind,
                         candidate_id: Some(contribution.source_id.clone()),
                         estimated_tokens: contribution.estimated_tokens,
+                        budget_used_tokens: next_estimate,
                         decision,
                         reason,
+                        source_level: source_level_for_contribution(&contribution),
+                        scoring_reason: scoring_reason_for_contribution(&contribution),
                         priority: contributor.priority(),
                     });
                     contribution.content
@@ -234,8 +254,11 @@ impl ContextManager {
             candidate_kind: ContextCandidateKind::CurrentPrompt,
             candidate_id: input.current_head_response_id.clone(),
             estimated_tokens: user_prompt_tokens,
+            budget_used_tokens: estimated_used.saturating_add(user_prompt_tokens),
             decision: ContextCandidateBudgetDecision::Selected,
             reason: "current_prompt_protected".to_string(),
+            source_level: Some("exact_response_part".to_string()),
+            scoring_reason: Some("current_prompt_protected".to_string()),
             priority: 0,
         });
         messages.push(ContextMessage::new(
@@ -279,6 +302,11 @@ impl ContextBudgetDiagnostics {
                     .saturating_add(record.estimated_tokens);
             }
             ContextCandidateKind::Reference => {
+                self.references_estimate = self
+                    .references_estimate
+                    .saturating_add(record.estimated_tokens);
+            }
+            ContextCandidateKind::Attachment => {
                 self.references_estimate = self
                     .references_estimate
                     .saturating_add(record.estimated_tokens);
@@ -345,6 +373,7 @@ fn candidate_kind_for_contribution(contribution: &ContextContribution) -> Contex
     match contribution.source_kind {
         ContextSourceKind::RecentTurn => ContextCandidateKind::RecentTurn,
         ContextSourceKind::Reference => ContextCandidateKind::Reference,
+        ContextSourceKind::Attachment => ContextCandidateKind::Attachment,
         ContextSourceKind::ResponseCapsule => ContextCandidateKind::Capsule,
         ContextSourceKind::LoomCheckpoint => ContextCandidateKind::Checkpoint,
         ContextSourceKind::WeftOrigin => ContextCandidateKind::WeftOrigin,
@@ -353,6 +382,35 @@ fn candidate_kind_for_contribution(contribution: &ContextContribution) -> Contex
             ContextCandidateKind::RetrievedMemory
         }
     }
+}
+
+fn source_level_for_contribution(contribution: &ContextContribution) -> Option<String> {
+    if let Some(level) = contribution
+        .metadata
+        .get("sourceLevel")
+        .and_then(|value| value.as_str())
+    {
+        return Some(level.to_string());
+    }
+    let level = match contribution.source_kind {
+        ContextSourceKind::RecentTurn | ContextSourceKind::UserPrompt => "exact_response_part",
+        ContextSourceKind::Reference => "exact_response_part",
+        ContextSourceKind::Attachment => "attachment_chunk",
+        ContextSourceKind::ResponseCapsule => "summary",
+        ContextSourceKind::LoomCheckpoint => "checkpoint",
+        ContextSourceKind::WeftOrigin => "weft_origin",
+        ContextSourceKind::RetrievedMemory => "memory",
+        ContextSourceKind::SystemPolicy => "summary",
+    };
+    Some(level.to_string())
+}
+
+fn scoring_reason_for_contribution(contribution: &ContextContribution) -> Option<String> {
+    contribution
+        .metadata
+        .get("scoringReason")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
 }
 
 fn is_optional_old_context(kind: &ContextCandidateKind) -> bool {
@@ -406,9 +464,10 @@ fn truncate_to_token_estimate(value: &str, max_tokens: usize) -> String {
 pub(crate) mod tests {
     use super::ContextManager;
     use crate::{
+        capabilities::strategy::{ExecutionStrategy, ExecutionStrategyDecision},
         context::contributors::{ContextContribution, ContextContributor},
         context::types::{
-            ArtifactStatus, AttachedReferenceInput, BuildContextInput,
+            ArtifactStatus, AttachedReferenceInput, AttachmentContext, BuildContextInput,
             ContextCandidateBudgetDecision, ContextCandidateKind, ContextMessage,
             ContextMessageRole, ContextSource, ContextSourceKind, LoomCheckpointSummary,
             ReferenceContext, ResponseMode, WeftOriginContext,
@@ -450,6 +509,46 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn referenced_attachment_content_is_included_when_explicitly_attached() {
+        let manager = ContextManager::default();
+        let built = manager.build_context(BuildContextInput {
+            attached_references: vec![AttachedReferenceInput {
+                reference: ReferenceContext {
+                    reference_id: "att-ref-1".to_string(),
+                    target_kind: "attachment".to_string(),
+                    target_id: Some("att-1".to_string()),
+                    target_uri: Some("loom://loom-1/attachments/att-1".to_string()),
+                    label: Some("notes.txt".to_string()),
+                    selected_text: None,
+                    capsule_summary: None,
+                },
+                response_capsule: None,
+                attachment: Some(AttachmentContext {
+                    attachment_id: "att-1".to_string(),
+                    loom_id: "loom-1".to_string(),
+                    file_name: "notes.txt".to_string(),
+                    mime_type: Some("text/plain".to_string()),
+                    kind: "text".to_string(),
+                    parse_status: "ready".to_string(),
+                    parser: Some("utf8_text_v1".to_string()),
+                    content_text: Some("Only referenced attachments enter context.".to_string()),
+                    content_kind: Some("text".to_string()),
+                    char_count: Some(47),
+                }),
+            }],
+            ..minimal_input("Use the attached notes.")
+        });
+
+        assert!(built.messages.iter().any(|message| message
+            .content
+            .contains("Only referenced attachments enter context")));
+        assert!(built.messages.iter().any(|message| {
+            message.source_kind == Some(ContextSourceKind::Attachment)
+                && message.source_id.as_deref() == Some("att-1")
+        }));
+    }
+
+    #[test]
     fn attached_reference_is_background_context_not_visible_user_prompt() {
         let manager = ContextManager::default();
         let built = manager.build_context(BuildContextInput {
@@ -477,6 +576,45 @@ pub(crate) mod tests {
             .map(|message| message.content.as_str())
             .collect::<Vec<_>>();
         assert_eq!(visible_user_messages, vec!["Explain this selected part."]);
+    }
+
+    #[test]
+    fn profile_memory_is_background_context_not_visible_user_prompt() {
+        let manager = ContextManager::default();
+        let built = manager.build_context(BuildContextInput {
+            memory_messages: vec![ContextMessage::new(
+                ContextMessageRole::System,
+                "Occupation: Software architect / .NET engineer\nAnswer preferences: Turkish answers, English technical terms",
+                Some(ContextSourceKind::RetrievedMemory),
+                Some("local-profile-settings".to_string()),
+            )],
+            ..minimal_input("Benim teknik geçmişime göre bunu nasıl değerlendirmeliyim?")
+        });
+
+        let profile_message = built
+            .messages
+            .iter()
+            .find(|message| {
+                message
+                    .content
+                    .contains("Software architect / .NET engineer")
+            })
+            .expect("profile memory contribution");
+        assert_eq!(profile_message.role, ContextMessageRole::System);
+        assert_eq!(
+            profile_message.source_kind,
+            Some(ContextSourceKind::RetrievedMemory)
+        );
+        let visible_user_messages = built
+            .messages
+            .iter()
+            .filter(|message| message.role == ContextMessageRole::User)
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            visible_user_messages,
+            vec!["Benim teknik geçmişime göre bunu nasıl değerlendirmeliyim?"]
+        );
     }
 
     #[test]
@@ -511,6 +649,176 @@ pub(crate) mod tests {
             .budget_diagnostics
             .reasons
             .contains(&"response_reserve_not_available_to_input_context".to_string()));
+    }
+
+    #[test]
+    fn diagnostics_record_recent_candidate_limit_and_selected_responses() {
+        let recent_messages = numbered_recent_messages(24);
+        let built = ContextManager::default().build_context_with_contributors_and_strategy(
+            BuildContextInput {
+                resolved_num_ctx: 16_384,
+                recent_messages,
+                ..minimal_input("Explain the recent context.")
+            },
+            vec![Box::new(
+                crate::context::contributors::RecentTurnsContributor,
+            )],
+            Some(&strategy_decision(
+                ExecutionStrategy::Parallel2DraftSynthesize,
+                "deep",
+                12_000,
+                2,
+                true,
+            )),
+        );
+
+        assert_eq!(built.budget_plan.recent_full_response_limit, 20);
+        assert_eq!(built.budget_diagnostics.recent_candidate_responses, 24);
+        assert_eq!(built.budget_diagnostics.recent_response_limit, 20);
+        assert_eq!(built.budget_diagnostics.recent_selected_responses, 20);
+        assert_eq!(
+            built.budget_diagnostics.recent_selected_response_ids.len(),
+            20
+        );
+        assert_eq!(
+            built
+                .budget_diagnostics
+                .recent_selected_response_ids
+                .first()
+                .map(String::as_str),
+            Some("recent-response-4")
+        );
+        assert_eq!(
+            built
+                .budget_diagnostics
+                .recent_selected_response_ids
+                .last()
+                .map(String::as_str),
+            Some("recent-response-23")
+        );
+        let context_text = context_text(&built);
+        assert!(!context_text.contains("recent response 3"));
+        assert!(context_text.contains("recent response 4"));
+        assert!(context_text.contains("recent response 23"));
+    }
+
+    #[test]
+    fn recent_selection_uses_budget_plan_for_medium_quick_and_weak_profiles() {
+        let cases = [
+            (
+                "medium",
+                strategy_decision(
+                    ExecutionStrategy::SectionedSequential,
+                    "long",
+                    6_000,
+                    1,
+                    false,
+                ),
+                10,
+            ),
+            (
+                "quick",
+                strategy_decision(ExecutionStrategy::ShortDirect, "quick", 768, 1, false),
+                4,
+            ),
+            (
+                "weak",
+                strategy_decision(ExecutionStrategy::NormalDirect, "normal", 2_048, 1, false),
+                6,
+            ),
+        ];
+
+        for (label, decision, expected_limit) in cases {
+            let built = ContextManager::default().build_context_with_contributors_and_strategy(
+                BuildContextInput {
+                    recent_messages: numbered_recent_messages(24),
+                    ..minimal_input(&format!("Use {label} context."))
+                },
+                vec![Box::new(
+                    crate::context::contributors::RecentTurnsContributor,
+                )],
+                Some(&decision),
+            );
+
+            assert_eq!(
+                built.budget_diagnostics.recent_selected_responses, expected_limit,
+                "{label} selected response count"
+            );
+            assert_eq!(
+                built.budget_diagnostics.recent_response_limit, expected_limit,
+                "{label} response limit"
+            );
+        }
+    }
+
+    #[test]
+    fn explicit_attachment_and_weft_origin_stay_outside_recent_response_cap() {
+        let built = ContextManager::default().build_context_with_contributors_and_strategy(
+            BuildContextInput {
+                source: ContextSource::Weft,
+                weft_origin: Some(WeftOriginContext {
+                    context_id: "origin-1".to_string(),
+                    weft_loom_id: "loom-1".to_string(),
+                    origin_loom_id: "origin-loom".to_string(),
+                    origin_response_id: "origin-response".to_string(),
+                    origin_capsule_id: None,
+                    origin_summary: "Hidden Weft origin context remains separate.".to_string(),
+                    source_hash: None,
+                    status: ArtifactStatus::Ready,
+                }),
+                attached_references: vec![AttachedReferenceInput {
+                    reference: ReferenceContext {
+                        reference_id: "att-ref-1".to_string(),
+                        target_kind: "attachment".to_string(),
+                        target_id: Some("att-1".to_string()),
+                        target_uri: Some("loom://loom-1/attachments/att-1".to_string()),
+                        label: Some("notes.txt".to_string()),
+                        selected_text: None,
+                        capsule_summary: None,
+                    },
+                    response_capsule: None,
+                    attachment: Some(AttachmentContext {
+                        attachment_id: "att-1".to_string(),
+                        loom_id: "loom-1".to_string(),
+                        file_name: "notes.txt".to_string(),
+                        mime_type: Some("text/plain".to_string()),
+                        kind: "text".to_string(),
+                        parse_status: "ready".to_string(),
+                        parser: Some("utf8_text_v1".to_string()),
+                        content_text: Some(
+                            "Explicit attachment context remains separate.".to_string(),
+                        ),
+                        content_kind: Some("text".to_string()),
+                        char_count: Some(45),
+                    }),
+                }],
+                recent_messages: numbered_recent_messages(24),
+                resolved_num_ctx: 16_384,
+                ..minimal_input("Use all context.")
+            },
+            vec![
+                Box::new(crate::context::contributors::RecentTurnsContributor),
+                Box::new(crate::context::contributors::AttachedReferencesContributor),
+                Box::new(crate::context::contributors::WeftOriginContributor),
+            ],
+            Some(&strategy_decision(
+                ExecutionStrategy::Parallel2DraftSynthesize,
+                "deep",
+                12_000,
+                2,
+                true,
+            )),
+        );
+
+        assert_eq!(built.budget_diagnostics.recent_selected_responses, 20);
+        assert!(built.messages.iter().any(|message| {
+            message.source_kind == Some(ContextSourceKind::Attachment)
+                && message.content.contains("Explicit attachment context")
+        }));
+        assert!(built.messages.iter().any(|message| {
+            message.source_kind == Some(ContextSourceKind::WeftOrigin)
+                && message.content.contains("Hidden Weft origin")
+        }));
     }
 
     #[test]
@@ -628,6 +936,13 @@ pub(crate) mod tests {
             built.budget_diagnostics.candidate_records[reference_index].reason,
             "explicit_reference"
         );
+        assert_eq!(
+            built.budget_diagnostics.candidate_records[reference_index]
+                .source_level
+                .as_deref(),
+            Some("exact_response_part")
+        );
+        assert!(built.budget_diagnostics.candidate_records[reference_index].budget_used_tokens > 0);
     }
 
     #[test]
@@ -1055,6 +1370,7 @@ pub(crate) mod tests {
             source: ContextSource::Composer,
             weft_origin: None,
             checkpoint: None,
+            memory_messages: Vec::new(),
             recent_messages: Vec::new(),
         }
     }
@@ -1102,6 +1418,7 @@ pub(crate) mod tests {
                 capsule_summary: None,
             },
             response_capsule: None,
+            attachment: None,
         }
     }
 
@@ -1110,8 +1427,55 @@ pub(crate) mod tests {
             role,
             content.to_string(),
             Some(ContextSourceKind::RecentTurn),
-            None,
+            Some(content.replace(' ', "-")),
         )
+    }
+
+    fn numbered_recent_messages(count: usize) -> Vec<ContextMessage> {
+        (0..count)
+            .map(|index| {
+                let role = if index % 2 == 0 {
+                    ContextMessageRole::User
+                } else {
+                    ContextMessageRole::Assistant
+                };
+                context_message(role, &format!("recent response {index}"))
+            })
+            .collect()
+    }
+
+    fn context_text(context: &crate::context::types::BuiltContext) -> String {
+        context
+            .messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn strategy_decision(
+        strategy: ExecutionStrategy,
+        requested_mode: &str,
+        max_output_tokens: i64,
+        max_parallelism: i64,
+        allow_deep_synthesis: bool,
+    ) -> ExecutionStrategyDecision {
+        ExecutionStrategyDecision {
+            decision_id: "decision-1".to_string(),
+            snapshot_id: None,
+            model_id: None,
+            requested_mode: requested_mode.to_string(),
+            prompt_kind: "explanation".to_string(),
+            context_size_tokens: 512,
+            strategy,
+            max_output_tokens,
+            max_parallelism,
+            allow_deep_synthesis,
+            allow_parallel_drafts: max_parallelism >= 2,
+            reason: Vec::new(),
+            warnings: Vec::new(),
+            created_at: "2026-05-22T00:00:00Z".to_string(),
+        }
     }
 
     struct StaticContributor {

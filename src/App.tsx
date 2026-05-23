@@ -46,8 +46,8 @@ import {
   Layers,
   Lightbulb,
   Link2,
+  LoaderCircle,
   Lock,
-  LogOut,
   Map,
   Maximize2,
   MessageSquare,
@@ -137,6 +137,9 @@ import {
   type AddressBarEvent,
 } from "./state/addressBarMachine";
 import {
+  getAvatarInitial,
+  getDisplayProfileName,
+  getDisplayWorkspaceName,
   isMockDataEnabled,
   readAppSettings,
   writeAppSettings,
@@ -274,7 +277,10 @@ import { useSpeechToTextRecorder } from "./hooks/useSpeechToTextRecorder";
 import { AppShell } from "./components/AppShell";
 import { AddressBar } from "./components/AddressBar";
 import { AddressMetadataBadge } from "./components/AddressMetadataBadge";
-import { AIProviderSettingsModal } from "./components/AIProviderSettings";
+import {
+  AIProviderSettingsModal,
+  type SettingsCategoryId,
+} from "./components/AIProviderSettings";
 import { AddressHintPopover } from "./components/AddressHintPopover";
 import { AskPopup, type AskPopupState } from "./components/AskPopup";
 import { AssistantMarkdownContent } from "./components/AssistantMarkdownContent";
@@ -287,6 +293,7 @@ import { GroupColorPopover } from "./components/GroupColorPopover";
 import { GraphView } from "./components/GraphView";
 import { HistoryView } from "./components/HistoryView";
 import { ReferencesListBox } from "./components/ReferencesListBox";
+import { RetryConfirmationDialog } from "./components/RetryConfirmationDialog";
 import { SelectionPopover } from "./components/SelectionPopover";
 import { TopBar } from "./components/TopBar";
 import {
@@ -320,6 +327,7 @@ const iconForType: Record<LoomObjectType, typeof Globe2> = {
   loom: GitBranch,
   response: FileText,
   fragment: FileText,
+  attachment: Paperclip,
   bookmark: Bookmark,
   semantic: Sparkles,
   recent: Clock3,
@@ -564,9 +572,27 @@ interface AttachContentItem extends LoomLink {
 
 interface ComposerAttachment {
   id: string;
+  attachmentId?: string;
+  loomId?: string;
   name: string;
   size: number;
   type: string;
+  extension?: string;
+  kind?: string;
+  parseStatus?:
+    | "queued"
+    | "parsing"
+    | "extracting_text"
+    | "ocr_needed"
+    | "ocr_running"
+    | "ready"
+    | "failed"
+    | "unsupported";
+  parser?: string;
+  error?: string;
+  thumbnailDataUrl?: string;
+  parsedCharCount?: number;
+  metadataJson?: JsonValue;
   lastModified: number;
   attachedAt?: number;
 }
@@ -748,10 +774,42 @@ const attachContentTabs: Array<{
   { id: "files", label: "Files", Icon: Paperclip },
 ];
 
+const MAX_COMPOSER_ATTACHMENTS = 10;
+const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+const MAX_ATTACHMENT_SIZE_LABEL = "25 MB";
+
 function formatAttachmentSize(size: number) {
   if (size < 1024) return `${size} B`;
   if (size < 1024 * 1024) return `${Math.round(size / 1024)} KB`;
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatAttachmentDisplayName(fileName: string, maxLength = 22) {
+  if (fileName.length <= maxLength) return fileName;
+  const dotIndex = fileName.lastIndexOf(".");
+  const hasExtension = dotIndex > 0 && dotIndex < fileName.length - 1;
+  const extension = hasExtension ? fileName.slice(dotIndex) : "";
+  const baseName = hasExtension ? fileName.slice(0, dotIndex) : fileName;
+  const availableNameLength = Math.max(8, maxLength - extension.length - 3);
+  const suffixLength = Math.min(6, Math.max(4, Math.floor(availableNameLength * 0.4)));
+  const prefixLength = Math.max(4, availableNameLength - suffixLength);
+  return `${baseName.slice(0, prefixLength)}...${baseName.slice(-suffixLength)}${extension}`;
+}
+
+function isAttachmentReferenceLink(link: Pick<LoomLink, "type" | "targetKind">) {
+  return link.type === "attachment" || link.targetKind === "attachment";
+}
+
+function composerReferenceTokenText(
+  link: LoomLink,
+  fallbackDisplayMode: ReferenceDisplayMode
+) {
+  if (!isAttachmentReferenceLink(link)) {
+    return referenceTokenText(link, fallbackDisplayMode);
+  }
+  const displayMode = referenceDisplayModeForLink(link, fallbackDisplayMode);
+  const label = referenceLabelForMode(link, displayMode);
+  return `[[${formatAttachmentDisplayName(label, 26)}]]`;
 }
 
 function runtimeGraphObjectIdFor(kind: LoomObjectKind, id: string) {
@@ -827,6 +885,7 @@ function fragmentQuoteText(link: LoomLink) {
 function stripAttachedReferenceTokens(text: string, references?: LoomLink[]) {
   const withoutReferenceTokens = splitPromptReferences(references).attached.reduce((current, link) => {
     const labels = new Set([
+      composerReferenceTokenText(link, link.referenceDisplayMode ?? "title"),
       referenceTokenText(link, link.referenceDisplayMode ?? "title"),
       referenceTokenText(link, "title"),
       referenceTokenText(link, "code"),
@@ -889,6 +948,7 @@ function textFromComposerHtml(html: string, preserveLineBreaks: boolean) {
 function tokenTextsForQuestionGroupReference(link: LoomLink) {
   return Array.from(
     new Set([
+      composerReferenceTokenText(link, link.referenceDisplayMode ?? "title"),
       referenceTokenText(link, link.referenceDisplayMode ?? "title"),
       referenceTokenText(link, "title"),
       referenceTokenText(link, "code"),
@@ -1100,6 +1160,63 @@ function sortAttachmentsBySelection(attachments: ComposerAttachment[]) {
   return [...attachments].sort(
     (a, b) =>
       (b.attachedAt ?? b.lastModified) - (a.attachedAt ?? a.lastModified)
+  );
+}
+
+function attachmentToLoomLink(attachment: ComposerAttachment): LoomLink {
+  const attachmentId = attachment.attachmentId ?? attachment.id;
+  const path = attachment.loomId
+    ? `loom://${attachment.loomId}/attachments/${attachmentId}`
+    : `loom://attachments/${attachmentId}`;
+  return {
+    id: attachmentId,
+    type: "attachment",
+    title: attachment.name,
+    path,
+    badge:
+      attachment.parseStatus === "unsupported"
+        ? "Unsupported file"
+        : attachment.kind === "image"
+          ? "Image"
+          : "File",
+    targetObjectId: attachmentId,
+    targetKind: "attachment",
+    canonicalUri: path,
+  };
+}
+
+function attachmentStatusLabel(attachment: ComposerAttachment) {
+  const ocrNeededPages = attachmentOcrNeededPageCount(attachment.metadataJson);
+  if (attachment.parseStatus === "ready" && ocrNeededPages > 0) {
+    return `Ready · OCR needed ${ocrNeededPages} ${ocrNeededPages === 1 ? "page" : "pages"}`;
+  }
+  if (attachment.parseStatus === "queued") return "Queued";
+  if (attachment.parseStatus === "ready") return "Ready";
+  if (attachment.parseStatus === "parsing") return "Parsing";
+  if (attachment.parseStatus === "extracting_text") return "Extracting text";
+  if (attachment.parseStatus === "ocr_needed") {
+    return ocrNeededPages > 0
+      ? `OCR needed · ${ocrNeededPages} ${ocrNeededPages === 1 ? "page" : "pages"}`
+      : "OCR needed";
+  }
+  if (attachment.parseStatus === "ocr_running") return "OCR running";
+  if (attachment.parseStatus === "failed") return "Failed";
+  if (attachment.parseStatus === "unsupported") return "Unsupported";
+  return "Pending";
+}
+
+function attachmentOcrNeededPageCount(metadata: JsonValue | undefined) {
+  if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return 0;
+  const pages = metadata.ocrNeededPages;
+  return Array.isArray(pages) ? pages.length : 0;
+}
+
+function attachmentParseActive(attachment: ComposerAttachment) {
+  return (
+    attachment.parseStatus === "queued" ||
+    attachment.parseStatus === "parsing" ||
+    attachment.parseStatus === "extracting_text" ||
+    attachment.parseStatus === "ocr_running"
   );
 }
 
@@ -1535,6 +1652,7 @@ const typeLabel: Record<LoomObjectType, string> = {
   loom: "Weft",
   response: "Response",
   fragment: "Fragment",
+  attachment: "Attachment",
   bookmark: "Bookmark",
   semantic: "Semantic",
   recent: "Recent",
@@ -1662,9 +1780,10 @@ function inlineReferenceTokenHtml(
     )
     .join(" ");
   const tokenText = escapeInlineReferenceHtml(
-    referenceTokenText(displayLink, referenceDisplayMode)
+    composerReferenceTokenText(displayLink, referenceDisplayMode)
   );
-  return `<span class="inline-loom-token" contenteditable="false" draggable="true" ${serializedAttributes}>${tokenText}</span>`;
+  const title = escapeInlineReferenceAttribute(displayLink.title);
+  return `<span class="inline-loom-token" contenteditable="false" draggable="true" title="${title}" ${serializedAttributes}>${tokenText}</span>`;
 }
 
 function appendInlineReferenceTokenHtml(
@@ -2227,12 +2346,19 @@ function App() {
     useState<SelectionReferenceState | null>(null);
   const selectionHighlightRef = useRef<HTMLSpanElement | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<Conversation | null>(null);
+  const [retryConfirmTarget, setRetryConfirmTarget] = useState<{
+    loomId: string;
+    responseId: string;
+    returnFocus: HTMLElement | null;
+  } | null>(null);
   const [iconPickerTarget, setIconPickerTarget] = useState<Conversation | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [providerSettings, setProviderSettings] = useState<AIProviderSettings>(() =>
     readAIProviderSettings()
   );
   const [providerSettingsOpen, setProviderSettingsOpen] = useState(false);
+  const [providerSettingsInitialCategory, setProviderSettingsInitialCategory] =
+    useState<SettingsCategoryId>("runtime");
   const [appSettings, setAppSettings] = useState<AppSettings>(
     initialAppSettingsSnapshot
   );
@@ -10099,7 +10225,11 @@ function App() {
     }
   }
 
-  async function retryFromUserMessage(loomId: string, responseId: string) {
+  async function retryFromUserMessage(
+    loomId: string,
+    responseId: string,
+    returnFocus: HTMLElement | null = null
+  ) {
     const responses = conversationResponses[loomId] ?? [];
     const sourceIndex = responses.findIndex((response) => response.id === responseId);
     const sourceResponse = responses[sourceIndex];
@@ -10112,12 +10242,24 @@ function App() {
       return;
     }
     const hasDownstreamActiveMessages = sourceIndex >= 0 && sourceIndex < responses.length - 1;
-    if (
-      hasDownstreamActiveMessages &&
-      !window.confirm(
-        "Retrying from this message will remove later messages from this Loom. Existing Wefts will be preserved."
-      )
-    ) {
+    if (hasDownstreamActiveMessages) {
+      setRetryConfirmTarget({ loomId, responseId, returnFocus });
+      return;
+    }
+
+    await executeRetryFromUserMessage(loomId, responseId);
+  }
+
+  async function executeRetryFromUserMessage(loomId: string, responseId: string) {
+    const responses = conversationResponses[loomId] ?? [];
+    const sourceIndex = responses.findIndex((response) => response.id === responseId);
+    const sourceResponse = responses[sourceIndex];
+    if (!sourceResponse?.serviceUserResponseId) {
+      showToast({
+        title: "Retry unavailable",
+        message: "This prompt is not persisted in loom-service yet.",
+        color: "sunset",
+      });
       return;
     }
 
@@ -10351,6 +10493,30 @@ function App() {
       mainAbortRef.current = null;
       mainServiceCancellationRef.current = null;
     }
+  }
+
+  function restoreRetryConfirmationFocus(target: HTMLElement | null) {
+    window.requestAnimationFrame(() => {
+      if (target?.isConnected) {
+        target.focus();
+        return;
+      }
+      composerFocusRef.current?.();
+    });
+  }
+
+  function cancelRetryConfirmation() {
+    const target = retryConfirmTarget;
+    setRetryConfirmTarget(null);
+    restoreRetryConfirmationFocus(target?.returnFocus ?? null);
+  }
+
+  function confirmRetryFromDialog() {
+    const target = retryConfirmTarget;
+    setRetryConfirmTarget(null);
+    restoreRetryConfirmationFocus(target?.returnFocus ?? null);
+    if (!target) return;
+    void executeRetryFromUserMessage(target.loomId, target.responseId);
   }
 
   function bookmarkSuggestedLinks(response: ResponseItem) {
@@ -11517,6 +11683,7 @@ function App() {
           collapsed={sidebarCollapsed && !sidebarFlyoutVisible}
           flyout={sidebarFlyoutVisible}
           archivedCount={archived.length}
+          appSettings={appSettings}
           activeConversationId={
             showWeftSplit && activeAddressableConversation
               ? activeAddressableConversation.id
@@ -11561,7 +11728,10 @@ function App() {
           onOpenContextMenu={openConversationMenu}
           onOpenGroupContextMenu={openGroupMenu}
           onDeleteRequest={setDeleteTarget}
-          onOpenSettings={() => setProviderSettingsOpen(true)}
+          onOpenSettings={(category = "runtime") => {
+            setProviderSettingsInitialCategory(category);
+            setProviderSettingsOpen(true);
+          }}
           onHoverExpandStart={() => {
             if (sidebarCollapsed) setSidebarFlyoutOpen(true);
           }}
@@ -12258,6 +12428,7 @@ function App() {
           appSettings={appSettings}
           runtimeHealth={activeComposerRuntimeHealth}
           engineClient={loomEngineClient}
+          initialCategory={providerSettingsInitialCategory}
           onSave={saveProviderSettings}
           onAppSettingsSave={saveAppSettings}
           onClose={() => setProviderSettingsOpen(false)}
@@ -12269,6 +12440,13 @@ function App() {
           conversation={deleteTarget}
           onCancel={() => setDeleteTarget(null)}
           onConfirm={() => deleteConversation(deleteTarget)}
+        />
+      )}
+
+      {retryConfirmTarget && (
+        <RetryConfirmationDialog
+          onCancel={cancelRetryConfirmation}
+          onConfirm={confirmRetryFromDialog}
         />
       )}
     </AppShell>
@@ -12283,6 +12461,7 @@ interface SidebarProps {
   collapsed: boolean;
   flyout: boolean;
   archivedCount: number;
+  appSettings: AppSettings;
   activeConversationId: string;
   activePanel: ActivePanel;
   bookmarksNavPulse: boolean;
@@ -12301,7 +12480,7 @@ interface SidebarProps {
   onOpenContextMenu: (event: React.MouseEvent, conversation: Conversation) => void;
   onOpenGroupContextMenu: (event: React.MouseEvent, group: TabGroup) => void;
   onDeleteRequest: (conversation: Conversation) => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (category?: SettingsCategoryId) => void;
   onHoverExpandStart: () => void;
   onHoverExpandEnd: () => void;
   onFlyoutDragStart: () => void;
@@ -12316,6 +12495,7 @@ function Sidebar({
   collapsed,
   flyout,
   archivedCount,
+  appSettings,
   activeConversationId,
   activePanel,
   bookmarksNavPulse,
@@ -12364,6 +12544,12 @@ function Sidebar({
       removeFromGroups: onRemoveFromGroups,
     },
   });
+  const [profileInfoPanel, setProfileInfoPanel] = useState<"help" | "about" | null>(
+    null
+  );
+  const profileName = getDisplayProfileName(appSettings);
+  const workspaceName = getDisplayWorkspaceName(appSettings);
+  const avatarInitial = getAvatarInitial(profileName);
 
   useLayoutEffect(() => {
     const folderList = folderListRef.current;
@@ -12403,9 +12589,15 @@ function Sidebar({
     };
   }, [profileMenuOpen]);
 
-  function openSettingsFromProfile() {
+  function openSettingsFromProfile(category: SettingsCategoryId = "runtime") {
     setProfileMenuOpen(false);
-    onOpenSettings();
+    setProfileInfoPanel(null);
+    onOpenSettings(category);
+  }
+
+  function openProfileInfoPanel(panel: "help" | "about") {
+    setProfileMenuOpen(false);
+    setProfileInfoPanel(panel);
   }
 
   function conversationToLink(conversation: Conversation): LoomLink {
@@ -12695,19 +12887,19 @@ function Sidebar({
           aria-expanded={profileMenuOpen}
           onClick={() => setProfileMenuOpen((current) => !current)}
         >
-          <div className="profile-dot">G</div>
+          <div className="profile-dot">{avatarInitial}</div>
           <div>
-            <div className="footer-title">Gokay</div>
-            <div className="footer-caption">Personal Web</div>
+            <div className="footer-title">{profileName}</div>
+            <div className="footer-caption">{workspaceName}</div>
           </div>
         </button>
         {profileMenuOpen && (
           <div className="profile-menu" role="menu" aria-label="Profile menu">
             <div className="profile-menu-header">
-              <div className="profile-dot">G</div>
+              <div className="profile-dot">{avatarInitial}</div>
               <div>
-                <strong>Gokay</strong>
-                <span>Personal Web</span>
+                <strong>{profileName}</strong>
+                <span>{workspaceName}</span>
               </div>
             </div>
             <div className="profile-menu-section">
@@ -12715,42 +12907,131 @@ function Sidebar({
                 type="button"
                 role="menuitem"
                 data-testid="open-app-settings"
-                onClick={openSettingsFromProfile}
+                onClick={() => openSettingsFromProfile("runtime")}
               >
                 <Settings size={14} />
                 <span>Settings</span>
               </button>
             </div>
             <div className="profile-menu-section">
-              <button type="button" role="menuitem" onClick={openSettingsFromProfile}>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => openSettingsFromProfile("ai-providers")}
+              >
                 <Cpu size={14} />
                 <span>AI Providers</span>
               </button>
-              <button type="button" role="menuitem" onClick={openSettingsFromProfile}>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => openSettingsFromProfile("models")}
+              >
                 <Settings size={14} />
                 <span>Model settings</span>
               </button>
             </div>
             <div className="profile-menu-section">
-              <button type="button" role="menuitem">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => openProfileInfoPanel("help")}
+              >
                 <HelpCircle size={14} />
                 <span>Help</span>
               </button>
-              <button type="button" role="menuitem">
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => openProfileInfoPanel("about")}
+              >
                 <Info size={14} />
                 <span>About Loom</span>
               </button>
             </div>
             <div className="profile-menu-section profile-menu-footer">
-              <button type="button" role="menuitem">
-                <LogOut size={14} />
-                <span>Log out</span>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => openSettingsFromProfile("context-memory")}
+              >
+                <Settings size={14} />
+                <span>Manage local profile</span>
               </button>
             </div>
           </div>
         )}
       </div>
+      {profileInfoPanel && (
+        <ProfileInfoDialog
+          panel={profileInfoPanel}
+          onClose={() => setProfileInfoPanel(null)}
+        />
+      )}
     </aside>
+  );
+}
+
+function ProfileInfoDialog({
+  panel,
+  onClose,
+}: {
+  panel: "help" | "about";
+  onClose: () => void;
+}) {
+  const isHelp = panel === "help";
+  return (
+    <div className="profile-info-backdrop" role="presentation" onMouseDown={onClose}>
+      <section
+        className="profile-info-dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-label={isHelp ? "Loom Help" : "About Loom"}
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="profile-info-header">
+          <div>
+            <span>{isHelp ? "Help" : "About"}</span>
+            <h2>{isHelp ? "Using Loom" : "Loom AI"}</h2>
+          </div>
+          <button type="button" className="icon-button subtle" onClick={onClose} aria-label="Close">
+            <X size={14} />
+          </button>
+        </div>
+        {isHelp ? (
+          <div className="profile-info-body">
+            <p>
+              Loom is a local-first AI browser.
+            </p>
+            <p>Use the address bar to move between Looms.</p>
+            <p>
+              Type <strong>#</strong> in the composer to reference Looms inline.
+            </p>
+            <p>Create Wefts from responses when you want to branch a thought.</p>
+            <p>
+              Everything stays connected to its origin while remaining independently
+              navigable.
+            </p>
+          </div>
+        ) : (
+          <div className="profile-info-body">
+            <p>Build your personal web from AI conversations.</p>
+            <p>
+              Loom turns linear AI chats into a Personal Web.
+            </p>
+            <p>Every answer becomes addressable.</p>
+            <p>Every response can be bookmarked, referenced, and reused.</p>
+            <p>
+              Every idea can branch into a new path while staying tied to its origin.
+            </p>
+            <p>Loom is your personal, writable, navigable AI web.</p>
+            <p>Browse your thinking.</p>
+            <p>Connect it.</p>
+            <p>Build on it.</p>
+          </div>
+        )}
+      </section>
+    </div>
   );
 }
 
@@ -14026,6 +14307,7 @@ function UserPromptContent({
     remainingReferences.forEach((link, referenceIndex) => {
       const tokenCandidates = Array.from(
         new Set([
+          composerReferenceTokenText(link, link.referenceDisplayMode ?? "title"),
           referenceTokenText(link, link.referenceDisplayMode ?? "title"),
           referenceTokenText(link, "title"),
           referenceTokenText(link, "code"),
@@ -14058,10 +14340,18 @@ function UserPromptContent({
         title={nextMatch.link.selectedText ?? nextMatch.link.title}
       >
         <span>
-          {referenceLabelForMode(
-            nextMatch.link,
-            nextMatch.link.referenceDisplayMode ?? "title"
-          )}
+          {isAttachmentReferenceLink(nextMatch.link)
+            ? formatAttachmentDisplayName(
+                referenceLabelForMode(
+                  nextMatch.link,
+                  nextMatch.link.referenceDisplayMode ?? "title"
+                ),
+                26
+              )
+            : referenceLabelForMode(
+                nextMatch.link,
+                nextMatch.link.referenceDisplayMode ?? "title"
+              )}
         </span>
       </button>
     );
@@ -14084,7 +14374,14 @@ function UserPromptContent({
           onBlur={onReferenceHintClose}
           title={link.selectedText ?? link.title}
         >
-          <span>{referenceLabelForMode(link, link.referenceDisplayMode ?? "title")}</span>
+          <span>
+            {isAttachmentReferenceLink(link)
+              ? formatAttachmentDisplayName(
+                  referenceLabelForMode(link, link.referenceDisplayMode ?? "title"),
+                  26
+                )
+              : referenceLabelForMode(link, link.referenceDisplayMode ?? "title")}
+          </span>
         </button>
       ))}
       {remainingReferences.length > 0 && text ? " " : ""}
@@ -14307,7 +14604,11 @@ function ChatTranscript({
   onContinueTruncatedResponse: (responseId: string) => void;
   onEditPrompt: (loomId: string, responseId: string, nextPrompt: string) => Promise<boolean>;
   onRegenerateFromPrompt: (loomId: string, responseId: string) => void;
-  onRetryPrompt: (loomId: string, responseId: string) => void;
+  onRetryPrompt: (
+    loomId: string,
+    responseId: string,
+    returnFocus?: HTMLElement | null
+  ) => void;
   showGenerationDebug: boolean;
 }) {
   const [sentReferenceHint, setSentReferenceHint] = useState<{
@@ -14795,8 +15096,8 @@ function ChatTranscript({
                         aria-label="Retry from this message"
                         data-testid={`retry-prompt-${displayResponse.id}`}
                         title="Retry"
-                        onClick={() => {
-                          onRetryPrompt(conversation.id, displayResponse.id);
+                        onClick={(event) => {
+                          onRetryPrompt(conversation.id, displayResponse.id, event.currentTarget);
                         }}
                       >
                         <RotateCcw size={16} />
@@ -15143,6 +15444,7 @@ function PromptComposer({
   const modelButtonRef = useRef<HTMLButtonElement>(null);
   const modelMenuRef = useRef<HTMLDivElement>(null);
   const mentionMenuRef = useRef<HTMLDivElement>(null);
+  const draftRef = useRef(draft);
   const insertedPathsRef = useRef<Set<string>>(new Set());
   const activeDraftKeyRef = useRef("");
   const historiesRef = useRef<Record<string, ComposerHistoryState>>({});
@@ -15162,6 +15464,7 @@ function PromptComposer({
     left: number;
     top: number;
     minWidth: number;
+    height: number;
     placement: "top" | "bottom";
   } | null>(null);
   const [referencePickerOpen, setReferencePickerOpen] = useState(false);
@@ -15348,6 +15651,51 @@ function PromptComposer({
     () => sortAttachmentsBySelection(draft.attachments ?? []),
     [draft.attachments]
   );
+  useEffect(() => {
+    if (!currentAttachments.some(attachmentParseActive)) return;
+    let cancelled = false;
+    const refreshAttachments = async () => {
+      try {
+        const result = await engineClient.listAttachments({ loomId: draftKey });
+        if (cancelled) return;
+        const byId = new globalThis.Map(
+          result.attachments.map((attachment) => [attachment.attachmentId, attachment])
+        );
+        const nextAttachments = (draftRef.current.attachments ?? []).map((attachment) => {
+          const attachmentId = attachment.attachmentId ?? attachment.id;
+          const stored = byId.get(attachmentId);
+          return stored
+            ? {
+                ...attachment,
+                id: stored.attachmentId,
+                attachmentId: stored.attachmentId,
+                loomId: stored.loomId,
+                name: stored.fileName,
+                size: stored.sizeBytes,
+                type: stored.mimeType ?? attachment.type,
+                extension: stored.extension,
+                kind: stored.kind,
+                parseStatus: stored.parseStatus,
+                parser: stored.parser,
+                error: stored.error,
+                thumbnailDataUrl: stored.thumbnailDataUrl,
+                parsedCharCount: stored.parsedCharCount,
+                metadataJson: stored.metadataJson,
+              }
+            : attachment;
+        });
+        updateDraftAttachments(nextAttachments);
+      } catch {
+        // Keep current chip state; upload error handling already reports failures.
+      }
+    };
+    void refreshAttachments();
+    const interval = window.setInterval(refreshAttachments, 900);
+    return () => {
+      cancelled = true;
+      window.clearInterval(interval);
+    };
+  }, [currentAttachments, draftKey, engineClient]);
   const draftAttachedReferences = useMemo(
     () => splitPromptReferences(draft.links).attached,
     [draft.links]
@@ -15401,6 +15749,10 @@ function PromptComposer({
     });
     return ranks;
   }, [visibleAttachedReferences, draftInlineReferences]);
+
+  useEffect(() => {
+    draftRef.current = draft;
+  }, [draft]);
 
   const filteredAttachItems = useMemo(() => {
     const query = attachSearch.trim().toLowerCase();
@@ -15646,29 +15998,39 @@ function PromptComposer({
 
       const buttonRect = button.getBoundingClientRect();
       const menuRect = menu.getBoundingClientRect();
+      const topBarRect = document.querySelector(".top-browser-bar")?.getBoundingClientRect();
       const viewportPadding = 12;
+      const topBoundary = Math.max(viewportPadding, (topBarRect?.bottom ?? 0) + 8);
       const gap = 6;
       const minWidth = Math.max(buttonRect.width, 430);
-      const fixedMenuHeight = Math.min(360, window.innerHeight - viewportPadding * 2);
+      const desiredMenuHeight = 360;
+      const minimumMenuHeight = 220;
+      const availableAbove = Math.max(0, buttonRect.top - gap - topBoundary);
+      const availableBelow = Math.max(
+        0,
+        window.innerHeight - viewportPadding - buttonRect.bottom - gap
+      );
+      const openAbove =
+        availableAbove >= minimumMenuHeight || availableAbove >= availableBelow;
+      const fixedMenuHeight = openAbove
+        ? Math.min(desiredMenuHeight, Math.max(minimumMenuHeight, availableAbove))
+        : Math.min(desiredMenuHeight, Math.max(minimumMenuHeight, availableBelow));
 
       let left = buttonRect.left;
-      let top = buttonRect.bottom + gap;
-      let placement: "top" | "bottom" = "bottom";
-
-      if (top + fixedMenuHeight > window.innerHeight - viewportPadding) {
-        const aboveTop = buttonRect.top - gap - fixedMenuHeight;
-        if (aboveTop >= viewportPadding) {
-          top = aboveTop;
-          placement = "top";
-        }
-      }
+      const top = openAbove
+        ? Math.max(topBoundary, buttonRect.top - gap - fixedMenuHeight)
+        : Math.min(
+            buttonRect.bottom + gap,
+            window.innerHeight - viewportPadding - fixedMenuHeight
+          );
+      const placement: "top" | "bottom" = openAbove ? "top" : "bottom";
 
       const width = Math.max(menuRect.width, minWidth);
       if (left + width > window.innerWidth - viewportPadding) {
         left = Math.max(viewportPadding, window.innerWidth - width - viewportPadding);
       }
 
-      setAttachPopoverStyle({ left, top, minWidth: width, placement });
+      setAttachPopoverStyle({ left, top, minWidth: width, height: fixedMenuHeight, placement });
     }
 
     const raf = window.requestAnimationFrame(updateAttachPopoverPosition);
@@ -15919,7 +16281,8 @@ function PromptComposer({
     token.dataset.loomDisplayMode = displayMode;
     if (nextLink.referenceCode) token.dataset.loomCode = nextLink.referenceCode;
     delete token.dataset.loomCustomLabel;
-    token.textContent = referenceTokenText(nextLink, referenceDisplayMode);
+    token.title = nextLink.title;
+    token.textContent = composerReferenceTokenText(nextLink, referenceDisplayMode);
     window.requestAnimationFrame(() => commitDraftChange("external-reference"));
   }
 
@@ -16002,7 +16365,8 @@ function PromptComposer({
     };
     token.dataset.loomCustomLabel = customLabel;
     if (nextLink.referenceCode) token.dataset.loomCode = nextLink.referenceCode;
-    token.textContent = referenceTokenText(nextLink, referenceDisplayMode);
+    token.title = nextLink.title;
+    token.textContent = composerReferenceTokenText(nextLink, referenceDisplayMode);
     setTokenRenamePopover(null);
     window.requestAnimationFrame(() => commitDraftChange("external-reference"));
   }
@@ -16321,7 +16685,8 @@ function PromptComposer({
     if (displayLink.sourceCanonicalUri) token.dataset.loomSourceCanonicalUri = displayLink.sourceCanonicalUri;
     if (displayLink.fragmentHash) token.dataset.loomFragmentHash = displayLink.fragmentHash;
     if (displayLink.createdAt) token.dataset.loomCreatedAt = String(displayLink.createdAt);
-    token.textContent = referenceTokenText(displayLink, referenceDisplayMode);
+    token.title = displayLink.title;
+    token.textContent = composerReferenceTokenText(displayLink, referenceDisplayMode);
     token.addEventListener("mouseenter", () => scheduleAddressHintForToken(token));
     token.addEventListener("mouseover", () => scheduleAddressHintForToken(token));
     token.addEventListener("mousemove", () => scheduleAddressHintForToken(token));
@@ -16381,8 +16746,8 @@ function PromptComposer({
     } else {
       delete token.dataset.loomSourceCanonicalUri;
     }
-    token.removeAttribute("title");
-    token.textContent = referenceTokenText(displayLink, referenceDisplayMode);
+    token.title = displayLink.title;
+    token.textContent = composerReferenceTokenText(displayLink, referenceDisplayMode);
   }
 
   function normalizeEditorReferenceTokens() {
@@ -17017,6 +17382,7 @@ function PromptComposer({
       ...extractDraftFromEditor(),
       attachments: nextAttachments,
     };
+    draftRef.current = nextDraft;
     const history = getHistoryState();
     const entries = history.entries.slice(0, history.index + 1);
     history.entries = [...entries, nextDraft];
@@ -17030,34 +17396,124 @@ function PromptComposer({
     onDraftChange(nextDraft);
   }
 
+  function readFileAsBase64(file: File) {
+    return new Promise<string>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onerror = () => reject(new Error("File could not be read."));
+      reader.onload = () => {
+        const result = typeof reader.result === "string" ? reader.result : "";
+        resolve(result.includes(",") ? result.split(",").pop() ?? "" : result);
+      };
+      reader.readAsDataURL(file);
+    });
+  }
+
+  async function uploadAttachment(file: File, pendingAttachment: ComposerAttachment) {
+    try {
+      const contentBase64 = await readFileAsBase64(file);
+      const result = await engineClient.createAttachment({
+        loomId: draftKey,
+        fileName: file.name,
+        mimeType: file.type || undefined,
+        sizeBytes: file.size,
+        contentBase64,
+      });
+      const stored = result.attachment;
+      updateDraftAttachments(
+        (draftRef.current.attachments ?? []).map((attachment) =>
+          attachment.id === pendingAttachment.id
+            ? {
+                ...attachment,
+                id: stored.attachmentId,
+                attachmentId: stored.attachmentId,
+                loomId: stored.loomId,
+                name: stored.fileName,
+                size: stored.sizeBytes,
+                type: stored.mimeType ?? file.type ?? "File",
+                extension: stored.extension,
+                kind: stored.kind,
+                parseStatus: stored.parseStatus,
+                parser: stored.parser,
+                error: stored.error,
+                thumbnailDataUrl: stored.thumbnailDataUrl,
+                parsedCharCount: stored.parsedCharCount,
+                metadataJson: stored.metadataJson,
+              }
+            : attachment
+        )
+      );
+    } catch (error) {
+      updateDraftAttachments(
+        (draftRef.current.attachments ?? []).map((attachment) =>
+          attachment.id === pendingAttachment.id
+            ? {
+                ...attachment,
+                parseStatus: "failed",
+                error: error instanceof Error ? error.message : "Attachment failed.",
+              }
+            : attachment
+        )
+      );
+    }
+  }
+
   function addAttachments(files: FileList | null) {
     if (!files || files.length === 0) return;
-    const existing = draft.attachments ?? [];
+    const existing = draftRef.current.attachments ?? [];
+    const availableSlots = MAX_COMPOSER_ATTACHMENTS - existing.length;
+    if (availableSlots <= 0) {
+      setAttachFeedback(`You can attach up to ${MAX_COMPOSER_ATTACHMENTS} files.`);
+      return;
+    }
     const seen = new Set(
       existing.map((attachment) => `${attachment.name}:${attachment.size}:${attachment.lastModified}`)
     );
     const next = [...existing];
-    Array.from(files).forEach((file) => {
+    const pendingUploads: Array<{ file: File; attachment: ComposerAttachment }> = [];
+    const selectedFiles = Array.from(files);
+    const acceptedFiles = selectedFiles.slice(0, availableSlots);
+    if (selectedFiles.length > acceptedFiles.length) {
+      setAttachFeedback(`You can attach up to ${MAX_COMPOSER_ATTACHMENTS} files.`);
+    }
+    acceptedFiles.forEach((file) => {
       const key = `${file.name}:${file.size}:${file.lastModified}`;
       if (seen.has(key)) return;
+      if (file.size > MAX_ATTACHMENT_BYTES) {
+        setAttachFeedback(`File is too large. Files can be up to ${MAX_ATTACHMENT_SIZE_LABEL}.`);
+        return;
+      }
       seen.add(key);
       const attachedAt = Date.now() + next.length;
-      next.push({
+      const pendingAttachment: ComposerAttachment = {
         id: key,
         name: file.name,
         size: file.size,
         type: file.type || "File",
+        parseStatus: "parsing",
         lastModified: file.lastModified,
         attachedAt,
-      });
+      };
+      next.push(pendingAttachment);
+      pendingUploads.push({ file, attachment: pendingAttachment });
     });
     updateDraftAttachments(next);
+    pendingUploads.forEach(({ file, attachment }) => {
+      void uploadAttachment(file, attachment);
+    });
   }
 
   function removeAttachment(attachmentId: string) {
+    const attachment = (draftRef.current.attachments ?? []).find((item) => item.id === attachmentId);
+    if (attachment?.attachmentId) {
+      void engineClient.deleteAttachment({ attachmentId: attachment.attachmentId });
+    }
+    const attachmentLink = attachment ? attachmentToLoomLink(attachment) : null;
     updateDraftAttachments(
-      (draft.attachments ?? []).filter((attachment) => attachment.id !== attachmentId)
+      (draftRef.current.attachments ?? []).filter((attachment) => attachment.id !== attachmentId)
     );
+    if (attachmentLink) {
+      onRemoveLink(attachmentLink);
+    }
   }
 
   async function submitComposer() {
@@ -17085,8 +17541,7 @@ function PromptComposer({
       draftForSend.html.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
     const meaningful =
       promptText.length > 0 ||
-      draftForSend.links.length > 0 ||
-      Boolean(draftForSend.attachments?.length);
+      draftForSend.links.length > 0;
     if (!meaningful) return;
     onUserTyping();
     attachedReferences.forEach((link) => onRemoveAttachedReference(link));
@@ -17326,16 +17781,50 @@ function PromptComposer({
           <div className="attached-file-row" aria-label="File attachments">
             {currentAttachments.map((attachment) => (
               <span
-                className="file-attachment-chip"
+                role="button"
+                tabIndex={0}
+                className={`file-attachment-chip attachment-status-${attachment.parseStatus ?? "pending"}`}
                 key={attachment.id}
-                title={`${attachment.name} (${formatAttachmentSize(attachment.size)})`}
+                data-testid={`attachment-token-${attachment.name}`}
+                title={`${attachment.name} (${formatAttachmentSize(attachment.size)}) · ${attachmentStatusLabel(attachment)}`}
+                draggable
+                onDragStart={(event) => setLoomDragPayload(event, attachmentToLoomLink(attachment))}
+                onClick={() => {
+                  if (!attachment.attachmentId) {
+                    setAttachFeedback("File is still uploading");
+                    return;
+                  }
+                  if (attachment.parseStatus !== "ready") {
+                    setAttachFeedback(
+                      attachment.error ?? "This file is not ready for prompt context."
+                    );
+                    return;
+                  }
+                  const link = attachmentToLoomLink(attachment);
+                  if (isReferenceSelected(link)) return;
+                  const resolvedLink = insertTokenAtEnd(link);
+                  onDropLink(resolvedLink);
+                  window.requestAnimationFrame(() => commitDraftChange("reference-insert"));
+                }}
+                onKeyDown={(event) => {
+                  if (event.key !== "Enter" && event.key !== " ") return;
+                  event.preventDefault();
+                  event.currentTarget.click();
+                }}
               >
-                <Paperclip size={13} />
-                <span>{attachment.name}</span>
-                <small>{formatAttachmentSize(attachment.size)}</small>
+                {attachmentParseActive(attachment) ? (
+                  <LoaderCircle className="attachment-spinner" size={13} />
+                ) : (
+                  <Paperclip size={13} />
+                )}
+                <span>{formatAttachmentDisplayName(attachment.name)}</span>
+                <small>{attachmentStatusLabel(attachment)} · {formatAttachmentSize(attachment.size)}</small>
                 <button
                   type="button"
-                  onClick={() => removeAttachment(attachment.id)}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    removeAttachment(attachment.id);
+                  }}
                   aria-label={`Remove ${attachment.name}`}
                 >
                   <X size={12} />
@@ -17551,7 +18040,7 @@ function PromptComposer({
           <Tooltip label="Attach" placement="bottom-right">
             <button
               ref={attachButtonRef}
-              className="composer-icon-action"
+              className={attachPickerOpen ? "composer-icon-action active" : "composer-icon-action"}
               aria-label="Attach"
               title="Attach"
               aria-haspopup="dialog"
@@ -17579,12 +18068,14 @@ function PromptComposer({
                       left: attachPopoverStyle.left,
                       top: attachPopoverStyle.top,
                       minWidth: attachPopoverStyle.minWidth,
+                      height: attachPopoverStyle.height,
                       visibility: "visible",
                     }
                   : {
                       left: 0,
                       top: 0,
                       minWidth: 430,
+                      height: 360,
                       visibility: "hidden",
                     }
               }
@@ -18378,17 +18869,23 @@ function AttachContentDropdown({
                 </div>
               );
             })}
-            <AttachFilesSection
-              attachments={attachments}
-              fileInputRef={fileInputRef}
-              onAddFiles={onAddFiles}
-              onRemoveAttachment={onRemoveAttachment}
-            />
+            {attachments.length > 0 && (
+              <AttachFilesSection
+                attachments={attachments}
+                fileInputRef={fileInputRef}
+                allowUpload={false}
+                allowRemove={false}
+                onAddFiles={onAddFiles}
+                onRemoveAttachment={onRemoveAttachment}
+              />
+            )}
           </>
         ) : tab === "files" ? (
           <AttachFilesSection
             attachments={attachments}
             fileInputRef={fileInputRef}
+            allowUpload={true}
+            allowRemove={true}
             onAddFiles={onAddFiles}
             onRemoveAttachment={onRemoveAttachment}
           />
@@ -18406,53 +18903,72 @@ function AttachContentDropdown({
 function AttachFilesSection({
   attachments,
   fileInputRef,
+  allowUpload,
+  allowRemove,
   onAddFiles,
   onRemoveAttachment,
 }: {
   attachments: ComposerAttachment[];
   fileInputRef: RefObject<HTMLInputElement>;
+  allowUpload: boolean;
+  allowRemove: boolean;
   onAddFiles: (files: FileList | null) => void;
   onRemoveAttachment: (attachmentId: string) => void;
 }) {
   return (
     <div className="attach-content-section">
       <h3>Files</h3>
-      <button
-        type="button"
-        className="attach-file-action"
-        onClick={() => fileInputRef.current?.click()}
-      >
-        <Paperclip size={14} />
-        <span>Add file</span>
-      </button>
-      <input
-        ref={fileInputRef}
-        type="file"
-        multiple
-        className="visually-hidden-file-input"
-        onChange={(event) => {
-          onAddFiles(event.currentTarget.files);
-          event.currentTarget.value = "";
-        }}
-      />
+      {allowUpload && (
+        <>
+          <button
+            type="button"
+            className="attach-file-action"
+            title="Attach local file"
+            aria-label="Attach local file"
+            onClick={() => fileInputRef.current?.click()}
+          >
+            <Paperclip size={14} />
+            <span>Add file</span>
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            className="visually-hidden-file-input"
+            onChange={(event) => {
+              onAddFiles(event.currentTarget.files);
+              event.currentTarget.value = "";
+            }}
+          />
+        </>
+      )}
       {attachments.length === 0 ? (
         <div className="attach-file-empty">No files attached.</div>
       ) : (
         attachments.map((attachment) => (
-          <div className="attach-file-row" key={attachment.id}>
-            <Paperclip size={14} />
+          <div
+            className={`attach-file-row attachment-status-${attachment.parseStatus ?? "pending"}`}
+            key={attachment.id}
+          >
+            {attachmentParseActive(attachment) ? (
+              <LoaderCircle className="attachment-spinner" size={14} />
+            ) : (
+              <Paperclip size={14} />
+            )}
             <span>
-              <strong>{attachment.name}</strong>
-              <small>{formatAttachmentSize(attachment.size)}</small>
+              <strong title={attachment.name}>{formatAttachmentDisplayName(attachment.name)}</strong>
+              <small>{attachmentStatusLabel(attachment)} · {formatAttachmentSize(attachment.size)}</small>
             </span>
-            <button
-              type="button"
-              onClick={() => onRemoveAttachment(attachment.id)}
-              aria-label={`Remove ${attachment.name}`}
-              title="Remove file"
-            >
-              <X size={13} />
-            </button>
+            {allowRemove && (
+              <button
+                type="button"
+                onClick={() => onRemoveAttachment(attachment.id)}
+                aria-label={`Remove ${attachment.name}`}
+                title="Remove file"
+              >
+                <X size={13} />
+              </button>
+            )}
           </div>
         ))
       )}

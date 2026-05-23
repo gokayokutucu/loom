@@ -131,11 +131,42 @@ export interface SpeechSetupStatus {
   providerHealth: SpeechProviderHealth;
 }
 
+export interface OcrRuntimeConfig {
+  enabled: boolean;
+  provider: string;
+  commandPath?: string | null;
+  pdfRasterizerCommandPath?: string | null;
+  language: string;
+  dpi: number;
+  timeoutSeconds: number;
+  maxPagesPerFile: number;
+  maxImagePixels: number;
+  tempDir?: string | null;
+}
+
+export interface OcrProviderHealth {
+  status: "disabled" | "configured" | "unavailable" | string;
+  provider: string;
+  enabled: boolean;
+  commandPath?: string | null;
+  rasterizerCommandPath?: string | null;
+  language: string;
+  dpi: number;
+  message: string;
+  warnings: string[];
+}
+
 export interface LoomServiceRuntimeConfig {
   speech: SpeechToTextRuntimeConfig;
+  ocr?: OcrRuntimeConfig;
   memory?: {
+    enabled?: boolean;
     referenceRecentLooms?: boolean;
     referenceSavedMemories?: boolean;
+    nickname?: string;
+    occupation?: string;
+    stylePreferences?: string;
+    moreAboutYou?: string;
   };
   providers?: {
     defaultMainModel?: string;
@@ -155,11 +186,30 @@ export interface UpdateSpeechToTextConfigInput {
   localCommandTranscriptFileExtension?: string;
 }
 
+export interface UpdateOcrConfigInput {
+  enabled?: boolean;
+  provider?: string;
+  commandPath?: string | null;
+  pdfRasterizerCommandPath?: string | null;
+  language?: string;
+  dpi?: number;
+  timeoutSeconds?: number;
+  maxPagesPerFile?: number;
+  maxImagePixels?: number;
+  tempDir?: string | null;
+}
+
 export interface UpdateServiceConfigInput {
   speech?: UpdateSpeechToTextConfigInput;
+  ocr?: UpdateOcrConfigInput;
   memory?: {
+    enabled?: boolean;
     referenceRecentLooms?: boolean;
     referenceSavedMemories?: boolean;
+    nickname?: string;
+    occupation?: string;
+    stylePreferences?: string;
+    moreAboutYou?: string;
   };
   providers?: {
     defaultMainModel?: string;
@@ -384,6 +434,58 @@ export interface SendMessageInput {
   };
   persistWorkflow?: boolean;
   signal?: AbortSignal;
+}
+
+export type AttachmentParseStatus =
+  | "queued"
+  | "parsing"
+  | "extracting_text"
+  | "ocr_needed"
+  | "ocr_running"
+  | "ready"
+  | "failed"
+  | "unsupported";
+
+export interface AttachmentItem {
+  attachmentId: string;
+  loomId: string;
+  fileName: string;
+  mimeType?: string;
+  extension?: string;
+  sizeBytes: number;
+  kind: string;
+  parseStatus: AttachmentParseStatus;
+  parser?: string;
+  error?: string;
+  thumbnailDataUrl?: string;
+  parsedCharCount?: number;
+  metadataJson?: JsonValue;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CreateAttachmentInput {
+  loomId: string;
+  fileName: string;
+  mimeType?: string;
+  sizeBytes: number;
+  contentBase64: string;
+}
+
+export interface CreateAttachmentResult {
+  attachment: AttachmentItem;
+}
+
+export interface ListAttachmentsInput {
+  loomId: string;
+}
+
+export interface ListAttachmentsResult {
+  attachments: AttachmentItem[];
+}
+
+export interface DeleteAttachmentInput {
+  attachmentId: string;
 }
 
 export interface RegenerateFromResponseInput {
@@ -803,6 +905,9 @@ export interface ExportLoomResult {
 export interface TypeScriptLocalLoomEngineDependencies {
   graphRepository?: LoomGraphRepository;
   sendMessage?: (input: SendMessageInput) => AsyncIterable<EngineResponseEvent>;
+  createAttachment?: (input: CreateAttachmentInput) => Promise<CreateAttachmentResult>;
+  listAttachments?: (input: ListAttachmentsInput) => Promise<ListAttachmentsResult>;
+  deleteAttachment?: (input: DeleteAttachmentInput) => Promise<void>;
   regenerateFromResponse?: (
     input: RegenerateFromResponseInput
   ) => AsyncIterable<EngineResponseEvent>;
