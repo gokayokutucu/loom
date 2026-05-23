@@ -3,6 +3,7 @@ import type { ResponseItem } from "../types";
 export type AssistantMarkdownBlock =
   | { kind: "paragraph"; text: string }
   | { kind: "heading"; level: 1 | 2 | 3 | 4 | 5 | 6; text: string }
+  | { kind: "thematicBreak" }
   | { kind: "list"; ordered: boolean; items: string[] }
   | { kind: "code"; language: string; code: string; closed: boolean }
   | {
@@ -163,6 +164,11 @@ function parseTableAlignment(line: string) {
   });
 }
 
+function isMarkdownThematicBreak(line: string) {
+  const trimmed = line.trim();
+  return /^(?:-{3,}|\*{3,}|_{3,})$/.test(trimmed);
+}
+
 export function parseAssistantMarkdown(markdown: string): AssistantMarkdownBlock[] {
   const blocks: AssistantMarkdownBlock[] = [];
   let paragraphLines: string[] = [];
@@ -252,6 +258,12 @@ export function parseAssistantMarkdown(markdown: string): AssistantMarkdownBlock
       return;
     }
 
+    if (isMarkdownThematicBreak(line)) {
+      flushParagraph();
+      blocks.push({ kind: "thematicBreak" });
+      return;
+    }
+
     const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
     if (headingMatch) {
       flushParagraph();
@@ -294,6 +306,7 @@ export function assistantMarkdownToPlainText(markdown: string) {
     .map((block) => {
       if (block.kind === "heading") return block.text;
       if (block.kind === "paragraph") return stripInlineMarkdown(block.text);
+      if (block.kind === "thematicBreak") return "";
       if (block.kind === "list") return block.items.map((item) => stripInlineMarkdown(item)).join("\n");
       if (block.kind === "code") return block.code;
       const rows = [block.headers, ...block.rows];
@@ -321,6 +334,7 @@ export function assistantMarkdownToSafeHtml(markdown: string) {
         return `<h${block.level}>${renderInlineHtml(block.text)}</h${block.level}>`;
       }
       if (block.kind === "paragraph") return `<p>${renderInlineHtml(block.text)}</p>`;
+      if (block.kind === "thematicBreak") return `<hr>`;
       if (block.kind === "list") {
         const tag = block.ordered ? "ol" : "ul";
         return `<${tag}>${block.items
@@ -354,9 +368,30 @@ function tableCellHtml(
 }
 
 function renderInlineHtml(value: string) {
-  return escapeHtml(value)
-    .replace(/`([^`]+)`/g, "<code>$1</code>")
-    .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  const tokenPattern = /(`[^`]+`|\*\*[^*]+\*\*|\[([^\]]+)\]\((loom:\/\/[^)\s]+)\))/g;
+  let cursor = 0;
+  let html = "";
+  let match: RegExpExecArray | null;
+
+  while ((match = tokenPattern.exec(value)) !== null) {
+    if (match.index > cursor) html += escapeHtml(value.slice(cursor, match.index));
+    const token = match[0];
+    if (token.startsWith("`")) {
+      html += `<code>${escapeHtml(token.slice(1, -1))}</code>`;
+    } else if (token.startsWith("**")) {
+      html += `<strong>${escapeHtml(token.slice(2, -2))}</strong>`;
+    } else {
+      const label = match[2] ?? "";
+      const address = match[3] ?? "";
+      html += `<a href="${escapeHtmlAttribute(address)}" data-loom-reference-title="${escapeHtmlAttribute(
+        label
+      )}">${escapeHtml(label)}</a>`;
+    }
+    cursor = match.index + token.length;
+  }
+
+  if (cursor < value.length) html += escapeHtml(value.slice(cursor));
+  return html;
 }
 
 function stripInlineMarkdown(value: string) {
@@ -381,4 +416,8 @@ function escapeHtml(value: string) {
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+function escapeHtmlAttribute(value: string) {
+  return escapeHtml(value).replace(/'/g, "&#39;");
 }

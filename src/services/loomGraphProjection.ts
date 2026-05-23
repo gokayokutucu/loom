@@ -5,6 +5,7 @@
  */
 import type { Conversation, LoomForkRecord, LoomLink, ResponseItem } from "../types";
 import { cleanMarkdownDisplayText } from "./assistantMarkdown";
+import { polishDisplayTitle } from "./displayTitlePolish";
 
 export type LoomGraphProjectionNodeKind =
   | "root"
@@ -101,7 +102,8 @@ function responseFullContent(response: ResponseItem) {
 }
 
 function nodeTitle(response: ResponseItem) {
-  return cleanMarkdownDisplayText(response.meta?.title || response.title) || "Untitled response";
+  const title = cleanMarkdownDisplayText(response.meta?.title || response.title);
+  return polishDisplayTitle(title) || "Untitled response";
 }
 
 function responseCode(response: ResponseItem) {
@@ -245,7 +247,7 @@ export function buildLoomGraphProjection({
       id: rootNodeId,
       kind: isActiveRoot ? "root" : "weft",
       loomId: loom.id,
-      title: cleanMarkdownDisplayText(loom.title) || "Untitled Loom",
+      title: polishDisplayTitle(cleanMarkdownDisplayText(loom.title)) || "Untitled Loom",
       code: loom.meta?.code,
       summary: cleanMarkdownDisplayText(loom.summary),
       canonicalUri: loom.meta?.canonicalUri,

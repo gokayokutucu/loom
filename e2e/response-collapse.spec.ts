@@ -2,7 +2,10 @@
 // This spec exercises prompt and assistant response rendering over legacy seeded UI state.
 import { expect, type Page, test } from "@playwright/test";
 
-async function openMockApp(page: Page) {
+async function openMockApp(
+  page: Page,
+  settings: Record<string, unknown> = {}
+) {
   await page.addInitScript(() => {
     window.localStorage.clear();
     Object.defineProperty(navigator, "clipboard", {
@@ -23,6 +26,17 @@ async function openMockApp(page: Page) {
       JSON.stringify({ mockDataEnabled: true })
     );
   });
+  if (Object.keys(settings).length > 0) {
+    await page.addInitScript((appSettings) => {
+      const current = JSON.parse(
+        window.localStorage.getItem("loom-ai-app-settings-v1") ?? "{}"
+      ) as Record<string, unknown>;
+      window.localStorage.setItem(
+        "loom-ai-app-settings-v1",
+        JSON.stringify({ ...current, ...appSettings })
+      );
+    }, settings);
+  }
   await page.goto("/");
   await expect(page.getByTestId("loom-sidebar")).toBeVisible();
 }
@@ -146,6 +160,37 @@ test.describe("[pure-ui-rendering] Assistant response collapse", () => {
     await expect(content).toHaveClass(/is-collapsed/);
   });
 
+  test("message collapse setting disables long user message controls", async ({ page }) => {
+    await openMockApp(page, {
+      messageCollapse: { userMessages: false, responses: true },
+    });
+    await openArchitectureLoom(page);
+
+    const article = page.locator('[data-response-id="r-address-bar"]');
+    const userMessage = article.locator(".user-message");
+    const promptText = userMessage.locator(".user-message-prompt-text");
+
+    await forceUserPromptToLongVisualContent(page, "r-address-bar");
+
+    await expect(userMessage.locator(".user-message-collapse-toggle")).toHaveCount(0);
+    await expect(promptText).not.toHaveClass(/is-clamped/);
+  });
+
+  test("response collapse setting disables long response controls", async ({ page }) => {
+    await openMockApp(page, {
+      messageCollapse: { userMessages: true, responses: false },
+    });
+    await openArchitectureLoom(page);
+
+    const article = page.locator('[data-response-id="r-address-bar"]');
+    await forceResponseToLongVisualContent(page, "r-address-bar");
+
+    await expect(page.getByTestId("response-collapse-toggle-r-address-bar")).toHaveCount(0);
+    await expect(article.locator(".assistant-response-content")).not.toHaveClass(
+      /is-collapsed/
+    );
+  });
+
   test("short assistant responses do not show the collapse control", async ({ page }) => {
     await openMockApp(page);
     await openArchitectureLoom(page);
@@ -154,6 +199,18 @@ test.describe("[pure-ui-rendering] Assistant response collapse", () => {
     await expect(
       page.getByTestId("response-collapse-toggle-r-archive-delete")
     ).toHaveCount(0);
+  });
+
+  test("latest assistant response stays fully visible even when long", async ({ page }) => {
+    await openMockApp(page);
+    await openArchitectureLoom(page);
+
+    const article = page.locator('[data-response-id="r-composer"]');
+    await expect(article).toBeVisible();
+    await forceResponseToLongVisualContent(page, "r-composer");
+
+    await expect(page.getByTestId("response-collapse-toggle-r-composer")).toHaveCount(0);
+    await expect(article.locator(".assistant-response-content")).not.toHaveClass(/is-collapsed/);
   });
 
   test("code block responses keep their code block layout intact", async ({ page }) => {
@@ -174,5 +231,28 @@ test.describe("[pure-ui-rendering] Assistant response collapse", () => {
       };
     });
     expect(layout.articleWidth).toBeLessThanOrEqual(layout.viewportWidth);
+  });
+
+  test("select all is blocked on Loom reading surfaces but allowed in the prompt input", async ({
+    page,
+  }) => {
+    await openMockApp(page);
+    await openArchitectureLoom(page);
+
+    await page.locator('[data-response-id="r-address-bar"]').click();
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+    await expect
+      .poll(() => page.evaluate(() => window.getSelection()?.toString() ?? ""))
+      .toBe("");
+
+    const editor = page.getByRole("textbox", { name: "Prompt" }).first();
+    await editor.click();
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+    await page.keyboard.press("Backspace");
+    await page.keyboard.insertText("Select all remains available in inputs");
+    await page.keyboard.press(process.platform === "darwin" ? "Meta+A" : "Control+A");
+    await expect
+      .poll(() => page.evaluate(() => window.getSelection()?.toString() ?? ""))
+      .toBe("Select all remains available in inputs");
   });
 });

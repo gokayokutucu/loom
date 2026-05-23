@@ -1,7 +1,11 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy, Link2 } from "lucide-react";
 import { parseAssistantMarkdown } from "../services/assistantMarkdown";
-import type { ResponseCodeBlock } from "../types";
+import {
+  loomLinkFromMarkdownReference,
+  referenceLabelForMode,
+} from "../services/referenceDisplay";
+import type { LoomLink, ResponseCodeBlock } from "../types";
 
 const codeKeywords = new Set([
   "as",
@@ -38,9 +42,19 @@ const codeKeywords = new Set([
   "void",
 ]);
 
-function renderInlineMarkdown(text: string, keyPrefix: string) {
+interface InlineReferenceHandlers {
+  onOpenReference?: (link: LoomLink) => string | null;
+  onReferenceHint?: (link: LoomLink, target: HTMLElement) => void;
+  onReferenceHintClose?: () => void;
+}
+
+function renderInlineMarkdown(
+  text: string,
+  keyPrefix: string,
+  referenceHandlers: InlineReferenceHandlers = {}
+) {
   const elements: Array<string | JSX.Element> = [];
-  const tokenPattern = /(`[^`]+`|\*\*[^*]+\*\*)/g;
+  const tokenPattern = /(`[^`]+`|\*\*[^*]+\*\*|\[([^\]]+)\]\((loom:\/\/[^)\s]+)\))/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
 
@@ -55,12 +69,42 @@ function renderInlineMarkdown(text: string, keyPrefix: string) {
           {token.slice(2, -2)}
         </strong>
       );
-    } else {
+    } else if (token.startsWith("`")) {
       elements.push(
         <code key={`${keyPrefix}-code-${match.index}`}>
           {token.slice(1, -1)}
         </code>
       );
+    } else {
+      const link = loomLinkFromMarkdownReference(match[2] ?? "", match[3] ?? "");
+      if (link) {
+        elements.push(
+          <button
+            className="sent-prompt-reference-token assistant-reference-token"
+            key={`${keyPrefix}-reference-${match.index}`}
+            type="button"
+            onClick={() => referenceHandlers.onOpenReference?.(link)}
+            onMouseEnter={(event) =>
+              referenceHandlers.onReferenceHint?.(link, event.currentTarget)
+            }
+            onMouseLeave={referenceHandlers.onReferenceHintClose}
+            onFocus={(event) =>
+              referenceHandlers.onReferenceHint?.(link, event.currentTarget)
+            }
+            onBlur={referenceHandlers.onReferenceHintClose}
+            title={link.title}
+            data-loom-path={link.path}
+            data-loom-id={link.id}
+            data-loom-title={link.title}
+            data-loom-type={link.type}
+            data-loom-canonical-uri={link.canonicalUri}
+          >
+            <span>{referenceLabelForMode(link, "title")}</span>
+          </button>
+        );
+      } else {
+        elements.push(token);
+      }
     }
     cursor = match.index + token.length;
   }
@@ -261,20 +305,31 @@ export function AssistantMarkdownContent({
   codeBlocks,
   onCopyCode,
   onAddCodeReference,
+  onOpenReference,
+  onReferenceHint,
+  onReferenceHintClose,
 }: {
   markdown: string;
   codeBlocks?: ResponseCodeBlock[];
   onCopyCode?: (code: string) => Promise<boolean>;
   onAddCodeReference?: (codeBlock: ResponseCodeBlock) => Promise<boolean>;
+  onOpenReference?: (link: LoomLink) => string | null;
+  onReferenceHint?: (link: LoomLink, target: HTMLElement) => void;
+  onReferenceHintClose?: () => void;
 }) {
   let renderedCodeBlockIndex = -1;
+  const referenceHandlers = {
+    onOpenReference,
+    onReferenceHint,
+    onReferenceHintClose,
+  };
   return (
     <>
       {parseAssistantMarkdown(markdown).map((block, index) => {
         if (block.kind === "paragraph") {
           return (
             <p key={`paragraph-${index}`}>
-              {renderInlineMarkdown(block.text, `paragraph-${index}`)}
+              {renderInlineMarkdown(block.text, `paragraph-${index}`, referenceHandlers)}
             </p>
           );
         }
@@ -282,9 +337,12 @@ export function AssistantMarkdownContent({
           const Heading = `h${block.level}` as keyof JSX.IntrinsicElements;
           return (
             <Heading className="assistant-markdown-heading" key={`heading-${index}`}>
-              {renderInlineMarkdown(block.text, `heading-${index}`)}
+              {renderInlineMarkdown(block.text, `heading-${index}`, referenceHandlers)}
             </Heading>
           );
+        }
+        if (block.kind === "thematicBreak") {
+          return <hr className="assistant-markdown-rule" key={`rule-${index}`} />;
         }
         if (block.kind === "list") {
           const List = block.ordered ? "ol" : "ul";
@@ -292,7 +350,11 @@ export function AssistantMarkdownContent({
             <List className="assistant-markdown-list" key={`list-${index}`}>
               {block.items.map((item, itemIndex) => (
                 <li key={`${itemIndex}-${item}`}>
-                  {renderInlineMarkdown(item, `list-${index}-${itemIndex}`)}
+                  {renderInlineMarkdown(
+                    item,
+                    `list-${index}-${itemIndex}`,
+                    referenceHandlers
+                  )}
                 </li>
               ))}
             </List>
@@ -313,7 +375,11 @@ export function AssistantMarkdownContent({
                             : undefined
                         }
                       >
-                        {renderInlineMarkdown(header, `table-${index}-header-${headerIndex}`)}
+                        {renderInlineMarkdown(
+                          header,
+                          `table-${index}-header-${headerIndex}`,
+                          referenceHandlers
+                        )}
                       </th>
                     ))}
                   </tr>
@@ -332,7 +398,8 @@ export function AssistantMarkdownContent({
                         >
                           {renderInlineMarkdown(
                             row[cellIndex] ?? "",
-                            `table-${index}-${rowIndex}-${cellIndex}`
+                            `table-${index}-${rowIndex}-${cellIndex}`,
+                            referenceHandlers
                           )}
                         </td>
                       ))}

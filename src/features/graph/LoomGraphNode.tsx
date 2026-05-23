@@ -12,6 +12,7 @@ import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Handle, Position, type Node, type NodeProps } from "@xyflow/react";
 import { formatBadgeCode } from "../../services/displayCode";
 import { cleanMarkdownDisplayText } from "../../services/assistantMarkdown";
+import { polishDisplayTitle } from "../../services/displayTitlePolish";
 import { formatRelativeTimestamp } from "../../services/timeLabels";
 import type { LoomGraphProjectionNode } from "../../services/loomGraphProjection";
 import type { LoomForkRecord, ResponseItem } from "../../types";
@@ -97,7 +98,9 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
   const showSummary = Boolean(summaryText) && projectionNode.kind !== "response";
   const showPreview = Boolean(previewText);
   const showPending = projectionNode.kind === "response" && isResponsePending && !showPreview;
-  const nodeTitle = cleanMarkdownDisplayText(projectionNode.title) || projectionNode.title;
+  const nodeTitle =
+    polishDisplayTitle(cleanMarkdownDisplayText(projectionNode.title)) ||
+    projectionNode.title;
   const hasRevisionCarousel =
     projectionNode.kind === "response" &&
     revisionVariantCount > 1 &&
