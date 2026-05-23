@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  Loom turns AI conversations into an addressable, navigable, replayable personal web.
+  Loom turns AI conversations into an addressable, navigable, replayable personal web for reusable AI knowledge.
 </p>
 
 <p align="center">
@@ -25,7 +25,7 @@
   <!-- Loom demo GIF preview -->
 </p>
 
-Loom is a local-first AI runtime and desktop app for turning useful AI work into durable knowledge objects. Instead of losing answers inside long transcripts, you can browse them, ask across them, reference them, branch from them, attach local files, and reconstruct why a model saw a piece of context.
+Loom is a local-first AI runtime and desktop app for turning useful AI work into durable, reusable knowledge artifacts. Instead of losing answers inside long transcripts, you can browse them, ask across them, reference them, branch from them, attach local files, inspect retrieval lineage, and reconstruct why a model saw a piece of context.
 
 It is not a hosted SaaS, not a generic chat UI, not just RAG, and not an opaque memory wrapper. Loom is built around explicit context, provenance, graph navigation, and local ownership.
 
@@ -35,13 +35,15 @@ It is not a hosted SaaS, not a generic chat UI, not just RAG, and not an opaque 
 
 **Quick Ask** is the lightweight ask/search surface. It behaves more like an AI-native Spotlight or browser omnibox than a full transcript: fast, contextual, and ephemeral until you promote useful output into a Loom, Reference, or Weft.
 
+Quick Ask reduces context inflation. Instead of repeatedly replaying large conversations, you can ask lightweight contextual questions, then promote only the useful results into Looms, References, or Wefts when they become important.
+
 **Wefts** are exploration branches. They let an idea split into a new path while preserving origin context without copying hidden seed rows into the visible transcript.
 
 **References** make prior work reusable. A Response can be referenced in a new prompt, keeping provenance attached instead of relying on copy and paste.
 
 **Attachments** are local files you explicitly add as context. Parsed content is stored separately, chunked, deduped, and included only when you activate the attachment chip.
 
-**Graph** makes Loom non-linear. It connects Looms, Wefts, Responses, References, Bookmarks, attachments, and retrieval lineage so AI work can be navigated as knowledge, not just scrolled as chat.
+**Graph** makes Loom non-linear. It connects Looms, Wefts, Responses, References, Bookmarks, attachments, retrieval lineage, and provenance so AI work can be explored as a navigable knowledge graph instead of disposable chat history.
 
 **ContextManager** is Loom's context authority. It decides how recent conversation, explicit References, attachments, memories, Weft origin context, and retrieval candidates fit into the prompt budget.
 
@@ -67,6 +69,7 @@ It is not a hosted SaaS, not a generic chat UI, not just RAG, and not an opaque 
 
 - Address Bar navigation for Looms, Wefts, Responses, Bookmarks, and free-text Loom creation.
 - Quick Ask for lightweight ask/search/lookup flows that stay ephemeral until promoted.
+- Reusable context through Wefts, References, attachments, and retrieval lineage instead of repeatedly replaying large transcripts.
 - Weft-based exploration with hidden origin context and clean visible transcript semantics.
 - Graph navigation across Looms, Wefts, References, Bookmarks, attachments, and provenance links.
 - Explicit `#` References for composing new prompts from prior Responses.
@@ -76,6 +79,7 @@ It is not a hosted SaaS, not a generic chat UI, not just RAG, and not an opaque 
 - OCR-ready architecture for scanned PDF pages through an optional local Tesseract-style pipeline.
 - SQLite + FTS retrieval as an inspectable candidate layer under ContextManager policy.
 - Retrieval diagnostics designed for replayable provenance, attachment lineage, and context reconstruction.
+- Graph exploration for understanding how Looms, Wefts, References, attachments, and retrieval decisions connect together.
 - Packaged Electron desktop app with bundled Rust `loom-service` sidecar.
 - Ollama-backed local model support when Ollama and a model are installed.
 - Local Speech-to-Text flows where runtime and model setup are available.
@@ -90,6 +94,9 @@ Most AI interfaces still treat conversations as disposable linear transcripts:
 - memory becomes opaque
 - files are either ignored or dumped into prompts without provenance
 - graph relationships between ideas and artifacts disappear
+- users repeatedly re-explain the same context
+- retrieval and memory become impossible to inspect
+- token usage grows because conversations cannot be reused structurally
 
 Loom treats AI work as a local web of reusable artifacts:
 
@@ -99,9 +106,15 @@ Loom treats AI work as a local web of reusable artifacts:
 - every attachment can be explicit context instead of silent background data
 - every Quick Ask can stay temporary or become a reusable object when it matters
 - every graph edge can preserve where an idea, file, Reference, or retrieval result came from
-- retrieval can be inspected, budgeted, and reconstructed
+- conversations become reusable context instead of repeatedly replayed transcripts
+- Wefts let you continue from the exact point where an idea already exists
+- retrieval can reuse structured artifacts instead of re-inflating entire histories
 
-The goal is not to automate the user out of the loop. The goal is to make serious AI work navigable.
+The goal is not to automate the user out of the loop.
+
+Chat apps optimize for conversations. Loom optimizes for continuity. The system is designed to reduce context waste by turning AI work into reusable, addressable artifacts instead of repeatedly rebuilding the same context window from scratch.
+
+The goal is to make serious AI work navigable.
 
 ## Architecture
 
@@ -112,6 +125,7 @@ Loom is intentionally small at the top level:
 - **SQLite** as the canonical local store.
 - **ContextManager** as the policy authority for prompt assembly.
 - **SQLite FTS** as a local retrieval candidate layer.
+- Retrieval lineage and provenance diagnostics for reconstructable context assembly.
 - **Attachment pipeline** for local blob storage, parsing, chunking, dedupe, and parser metadata.
 - **Graph projection** for Loom, Weft, Reference, Bookmark, attachment, and provenance relationships.
 - **Ollama** as the current external local model runtime.
@@ -251,6 +265,8 @@ Longer-term:
 - image OCR as text extraction, separate from image understanding
 - semantic diff between Looms and Wefts
 - provenance visualization and replay/fork visualization
+- structural and semantic Weft diffing
+- graph-aware retrieval inspection
 - optional local vector embeddings
 - local multimodal runtimes when capability boundaries are clear
 
@@ -265,6 +281,7 @@ Loom is product-first infrastructure. Contributions should preserve these bounda
 - Explicit References and attachment chips outrank implicit retrieval.
 - Attachments are Loom-scoped, even when blobs and parsed artifacts are deduped.
 - Retrieval should stay inspectable and diagnosable.
+- Context reuse and provenance are product-level features, not implementation details.
 - Raw model thinking must never be persisted or re-used as future context.
 - Local-first behavior is the default.
 - Avoid dependency creep; add frameworks only after a concrete product gap is proven.
