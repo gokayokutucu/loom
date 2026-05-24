@@ -6007,6 +6007,26 @@ function App() {
     setPinnedConversationIds((current) =>
       current.filter((id) => !deletedLoomIds.has(id))
     );
+    setHistory((current) =>
+      current.filter(
+        (entry) => !deletedLoomIds.has(entry.navigationDestination?.loomId ?? "")
+      )
+    );
+    setNavigationStack((current) => {
+      const filtered = current.filter(
+        (entry) => !deletedLoomIds.has(entry.navigationDestination?.loomId ?? "")
+      );
+      if (filtered.length === current.length) return current;
+      const currentEntry = current[navigationIndex];
+      const currentEntryDeleted =
+        !currentEntry ||
+        deletedLoomIds.has(currentEntry.navigationDestination?.loomId ?? "");
+      if (!currentEntryDeleted) {
+        const newIndex = filtered.findIndex((e) => e.id === currentEntry.id);
+        setNavigationIndex(newIndex >= 0 ? newIndex : 0);
+      }
+      return filtered;
+    });
     if (deletedLoomIds.has(activeConversationId)) {
       openNewConversationDraft();
     }
