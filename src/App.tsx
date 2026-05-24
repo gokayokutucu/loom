@@ -8459,14 +8459,14 @@ function App() {
     });
   }
 
-  function changeConversationIcon(conversation: Conversation, iconKey: string, title: string) {
-    const nextTitle = normalizeLoomTitle(title);
+  function changeConversationIcon(conversation: Conversation, iconKey: string, tabLabel: string) {
+    const trimmed = tabLabel.trim();
+    const nextTabLabel = trimmed === conversation.title ? undefined : normalizeLoomTitle(trimmed);
     setConversations((current) =>
       current.map((item) =>
-        item.id === conversation.id ? { ...item, iconKey, title: nextTitle } : item
+        item.id === conversation.id ? { ...item, iconKey, tabLabel: nextTabLabel } : item
       )
     );
-    if (conversation.id === activeConversationId) setActiveObjectTitle(nextTitle);
     setIconPickerTarget(null);
   }
 
@@ -12877,7 +12877,7 @@ function Sidebar({
     const pinned = pinnedConversationIds.includes(conversation.id);
     const groupId = sidebarDnD.getGroupIdForConversation(conversation.id);
     const Icon = getConversationIconOption(conversation.iconKey).Icon;
-    const displayTitle = cleanPolishedDisplayTitle(conversation.title);
+    const displayTitle = cleanPolishedDisplayTitle(conversation.tabLabel ?? conversation.title);
     const displaySummary = cleanMarkdownDisplayTitle(conversation.summary);
     return (
       <div

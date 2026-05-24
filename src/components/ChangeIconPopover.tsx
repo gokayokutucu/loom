@@ -29,7 +29,7 @@ export function ChangeIconPopover({
 }) {
   const titleInputRef = useRef<HTMLInputElement | null>(null);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const [title, setTitle] = useState(conversation.title);
+  const [title, setTitle] = useState(conversation.tabLabel ?? conversation.title);
   const [query, setQuery] = useState("");
   const [selectedIconKey, setSelectedIconKey] = useState(
     conversation.iconKey ?? options[0].key
@@ -82,7 +82,7 @@ export function ChangeIconPopover({
             <SelectedIcon size={20} />
           </div>
           <div>
-            <span>Name &amp; icon</span>
+            <span>Tab label &amp; icon</span>
             <input
               ref={titleInputRef}
               id="icon-picker-title"

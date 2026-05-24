@@ -224,6 +224,8 @@ export type ReferenceDisplayMode = "title" | "code";
 export interface Conversation {
   id: string;
   title: string;
+  /** Optional display label shown only in the sidebar tab. Does not affect the Loom Surface title. */
+  tabLabel?: string;
   path: string;
   folder: string;
   summary: string;
