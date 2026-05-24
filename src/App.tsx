@@ -2916,7 +2916,7 @@ function App() {
       }));
     const bookmarkOptions = bookmarks.map((bookmark) => ({
       ...bookmark,
-      title: bookmark.editableTitle,
+      title: cleanPolishedDisplayTitle(bookmark.editableTitle) || bookmark.editableTitle,
       referenceCode: bookmark.referenceCode ?? bookmark.meta?.code,
       group: "Bookmarks" as const,
       subtitle: bookmark.lastUsed,
@@ -2955,13 +2955,14 @@ function App() {
   const attachContentItems = useMemo<AttachContentItem[]>(() => {
     const bookmarkItems = bookmarks.map((bookmark) => ({
       ...bookmark,
-      title: bookmark.editableTitle,
+      title: cleanPolishedDisplayTitle(bookmark.editableTitle) || bookmark.editableTitle,
       source: "bookmark" as const,
       subtitle: bookmark.path,
       keywords: ["Bookmark", bookmark.lastUsed],
     }));
     const historyItems = history.map((entry) => ({
       ...entry,
+      title: cleanPolishedDisplayTitle(entry.title) || entry.title,
       source: "history" as const,
       subtitle: entry.path,
       keywords: ["Loom History", entry.visitedAt],
@@ -2971,7 +2972,7 @@ function App() {
       return {
         id: conversation.id,
         type: getWeftOrigin(conversation.id) ? "loom" as const : "conversation" as const,
-        title: conversation.title,
+        title: cleanPolishedDisplayTitle(conversation.tabLabel ?? conversation.title) || conversation.title,
         path: conversation.path,
         badge: getWeftOrigin(conversation.id) ? typeLabel.loom : typeLabel.conversation,
         targetObjectId,
@@ -2995,14 +2996,14 @@ function App() {
         return {
         id: response.id,
         type: "response" as const,
-        title: response.title,
+        title: cleanPolishedDisplayTitle(response.title) || response.title,
         path: response.address,
         badge: typeLabel.response,
         targetObjectId,
         canonicalUri: response.meta?.canonicalUri ?? canonicalLoomUri("response", targetObjectId),
         meta: response.meta,
         source: "response" as const,
-        subtitle: response.question,
+        subtitle: cleanMarkdownDisplayTitle(response.question) || response.question,
         keywords: [
           "Response",
           ...(response.meta?.keywords ?? []),
