@@ -162,6 +162,12 @@ import {
 import { formatRelativeTimestamp } from "./services/timeLabels";
 import { formatBadgeCode } from "./services/displayCode";
 import {
+  codeSnippetFirstMeaningfulLine,
+  codeSnippetLanguageLabel,
+  codeSnippetSemanticTitle,
+  isReusableCodeSnippet,
+} from "./services/codeSnippetDisplay";
+import {
   getElectronPermissionsBridge,
   getElectronRuntimeInfo,
   getElectronWindowControls,
@@ -1096,17 +1102,6 @@ function sortAttachContentItemsBySelection(
     .map(({ item }) => item);
 }
 
-function codeSnippetFirstLine(code: string) {
-  return code
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .find(Boolean) ?? "Code block";
-}
-
-function codeSnippetLanguageLabel(language?: string) {
-  return language?.trim() || "text";
-}
-
 function codeSnippetAttachItemFromService(
   snippet: CodeSnippetReferenceItem
 ): AttachContentItem {
@@ -1114,19 +1109,20 @@ function codeSnippetAttachItemFromService(
   const sourceTitle =
     cleanMarkdownDisplayText(snippet.sourceResponseTitle ?? snippet.sourceResponseCode ?? "") ||
     "Response";
-  const firstLine = codeSnippetFirstLine(snippet.code);
+  const firstLine = codeSnippetFirstMeaningfulLine(snippet.code);
+  const semanticTitle = codeSnippetSemanticTitle(snippet);
   const sourceUri = snippet.sourceCanonicalUri ?? `loom://responses/${snippet.responseId}`;
   return {
     id: snippet.codeBlockId,
     type: "fragment",
-    title: `${language} code from ${sourceTitle}`,
+    title: semanticTitle,
     path: `${sourceUri}#code-block=${encodeURIComponent(snippet.codeBlockId)}`,
     badge: "Code",
     targetKind: "code_block",
     targetObjectId: snippet.codeBlockId,
     canonicalUri: `${sourceUri}#code-block=${encodeURIComponent(snippet.codeBlockId)}`,
     referenceDisplayMode: "title",
-    referenceCustomLabel: `${language} code from ${sourceTitle}`,
+    referenceCustomLabel: semanticTitle,
     sourceLoomId: snippet.loomId,
     sourceResponseId: snippet.responseId,
     selectedText: snippet.code,
@@ -1135,7 +1131,7 @@ function codeSnippetAttachItemFromService(
     sourceCanonicalUri: sourceUri,
     fragmentHash: snippet.exactHash,
     source: "codeSnippet",
-    subtitle: `${language} · ${snippet.loomTitle ?? "Loom"} · ${firstLine}`,
+    subtitle: `${language} · ${sourceTitle} · ${snippet.loomTitle ?? "Loom"} · ${firstLine}`,
     keywords: [
       "Code Snippet",
       language,
@@ -3018,8 +3014,8 @@ function App() {
     const loadedCodeSnippetItems = Object.entries(conversationResponses).flatMap(([conversationId, responses]) => {
       const conversation = conversations.find((item) => item.id === conversationId);
       return responses.flatMap((response) =>
-        (response.codeBlocks ?? []).map((codeBlock) =>
-          codeSnippetAttachItemFromService({
+        (response.codeBlocks ?? [])
+          .map((codeBlock) => ({
             codeBlockId: codeBlock.codeBlockId ?? `${response.id}-code-${codeBlock.blockIndex}`,
             responseId: response.id,
             loomId: conversationId,
@@ -3032,8 +3028,9 @@ function App() {
             code: codeBlock.code,
             exactHash: codeBlock.exactHash,
             fence: codeBlock.fence,
-          })
-        )
+          }))
+          .filter(isReusableCodeSnippet)
+          .map(codeSnippetAttachItemFromService)
       );
     });
 
@@ -3181,7 +3178,11 @@ function App() {
       .listCodeSnippets({ loomId, limit: 200 })
       .then((result) => {
         if (cancelled) return;
-        setServiceCodeSnippetItems(result.codeSnippets.map(codeSnippetAttachItemFromService));
+        setServiceCodeSnippetItems(
+          result.codeSnippets
+            .filter(isReusableCodeSnippet)
+            .map(codeSnippetAttachItemFromService)
+        );
       })
       .catch((error) => {
         if (cancelled) return;
@@ -3909,6 +3910,10 @@ function App() {
           thinkingStalled: progress.thinkingStalled ?? response.thinkingStalled,
           thinkingStallReason:
             progress.thinkingStallReason ?? response.thinkingStallReason,
+          thinkingTokenCount:
+            progress.thinkingTokenCount !== undefined
+              ? progress.thinkingTokenCount
+              : response.thinkingTokenCount,
         };
       }),
     }));
@@ -6603,6 +6608,17 @@ function App() {
         if (persistedCodeBlock) {
           resolvedCodeBlock = persistedCodeBlock;
         }
+        const freshCodeBlocks = latestResponse?.codeBlocks;
+        if (freshCodeBlocks?.length) {
+          setConversationResponses((current) => ({
+            ...current,
+            [conversation.id]: (current[conversation.id] ?? []).map((item) =>
+              item.id === response.id && !item.codeBlocks?.length
+                ? { ...item, codeBlocks: freshCodeBlocks }
+                : item
+            ),
+          }));
+        }
       } catch (error) {
         console.warn("Could not hydrate persisted code block before Reference creation.", error);
       }
@@ -7754,6 +7770,7 @@ function App() {
                 event.payload.durationMs !== undefined
                   ? Math.round(event.payload.durationMs / 1000)
                   : undefined,
+              thinkingTokenCount: event.payload.tokenEstimate,
             });
             continue;
           }
@@ -7819,6 +7836,12 @@ function App() {
                         item.serviceUserResponseId ??
                         completedResponse.serviceUserResponseId ??
                         persistedUserResponseId,
+                      thinkingTokenCount:
+                        event.payload.evalTokenCount ?? item.thinkingTokenCount,
+                      inferenceMs:
+                        event.payload.elapsedMs ?? item.inferenceMs,
+                      inferenceTokenCount:
+                        event.payload.evalTokenCount ?? item.inferenceTokenCount,
                     }
                   : item
               ),
@@ -14171,6 +14194,19 @@ function formatThinkingSeconds(value: number | undefined) {
   return Math.round(value).toString();
 }
 
+function formatElapsedTime(seconds: number): string {
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  const secs = Math.round(seconds % 60);
+  return `${minutes}m ${secs}s`;
+}
+
+function formatTokenCount(count: number): string {
+  if (count < 1000) return `${count} tokens`;
+  if (count < 1_000_000) return `${(count / 1000).toFixed(1)}k tokens`;
+  return `${(count / 1_000_000).toFixed(1)}M tokens`;
+}
+
 function AnimatedProgressText({ text }: { text: string }) {
   return (
     <span className="assistant-progress-animated-text" aria-label={text}>
@@ -14379,37 +14415,47 @@ function ThinkingPanel({
     response.thinkingStartedAt && thinkingRunning
       ? Math.max(0, (now - Date.parse(response.thinkingStartedAt)) / 1000)
       : response.elapsedThinkingSeconds;
-  const elapsedLabel = formatThinkingSeconds(liveElapsed);
+  const elapsedLabel = liveElapsed !== undefined ? formatElapsedTime(liveElapsed) : undefined;
   const visibleTask = visibleProgress?.tasks.find(
     (task) => task.id === visibleProgress.activeTaskId
   );
   const visibleStatusLabel =
     visibleProgress?.statusText || (visibleTask ? `${visibleTask.title}...` : undefined);
-  const label = thinkingRunning
+  const liveTokenCount = response.thinkingTokenCount;
+  const tokenLabel = liveTokenCount !== undefined ? formatTokenCount(liveTokenCount) : undefined;
+  const primaryLabel = thinkingRunning
     ? showGuardControls
       ? "Still thinking..."
-      : elapsedLabel
-      ? `Thinking for ${elapsedLabel} seconds`
+      : tokenLabel
+      ? `Thinking · ${tokenLabel}`
       : "Thinking..."
     : visibleStatusLabel
       ? "Thinking"
-    : elapsedLabel
-      ? `Thought for ${elapsedLabel} seconds`
+      : tokenLabel
+      ? `Thought · ${tokenLabel}`
+      : elapsedLabel
+      ? `Thought for ${elapsedLabel}`
       : "Thought";
+  const secondaryLabel = thinkingRunning && !showGuardControls && elapsedLabel
+    ? `${elapsedLabel} elapsed`
+    : !thinkingRunning && visibleStatusLabel
+    ? visibleStatusLabel
+    : undefined;
+  const ariaLabel = secondaryLabel ? `${primaryLabel} · ${secondaryLabel}` : primaryLabel;
 
   return (
     <section className={thinkingRunning ? "thinking-panel is-running" : "thinking-panel"}>
       <button
         type="button"
         className="thinking-panel-toggle"
-        aria-label={label}
+        aria-label={ariaLabel}
         aria-expanded={expanded}
         onClick={() => setExpanded((current) => !current)}
       >
         <Lightbulb size={13} />
-        <span>{label}</span>
-        {!thinkingRunning && visibleStatusLabel && (
-          <small>{visibleStatusLabel}</small>
+        <span>{primaryLabel}</span>
+        {secondaryLabel && (
+          <small>{secondaryLabel}</small>
         )}
       </button>
       {expanded && !showGuardControls && !response.thinkingStopped && (
@@ -14504,12 +14550,6 @@ function ResponseContent({
   );
 }
 
-const ASSISTANT_RESPONSE_COLLAPSE_LINE_COUNT = 40;
-const ASSISTANT_RESPONSE_COLLAPSE_LINE_HEIGHT_PX = 24;
-const ASSISTANT_RESPONSE_COLLAPSE_MAX_HEIGHT_PX =
-  ASSISTANT_RESPONSE_COLLAPSE_LINE_COUNT * ASSISTANT_RESPONSE_COLLAPSE_LINE_HEIGHT_PX;
-const ASSISTANT_RESPONSE_COLLAPSE_TOLERANCE_PX = 8;
-const ASSISTANT_RESPONSE_COLLAPSE_MIN_BOUNDARY_RATIO = 0.55;
 const USER_PROMPT_COLLAPSE_LINE_COUNT = 40;
 
 function CollapsibleResponseContent({
@@ -14521,7 +14561,6 @@ function CollapsibleResponseContent({
   onOpenReference,
   onReferenceHint,
   onReferenceHintClose,
-  collapseEnabled = true,
 }: {
   responseId: string;
   markdown: string;
@@ -14531,114 +14570,21 @@ function CollapsibleResponseContent({
   onOpenReference: (link: LoomLink) => string | null;
   onReferenceHint: (link: LoomLink, target: HTMLElement) => void;
   onReferenceHintClose: () => void;
-  collapseEnabled?: boolean;
 }) {
-  const contentRef = useRef<HTMLDivElement | null>(null);
-  const [expanded, setExpanded] = useState(false);
-  const [collapsible, setCollapsible] = useState(false);
-  const [collapseHeight, setCollapseHeight] = useState(
-    ASSISTANT_RESPONSE_COLLAPSE_MAX_HEIGHT_PX
-  );
-
-  useEffect(() => {
-    setExpanded(false);
-  }, [responseId, markdown]);
-
-  useLayoutEffect(() => {
-    const content = contentRef.current;
-    if (!content) return;
-
-    function measure() {
-      if (!content) return;
-      const shouldCollapse =
-        content.scrollHeight >
-        ASSISTANT_RESPONSE_COLLAPSE_MAX_HEIGHT_PX +
-          ASSISTANT_RESPONSE_COLLAPSE_TOLERANCE_PX;
-      setCollapsible(shouldCollapse);
-
-      if (!shouldCollapse) {
-        setCollapseHeight(ASSISTANT_RESPONSE_COLLAPSE_MAX_HEIGHT_PX);
-        return;
-      }
-
-      const children = Array.from(content.children).filter(
-        (child): child is HTMLElement => child instanceof HTMLElement
-      );
-      let lastSafeBoundary = 0;
-      children.forEach((child) => {
-        const childBottom = child.offsetTop + child.offsetHeight;
-        if (childBottom <= ASSISTANT_RESPONSE_COLLAPSE_MAX_HEIGHT_PX) {
-          lastSafeBoundary = childBottom;
-        }
-      });
-
-      const minBoundaryHeight =
-        ASSISTANT_RESPONSE_COLLAPSE_MAX_HEIGHT_PX *
-        ASSISTANT_RESPONSE_COLLAPSE_MIN_BOUNDARY_RATIO;
-      const nextCollapseHeight =
-        lastSafeBoundary >= minBoundaryHeight
-          ? lastSafeBoundary
-          : ASSISTANT_RESPONSE_COLLAPSE_MAX_HEIGHT_PX;
-      setCollapseHeight(Math.round(nextCollapseHeight));
-    }
-
-    measure();
-    const resizeObserver =
-      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
-    resizeObserver?.observe(content);
-    return () => {
-      resizeObserver?.disconnect();
-    };
-  }, [markdown, codeBlocks]);
-
-  const isCollapsed = collapsible && !expanded;
-  const canCollapse = collapseEnabled && collapsible;
-
   return (
     <div
-      className="assistant-response-content-frame"
-      data-collapsible={canCollapse ? "true" : "false"}
-      data-expanded={expanded ? "true" : "false"}
+      id={`assistant-response-content-${responseId}`}
+      className="assistant-response-content"
     >
-      <div
-        id={`assistant-response-content-${responseId}`}
-        ref={contentRef}
-        className={[
-          "assistant-response-content",
-          collapseEnabled && isCollapsed ? "is-collapsed" : "",
-        ]
-          .filter(Boolean)
-          .join(" ")}
-        style={
-          collapseEnabled && isCollapsed
-            ? ({
-                "--assistant-response-collapse-height": `${collapseHeight}px`,
-              } as CSSProperties)
-            : undefined
-        }
-      >
-        <ResponseContent
-          markdown={markdown}
-          codeBlocks={codeBlocks}
-          onCopyCode={onCopyCode}
-          onAddCodeReference={onAddCodeReference}
-          onOpenReference={onOpenReference}
-          onReferenceHint={onReferenceHint}
-          onReferenceHintClose={onReferenceHintClose}
-        />
-      </div>
-      {canCollapse && (
-        <button
-          type="button"
-          className="assistant-response-collapse-toggle"
-          aria-controls={`assistant-response-content-${responseId}`}
-          aria-expanded={expanded}
-          data-testid={`response-collapse-toggle-${responseId}`}
-          onClick={() => setExpanded((current) => !current)}
-        >
-          {expanded ? "Show less" : "Show full response"}
-        </button>
-      )}
+      <ResponseContent
+        markdown={markdown}
+        codeBlocks={codeBlocks}
+        onCopyCode={onCopyCode}
+        onAddCodeReference={onAddCodeReference}
+        onOpenReference={onOpenReference}
+        onReferenceHint={onReferenceHint}
+        onReferenceHintClose={onReferenceHintClose}
+      />
     </div>
   );
 }
@@ -15408,11 +15354,6 @@ function ChatTranscript({
         const isGeneratingResponse = displayResponse.id === generatingResponseId;
         const revealCompletionActions =
           displayResponse.id === completionActionRevealResponseId;
-        const isLatestResponse = index === responses.length - 1;
-        const suppressResponseCollapse =
-          !collapseResponses ||
-          isLatestResponse ||
-          Boolean(uncollapsedResponseIds?.has(displayResponse.id));
         const displayResponseTitle =
           cleanMarkdownDisplayTitle(displayResponse.title) || displayResponse.title;
         const responseUrl = responseAddressForConversation(conversation, displayResponse);
@@ -15675,7 +15616,6 @@ function ChatTranscript({
                   responseId={displayResponse.id}
                   markdown={responseMarkdownSource(displayResponse)}
                   codeBlocks={displayResponse.codeBlocks}
-                  collapseEnabled={!suppressResponseCollapse}
                   onCopyCode={onCopyCode}
                   onAddCodeReference={(codeBlock) =>
                     onAddCodeReference(conversation, displayResponse, codeBlock)
@@ -15809,6 +15749,20 @@ function ChatTranscript({
                       <ChevronsUpDown size={11} aria-hidden="true" />
                     </button>
                   )}
+                {(() => {
+                  const { inferenceTokenCount, inferenceMs } = displayResponse;
+                  const isFinalized = displayResponse.serviceGenerationStatus === "completed" ||
+                    displayResponse.serviceGenerationStatus === "truncated";
+                  if (!isFinalized || (inferenceTokenCount === undefined && inferenceMs === undefined)) return null;
+                  const parts: string[] = [];
+                  if (inferenceTokenCount !== undefined) parts.push(formatTokenCount(inferenceTokenCount));
+                  if (inferenceMs !== undefined) parts.push(formatElapsedTime(inferenceMs / 1000));
+                  return (
+                    <span className="response-inference-metadata" aria-label={`Inference: ${parts.join(", ")}`}>
+                      {parts.join(" · ")}
+                    </span>
+                  );
+                })()}
                   {isWeftBranchPickerOpen && (
                     <div className="weft-branch-picker" role="menu" aria-label="Weft branches">
                       {responseBranchRecords.map((record, branchIndex) => (
@@ -18970,7 +18924,9 @@ function PromptComposer({
               document.body
             )}
           </div>
-          <span>Type # to insert Loom references inline.</span>
+          <span className="composer-reference-hint">
+            Type # to insert Loom references inline.
+          </span>
           <Tooltip
             label={`Model: ${mainModel.name}`}
             placement="bottom-right"

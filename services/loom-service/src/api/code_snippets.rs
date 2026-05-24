@@ -1,4 +1,7 @@
-use crate::{api::state::AppState, error::ServiceError};
+use crate::{
+    api::state::AppState, error::ServiceError,
+    storage::repositories::code_blocks::is_reusable_code_artifact,
+};
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -102,6 +105,7 @@ pub async fn list_code_snippets(
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
         })
+        .filter(|snippet| is_reusable_code_artifact(snippet.language.as_deref(), &snippet.code))
         .collect();
 
     Ok(Json(CodeSnippetListResponse { code_snippets }))

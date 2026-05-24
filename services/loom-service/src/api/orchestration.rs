@@ -3064,6 +3064,7 @@ fn execute_stream(
         let mut buffer = String::new();
         let mut first_chunk = true;
         let mut thinking_started_at: Option<Instant> = None;
+        let mut thinking_total_chars: usize = 0;
 
         loop {
             let idle_timeout = if first_chunk {
@@ -3225,11 +3226,15 @@ fn execute_stream(
             for chunk in chunks {
                 if chunk.thinking_seen {
                     let started_at = thinking_started_at.get_or_insert_with(Instant::now);
+                    thinking_total_chars += chunk.thinking_char_count;
+                    // ~3.5 chars per token is a reasonable estimate for mixed-language thinking text.
+                    let token_estimate = (thinking_total_chars as f64 / 3.5) as u64;
                     yield Ok(to_sse_event(service_event(run_id.clone(), "orchestration.progress", json!({
                         "runId": run_id,
                         "thinking": {
                             "status": "active",
-                            "durationMs": started_at.elapsed().as_millis()
+                            "durationMs": started_at.elapsed().as_millis(),
+                            "tokenEstimate": token_estimate
                         }
                     }))));
                 }
@@ -3271,6 +3276,14 @@ fn execute_stream(
                             None,
                         )
                         .await;
+                        let elapsed_ms = started.elapsed().as_millis() as u64;
+                        let _ = crate::storage::repositories::responses::ResponseRepository::new(&state.database)
+                            .update_response_inference_metadata(
+                                &lifecycle.assistant_response_id,
+                                Some(elapsed_ms),
+                                chunk.eval_count,
+                            )
+                            .await;
                     }
                     schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
                     if let Ok(run) = complete_successful_execution_stages(&runner, &run_id).await {
@@ -3279,7 +3292,9 @@ fn execute_stream(
                     let payload = merge_response_ids(json!({
                         "runId": run_id,
                         "elapsedMs": started.elapsed().as_millis(),
-                        "doneReason": done_reason
+                        "doneReason": done_reason,
+                        "evalTokenCount": chunk.eval_count,
+                        "promptTokenCount": chunk.prompt_eval_count
                     }), persisted_lifecycle.as_ref());
                     let _ = runner.persist_event(run_id.clone(), event_type.to_string(), Some("generate".to_string()), payload.to_string()).await;
                     yield Ok(to_sse_event(service_event(run_id.clone(), event_type, payload)));

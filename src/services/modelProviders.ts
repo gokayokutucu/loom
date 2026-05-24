@@ -158,6 +158,8 @@ export interface ModelExecutionProgress {
   thinkingStalled?: boolean;
   thinkingStallReason?: string;
   done?: boolean;
+  /** Live token count: estimated during streaming, replaced by authoritative value on completion. */
+  thinkingTokenCount?: number;
 }
 
 export class ModelProviderError extends Error {

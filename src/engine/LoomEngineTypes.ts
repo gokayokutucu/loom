@@ -676,11 +676,36 @@ export type EngineResponseEvent =
       payload: {
         status: "started" | "running" | "stalled" | "stopped" | "completed";
         durationMs?: number;
+        /** Estimated token count based on accumulated thinking chars (replaced by authoritative value on completion). */
+        tokenEstimate?: number;
       };
     }
   | { type: "content_delta"; payload: { responseId: string; delta: string } }
-  | { type: "response_completed"; payload: { responseId: string; doneReason?: string; loomTitle?: string } }
-  | { type: "response_truncated"; payload: { responseId: string; doneReason?: string; loomTitle?: string } }
+  | {
+      type: "response_completed";
+      payload: {
+        responseId: string;
+        doneReason?: string;
+        loomTitle?: string;
+        /** Total elapsed time from request start to completion (ms). */
+        elapsedMs?: number;
+        /** Authoritative generated token count from Ollama final chunk. */
+        evalTokenCount?: number;
+        /** Authoritative prompt token count from Ollama final chunk. */
+        promptTokenCount?: number;
+      };
+    }
+  | {
+      type: "response_truncated";
+      payload: {
+        responseId: string;
+        doneReason?: string;
+        loomTitle?: string;
+        elapsedMs?: number;
+        evalTokenCount?: number;
+        promptTokenCount?: number;
+      };
+    }
   | {
       type: "response_cancelled";
       payload: { responseId?: string; message?: string; workflowRunId?: string };
