@@ -1,5 +1,6 @@
 import { app, BrowserWindow, ipcMain, nativeImage, shell, systemPreferences } from "electron";
 import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAppLogger } from "./app-logger.mjs";
@@ -142,16 +143,49 @@ function errorHtml(message) {
   </html>`;
 }
 
+function windowStatePath() {
+  return path.join(app.getPath("userData"), "window-state.json");
+}
+
+function loadWindowState() {
+  try {
+    const raw = fs.readFileSync(windowStatePath(), "utf8");
+    const state = JSON.parse(raw);
+    if (
+      typeof state.width === "number" && state.width >= 980 &&
+      typeof state.height === "number" && state.height >= 680
+    ) {
+      return state;
+    }
+  } catch {
+    // no saved state yet
+  }
+  return null;
+}
+
+function saveWindowState(window) {
+  try {
+    const isMaximized = window.isMaximized();
+    const bounds = window.getNormalBounds();
+    fs.writeFileSync(windowStatePath(), JSON.stringify({ ...bounds, isMaximized }), "utf8");
+  } catch {
+    // ignore
+  }
+}
+
 function createWindow(runtimeStatus) {
   const serviceUrl = runtimeStatus.serviceUrl ?? "http://127.0.0.1:17633";
   const appIcon = getAppIcon();
+  const savedState = loadWindowState();
   appLogger?.info("window.create", {
     serviceUrl,
     runtimeState: runtimeStatus?.state,
   });
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
+    width: savedState?.width ?? 1280,
+    height: savedState?.height ?? 860,
+    x: savedState?.x,
+    y: savedState?.y,
     minWidth: 980,
     minHeight: 680,
     title: "Loom",
@@ -169,6 +203,10 @@ function createWindow(runtimeStatus) {
     },
   });
 
+  if (savedState?.isMaximized) {
+    mainWindow.maximize();
+  }
+
   mainWindow.webContents.session.setPermissionRequestHandler((_webContents, permission, callback, details) => {
     if (permission !== "media") {
       callback(false);
@@ -176,6 +214,10 @@ function createWindow(runtimeStatus) {
     }
     const mediaTypes = Array.isArray(details?.mediaTypes) ? details.mediaTypes : [];
     callback(mediaTypes.length === 0 || mediaTypes.includes("audio"));
+  });
+
+  mainWindow.on("close", () => {
+    if (mainWindow) saveWindowState(mainWindow);
   });
 
   mainWindow.once("ready-to-show", () => {
