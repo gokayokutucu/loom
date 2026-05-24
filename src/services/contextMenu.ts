@@ -67,8 +67,7 @@ export function getContextMenuItems(payload: ContextMenuPayload): ContextMenuIte
       return [
         { id: "open", label: "Open" },
         { id: payload.pinned ? "unpin" : "pin", label: payload.pinned ? "Unpin" : "Pin" },
-        { id: "rename", label: "Rename" },
-        { id: "change-icon", label: "Change Icon..." },
+        { id: "rename", label: "Rename..." },
         { id: "bookmark", label: "Bookmark" },
         { id: "copy-address", label: "Copy Loom Address" },
         { id: "archive", label: "Archive", separatorBefore: true },

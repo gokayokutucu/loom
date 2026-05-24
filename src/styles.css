@@ -9408,14 +9408,25 @@ kbd {
   font-size: 12px;
 }
 
-.icon-picker-header h2 {
-  overflow: hidden;
+.icon-picker-title-input {
+  display: block;
+  width: 100%;
   margin: 2px 0 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
   color: var(--text-primary);
   font-size: 14px;
+  font-weight: 600;
   line-height: 20px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  outline: none;
+  transition: border-color 120ms ease;
+}
+
+.icon-picker-title-input:focus {
+  border-bottom-color: rgba(255, 255, 255, 0.25);
 }
 
 .icon-search {

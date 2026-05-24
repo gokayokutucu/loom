@@ -8459,24 +8459,14 @@ function App() {
     });
   }
 
-  function renameConversation(conversation: Conversation) {
-    const title = window.prompt("Rename conversation", conversation.title);
-    if (!title) return;
+  function changeConversationIcon(conversation: Conversation, iconKey: string, title: string) {
     const nextTitle = normalizeLoomTitle(title);
     setConversations((current) =>
       current.map((item) =>
-        item.id === conversation.id ? { ...item, title: nextTitle } : item
+        item.id === conversation.id ? { ...item, iconKey, title: nextTitle } : item
       )
     );
     if (conversation.id === activeConversationId) setActiveObjectTitle(nextTitle);
-  }
-
-  function changeConversationIcon(conversation: Conversation, iconKey: string) {
-    setConversations((current) =>
-      current.map((item) =>
-        item.id === conversation.id ? { ...item, iconKey } : item
-      )
-    );
     setIconPickerTarget(null);
   }
 
@@ -10786,8 +10776,7 @@ function App() {
         closeUnpinnedUtilityOverlays();
       }
       if (item.id === "pin" || item.id === "unpin") togglePinnedConversation(conversation);
-      if (item.id === "rename") renameConversation(conversation);
-      if (item.id === "change-icon") setIconPickerTarget(conversation);
+      if (item.id === "rename" || item.id === "change-icon") setIconPickerTarget(conversation);
       if (item.id === "move-to-group" && item.targetGroupId) {
         addConversationToGroup(conversation.id, item.targetGroupId);
       }

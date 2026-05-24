@@ -24,10 +24,12 @@ export function ChangeIconPopover({
 }: {
   conversation: Conversation;
   options: ConversationIconOption[];
-  onSave: (conversation: Conversation, iconKey: string) => void;
+  onSave: (conversation: Conversation, iconKey: string, title: string) => void;
   onCancel: () => void;
 }) {
-  const inputRef = useRef<HTMLInputElement | null>(null);
+  const titleInputRef = useRef<HTMLInputElement | null>(null);
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const [title, setTitle] = useState(conversation.title);
   const [query, setQuery] = useState("");
   const [selectedIconKey, setSelectedIconKey] = useState(
     conversation.iconKey ?? options[0].key
@@ -46,17 +48,25 @@ export function ChangeIconPopover({
   const selectedOption = getConversationIconOption(options, selectedIconKey);
   const SelectedIcon = selectedOption.Icon;
 
+  const handleSave = () => {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    onSave(conversation, selectedIconKey, trimmed);
+  };
+
   useEffect(() => {
-    inputRef.current?.focus();
+    titleInputRef.current?.focus();
+    titleInputRef.current?.select();
 
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") onCancel();
-      if (event.key === "Enter") onSave(conversation, selectedIconKey);
+      if (event.key === "Enter") handleSave();
     }
 
     document.addEventListener("keydown", handleKeyDown);
     return () => document.removeEventListener("keydown", handleKeyDown);
-  }, [conversation, onCancel, onSave, selectedIconKey]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <div className="icon-picker-backdrop" role="presentation" onClick={onCancel}>
@@ -72,15 +82,23 @@ export function ChangeIconPopover({
             <SelectedIcon size={20} />
           </div>
           <div>
-            <span>Conversation icon</span>
-            <h2 id="icon-picker-title">{conversation.title}</h2>
+            <span>Name &amp; icon</span>
+            <input
+              ref={titleInputRef}
+              id="icon-picker-title"
+              className="icon-picker-title-input"
+              value={title}
+              onChange={(e) => setTitle(e.target.value)}
+              aria-label="Conversation name"
+              spellCheck={false}
+            />
           </div>
         </div>
 
         <label className="icon-search">
           <Search size={14} />
           <input
-            ref={inputRef}
+            ref={searchInputRef}
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search icons"
@@ -117,7 +135,8 @@ export function ChangeIconPopover({
             <button onClick={onCancel}>Cancel</button>
             <button
               className="primary"
-              onClick={() => onSave(conversation, selectedIconKey)}
+              onClick={handleSave}
+              disabled={!title.trim()}
             >
               Done
             </button>
