@@ -2783,6 +2783,45 @@ kbd {
   white-space: pre-wrap;
 }
 
+.user-message-collapsible {
+  display: grid;
+  gap: 7px;
+  justify-items: start;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.user-message-prompt-text {
+  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.user-message-prompt-text.is-clamped {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--user-message-collapse-lines, 40);
+}
+
+.user-message-collapse-toggle {
+  border: 0;
+  border-radius: 999px;
+  padding: 3px 0;
+  background: transparent;
+  color: var(--loom-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.user-message-collapse-toggle:hover,
+.user-message-collapse-toggle:focus-visible {
+  color: var(--loom-text-primary);
+  outline: none;
+}
+
 .user-prompt-actions {
   position: absolute;
   top: calc(100% + 1px);
@@ -3295,6 +3334,58 @@ kbd {
 .assistant-body strong {
   color: var(--loom-text-primary);
   font-weight: 650;
+}
+
+.assistant-response-content-frame {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+}
+
+.assistant-response-content {
+  position: relative;
+  min-width: 0;
+}
+
+.assistant-response-content.is-collapsed {
+  max-height: var(--assistant-response-collapse-height, 960px);
+  overflow: hidden;
+}
+
+.assistant-response-content.is-collapsed::after {
+  content: "";
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  height: 88px;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    color-mix(in srgb, var(--loom-bg) 0%, transparent),
+    color-mix(in srgb, var(--loom-bg) 96%, transparent)
+  );
+}
+
+.assistant-response-collapse-toggle {
+  justify-self: start;
+  border: 1px solid var(--loom-border-subtle);
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: color-mix(in srgb, var(--loom-bg-surface) 82%, transparent);
+  color: var(--loom-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.assistant-response-collapse-toggle:hover,
+.assistant-response-collapse-toggle:focus-visible {
+  border-color: var(--loom-border-strong);
+  background: var(--loom-bg-hover);
+  color: var(--loom-text-primary);
+  outline: none;
 }
 
 .assistant-body p code,
@@ -8128,21 +8219,24 @@ kbd {
   box-shadow: 0 28px 80px rgba(0, 0, 0, 0.48);
 }
 
-.graph-response-preview-header {
-  position: sticky;
-  top: 0;
-  z-index: 6;
-  display: grid;
-  gap: 14px;
-  padding: 24px 24px 18px;
+.graph-response-preview-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  justify-content: flex-end;
+  min-height: 66px;
+  padding: 18px 64px 16px 24px;
   border-bottom: 1px solid var(--loom-border-subtle);
   background: var(--loom-graph-panel-strong);
 }
 
 .graph-response-preview-scroll {
+  display: grid;
+  gap: 22px;
+  flex: 1 1 auto;
   min-height: 0;
   overflow: auto;
-  padding: 18px 24px 24px;
+  padding: 22px 24px 24px;
+  overscroll-behavior: contain;
 }
 
 .graph-response-preview-close {
@@ -8180,7 +8274,8 @@ kbd {
   text-transform: uppercase;
 }
 
-.graph-response-preview-block > p {
+.graph-response-preview-block > p,
+.graph-response-preview-question-content > p {
   margin: 0;
   padding-right: 36px;
   color: var(--text-primary);
@@ -8188,14 +8283,45 @@ kbd {
   line-height: 1.45;
 }
 
-.graph-response-preview-question > p {
-  padding-right: 132px;
+.graph-response-preview-question-content {
+  display: grid;
+  gap: 8px;
+}
+
+.graph-response-preview-question-content > p.is-clamped {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: var(--graph-preview-question-clamp-lines, 10);
+}
+
+.graph-response-preview-question-content > p {
+  padding-right: 0;
+}
+
+.graph-response-preview-question-toggle {
+  justify-self: start;
+  border: 1px solid var(--loom-border-subtle);
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: color-mix(in srgb, var(--loom-bg-surface) 82%, transparent);
+  color: var(--text-secondary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.graph-response-preview-question-toggle:hover,
+.graph-response-preview-question-toggle:focus-visible {
+  border-color: var(--loom-border-strong);
+  background: var(--loom-bg-hover);
+  color: var(--text-primary);
+  outline: none;
 }
 
 .graph-response-preview-actions {
-  position: absolute;
-  top: 24px;
-  right: 24px;
+  position: relative;
   z-index: 8;
   display: inline-flex;
   align-items: center;
@@ -8401,6 +8527,13 @@ kbd {
   font-weight: 520;
   line-height: 1.35;
   text-overflow: ellipsis;
+}
+
+.loom-graph-node--response .loom-graph-node-question-preview {
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 10;
 }
 
 .loom-graph-node-title-row {

@@ -166,7 +166,14 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
             {"<"}
           </button>
         )}
-        <h3>{nodeTitle}</h3>
+        <h3
+          className={
+            projectionNode.kind === "response" ? "loom-graph-node-question-preview" : undefined
+          }
+          title={projectionNode.kind === "response" ? nodeTitle : undefined}
+        >
+          {nodeTitle}
+        </h3>
         {hasRevisionCarousel && (
           <button
             type="button"

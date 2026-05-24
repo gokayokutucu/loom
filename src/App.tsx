@@ -14280,6 +14280,133 @@ function ResponseContent({
   );
 }
 
+const ASSISTANT_RESPONSE_COLLAPSE_LINE_COUNT = 40;
+const ASSISTANT_RESPONSE_COLLAPSE_LINE_HEIGHT_PX = 24;
+const ASSISTANT_RESPONSE_COLLAPSE_MAX_HEIGHT_PX =
+  ASSISTANT_RESPONSE_COLLAPSE_LINE_COUNT * ASSISTANT_RESPONSE_COLLAPSE_LINE_HEIGHT_PX;
+const ASSISTANT_RESPONSE_COLLAPSE_TOLERANCE_PX = 8;
+const ASSISTANT_RESPONSE_COLLAPSE_MIN_BOUNDARY_RATIO = 0.55;
+const USER_PROMPT_COLLAPSE_LINE_COUNT = 40;
+
+function CollapsibleResponseContent({
+  responseId,
+  markdown,
+  codeBlocks,
+  onCopyCode,
+  onAddCodeReference,
+}: {
+  responseId: string;
+  markdown: string;
+  codeBlocks?: ResponseCodeBlock[];
+  onCopyCode: (code: string) => Promise<boolean>;
+  onAddCodeReference: (codeBlock: ResponseCodeBlock) => Promise<boolean>;
+}) {
+  const contentRef = useRef<HTMLDivElement | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [collapsible, setCollapsible] = useState(false);
+  const [collapseHeight, setCollapseHeight] = useState(
+    ASSISTANT_RESPONSE_COLLAPSE_MAX_HEIGHT_PX
+  );
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [responseId, markdown]);
+
+  useLayoutEffect(() => {
+    const content = contentRef.current;
+    if (!content) return;
+
+    function measure() {
+      if (!content) return;
+      const shouldCollapse =
+        content.scrollHeight >
+        ASSISTANT_RESPONSE_COLLAPSE_MAX_HEIGHT_PX +
+          ASSISTANT_RESPONSE_COLLAPSE_TOLERANCE_PX;
+      setCollapsible(shouldCollapse);
+
+      if (!shouldCollapse) {
+        setCollapseHeight(ASSISTANT_RESPONSE_COLLAPSE_MAX_HEIGHT_PX);
+        return;
+      }
+
+      const children = Array.from(content.children).filter(
+        (child): child is HTMLElement => child instanceof HTMLElement
+      );
+      let lastSafeBoundary = 0;
+      children.forEach((child) => {
+        const childBottom = child.offsetTop + child.offsetHeight;
+        if (childBottom <= ASSISTANT_RESPONSE_COLLAPSE_MAX_HEIGHT_PX) {
+          lastSafeBoundary = childBottom;
+        }
+      });
+
+      const minBoundaryHeight =
+        ASSISTANT_RESPONSE_COLLAPSE_MAX_HEIGHT_PX *
+        ASSISTANT_RESPONSE_COLLAPSE_MIN_BOUNDARY_RATIO;
+      const nextCollapseHeight =
+        lastSafeBoundary >= minBoundaryHeight
+          ? lastSafeBoundary
+          : ASSISTANT_RESPONSE_COLLAPSE_MAX_HEIGHT_PX;
+      setCollapseHeight(Math.round(nextCollapseHeight));
+    }
+
+    measure();
+    const resizeObserver =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    resizeObserver?.observe(content);
+    return () => {
+      resizeObserver?.disconnect();
+    };
+  }, [markdown, codeBlocks]);
+
+  const isCollapsed = collapsible && !expanded;
+
+  return (
+    <div
+      className="assistant-response-content-frame"
+      data-collapsible={collapsible ? "true" : "false"}
+      data-expanded={expanded ? "true" : "false"}
+    >
+      <div
+        id={`assistant-response-content-${responseId}`}
+        ref={contentRef}
+        className={[
+          "assistant-response-content",
+          isCollapsed ? "is-collapsed" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        style={
+          isCollapsed
+            ? ({
+                "--assistant-response-collapse-height": `${collapseHeight}px`,
+              } as CSSProperties)
+            : undefined
+        }
+      >
+        <ResponseContent
+          markdown={markdown}
+          codeBlocks={codeBlocks}
+          onCopyCode={onCopyCode}
+          onAddCodeReference={onAddCodeReference}
+        />
+      </div>
+      {collapsible && (
+        <button
+          type="button"
+          className="assistant-response-collapse-toggle"
+          aria-controls={`assistant-response-content-${responseId}`}
+          aria-expanded={expanded}
+          data-testid={`response-collapse-toggle-${responseId}`}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? "Show less" : "Show full response"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 function UserPromptContent({
   text,
   references,
@@ -14387,6 +14514,94 @@ function UserPromptContent({
       {remainingReferences.length > 0 && text ? " " : ""}
       {rendered}
     </>
+  );
+}
+
+function CollapsibleUserPromptContent({
+  text,
+  references,
+  onOpenReference,
+  onReferenceHint,
+  onReferenceHintClose,
+}: {
+  text: string;
+  references?: LoomLink[];
+  onOpenReference: (link: LoomLink) => string | null;
+  onReferenceHint: (link: LoomLink, target: HTMLElement) => void;
+  onReferenceHintClose: () => void;
+}) {
+  const promptRef = useRef<HTMLParagraphElement | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [collapsible, setCollapsible] = useState(false);
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [text]);
+
+  useLayoutEffect(() => {
+    const element = promptRef.current;
+    if (!element) return;
+
+    function measure() {
+      if (!element) return;
+      const overflowing = element.scrollHeight > element.clientHeight + 2;
+      setCollapsible((current) => (expanded ? current || overflowing : overflowing));
+    }
+
+    measure();
+    const resizeObserver =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    const mutationObserver =
+      typeof MutationObserver === "undefined" ? null : new MutationObserver(measure);
+    resizeObserver?.observe(element);
+    mutationObserver?.observe(element, {
+      characterData: true,
+      childList: true,
+      subtree: true,
+    });
+    return () => {
+      resizeObserver?.disconnect();
+      mutationObserver?.disconnect();
+    };
+  }, [text, expanded]);
+
+  return (
+    <div className="user-message-collapsible" data-expanded={expanded ? "true" : "false"}>
+      <p
+        ref={promptRef}
+        className={[
+          "user-message-prompt-text",
+          !expanded ? "is-clamped" : "",
+        ]
+          .filter(Boolean)
+          .join(" ")}
+        style={
+          !expanded
+            ? ({
+                "--user-message-collapse-lines": USER_PROMPT_COLLAPSE_LINE_COUNT,
+              } as CSSProperties)
+            : undefined
+        }
+      >
+        <UserPromptContent
+          text={text}
+          references={references}
+          onOpenReference={onOpenReference}
+          onReferenceHint={onReferenceHint}
+          onReferenceHintClose={onReferenceHintClose}
+        />
+      </p>
+      {collapsible && (
+        <button
+          type="button"
+          className="user-message-collapse-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? "Show less" : "Show full message"}
+        </button>
+      )}
+    </div>
   );
 }
 
@@ -15013,15 +15228,13 @@ function ChatTranscript({
                     </div>
                   </div>
                 ) : (
-                  <p>
-                    <UserPromptContent
-                      text={displayPromptText}
-                      references={inlinePromptReferences}
-                      onOpenReference={onOpenReference}
-                      onReferenceHint={showSentReferenceHint}
-                      onReferenceHintClose={scheduleSentReferenceHintClose}
-                    />
-                  </p>
+                  <CollapsibleUserPromptContent
+                    text={displayPromptText}
+                    references={inlinePromptReferences}
+                    onOpenReference={onOpenReference}
+                    onReferenceHint={showSentReferenceHint}
+                    onReferenceHintClose={scheduleSentReferenceHintClose}
+                  />
                 )}
               </div>
               {!isEditingPrompt && (
@@ -15150,7 +15363,8 @@ function ChatTranscript({
                   onContinueThinking={onContinueThinking}
                   onStop={onStopThinking}
                 />
-                <ResponseContent
+                <CollapsibleResponseContent
+                  responseId={displayResponse.id}
                   markdown={responseMarkdownSource(displayResponse)}
                   codeBlocks={displayResponse.codeBlocks}
                   onCopyCode={onCopyCode}
