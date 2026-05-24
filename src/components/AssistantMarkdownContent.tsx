@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy, Link2 } from "lucide-react";
-import { parseAssistantMarkdown } from "../services/assistantMarkdown";
+import { normalizeAssistantMarkdownSource, parseAssistantMarkdown } from "../services/assistantMarkdown";
 import { isReusableCodeSnippet } from "../services/codeSnippetDisplay";
 import {
   loomLinkFromMarkdownReference,
@@ -331,7 +331,7 @@ export function AssistantMarkdownContent({
   };
   return (
     <>
-      {parseAssistantMarkdown(markdown).map((block, index) => {
+      {parseAssistantMarkdown(normalizeAssistantMarkdownSource(markdown)).map((block, index) => {
         if (block.kind === "paragraph") {
           return (
             <p key={`paragraph-${index}`}>
