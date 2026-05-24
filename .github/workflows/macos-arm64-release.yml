@@ -28,14 +28,14 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v4.2.2
 
       - name: Verify arm64 runner
         run: |
           test "$(uname -m)" = "arm64"
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v4.4.0
         with:
           node-version: "22"
           cache: npm
@@ -105,7 +105,7 @@ jobs:
           find release -maxdepth 1 -type f -name "*.dmg" -print
 
       - name: Upload DMG artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v4.6.2
         with:
           name: ${{ steps.release_meta.outputs.artifact_name }}
           path: ${{ steps.release_meta.outputs.dmg_path }}
@@ -137,7 +137,7 @@ jobs:
           fi
 
       - name: Download DMG artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v4.3.0
         with:
           name: ${{ needs.build-macos-arm64.outputs.artifact_name }}
           path: release
