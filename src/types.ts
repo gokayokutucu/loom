@@ -370,6 +370,12 @@ export interface ResponseItem {
   thinkingStallReason?: string;
   thinkingContinueCount?: number;
   thinkingStopped?: boolean;
+  /** Live thinking token count: estimated during streaming, overwritten by authoritative eval_count on completion. */
+  thinkingTokenCount?: number;
+  /** Finalized authoritative total elapsed inference time (ms). Set from Ollama completion payload and persisted. */
+  inferenceMs?: number;
+  /** Finalized authoritative total token count (eval_count). Set from Ollama completion payload and persisted. */
+  inferenceTokenCount?: number;
   visiblePlan?: VisibleAnswerPlan;
   visibleProgress?: VisibleAnswerProgress;
   codeBlocks?: ResponseCodeBlock[];

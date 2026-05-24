@@ -5,6 +5,7 @@ use crate::{
         types::{BuildContextInput, ContextSource},
     },
     error::ServiceError,
+    storage::repositories::code_blocks::is_reusable_code_artifact,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -678,6 +679,9 @@ impl ContextRetriever {
             let code: String = row.get("code");
             reject_forbidden_payload(&code)?;
             let language: Option<String> = row.get("language");
+            if !is_reusable_code_artifact(language.as_deref(), &code) {
+                continue;
+            }
             let code_block_id: String = row.get("code_block_id");
             let response_id: String = row.get("response_id");
             let exact_hash: String = row.get("exact_hash");
@@ -2244,6 +2248,68 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason == "explicit_code_reference"));
+    }
+
+    #[tokio::test]
+    async fn illustrative_artifact_metadata_blocks_are_not_retrieved_as_code() {
+        let fixture = Fixture::new().await;
+        fixture
+            .insert_response(
+                "r-fake-artifact",
+                "assistant",
+                "Illustrative generated artifact metadata example.",
+                1,
+                None,
+            )
+            .await;
+        sqlx::query(
+            "INSERT INTO response_code_blocks (
+                code_block_id, response_id, loom_id, block_index, language, code,
+                exact_hash, fence, metadata_json, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10)",
+        )
+        .bind("codeblock-fake-artifact")
+        .bind("r-fake-artifact")
+        .bind("loom-1")
+        .bind(0i64)
+        .bind("text")
+        .bind(
+            "Assistant: Kod review artifact'ı oluşturulur\n- Hash: abc123def456\n- Type: Security Analysis\n- Provenance: [timestamp, user, tool]\n",
+        )
+        .bind("fnv1a64:fake")
+        .bind("```")
+        .bind("1")
+        .bind("1")
+        .execute(fixture.database.pool())
+        .await
+        .expect("insert fake code block");
+        fixture
+            .insert_response(
+                "r-current",
+                "user",
+                "Kod artifact hash provenance nedir?",
+                9,
+                None,
+            )
+            .await;
+
+        let result = fixture
+            .retriever()
+            .retrieve_with_strategy(
+                &fixture.input("Kod artifact hash provenance nedir?", Some("r-current")),
+                Some(&strong_strategy()),
+            )
+            .await
+            .expect("retrieve");
+
+        assert!(
+            result
+                .candidates
+                .iter()
+                .all(|candidate| candidate.candidate_id != "codeblock-fake-artifact"),
+            "candidates={:?}",
+            result.candidates
+        );
     }
 
     #[tokio::test]

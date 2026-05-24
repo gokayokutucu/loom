@@ -333,6 +333,58 @@ impl ResponseRepository {
         self.update_response_metadata(response_id, &metadata).await
     }
 
+    /// Persists authoritative inference metrics (total elapsed time and token count)
+    /// into `metadata_json`. Safe to call multiple times; later calls only overwrite
+    /// if the provided values are `Some`.
+    pub async fn update_response_inference_metadata(
+        &self,
+        response_id: &str,
+        inference_ms: Option<u64>,
+        eval_token_count: Option<u64>,
+    ) -> Result<(), ServiceError> {
+        if inference_ms.is_none() && eval_token_count.is_none() {
+            return Ok(());
+        }
+        let response = self
+            .get_response(response_id)
+            .await?
+            .ok_or_else(|| ServiceError::storage("Response not found for inference metadata"))?;
+        let mut metadata = response
+            .metadata_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        if let Some(ms) = inference_ms {
+            metadata.insert(
+                "inferenceMs".to_string(),
+                serde_json::Value::Number(ms.into()),
+            );
+        }
+        if let Some(tokens) = eval_token_count {
+            metadata.insert(
+                "evalTokenCount".to_string(),
+                serde_json::Value::Number(tokens.into()),
+            );
+        }
+        let metadata_json = serde_json::to_string(&metadata).map_err(|error| {
+            ServiceError::storage(format!("failed to serialize inference metadata: {error}"))
+        })?;
+        reject_forbidden_payload(Some(&metadata_json))?;
+        sqlx::query(
+            "UPDATE responses SET metadata_json = ?2, updated_at = ?3 WHERE response_id = ?1",
+        )
+        .bind(response_id)
+        .bind(&metadata_json)
+        .bind(timestamp())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to persist inference metadata: {error}"))
+        })?;
+        Ok(())
+    }
+
     pub async fn list_responses_for_loom(
         &self,
         loom_id: &str,

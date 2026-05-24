@@ -945,6 +945,8 @@ function buildResponseItemsFromRows(rows: ServiceResponseRow[]): ResponseItem[] 
     const metadata = isRecord(row.metadata) ? row.metadata : {};
     const workflowRunId = stringValue(metadata, "workflowRunId");
     const serviceGenerationStatus = stringValue(metadata, "status");
+    const inferenceMs = numberValue(metadata, "inferenceMs");
+    const inferenceTokenCount = numberValue(metadata, "evalTokenCount");
     items.push({
       id: row.responseId,
       title,
@@ -961,6 +963,8 @@ function buildResponseItemsFromRows(rows: ServiceResponseRow[]): ResponseItem[] 
       serviceGenerationStatus,
       serviceUserResponseId: pendingUser?.responseId,
       meta: responseMetaFromRow(row, title),
+      inferenceMs,
+      inferenceTokenCount,
     });
     pendingUser = null;
   }
@@ -2297,6 +2301,7 @@ function mapServiceEventToEngineEvents(value: unknown): EngineResponseEvent[] {
           payload: {
             status: "running",
             durationMs: numberValue(thinking, "durationMs"),
+            tokenEstimate: numberValue(thinking, "tokenEstimate"),
           },
         },
       ];
@@ -2317,7 +2322,14 @@ function mapServiceEventToEngineEvents(value: unknown): EngineResponseEvent[] {
     return [
       {
         type: "response_completed",
-        payload: { responseId, doneReason: servicePayloadString(payload, "doneReason"), loomTitle },
+        payload: {
+          responseId,
+          doneReason: servicePayloadString(payload, "doneReason"),
+          loomTitle,
+          elapsedMs: numberValue(payload, "elapsedMs"),
+          evalTokenCount: numberValue(payload, "evalTokenCount"),
+          promptTokenCount: numberValue(payload, "promptTokenCount"),
+        },
       },
     ];
   }
@@ -2326,7 +2338,14 @@ function mapServiceEventToEngineEvents(value: unknown): EngineResponseEvent[] {
     return [
       {
         type: "response_truncated",
-        payload: { responseId, doneReason: servicePayloadString(payload, "doneReason"), loomTitle },
+        payload: {
+          responseId,
+          doneReason: servicePayloadString(payload, "doneReason"),
+          loomTitle,
+          elapsedMs: numberValue(payload, "elapsedMs"),
+          evalTokenCount: numberValue(payload, "evalTokenCount"),
+          promptTokenCount: numberValue(payload, "promptTokenCount"),
+        },
       },
     ];
   }

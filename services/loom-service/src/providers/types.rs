@@ -286,14 +286,24 @@ pub struct OllamaWireChunk {
         alias = "stopReason"
     )]
     pub done_reason: Option<String>,
+    /// Total tokens generated in this response (present on the final done=true chunk).
+    pub eval_count: Option<u64>,
+    /// Tokens consumed by the prompt (present on the final done=true chunk).
+    pub prompt_eval_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OllamaStreamChunk {
     pub content: Option<String>,
     pub thinking_seen: bool,
+    /// Raw byte length of thinking text in this chunk (used for live token estimation).
+    pub thinking_char_count: usize,
     pub done: bool,
     pub done_reason: Option<String>,
+    /// Authoritative generated token count from the final chunk.
+    pub eval_count: Option<u64>,
+    /// Authoritative prompt token count from the final chunk.
+    pub prompt_eval_count: Option<u64>,
 }
 
 impl From<OllamaWireChunk> for OllamaStreamChunk {
@@ -302,21 +312,24 @@ impl From<OllamaWireChunk> for OllamaStreamChunk {
             .message
             .as_ref()
             .and_then(|message| message.content.clone());
-        let message_thinking_seen = chunk
+        let message_thinking = chunk
             .message
             .as_ref()
-            .and_then(|message| message.thinking.as_ref())
-            .is_some_and(|thinking| !thinking.is_empty());
+            .and_then(|message| message.thinking.as_deref());
+        let message_thinking_seen = message_thinking.is_some_and(|thinking| !thinking.is_empty());
+        let top_level_thinking = chunk.thinking.as_deref();
+        let thinking_char_count = message_thinking.map(str::len).unwrap_or(0)
+            + top_level_thinking.map(str::len).unwrap_or(0);
 
         Self {
             content: message_content.or(chunk.response),
             thinking_seen: message_thinking_seen
-                || chunk
-                    .thinking
-                    .as_ref()
-                    .is_some_and(|thinking| !thinking.is_empty()),
+                || top_level_thinking.is_some_and(|thinking| !thinking.is_empty()),
+            thinking_char_count,
             done: chunk.done,
             done_reason: chunk.done_reason,
+            eval_count: chunk.eval_count,
+            prompt_eval_count: chunk.prompt_eval_count,
         }
     }
 }

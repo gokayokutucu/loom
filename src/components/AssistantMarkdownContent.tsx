@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { Check, Copy, Link2 } from "lucide-react";
 import { parseAssistantMarkdown } from "../services/assistantMarkdown";
+import { isReusableCodeSnippet } from "../services/codeSnippetDisplay";
 import {
   loomLinkFromMarkdownReference,
   referenceLabelForMode,
@@ -191,7 +192,10 @@ function CodeBlock({
   const referencedTimerRef = useRef<number | null>(null);
   const canCopy = Boolean(onCopyCode) && closed && code.trim().length > 0;
   const canAddReference =
-    Boolean(onAddCodeReference) && closed && code.trim().length > 0;
+    Boolean(onAddCodeReference) &&
+    closed &&
+    code.trim().length > 0 &&
+    (Boolean(codeBlock?.codeBlockId) || isReusableCodeSnippet({ language, code }));
 
   useEffect(() => {
     return () => {
@@ -278,7 +282,9 @@ function CodeBlock({
                   ? referenced
                     ? "Reference added"
                     : "Add Reference"
-                  : "Reference unavailable until code block completes"
+                  : closed
+                    ? "Reference unavailable for this code block"
+                    : "Reference unavailable until code block completes"
               }
             >
               <Link2 size={13} />
@@ -412,7 +418,9 @@ export function AssistantMarkdownContent({
         }
         renderedCodeBlockIndex += 1;
         const persistedCodeBlock = codeBlocks?.find(
-          (codeBlock) => codeBlock.blockIndex === renderedCodeBlockIndex
+          (codeBlock) =>
+            codeBlock.blockIndex === renderedCodeBlockIndex ||
+            codeBlock.code.trimEnd() === block.code.trimEnd()
         );
         return (
           <CodeBlock

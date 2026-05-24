@@ -2383,7 +2383,7 @@ kbd {
 }
 
 .weft-split-panel .reference-globe span,
-.weft-split-panel .composer-footer > span {
+.weft-split-panel .composer-reference-hint {
   overflow: hidden;
   width: 0;
   padding: 0;
@@ -3545,6 +3545,22 @@ kbd {
 
 .assistant-message:hover .response-actions,
 .response-actions:focus-within {
+  opacity: 1;
+}
+
+.response-inference-metadata {
+  margin-left: auto;
+  align-self: center;
+  color: var(--loom-text-muted);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 180ms ease;
+  pointer-events: none;
+}
+
+.assistant-message:hover .response-inference-metadata {
   opacity: 1;
 }
 

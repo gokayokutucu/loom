@@ -14,6 +14,8 @@ mod runtime;
 mod speech;
 mod storage;
 
+use storage::repositories::code_blocks::cleanup_pseudo_artifact_blocks;
+
 use config::{ConfigManager, ServiceConfig};
 use providers::ollama::OllamaRuntime;
 use runtime::{OperationTracker, RestartState};
@@ -47,6 +49,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     tracing::info!(db_path = %database_config.display_path, "loom-service SQLite config loaded");
     let database = Database::connect_and_migrate(&database_config).await?;
     tracing::info!("loom-service SQLite migrations ready");
+
+    match cleanup_pseudo_artifact_blocks(database.pool()).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(
+            count,
+            "loom-service removed historical pseudo-artifact code blocks"
+        ),
+        Err(error) => {
+            tracing::warn!(%error, "loom-service pseudo-artifact cleanup failed; continuing")
+        }
+    }
 
     let ollama = OllamaRuntime::new(config.ollama.clone());
     let config_manager = ConfigManager::new(config.config_path.clone(), config.config_file.clone());

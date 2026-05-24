@@ -2,6 +2,7 @@ use crate::{
     api::state::AppState,
     storage::{
         repositories::{
+            code_blocks::is_reusable_code_artifact,
             parts::ResponsePartRepository,
             responses::ResponseRepository,
             tags_graph::{ContextGraphLinkRepository, ResponseTagRepository, TopicIndexRepository},
@@ -187,12 +188,19 @@ async fn list_code_blocks_for_loom(
     .await
     .map(|rows| {
         rows.into_iter()
-            .map(|row| E2eCodeBlockProof {
-                code_block_id: row.get("code_block_id"),
-                response_id: row.get("response_id"),
-                language: row.get("language"),
-                exact_hash: row.get("exact_hash"),
-                code: row.get("code"),
+            .filter_map(|row| {
+                let language: Option<String> = row.get("language");
+                let code: String = row.get("code");
+                if !is_reusable_code_artifact(language.as_deref(), &code) {
+                    return None;
+                }
+                Some(E2eCodeBlockProof {
+                    code_block_id: row.get("code_block_id"),
+                    response_id: row.get("response_id"),
+                    language,
+                    exact_hash: row.get("exact_hash"),
+                    code,
+                })
             })
             .collect()
     })
