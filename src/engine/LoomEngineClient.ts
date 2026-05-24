@@ -1,6 +1,7 @@
 import type {
   AddReferenceInput,
   AddReferenceResult,
+  ArchiveLoomInput,
   BookmarkResponseInput,
   BookmarkResult,
   CancelMessageInput,
@@ -35,6 +36,7 @@ import type {
   ListCodeSnippetsInput,
   ListCodeSnippetsResult,
   ListHistoryResult,
+  ListLoomsInput,
   ListBookmarksResult,
   LoomDetail,
   LoomSummary,
@@ -47,6 +49,7 @@ import type {
   RemoveReferenceInput,
   RetryUserMessageInput,
   RenameLoomInput,
+  RestoreLoomInput,
   RecordHistoryInput,
   ResolveAddressInput,
   ResolveAddressResult,
@@ -90,11 +93,13 @@ export interface LoomEngineClient {
   downloadSpeechSetupModel(): Promise<SpeechSetupStatus>;
   configureSpeechSetup(): Promise<SpeechSetupStatus>;
   getCapabilitySummary(): Promise<CapabilitySummary>;
-  listLooms(): Promise<LoomSummary[]>;
+  listLooms(input?: ListLoomsInput): Promise<LoomSummary[]>;
   getLoom(loomId: string): Promise<LoomDetail>;
   createLoom(input: CreateLoomInput): Promise<CreateLoomResult>;
   renameLoom(input: RenameLoomInput): Promise<void>;
   updateLoomMetadata(input: UpdateLoomInput): Promise<CreateLoomResult>;
+  archiveLoom(input: ArchiveLoomInput): Promise<CreateLoomResult>;
+  restoreLoom(input: RestoreLoomInput): Promise<CreateLoomResult>;
   deleteLoom(input: DeleteLoomInput): Promise<void>;
   sendMessage(input: SendMessageInput): AsyncIterable<EngineResponseEvent>;
   createAttachment(input: CreateAttachmentInput): Promise<CreateAttachmentResult>;

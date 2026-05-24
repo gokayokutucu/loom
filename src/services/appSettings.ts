@@ -35,6 +35,11 @@ export interface AccessibilitySettings {
   keyboardNavigationHints: boolean;
 }
 
+export interface MessageCollapseSettings {
+  userMessages: boolean;
+  responses: boolean;
+}
+
 export interface MemorySettings {
   enabled: boolean;
   referenceRecentLooms: boolean;
@@ -55,6 +60,7 @@ export interface AppSettings {
   notifications: NotificationSettings;
   startup: StartupSettings;
   accessibility: AccessibilitySettings;
+  messageCollapse: MessageCollapseSettings;
   memory: MemorySettings;
   showGenerationDebug: boolean;
   mockDataEnabled: boolean;
@@ -89,6 +95,10 @@ export const defaultAppSettings: AppSettings = {
     largerClickTargets: false,
     alwaysShowIconLabels: false,
     keyboardNavigationHints: false,
+  },
+  messageCollapse: {
+    userMessages: true,
+    responses: true,
   },
   memory: {
     enabled: true,
@@ -222,6 +232,21 @@ function normalizeAccessibilitySettings(value: unknown): AccessibilitySettings {
   };
 }
 
+function normalizeMessageCollapseSettings(value: unknown): MessageCollapseSettings {
+  const stored = typeof value === "object" && value ? value : {};
+  const settings = stored as Partial<MessageCollapseSettings>;
+  return {
+    userMessages:
+      typeof settings.userMessages === "boolean"
+        ? settings.userMessages
+        : defaultAppSettings.messageCollapse.userMessages,
+    responses:
+      typeof settings.responses === "boolean"
+        ? settings.responses
+        : defaultAppSettings.messageCollapse.responses,
+  };
+}
+
 function normalizeMemoryText(value: unknown, maxLength: number): string {
   if (typeof value !== "string") return "";
   return value.slice(0, maxLength);
@@ -265,6 +290,7 @@ export function readAppSettings(): AppSettings {
     notifications: normalizeNotificationSettings(stored.notifications),
     startup: normalizeStartupSettings(stored.startup),
     accessibility: normalizeAccessibilitySettings(stored.accessibility),
+    messageCollapse: normalizeMessageCollapseSettings(stored.messageCollapse),
     memory: normalizeMemorySettings(stored.memory),
     showGenerationDebug: false,
     mockDataEnabled:
@@ -296,6 +322,7 @@ export function writeAppSettings(settings: AppSettings) {
     notifications: normalizeNotificationSettings(settings.notifications),
     startup: normalizeStartupSettings(settings.startup),
     accessibility: normalizeAccessibilitySettings(settings.accessibility),
+    messageCollapse: normalizeMessageCollapseSettings(settings.messageCollapse),
     memory: normalizeMemorySettings(settings.memory),
     showGenerationDebug: false,
     mockDataEnabled: Boolean(settings.mockDataEnabled),

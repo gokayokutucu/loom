@@ -7,6 +7,7 @@ import type { LoomEngineClient } from "./LoomEngineClient";
 import type {
   AddReferenceInput,
   AddReferenceResult,
+  ArchiveLoomInput,
   CreateAttachmentInput,
   CreateAttachmentResult,
   BookmarkResponseInput,
@@ -43,6 +44,7 @@ import type {
   ListCodeSnippetsResult,
   ListBookmarksResult,
   ListHistoryResult,
+  ListLoomsInput,
   LoomDetail,
   LoomSummary,
   OpenReferenceInput,
@@ -55,6 +57,7 @@ import type {
   RemoveReferenceInput,
   RetryUserMessageInput,
   RenameLoomInput,
+  RestoreLoomInput,
   ResolveAddressInput,
   ResolveAddressResult,
   LoomServiceRuntimeConfig,
@@ -185,7 +188,7 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
     };
   }
 
-  async listLooms(): Promise<LoomSummary[]> {
+  async listLooms(_input: ListLoomsInput = {}): Promise<LoomSummary[]> {
     // TODO(engine): Move canonical Loom storage behind the engine once App.tsx state is split.
     throw notImplemented("listLooms");
   }
@@ -208,6 +211,20 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
   async updateLoomMetadata(_input: UpdateLoomInput): Promise<CreateLoomResult> {
     // TODO(engine): Move Loom metadata mutation behind the engine boundary.
     throw notImplemented("updateLoomMetadata");
+  }
+
+  async archiveLoom(input: ArchiveLoomInput): Promise<CreateLoomResult> {
+    if (this.dependencies.archiveLoom) {
+      return this.dependencies.archiveLoom(input);
+    }
+    throw notImplemented("archiveLoom");
+  }
+
+  async restoreLoom(input: RestoreLoomInput): Promise<CreateLoomResult> {
+    if (this.dependencies.restoreLoom) {
+      return this.dependencies.restoreLoom(input);
+    }
+    throw notImplemented("restoreLoom");
   }
 
   async deleteLoom(input: DeleteLoomInput): Promise<void> {

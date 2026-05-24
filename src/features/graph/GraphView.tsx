@@ -52,6 +52,11 @@ import {
 import { graphResponsePreviewForNode } from "./graphNodePreview";
 import { LoomGraphEdge, type LoomGraphFlowEdge } from "./LoomGraphEdge";
 import { LoomGraphNode, type LoomGraphFlowNode } from "./LoomGraphNode";
+import {
+  compactGraphNodePositions,
+  GRAPH_FALLBACK_NODE_HEIGHT,
+  GRAPH_NODE_VERTICAL_GAP,
+} from "./graphLayout";
 
 export interface GraphViewProps {
   engineClient: LoomEngineClient;
@@ -88,7 +93,6 @@ const GRAPH_FOCUS_TOP_OFFSET = 20;
 const GRAPH_NODE_WIDTH = 292;
 const GRAPH_COMPOSER_WIDTH = 620;
 const GRAPH_COMPOSER_NODE_GAP = 60;
-const GRAPH_FALLBACK_NODE_HEIGHT = 220;
 const GRAPH_PREVIEW_QUESTION_COLLAPSE_LINES = 10;
 
 interface LoomGraphComposerNodeData extends Record<string, unknown> {
@@ -356,6 +360,7 @@ function GraphViewInner({
   const [responsePreviewWeftPickerOpen, setResponsePreviewWeftPickerOpen] = useState(false);
   const [selectedGraphRevisionByResponseId, setSelectedGraphRevisionByResponseId] =
     useState<Record<string, number>>({});
+  const [nodeHeights, setNodeHeights] = useState<Record<string, number>>({});
   const initializedViewportKey = useRef<string | undefined>(undefined);
   const skipNextFollowAfterWeftFocusRef = useRef(false);
   const skipNextFollowAfterContinuationFocusRef = useRef(false);
@@ -375,6 +380,46 @@ function GraphViewInner({
     }),
     [conversationTitlesById]
   );
+
+  const compactNodePositions = useMemo(
+    () => compactGraphNodePositions(projection.nodes, nodeHeights),
+    [nodeHeights, projection.nodes]
+  );
+
+  const graphNodeRenderPosition = useCallback(
+    (node: LoomGraphProjectionNode) =>
+      compactNodePositions[node.id] ?? node.position,
+    [compactNodePositions]
+  );
+
+  useLayoutEffect(() => {
+    const shell = graphShellRef.current;
+    if (!shell || projection.nodes.length === 0) return;
+    const zoom = reactFlow.getZoom() || graphZoom || GRAPH_DEFAULT_ZOOM;
+    const measuredEntries = projection.nodes
+      .map((node) => {
+        const element = shell.querySelector<HTMLElement>(
+          `.react-flow__node[data-id="${CSS.escape(node.id)}"] .loom-graph-node`
+        );
+        const measuredHeight = element
+          ? element.getBoundingClientRect().height / zoom
+          : undefined;
+        return measuredHeight && measuredHeight > 0
+          ? ([node.id, Math.ceil(measuredHeight)] as const)
+          : undefined;
+      })
+      .filter((entry): entry is readonly [string, number] => Boolean(entry));
+    if (measuredEntries.length === 0) return;
+    const nextHeights = Object.fromEntries(measuredEntries);
+    setNodeHeights((current) => {
+      const currentKeys = Object.keys(current);
+      const nextKeys = Object.keys(nextHeights);
+      const changed =
+        currentKeys.length !== nextKeys.length ||
+        nextKeys.some((key) => current[key] !== nextHeights[key]);
+      return changed ? nextHeights : current;
+    });
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -422,13 +467,14 @@ function GraphViewInner({
       if (!nodeId) return;
       const node = projection.nodes.find((item) => item.id === nodeId);
       if (!node) return;
-      reactFlow.setCenter(node.position.x + 150, node.position.y + 80, {
+      const position = graphNodeRenderPosition(node);
+      reactFlow.setCenter(position.x + 150, position.y + 80, {
         zoom: GRAPH_DEFAULT_ZOOM,
         duration: 420,
       });
       setSelectedNodeId(nodeId);
     },
-    [projection.nodes, reactFlow]
+    [graphNodeRenderPosition, projection.nodes, reactFlow]
   );
 
   const focusNodeNearTop = useCallback(
@@ -442,17 +488,20 @@ function GraphViewInner({
         centerNode(nodeId);
         return;
       }
+      const position = graphNodeRenderPosition(node);
       reactFlow.setViewport(
         {
-          x: width / 2 - (node.position.x + GRAPH_NODE_WIDTH / 2) * GRAPH_DEFAULT_ZOOM,
-          y: GRAPH_FOCUS_TOP_OFFSET - node.position.y * GRAPH_DEFAULT_ZOOM,
+          x:
+            width / 2 -
+            (position.x + GRAPH_NODE_WIDTH / 2) * GRAPH_DEFAULT_ZOOM,
+          y: GRAPH_FOCUS_TOP_OFFSET - position.y * GRAPH_DEFAULT_ZOOM,
           zoom: GRAPH_DEFAULT_ZOOM,
         },
         { duration }
       );
       setSelectedNodeId(nodeId);
     },
-    [centerNode, projection.nodes, reactFlow]
+    [centerNode, graphNodeRenderPosition, projection.nodes, reactFlow]
   );
 
   const positionContinuationComposer = useCallback((nodeId: string | undefined) => {
@@ -466,11 +515,12 @@ function GraphViewInner({
     const measuredHeight = nodeElement
       ? nodeElement.getBoundingClientRect().height / zoom
       : GRAPH_FALLBACK_NODE_HEIGHT;
+    const position = graphNodeRenderPosition(projectionNode);
     setContinuationComposerPosition({
-      x: projectionNode.position.x + (GRAPH_NODE_WIDTH - GRAPH_COMPOSER_WIDTH) / 2,
-      y: projectionNode.position.y + measuredHeight + GRAPH_COMPOSER_NODE_GAP / zoom,
+      x: position.x + (GRAPH_NODE_WIDTH - GRAPH_COMPOSER_WIDTH) / 2,
+      y: position.y + measuredHeight + GRAPH_COMPOSER_NODE_GAP / zoom,
     });
-  }, [projection.nodes, reactFlow]);
+  }, [graphNodeRenderPosition, projection.nodes, reactFlow]);
 
   const latestActiveResponse = useMemo(() => {
     if (!activeLoomId) return undefined;
@@ -875,7 +925,7 @@ function GraphViewInner({
         return {
           id: projectionNode.id,
           type: "loomGraphNode",
-          position: projectionNode.position,
+          position: graphNodeRenderPosition(projectionNode),
           data: {
             projectionNode: {
               ...visibleProjectionNode,
@@ -975,6 +1025,7 @@ function GraphViewInner({
       continuationNodeId,
       continuationTarget,
       graphZoom,
+      graphNodeRenderPosition,
       handleContinuationResponseCreated,
       openContinuationForResponse,
       latestActiveResponse,
@@ -1173,14 +1224,6 @@ function GraphViewInner({
               if (event.target === event.currentTarget) setResponsePreviewNodeId(null);
             }}
           >
-            <button
-              type="button"
-              className="graph-response-preview-close"
-              aria-label="Close response preview"
-              onClick={() => setResponsePreviewNodeId(null)}
-            >
-              <X size={18} />
-            </button>
             <section
               className="graph-response-preview-modal"
               role="dialog"
@@ -1337,6 +1380,18 @@ function GraphViewInner({
                         }}
                       >
                         <ExternalLink size={14} />
+                      </button>
+                    </div>
+                    <span className="graph-response-preview-action-separator" aria-hidden="true" />
+                    <div className="graph-response-preview-action-group">
+                      <button
+                        type="button"
+                        className="graph-response-preview-close"
+                        title="Close"
+                        aria-label="Close response preview"
+                        onClick={() => setResponsePreviewNodeId(null)}
+                      >
+                        <X size={16} />
                       </button>
                     </div>
                   </div>

@@ -32,6 +32,7 @@ import {
   type AccessibilitySettings,
   type AppSettings,
   type MemorySettings,
+  type MessageCollapseSettings,
   type NotificationSettings,
   type StartupSettings,
 } from "../services/appSettings";
@@ -462,6 +463,10 @@ export function AIProviderSettingsModal({
 
   function updateAccessibilitySettings(next: AccessibilitySettings) {
     updateAppSettings({ ...appSettings, accessibility: next });
+  }
+
+  function updateMessageCollapseSettings(next: MessageCollapseSettings) {
+    updateAppSettings({ ...appSettings, messageCollapse: next });
   }
 
   function updateMemoryDraft(patch: Partial<MemorySettings>) {
@@ -1092,6 +1097,39 @@ export function AIProviderSettingsModal({
             </select>
             <small>Language structure only. Full i18n is not enabled yet.</small>
           </label>
+        </section>
+
+        <section className="provider-section">
+          <div className="provider-section-heading">
+            <div>
+              <span>Loom surface</span>
+              <h3>Long message controls</h3>
+            </div>
+          </div>
+          {[
+            ["userMessages", "Collapse long messages"],
+            ["responses", "Collapse long responses"],
+          ].map(([key, label]) => (
+            <label className="settings-toggle" key={key}>
+              <input
+                type="checkbox"
+                checked={Boolean(
+                  appSettings.messageCollapse[key as keyof MessageCollapseSettings]
+                )}
+                onChange={(event) =>
+                  updateMessageCollapseSettings({
+                    ...appSettings.messageCollapse,
+                    [key]: event.target.checked,
+                  })
+                }
+              />
+              <span>{label}</span>
+            </label>
+          ))}
+          <small>
+            These only affect the Loom surface. Stored content, copy, references, and detail
+            views still use the full text.
+          </small>
         </section>
 
         {renderNotificationsSettings()}

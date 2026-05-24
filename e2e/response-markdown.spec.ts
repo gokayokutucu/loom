@@ -53,6 +53,19 @@ test.describe("[pure-ui-rendering] assistant Markdown rendering helpers", () => 
     });
   });
 
+  test("renders standalone Markdown separators as thematic breaks", () => {
+    const markdown = ["Before", "", "---", "", "After"].join("\n");
+    const blocks = parseAssistantMarkdown(markdown);
+
+    expect(blocks).toEqual([
+      { kind: "paragraph", text: "Before" },
+      { kind: "thematicBreak" },
+      { kind: "paragraph", text: "After" },
+    ]);
+    expect(assistantMarkdownToSafeHtml(markdown)).toBe("<p>Before</p><hr><p>After</p>");
+    expect(assistantMarkdownToPlainText(markdown)).toBe("Before\n\nAfter");
+  });
+
   test("repairs common collapsed one-line Markdown table", () => {
     const repaired = repairCollapsedMarkdownTables("| A | B | | :--- | :--- | | x | y |");
 
@@ -209,6 +222,17 @@ test.describe("[pure-ui-rendering] assistant Markdown rendering helpers", () => 
     expect(payload.plainText).not.toContain("#");
     expect(payload.plainText).not.toContain("**");
     expect(payload.plainText).not.toContain("| :--- |");
+  });
+
+  test("default rich clipboard keeps Loom references as address-bearing anchors", () => {
+    const markdown =
+      "Use [Address Bar as local AI web navigator](loom://loom-ai/navigation-architecture/loom/browser/r-address-bar?id=r-address-bar) as context.";
+
+    const payload = buildAssistantDefaultCopyPayload(markdown);
+
+    expect(payload.html).toContain('href="loom://loom-ai/navigation-architecture/loom/browser/r-address-bar?id=r-address-bar"');
+    expect(payload.html).toContain('data-loom-reference-title="Address Bar as local AI web navigator"');
+    expect(payload.plainText).toBe("Use Address Bar as local AI web navigator as context.");
   });
 
   test("explicit Markdown copy payload keeps raw Markdown source", () => {

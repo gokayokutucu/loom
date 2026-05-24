@@ -169,6 +169,58 @@ impl LoomRepository {
         .map_err(|error| ServiceError::storage(format!("failed to list Looms: {error}")))
     }
 
+    pub async fn list_archived_looms(&self) -> Result<Vec<LoomRecord>, ServiceError> {
+        sqlx::query(
+            "SELECT * FROM looms
+             WHERE archived_at IS NOT NULL AND is_deleted = 0
+             ORDER BY archived_at DESC, updated_at DESC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(loom_from_row).collect())
+        .map_err(|error| ServiceError::storage(format!("failed to list archived Looms: {error}")))
+    }
+
+    pub async fn archive_loom(
+        &self,
+        loom_id: &str,
+        archived_at: &str,
+    ) -> Result<Option<LoomRecord>, ServiceError> {
+        sqlx::query(
+            "UPDATE looms
+             SET archived_at = COALESCE(archived_at, ?2),
+                 updated_at = ?2
+             WHERE loom_id = ?1 AND is_deleted = 0",
+        )
+        .bind(loom_id)
+        .bind(archived_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| ServiceError::storage(format!("failed to archive Loom: {error}")))?;
+
+        self.get_loom(loom_id).await
+    }
+
+    pub async fn restore_loom(
+        &self,
+        loom_id: &str,
+        restored_at: &str,
+    ) -> Result<Option<LoomRecord>, ServiceError> {
+        sqlx::query(
+            "UPDATE looms
+             SET archived_at = NULL,
+                 updated_at = ?2
+             WHERE loom_id = ?1 AND is_deleted = 0",
+        )
+        .bind(loom_id)
+        .bind(restored_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| ServiceError::storage(format!("failed to restore Loom: {error}")))?;
+
+        self.get_loom(loom_id).await
+    }
+
     pub async fn soft_delete_loom_tree(
         &self,
         loom_id: &str,
@@ -526,5 +578,63 @@ mod tests {
             .expect("get tombstone")
             .expect("tombstone exists");
         assert!(tombstone.is_deleted);
+    }
+
+    #[tokio::test]
+    async fn archive_and_restore_hide_and_restore_active_loom() {
+        let database = test_database().await;
+        let repository = LoomRepository::new(&database);
+        repository
+            .insert_loom(&NewLoom {
+                loom_id: "loom-archive".to_string(),
+                title: "Archive Target".to_string(),
+                summary: None,
+                code: None,
+                canonical_uri: None,
+                kind: "loom".to_string(),
+                origin_loom_id: None,
+                origin_response_id: None,
+                created_at: "2026-05-08T00:00:00Z".to_string(),
+                updated_at: "2026-05-08T00:00:00Z".to_string(),
+                metadata_json: None,
+            })
+            .await
+            .expect("insert Loom");
+
+        let archived = repository
+            .archive_loom("loom-archive", "2026-05-08T00:00:01Z")
+            .await
+            .expect("archive Loom")
+            .expect("archived Loom");
+        assert_eq!(
+            archived.archived_at.as_deref(),
+            Some("2026-05-08T00:00:01Z")
+        );
+        assert!(repository
+            .list_looms()
+            .await
+            .expect("active list")
+            .is_empty());
+        assert_eq!(
+            repository
+                .list_archived_looms()
+                .await
+                .expect("archived list")
+                .len(),
+            1
+        );
+
+        let restored = repository
+            .restore_loom("loom-archive", "2026-05-08T00:00:02Z")
+            .await
+            .expect("restore Loom")
+            .expect("restored Loom");
+        assert!(restored.archived_at.is_none());
+        assert_eq!(repository.list_looms().await.expect("active list").len(), 1);
+        assert!(repository
+            .list_archived_looms()
+            .await
+            .expect("archived list")
+            .is_empty());
     }
 }

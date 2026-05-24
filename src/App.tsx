@@ -187,9 +187,12 @@ import {
   referenceCodeForLink,
   referenceDisplayModeForLink,
   referenceLabelForMode,
+  referenceMarkdownLink,
   referenceTokenText,
+  loomLinkFromMarkdownReference,
   withReferenceDisplayDefaults,
 } from "./services/referenceDisplay";
+import { polishDisplayTitle } from "./services/displayTitlePolish";
 import {
   normalizeReferenceAddress,
   normalizeResponseLinkSource,
@@ -1460,6 +1463,7 @@ function writeComposerDrafts(drafts: Record<string, ComposerDraft>) {
 }
 
 const LOOM_LINK_MIME = "application/loom-link";
+const LOOM_INLINE_TOKEN_DRAG_MIME = "application/loom-inline-token-drag-id";
 
 const seedComposerLink: LoomLink = {
   id: "seed-link",
@@ -1675,6 +1679,36 @@ function cleanMarkdownDisplayTitle(value?: string) {
   return cleaned || normalized;
 }
 
+function cleanPolishedDisplayTitle(value?: string) {
+  return polishDisplayTitle(cleanMarkdownDisplayTitle(value));
+}
+
+function isEditableSelectAllTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  if (target.isContentEditable) return true;
+  if (target.closest('[contenteditable="true"]')) return true;
+  if (target instanceof HTMLTextAreaElement) return true;
+  if (target instanceof HTMLInputElement) {
+    return ![
+      "button",
+      "checkbox",
+      "color",
+      "file",
+      "hidden",
+      "image",
+      "radio",
+      "range",
+      "reset",
+      "submit",
+    ].includes(target.type);
+  }
+  return false;
+}
+
+function isSelectAllShortcut(event: KeyboardEvent) {
+  return (event.metaKey || event.ctrlKey) && !event.altKey && event.key.toLowerCase() === "a";
+}
+
 function compactLoomTitle(value: string, maxLength = 96) {
   const normalized = normalizeLoomTitle(value);
   if (normalized.length <= maxLength) return normalized;
@@ -1699,8 +1733,8 @@ function normalizePromptEditText(value: string) {
 }
 
 function formatAddressBarTitle(activeLoom?: Pick<Conversation, "title"> | null, destinationTitle?: string) {
-  const loomTitle = cleanMarkdownDisplayTitle(activeLoom?.title);
-  const targetTitle = cleanMarkdownDisplayTitle(destinationTitle);
+  const loomTitle = cleanPolishedDisplayTitle(activeLoom?.title);
+  const targetTitle = cleanPolishedDisplayTitle(destinationTitle);
 
   if (!loomTitle && !targetTitle) return "Archive / No active conversation";
   if (!loomTitle) return targetTitle;
@@ -1797,6 +1831,28 @@ function appendInlineReferenceTokenHtml(
   );
   const needsLeadingSpace = html.trim().length > 0 && !/\s$/.test(html);
   return `${html}${needsLeadingSpace ? " " : ""}${token} `;
+}
+
+function markdownToReferenceClipboardHtml(markdown: string) {
+  const tokenPattern = /\[([^\]]+)\]\((loom:\/\/[^)\s]+)\)/g;
+  let cursor = 0;
+  let html = "";
+  let match: RegExpExecArray | null;
+  while ((match = tokenPattern.exec(markdown)) !== null) {
+    if (match.index > cursor) {
+      html += escapeInlineReferenceHtml(markdown.slice(cursor, match.index));
+    }
+    const label = match[1] ?? "";
+    const address = match[2] ?? "";
+    html += `<a href="${escapeInlineReferenceAttribute(address)}" data-loom-reference-title="${escapeInlineReferenceAttribute(
+      label
+    )}">${escapeInlineReferenceHtml(label)}</a>`;
+    cursor = match.index + match[0].length;
+  }
+  if (cursor < markdown.length) {
+    html += escapeInlineReferenceHtml(markdown.slice(cursor));
+  }
+  return `<div style="white-space: pre-wrap;">${html.replace(/\n/g, "<br>")}</div>`;
 }
 
 function linkFromInlineTokenElement(token: HTMLElement): LoomLink | null {
@@ -1998,7 +2054,15 @@ function responseAddressForConversation(conversation: Conversation, response: Re
   ) {
     return response.meta.canonicalUri;
   }
-  const basePath = (conversation.meta?.canonicalUri ?? conversation.path).replace(/\/$/, "");
+  let basePath = (conversation.meta?.canonicalUri ?? conversation.path).replace(/\/$/, "");
+  try {
+    const url = new URL(basePath);
+    url.search = "";
+    url.hash = "";
+    basePath = url.toString().replace(/\/$/, "");
+  } catch {
+    basePath = basePath.split("#")[0]?.split("?")[0]?.replace(/\/$/, "") ?? basePath;
+  }
   const code = response.meta?.displayCode ?? response.meta?.code ?? "R-00000";
   return `${basePath}/r/${encodeURIComponent(code)}?id=${encodeURIComponent(response.id)}`;
 }
@@ -2189,6 +2253,8 @@ function App() {
   const transcriptAutoFollowPausedRef = useRef(false);
   const transcriptProgrammaticScrollRef = useRef(false);
   const previousComposerRunningRef = useRef(false);
+  const activeVisitLoomIdRef = useRef<string | null>(null);
+  const activeVisitKnownResponseIdsRef = useRef<Set<string>>(new Set());
   const wasWeftSplitVisibleRef = useRef(false);
   const metadataGenerationRef = useRef(new Set<string>());
   const composerFocusRef = useRef<(() => void) | null>(null);
@@ -2373,6 +2439,7 @@ function App() {
   }>({ running: false, message: null });
   const [composerRuntimeTargetKey, setComposerRuntimeTargetKey] = useState<string | null>(null);
   const mainGenerationRef = useRef(0);
+  const mainComposerSubmissionInFlightRef = useRef(false);
   const mainAbortRef = useRef<AbortController | null>(null);
   const mainRevealTargetRef = useRef<{ loomId: string; responseId: string } | null>(null);
   const mainServiceCancellationRef = useRef<{
@@ -2424,6 +2491,9 @@ function App() {
     useState<string | null>(null);
   const [completionActionRevealResponseId, setCompletionActionRevealResponseId] =
     useState<string | null>(null);
+  const [currentVisitResponseIds, setCurrentVisitResponseIds] = useState<Set<string>>(
+    () => new Set()
+  );
   const completionActionRevealFrameRef = useRef<number | null>(null);
   const completionActionRevealTimerRef = useRef<number | null>(null);
   const growthMilestoneToastTimerRef = useRef<number | null>(null);
@@ -2460,6 +2530,46 @@ function App() {
   const activeResponses = activeConversation && activeConversation.id !== draftConversation?.id
     ? conversationResponses[activeConversation.id] ?? []
     : [];
+
+  useEffect(() => {
+    const loomId =
+      activeConversation && activeConversation.id !== draftConversation?.id
+        ? activeConversation.id
+        : null;
+    const responseIds = activeResponses.map((response) => response.id);
+
+    if (!loomId) {
+      activeVisitLoomIdRef.current = null;
+      activeVisitKnownResponseIdsRef.current = new Set();
+      setCurrentVisitResponseIds((current) =>
+        current.size === 0 ? current : new Set()
+      );
+      return;
+    }
+
+    if (activeVisitLoomIdRef.current !== loomId) {
+      activeVisitLoomIdRef.current = loomId;
+      activeVisitKnownResponseIdsRef.current = new Set(responseIds);
+      setCurrentVisitResponseIds((current) =>
+        current.size === 0 ? current : new Set()
+      );
+      return;
+    }
+
+    const nextIds = responseIds.filter(
+      (responseId) => !activeVisitKnownResponseIdsRef.current.has(responseId)
+    );
+    responseIds.forEach((responseId) =>
+      activeVisitKnownResponseIdsRef.current.add(responseId)
+    );
+    if (nextIds.length === 0) return;
+
+    setCurrentVisitResponseIds((current) => {
+      const next = new Set(current);
+      nextIds.forEach((responseId) => next.add(responseId));
+      return next;
+    });
+  }, [activeConversation?.id, activeResponses, draftConversation?.id]);
 
   useEffect(() => {
     conversationResponsesRef.current = conversationResponses;
@@ -3088,14 +3198,19 @@ function App() {
     setServiceLoomsLoading(true);
     try {
       const summaries = await loomEngineClientRef.current.listLooms();
+      const archivedSummaries = await loomEngineClientRef.current.listLooms({
+        archived: true,
+      });
       const details = await Promise.all(
         summaries.map((summary) => loomEngineClientRef.current.getLoom(summary.loomId))
       );
       const next = serviceLoomDetailsToState(details);
+      const nextArchived = archivedSummaries.map(conversationFromServiceLoom);
       const availableConversationIds = new Set(
         next.conversations.map((conversation) => conversation.id)
       );
       setConversations(next.conversations);
+      setArchived(nextArchived);
       setConversationResponses(next.responses);
       setForkRecords(next.forkRecords);
       let restoredLayout: SidebarLayoutState | null = null;
@@ -4640,8 +4755,12 @@ function App() {
         link.targetObjectId,
         link.sourceResponseId,
         link.sourceCanonicalUri,
+        responseIdFromReferenceAddress(link.path),
+        responseIdFromReferenceAddress(link.canonicalUri),
+        responseIdFromReferenceAddress(link.sourceCanonicalUri),
         link.meta?.id,
         link.meta?.canonicalUri,
+        responseIdFromReferenceAddress(link.meta?.canonicalUri),
       ].filter((value): value is string => Boolean(value))
     );
   }
@@ -4995,7 +5114,13 @@ function App() {
 
   useEffect(() => {
     function handleGlobalShortcuts(event: KeyboardEvent) {
-      if (event.defaultPrevented || providerSettingsOpen) return;
+      if (event.defaultPrevented) return;
+      if (isSelectAllShortcut(event) && !isEditableSelectAllTarget(event.target)) {
+        event.preventDefault();
+        event.stopPropagation();
+        return;
+      }
+      if (providerSettingsOpen) return;
       if (matchesKeyboardCommand(event, "focus-address-bar")) {
         event.preventDefault();
         event.stopPropagation();
@@ -5528,12 +5653,18 @@ function App() {
     const resolvedDestination = resolution.destination;
     const source = options.source ?? "userNavigation";
     const fromAddressBar = source === "addressBar";
+    const storedNavigationDestination =
+      "navigationDestination" in resolvedDestination && resolvedDestination.navigationDestination
+        ? resolvedDestination.navigationDestination
+        : "navigationDestination" in destination
+          ? destination.navigationDestination
+          : undefined;
     const navigationDestination =
       options.navigationDestination ??
-      ("navigationDestination" in destination && destination.navigationDestination
+      (storedNavigationDestination
         ? normalizeStoredNavigationDestination(
             resolvedDestination,
-            destination.navigationDestination,
+            storedNavigationDestination,
             source
           )
         : undefined) ??
@@ -5773,26 +5904,46 @@ function App() {
     workspaceWidth,
   ]);
 
-  function archiveConversation(conversation: Conversation) {
-    const nextConversations = conversations.filter(
-      (item) => item.id !== conversation.id
-    );
-    setConversations(nextConversations);
-    setArchived((current) => [conversation, ...current]);
-    setPinnedConversationIds((current) =>
-      current.filter((id) => id !== conversation.id)
-    );
-    if (conversation.id === activeConversationId) {
-      openNewConversationDraft();
+  async function archiveConversation(conversation: Conversation) {
+    try {
+      await loomEngineClient.archiveLoom({ loomId: conversation.id });
+      const nextConversations = conversations.filter(
+        (item) => item.id !== conversation.id
+      );
+      setConversations(nextConversations);
+      setArchived((current) => [conversation, ...current]);
+      setPinnedConversationIds((current) =>
+        current.filter((id) => id !== conversation.id)
+      );
+      if (conversation.id === activeConversationId) {
+        openNewConversationDraft();
+      }
+    } catch (error) {
+      console.warn("Archive requires loom-service.", error);
+      showToast({
+        title: "Archive failed",
+        message: "Loom could not be archived.",
+        color: "red",
+      });
     }
   }
 
-  function restoreConversation(conversation: Conversation) {
-    setArchived((current) => current.filter((item) => item.id !== conversation.id));
-    setConversations((current) => appendConversationInTabOrder(current, conversation));
-    setActiveConversationId(conversation.id);
-    setActiveObjectTitle(conversation.title);
-    closeUnpinnedUtilityOverlays();
+  async function restoreConversation(conversation: Conversation) {
+    try {
+      await loomEngineClient.restoreLoom({ loomId: conversation.id });
+      setArchived((current) => current.filter((item) => item.id !== conversation.id));
+      setConversations((current) => appendConversationInTabOrder(current, conversation));
+      setActiveConversationId(conversation.id);
+      setActiveObjectTitle(conversation.title);
+      closeUnpinnedUtilityOverlays();
+    } catch (error) {
+      console.warn("Restore requires loom-service.", error);
+      showToast({
+        title: "Restore failed",
+        message: "Loom could not be restored.",
+        color: "red",
+      });
+    }
   }
 
   async function deleteConversation(conversation: Conversation) {
@@ -5956,6 +6107,8 @@ function App() {
   function linkObjectForDraft(link: LoomLink, draftKey: string) {
     const transcript = transcriptRef.current;
     const preservedScrollTop = transcript?.scrollTop;
+    const shouldFollowTranscript =
+      transcript ? isScrollContainerNearBottom(transcript, 140) : false;
     const stableLink = resolveReferenceLink(promoteResponseLink(link), draftKey);
     updateComposerDraft(draftKey, (currentDraft) => {
       const selectedLink = withReferenceOccurrenceIndex(
@@ -5976,7 +6129,15 @@ function App() {
       };
     });
     composerFocusRef.current?.();
-    if (transcript && preservedScrollTop !== undefined) {
+    if (transcript && shouldFollowTranscript) {
+      const followScroll = () => {
+        scrollTranscriptToBottom(transcript);
+      };
+      window.requestAnimationFrame(followScroll);
+      window.setTimeout(followScroll, 0);
+      window.setTimeout(followScroll, 80);
+      window.setTimeout(followScroll, 220);
+    } else if (transcript && preservedScrollTop !== undefined) {
       transcriptProgrammaticScrollRef.current = true;
       const restoreScroll = () => {
         transcript.scrollTop = preservedScrollTop;
@@ -6373,8 +6534,33 @@ function App() {
     });
   }
 
-  function copyPromptTextWithToast(promptText: string) {
-    void browserHostShell.copyText(promptText).then(
+  function promptClipboardPayload(promptText: string, references: LoomLink[] = []) {
+    const referenceQueue = [...references];
+    const markdown = referenceQueue.reduce((current, link) => {
+      const tokenCandidates = [
+        composerReferenceTokenText(link, link.referenceDisplayMode ?? "title"),
+        referenceTokenText(link, link.referenceDisplayMode ?? "title"),
+        referenceTokenText(link, "title"),
+        referenceTokenText(link, "code"),
+        `[[${link.title}]]`,
+        link.referenceCustomLabel ? `[[${link.referenceCustomLabel}]]` : "",
+      ].filter(Boolean);
+      const token = tokenCandidates.find((candidate) => current.includes(candidate));
+      if (!token) return current;
+      return current.replace(
+        token,
+        referenceMarkdownLink(link, link.referenceDisplayMode ?? "title")
+      );
+    }, promptText);
+    return {
+      plainText: markdown,
+      html: markdownToReferenceClipboardHtml(markdown),
+    };
+  }
+
+  function copyPromptTextWithToast(promptText: string, references?: LoomLink[]) {
+    const payload = promptClipboardPayload(promptText, references);
+    void browserHostShell.copyRichText(payload).then(
       () => showLinkCopyToast("Prompt is copied"),
       () =>
         showToast({
@@ -6950,6 +7136,9 @@ function App() {
       return false;
     }
 
+    if (mainComposerSubmissionInFlightRef.current) return false;
+    mainComposerSubmissionInFlightRef.current = true;
+    try {
     const generationId = mainGenerationRef.current + 1;
     mainGenerationRef.current = generationId;
     const controller = new AbortController();
@@ -8180,6 +8369,9 @@ function App() {
         setGeneratingResponseId(null);
       }
       return false;
+    }
+    } finally {
+      mainComposerSubmissionInFlightRef.current = false;
     }
   }
 
@@ -11208,7 +11400,13 @@ function App() {
 
   function fragmentReferenceFromSelection(state: SelectionAskState): LoomLink {
     const responseCode = state.response.meta?.code;
-    const sourceCanonicalUri = state.response.meta?.canonicalUri;
+    const sourceConversation =
+      conversations.find((item) => item.id === state.draftKey) ??
+      archived.find((item) => item.id === state.draftKey) ??
+      (draftConversation?.id === state.draftKey ? draftConversation : undefined);
+    const sourceCanonicalUri = sourceConversation
+      ? responseAddressForConversation(sourceConversation, state.response)
+      : state.response.meta?.canonicalUri;
     const fragmentHash = fragmentTextHash(state.selectedText);
     const title = fragmentReferenceTitle(
       state.selectedText,
@@ -12036,6 +12234,13 @@ function App() {
                             onRegenerateFromPrompt={regenerateFromEditedPrompt}
                             onRetryPrompt={retryFromUserMessage}
                             showGenerationDebug={appSettings.showGenerationDebug}
+                            uncollapsedResponseIds={
+                              activeSplitPanel === "origin"
+                                ? currentVisitResponseIds
+                                : undefined
+                            }
+                            collapseUserMessages={appSettings.messageCollapse.userMessages}
+                            collapseResponses={appSettings.messageCollapse.responses}
                           />
                           {renderPanelComposer(originConversation.id, "origin")}
                         </div>
@@ -12118,6 +12323,13 @@ function App() {
                             onRegenerateFromPrompt={regenerateFromEditedPrompt}
                             onRetryPrompt={retryFromUserMessage}
                             showGenerationDebug={appSettings.showGenerationDebug}
+                            uncollapsedResponseIds={
+                              activeSplitPanel === "weft"
+                                ? currentVisitResponseIds
+                                : undefined
+                            }
+                            collapseUserMessages={appSettings.messageCollapse.userMessages}
+                            collapseResponses={appSettings.messageCollapse.responses}
                           />
                           {renderPanelComposer(activeConversation.id, "weft")}
                         </div>
@@ -12224,6 +12436,9 @@ function App() {
                     onRegenerateFromPrompt={regenerateFromEditedPrompt}
                     onRetryPrompt={retryFromUserMessage}
                     showGenerationDebug={appSettings.showGenerationDebug}
+                    uncollapsedResponseIds={currentVisitResponseIds}
+                    collapseUserMessages={appSettings.messageCollapse.userMessages}
+                    collapseResponses={appSettings.messageCollapse.responses}
                   />
                 )}
 
@@ -12630,7 +12845,7 @@ function Sidebar({
     const pinned = pinnedConversationIds.includes(conversation.id);
     const groupId = sidebarDnD.getGroupIdForConversation(conversation.id);
     const Icon = getConversationIconOption(conversation.iconKey).Icon;
-    const displayTitle = cleanMarkdownDisplayTitle(conversation.title);
+    const displayTitle = cleanPolishedDisplayTitle(conversation.title);
     const displaySummary = cleanMarkdownDisplayTitle(conversation.summary);
     return (
       <div
@@ -13105,7 +13320,7 @@ function PinnedConversationTab({
   onDragEnd: () => void;
 }) {
   const Icon = getConversationIconOption(conversation.iconKey).Icon;
-  const displayTitle = cleanMarkdownDisplayTitle(conversation.title);
+  const displayTitle = cleanPolishedDisplayTitle(conversation.title);
   return (
     <button
       className={active ? "pinned-tab active" : "pinned-tab"}
@@ -14264,11 +14479,17 @@ function ResponseContent({
   codeBlocks,
   onCopyCode,
   onAddCodeReference,
+  onOpenReference,
+  onReferenceHint,
+  onReferenceHintClose,
 }: {
   markdown: string;
   codeBlocks?: ResponseCodeBlock[];
   onCopyCode: (code: string) => Promise<boolean>;
   onAddCodeReference: (codeBlock: ResponseCodeBlock) => Promise<boolean>;
+  onOpenReference: (link: LoomLink) => string | null;
+  onReferenceHint: (link: LoomLink, target: HTMLElement) => void;
+  onReferenceHintClose: () => void;
 }) {
   return (
     <AssistantMarkdownContent
@@ -14276,6 +14497,9 @@ function ResponseContent({
       codeBlocks={codeBlocks}
       onCopyCode={onCopyCode}
       onAddCodeReference={onAddCodeReference}
+      onOpenReference={onOpenReference}
+      onReferenceHint={onReferenceHint}
+      onReferenceHintClose={onReferenceHintClose}
     />
   );
 }
@@ -14294,12 +14518,20 @@ function CollapsibleResponseContent({
   codeBlocks,
   onCopyCode,
   onAddCodeReference,
+  onOpenReference,
+  onReferenceHint,
+  onReferenceHintClose,
+  collapseEnabled = true,
 }: {
   responseId: string;
   markdown: string;
   codeBlocks?: ResponseCodeBlock[];
   onCopyCode: (code: string) => Promise<boolean>;
   onAddCodeReference: (codeBlock: ResponseCodeBlock) => Promise<boolean>;
+  onOpenReference: (link: LoomLink) => string | null;
+  onReferenceHint: (link: LoomLink, target: HTMLElement) => void;
+  onReferenceHintClose: () => void;
+  collapseEnabled?: boolean;
 }) {
   const contentRef = useRef<HTMLDivElement | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -14360,11 +14592,12 @@ function CollapsibleResponseContent({
   }, [markdown, codeBlocks]);
 
   const isCollapsed = collapsible && !expanded;
+  const canCollapse = collapseEnabled && collapsible;
 
   return (
     <div
       className="assistant-response-content-frame"
-      data-collapsible={collapsible ? "true" : "false"}
+      data-collapsible={canCollapse ? "true" : "false"}
       data-expanded={expanded ? "true" : "false"}
     >
       <div
@@ -14372,12 +14605,12 @@ function CollapsibleResponseContent({
         ref={contentRef}
         className={[
           "assistant-response-content",
-          isCollapsed ? "is-collapsed" : "",
+          collapseEnabled && isCollapsed ? "is-collapsed" : "",
         ]
           .filter(Boolean)
           .join(" ")}
         style={
-          isCollapsed
+          collapseEnabled && isCollapsed
             ? ({
                 "--assistant-response-collapse-height": `${collapseHeight}px`,
               } as CSSProperties)
@@ -14389,9 +14622,12 @@ function CollapsibleResponseContent({
           codeBlocks={codeBlocks}
           onCopyCode={onCopyCode}
           onAddCodeReference={onAddCodeReference}
+          onOpenReference={onOpenReference}
+          onReferenceHint={onReferenceHint}
+          onReferenceHintClose={onReferenceHintClose}
         />
       </div>
-      {collapsible && (
+      {canCollapse && (
         <button
           type="button"
           className="assistant-response-collapse-toggle"
@@ -14465,6 +14701,12 @@ function UserPromptContent({
         onFocus={(event) => onReferenceHint(nextMatch.link, event.currentTarget)}
         onBlur={onReferenceHintClose}
         title={nextMatch.link.selectedText ?? nextMatch.link.title}
+        data-loom-id={nextMatch.link.id}
+        data-loom-path={nextMatch.link.path}
+        data-loom-title={nextMatch.link.title}
+        data-loom-type={nextMatch.link.type}
+        data-loom-canonical-uri={nextMatch.link.canonicalUri}
+        data-loom-source-canonical-uri={nextMatch.link.sourceCanonicalUri}
       >
         <span>
           {isAttachmentReferenceLink(nextMatch.link)
@@ -14500,6 +14742,12 @@ function UserPromptContent({
           onFocus={(event) => onReferenceHint(link, event.currentTarget)}
           onBlur={onReferenceHintClose}
           title={link.selectedText ?? link.title}
+          data-loom-id={link.id}
+          data-loom-path={link.path}
+          data-loom-title={link.title}
+          data-loom-type={link.type}
+          data-loom-canonical-uri={link.canonicalUri}
+          data-loom-source-canonical-uri={link.sourceCanonicalUri}
         >
           <span>
             {isAttachmentReferenceLink(link)
@@ -14523,12 +14771,14 @@ function CollapsibleUserPromptContent({
   onOpenReference,
   onReferenceHint,
   onReferenceHintClose,
+  collapseEnabled = true,
 }: {
   text: string;
   references?: LoomLink[];
   onOpenReference: (link: LoomLink) => string | null;
   onReferenceHint: (link: LoomLink, target: HTMLElement) => void;
   onReferenceHintClose: () => void;
+  collapseEnabled?: boolean;
 }) {
   const promptRef = useRef<HTMLParagraphElement | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -14565,18 +14815,20 @@ function CollapsibleUserPromptContent({
     };
   }, [text, expanded]);
 
+  const canCollapse = collapseEnabled && collapsible;
+
   return (
     <div className="user-message-collapsible" data-expanded={expanded ? "true" : "false"}>
       <p
         ref={promptRef}
         className={[
           "user-message-prompt-text",
-          !expanded ? "is-clamped" : "",
+          collapseEnabled && !expanded ? "is-clamped" : "",
         ]
           .filter(Boolean)
           .join(" ")}
         style={
-          !expanded
+          collapseEnabled && !expanded
             ? ({
                 "--user-message-collapse-lines": USER_PROMPT_COLLAPSE_LINE_COUNT,
               } as CSSProperties)
@@ -14591,7 +14843,7 @@ function CollapsibleUserPromptContent({
           onReferenceHintClose={onReferenceHintClose}
         />
       </p>
-      {collapsible && (
+      {canCollapse && (
         <button
           type="button"
           className="user-message-collapse-toggle"
@@ -14632,6 +14884,12 @@ function AttachedPromptReferences({
           onFocus={(event) => onReferenceHint(link, event.currentTarget)}
           onBlur={onReferenceHintClose}
           title={link.sourceResponseTitle ?? link.title}
+          data-loom-id={link.id}
+          data-loom-path={link.path}
+          data-loom-title={link.title}
+          data-loom-type={link.type}
+          data-loom-canonical-uri={link.canonicalUri}
+          data-loom-source-canonical-uri={link.sourceCanonicalUri}
         >
           <CornerDownRightIcon />
           <span>{fragmentQuoteText(link)}</span>
@@ -14774,6 +15032,9 @@ function ChatTranscript({
   onRegenerateFromPrompt,
   onRetryPrompt,
   showGenerationDebug,
+  uncollapsedResponseIds,
+  collapseUserMessages = true,
+  collapseResponses = true,
 }: {
   transcriptRef?: (node: HTMLElement | null) => void;
   conversation?: Conversation;
@@ -14799,7 +15060,7 @@ function ChatTranscript({
   onCopyAddress: (link: Pick<LoomLink, "path" | "canonicalUri">) => void;
   onCopyAddressWithToast: (link: Pick<LoomLink, "path" | "canonicalUri">) => void;
   onCopyResponse: (response: ResponseItem) => void;
-  onCopyPrompt: (promptText: string) => void;
+  onCopyPrompt: (promptText: string, references?: LoomLink[]) => void;
   onCopyCode: (code: string) => Promise<boolean>;
   onAddCodeReference: (
     conversation: Conversation,
@@ -14825,11 +15086,16 @@ function ChatTranscript({
     returnFocus?: HTMLElement | null
   ) => void;
   showGenerationDebug: boolean;
+  uncollapsedResponseIds?: ReadonlySet<string>;
+  collapseUserMessages?: boolean;
+  collapseResponses?: boolean;
 }) {
   const [sentReferenceHint, setSentReferenceHint] = useState<{
     link: LoomLink;
     x: number;
     y: number;
+    placement: "top" | "bottom";
+    maxHeight: number;
   } | null>(null);
   const [editingPromptId, setEditingPromptId] = useState<string | null>(null);
   const [promptEditDraft, setPromptEditDraft] = useState("");
@@ -14889,14 +15155,50 @@ function ChatTranscript({
 
   function showSentReferenceHint(link: LoomLink, target: HTMLElement) {
     clearSentReferenceHintCloseTimer();
+    const hintLink =
+      link.type === "fragment" && link.sourceResponseId
+        ? (() => {
+            const sourceResponse = responses.find(
+              (response) =>
+                response.id === link.sourceResponseId ||
+                response.serviceUserResponseId === link.sourceResponseId
+            );
+            if (!sourceResponse || !conversation) return link;
+            const sourceAddress = responseAddressForConversation(conversation, sourceResponse);
+            return {
+              ...link,
+              path: link.path?.startsWith("loom://")
+                ? link.path
+                : `${sourceAddress}${link.fragmentHash ? `#fragment=${link.fragmentHash}` : ""}`,
+              canonicalUri: link.canonicalUri?.startsWith("loom://")
+                ? link.canonicalUri
+                : `${sourceAddress}${link.fragmentHash ? `#fragment=${link.fragmentHash}` : ""}`,
+              sourceCanonicalUri: link.sourceCanonicalUri?.startsWith("loom://")
+                ? link.sourceCanonicalUri
+                : sourceAddress,
+            };
+          })()
+        : link;
     const rect = target.getBoundingClientRect();
+    const viewportPadding = 12;
+    const hoverGap = 8;
     const popoverWidth = Math.min(340, window.innerWidth - 24);
     const x = Math.min(
-      Math.max(12, rect.left + rect.width / 2 - popoverWidth / 2),
-      window.innerWidth - popoverWidth - 12
+      Math.max(viewportPadding, rect.left + rect.width / 2 - popoverWidth / 2),
+      window.innerWidth - popoverWidth - viewportPadding
     );
-    const y = Math.min(rect.bottom + 8, window.innerHeight - 96);
-    setSentReferenceHint({ link, x, y });
+    const availableAbove = rect.top - hoverGap - viewportPadding;
+    const availableBelow = window.innerHeight - rect.bottom - hoverGap - viewportPadding;
+    const openAbove = availableAbove > availableBelow && availableAbove > 120;
+    setSentReferenceHint({
+      link: hintLink,
+      x,
+      y: openAbove
+        ? Math.max(viewportPadding, rect.top - hoverGap)
+        : Math.min(window.innerHeight - viewportPadding, rect.bottom + hoverGap),
+      placement: openAbove ? "top" : "bottom",
+      maxHeight: Math.max(120, openAbove ? availableAbove : availableBelow),
+    });
   }
 
   function scheduleSentReferenceHintClose() {
@@ -14973,7 +15275,7 @@ function ChatTranscript({
           )}
         </div>
         <div className="conversation-context-title-row">
-          <h1>{cleanMarkdownDisplayTitle(conversation.title)}</h1>
+          <h1>{cleanPolishedDisplayTitle(conversation.title)}</h1>
           {onReturnToOrigin && (
             <Tooltip label="Return to Origin">
               <button
@@ -15106,6 +15408,11 @@ function ChatTranscript({
         const isGeneratingResponse = displayResponse.id === generatingResponseId;
         const revealCompletionActions =
           displayResponse.id === completionActionRevealResponseId;
+        const isLatestResponse = index === responses.length - 1;
+        const suppressResponseCollapse =
+          !collapseResponses ||
+          isLatestResponse ||
+          Boolean(uncollapsedResponseIds?.has(displayResponse.id));
         const displayResponseTitle =
           cleanMarkdownDisplayTitle(displayResponse.title) || displayResponse.title;
         const responseUrl = responseAddressForConversation(conversation, displayResponse);
@@ -15231,6 +15538,7 @@ function ChatTranscript({
                   <CollapsibleUserPromptContent
                     text={displayPromptText}
                     references={inlinePromptReferences}
+                    collapseEnabled={collapseUserMessages}
                     onOpenReference={onOpenReference}
                     onReferenceHint={showSentReferenceHint}
                     onReferenceHintClose={scheduleSentReferenceHintClose}
@@ -15282,7 +15590,7 @@ function ChatTranscript({
                       className="prompt-action-button prompt-copy-trigger"
                       aria-label={`Copy prompt: ${displayResponse.title}`}
                       data-testid={`copy-prompt-${displayResponse.id}`}
-                      onClick={() => onCopyPrompt(displayPromptText)}
+                      onClick={() => onCopyPrompt(displayPromptText, inlinePromptReferences)}
                     >
                       <Copy size={16} />
                     </button>
@@ -15367,10 +15675,14 @@ function ChatTranscript({
                   responseId={displayResponse.id}
                   markdown={responseMarkdownSource(displayResponse)}
                   codeBlocks={displayResponse.codeBlocks}
+                  collapseEnabled={!suppressResponseCollapse}
                   onCopyCode={onCopyCode}
                   onAddCodeReference={(codeBlock) =>
                     onAddCodeReference(conversation, displayResponse, codeBlock)
                   }
+                  onOpenReference={onOpenReference}
+                  onReferenceHint={showSentReferenceHint}
+                  onReferenceHintClose={scheduleSentReferenceHintClose}
                 />
                 {displayResponse.answerStale && !isGeneratingResponse && (
                   <div className="stale-answer-notice">
@@ -15542,7 +15854,13 @@ function ChatTranscript({
           style={{
             left: sentReferenceHint.x,
             top: sentReferenceHint.y,
+            maxHeight: sentReferenceHint.maxHeight,
+            transform:
+              sentReferenceHint.placement === "top"
+                ? "translateY(-100%)"
+                : "translateY(0)",
           }}
+          placement={sentReferenceHint.placement}
           onEnter={clearSentReferenceHintCloseTimer}
           onClose={scheduleSentReferenceHintClose}
           onCopy={onCopyAddress}
@@ -15669,6 +15987,7 @@ function PromptComposer({
     inputType: string;
     replacesSelection: boolean;
   } | null>(null);
+  const lastEditorRangeRef = useRef<Range | null>(null);
   const [mention, setMention] = useState<MentionState | null>(null);
   const [attachPickerOpen, setAttachPickerOpen] = useState(false);
   const [attachSearch, setAttachSearch] = useState("");
@@ -15716,6 +16035,7 @@ function PromptComposer({
     x: number;
     y: number;
     placement: "top" | "bottom";
+    maxHeight: number;
   } | null>(null);
   const speechSnapshotRef = useRef<{
     draft: ComposerDraft;
@@ -15803,6 +16123,27 @@ function PromptComposer({
         onUserTyping();
         window.setTimeout(onUserTyping, 0);
         window.setTimeout(onUserTyping, 80);
+      });
+    });
+  }
+
+  function revealEditorInsertion(node?: HTMLElement | null) {
+    const editor = editorRef.current;
+    if (!editor) return;
+    window.requestAnimationFrame(() => {
+      resizeEditorToContent();
+      window.requestAnimationFrame(() => {
+        const currentEditor = editorRef.current;
+        if (!currentEditor) return;
+        if (node && currentEditor.contains(node)) {
+          const nodeBottom = node.offsetTop + node.offsetHeight;
+          const visibleBottom = currentEditor.scrollTop + currentEditor.clientHeight;
+          if (nodeBottom > visibleBottom) {
+            currentEditor.scrollTop = nodeBottom - currentEditor.clientHeight;
+          }
+          return;
+        }
+        currentEditor.scrollTop = currentEditor.scrollHeight;
       });
     });
   }
@@ -15924,10 +16265,7 @@ function PromptComposer({
   );
 
   const filteredLinkedReferences = useMemo(() => {
-    const allReferences = mergeUniqueReferences([
-      ...visibleAttachedReferences,
-      ...draftInlineReferences,
-    ]);
+    const allReferences = [...visibleAttachedReferences, ...draftInlineReferences];
     const query = referenceSearch.trim().toLowerCase();
     if (!query) return allReferences;
     return allReferences.filter((link) =>
@@ -16476,6 +16814,7 @@ function PromptComposer({
           ? Math.max(viewportPadding, rect.top - hoverGap)
           : Math.min(window.innerHeight - viewportPadding, rect.bottom + hoverGap),
         placement: openAbove ? "top" : "bottom",
+        maxHeight: Math.max(120, openAbove ? availableAbove : availableBelow),
       });
     }, REFERENCE_ADDRESS_HINT_DELAY_MS);
   }
@@ -16510,7 +16849,7 @@ function PromptComposer({
       editor.querySelectorAll<HTMLElement>(".inline-loom-token")
     ).find((item) => {
       const itemLink = linkFromInlineToken(item);
-      return Boolean(itemLink && referencesShareIdentity(itemLink, link));
+      return Boolean(itemLink && referencesMatchComposerInstance(itemLink, link));
     });
     if (!token) return;
     updateInlineTokenDisplayMode(token, displayMode);
@@ -16531,7 +16870,7 @@ function PromptComposer({
       editor.querySelectorAll<HTMLElement>(".inline-loom-token")
     ).find((item) => {
       const itemLink = linkFromInlineToken(item);
-      return Boolean(itemLink && referencesShareIdentity(itemLink, link));
+      return Boolean(itemLink && referencesMatchComposerInstance(itemLink, link));
     });
     if (!token) return;
     const rect = token.getBoundingClientRect();
@@ -16564,7 +16903,7 @@ function PromptComposer({
     ).find((item) => {
       const itemLink = linkFromInlineToken(item);
       return Boolean(
-        itemLink && referencesShareIdentity(itemLink, tokenRenamePopover.link)
+        itemLink && referencesMatchComposerInstance(itemLink, tokenRenamePopover.link)
       );
     });
     if (!token) {
@@ -16590,6 +16929,17 @@ function PromptComposer({
     setTokenContextMenu(null);
     setTokenRenamePopover(null);
     scheduleAddressHintClose();
+  }
+
+  function referencesMatchComposerInstance(a: LoomLink, b: LoomLink) {
+    if (!referencesShareIdentity(a, b)) return false;
+    if (
+      a.referenceOccurrenceIndex !== undefined ||
+      b.referenceOccurrenceIndex !== undefined
+    ) {
+      return a.referenceOccurrenceIndex === b.referenceOccurrenceIndex;
+    }
+    return true;
   }
 
   function removeSingleInlineToken(token: HTMLElement, intent: ComposerEditIntent) {
@@ -16765,6 +17115,7 @@ function PromptComposer({
       }
       return;
     }
+    storeEditorRange();
     updateMention();
   }
 
@@ -17064,6 +17415,25 @@ function PromptComposer({
     const range = selection.getRangeAt(0);
     if (!editor.contains(range.commonAncestorContainer)) return null;
     return range.cloneRange();
+  }
+
+  function storeEditorRange() {
+    const range = getCurrentEditorRange();
+    if (range) lastEditorRangeRef.current = range;
+  }
+
+  function getPreferredEditorInsertionRange() {
+    const currentRange = getCurrentEditorRange();
+    if (currentRange) return currentRange;
+    const editor = editorRef.current;
+    const storedRange = lastEditorRangeRef.current;
+    if (!editor || !storedRange) return null;
+    try {
+      if (!editor.contains(storedRange.commonAncestorContainer)) return null;
+      return storedRange.cloneRange();
+    } catch {
+      return null;
+    }
   }
 
   function setEditorSelectionByTextOffsets(selectionStart: number, selectionEnd = selectionStart) {
@@ -17403,6 +17773,10 @@ function PromptComposer({
     if (insertedExternalReference || removedExternalReference) {
       normalizeEditorReferenceTokens();
       syncEditorEmptyState(editor);
+      const inlineTokens = Array.from(
+        editor.querySelectorAll<HTMLElement>(".inline-loom-token")
+      );
+      revealEditorInsertion(inlineTokens[inlineTokens.length - 1]);
       window.requestAnimationFrame(() =>
         commitDraftChange(
           insertedExternalReference ? "external-reference" : "reference-remove-dropdown"
@@ -17420,12 +17794,14 @@ function PromptComposer({
     range.collapse(true);
     selection.removeAllRanges();
     selection.addRange(range);
+    lastEditorRangeRef.current = range.cloneRange();
   }
 
   function insertTokenAtRange(
     link: LoomLink,
     range: Range,
-    intent: ComposerEditIntent = "reference-insert"
+    intent: ComposerEditIntent = "reference-insert",
+    syncExternalLink = true
   ) {
     const resolvedLink = onResolveReference({
       ...link,
@@ -17441,7 +17817,9 @@ function PromptComposer({
     range.insertNode(token);
     placeCaretAfter(token);
     insertedPathsRef.current.add(occurrenceLink.path);
-    onDropLink(occurrenceLink);
+    if (syncExternalLink) onDropLink(occurrenceLink);
+    revealEditorInsertion(token);
+    normalizeEditorReferenceTokens();
     window.requestAnimationFrame(() => commitDraftChange(intent));
     setMention(null);
   }
@@ -17462,6 +17840,9 @@ function PromptComposer({
     if (editor.textContent?.trim()) editor.append(document.createTextNode(" "));
     editor.append(token, document.createTextNode(" "));
     insertedPathsRef.current.add(occurrenceLink.path);
+    revealEditorInsertion(token);
+    placeCaretAfter(token);
+    normalizeEditorReferenceTokens();
     return occurrenceLink;
   }
 
@@ -17837,8 +18218,19 @@ function PromptComposer({
     if (!token) return;
     const link = linkFromInlineToken(token);
     if (!link) return;
+    const dragId =
+      token.dataset.loomDragId ||
+      (crypto.randomUUID ? crypto.randomUUID() : `${Date.now()}-${Math.random()}`);
+    token.dataset.loomDragId = dragId;
     setLoomDragPayload(event, link);
-    event.dataTransfer.setData("application/loom-token-path", link.path);
+    event.dataTransfer.setData(LOOM_INLINE_TOKEN_DRAG_MIME, dragId);
+    event.dataTransfer.effectAllowed = "copyMove";
+  }
+
+  function handleEditorDragEnd(event: React.DragEvent<HTMLDivElement>) {
+    const token = (event.target as HTMLElement).closest<HTMLElement>(".inline-loom-token");
+    if (!token) return;
+    delete token.dataset.loomDragId;
   }
 
   function insertPlainTextAtSelection(text: string) {
@@ -17864,15 +18256,122 @@ function PromptComposer({
     selection.addRange(range);
   }
 
-  function handleEditorPaste(event: React.ClipboardEvent<HTMLDivElement>) {
-    const text = event.clipboardData.getData("text/plain");
+  type ClipboardReferenceSegment =
+    | { kind: "text"; text: string }
+    | { kind: "reference"; link: LoomLink };
+
+  function appendClipboardTextSegment(
+    segments: ClipboardReferenceSegment[],
+    text: string
+  ) {
     if (!text) return;
+    const last = segments[segments.length - 1];
+    if (last?.kind === "text") {
+      last.text += text;
+    } else {
+      segments.push({ kind: "text", text });
+    }
+  }
+
+  function referenceSegmentsFromMarkdown(text: string) {
+    const segments: ClipboardReferenceSegment[] = [];
+    const pattern = /\[([^\]]+)\]\((loom:\/\/[^)\s]+)\)/g;
+    let cursor = 0;
+    let match: RegExpExecArray | null;
+    while ((match = pattern.exec(text)) !== null) {
+      appendClipboardTextSegment(segments, text.slice(cursor, match.index));
+      const link = loomLinkFromMarkdownReference(match[1] ?? "", match[2] ?? "");
+      if (link) segments.push({ kind: "reference", link });
+      else appendClipboardTextSegment(segments, match[0]);
+      cursor = match.index + match[0].length;
+    }
+    appendClipboardTextSegment(segments, text.slice(cursor));
+    return segments;
+  }
+
+  function referenceSegmentsFromHtml(html: string) {
+    if (!html) return [];
+    const root = document.createElement("div");
+    root.innerHTML = html;
+    const segments: ClipboardReferenceSegment[] = [];
+    const blockTags = new Set(["DIV", "P", "LI"]);
+
+    function appendBreak() {
+      const last = segments[segments.length - 1];
+      if (last?.kind === "text" && !last.text.endsWith("\n")) last.text += "\n";
+    }
+
+    function visit(node: Node) {
+      if (node.nodeType === Node.TEXT_NODE) {
+        appendClipboardTextSegment(segments, node.textContent ?? "");
+        return;
+      }
+      if (!(node instanceof HTMLElement)) return;
+      if (node.tagName === "BR") {
+        appendClipboardTextSegment(segments, "\n");
+        return;
+      }
+      const referenceToken =
+        node.matches(".inline-loom-token, .sent-prompt-reference-token") ? node : null;
+      if (referenceToken) {
+        const tokenLink = linkFromInlineToken(referenceToken);
+        if (tokenLink) {
+          segments.push({ kind: "reference", link: tokenLink });
+          return;
+        }
+      }
+      if (node instanceof HTMLAnchorElement && node.href.startsWith("loom://")) {
+        const label =
+          node.dataset.loomReferenceTitle?.trim() ||
+          node.textContent?.replace(/\s+/g, " ").trim() ||
+          node.href;
+        const link = loomLinkFromMarkdownReference(label, node.href);
+        if (link) {
+          segments.push({ kind: "reference", link });
+          return;
+        }
+      }
+      const isBlock = blockTags.has(node.tagName);
+      if (isBlock && segments.length > 0) appendBreak();
+      node.childNodes.forEach(visit);
+      if (isBlock) appendBreak();
+    }
+
+    root.childNodes.forEach(visit);
+    return segments.some((segment) => segment.kind === "reference") ? segments : [];
+  }
+
+  function insertClipboardSegments(segments: ClipboardReferenceSegment[]) {
+    segments.forEach((segment) => {
+      if (segment.kind === "text") {
+        insertPlainTextAtSelection(segment.text);
+        return;
+      }
+      const range = getCurrentEditorRange() ?? getPreferredEditorInsertionRange();
+      if (range) {
+        insertTokenAtRange(segment.link, range, "paste", false);
+      } else {
+        const resolvedLink = insertTokenAtEnd(segment.link);
+        void resolvedLink;
+      }
+    });
+  }
+
+  function handleEditorPaste(event: React.ClipboardEvent<HTMLDivElement>) {
+    const html = event.clipboardData.getData("text/html");
+    const text = event.clipboardData.getData("text/plain");
+    const segmentsFromHtml = referenceSegmentsFromHtml(html);
+    const segments =
+      segmentsFromHtml.length > 0 ? segmentsFromHtml : referenceSegmentsFromMarkdown(text);
+    const hasReferenceSegment = segments.some((segment) => segment.kind === "reference");
+    if (!text && !hasReferenceSegment) return;
     event.preventDefault();
     pendingInputRef.current = {
       inputType: "insertFromPaste",
       replacesSelection: true,
     };
-    insertPlainTextAtSelection(text);
+    if (hasReferenceSegment) insertClipboardSegments(segments);
+    else insertPlainTextAtSelection(text);
     updateMention();
     resizeEditorToContent();
     commitDraftChange("paste");
@@ -17891,11 +18390,34 @@ function PromptComposer({
     }
     editorRef.current?.querySelectorAll<HTMLElement>(".inline-loom-token").forEach((token) => {
       const tokenLink = linkFromInlineToken(token);
-      if (!tokenLink || !referencesShareIdentity(tokenLink, link)) return;
+      if (!tokenLink || !referencesMatchComposerInstance(tokenLink, link)) return;
       token.remove();
       insertedPathsRef.current.delete(tokenLink.path);
     });
+    normalizeEditorReferenceTokens();
     window.requestAnimationFrame(() => commitDraftChange("reference-remove-dropdown"));
+  }
+
+  function duplicateLinkedReference(link: LoomLink) {
+    const editor = editorRef.current;
+    if (!editor) return;
+    editor.focus();
+    const range = getPreferredEditorInsertionRange();
+    if (range) {
+      insertTokenAtRange(
+        { ...link, referenceOccurrenceIndex: undefined },
+        range,
+        "reference-insert"
+      );
+    } else {
+      const resolvedLink = insertTokenAtEnd({
+        ...link,
+        referenceOccurrenceIndex: undefined,
+      });
+      onDropLink(resolvedLink);
+      window.requestAnimationFrame(() => commitDraftChange("reference-insert"));
+    }
+    setReferenceOpenError(null);
   }
 
   return (
@@ -17924,7 +18446,10 @@ function PromptComposer({
         onDragOver={(event) => {
           if (event.dataTransfer.types.includes(LOOM_LINK_MIME)) {
             event.preventDefault();
-            event.dataTransfer.dropEffect = "copy";
+            event.dataTransfer.dropEffect =
+              event.dataTransfer.types.includes(LOOM_INLINE_TOKEN_DRAG_MIME) && !event.altKey
+                ? "move"
+                : "copy";
           }
         }}
         onDragLeave={(event) => {
@@ -17937,26 +18462,52 @@ function PromptComposer({
           if (!link) return;
           event.preventDefault();
           setDragActive(false);
-          const movedTokenPath = event.dataTransfer.getData("application/loom-token-path");
-          if (movedTokenPath) {
-            editorRef.current
-              ?.querySelectorAll(`[data-loom-path="${CSS.escape(movedTokenPath)}"]`)
-              .forEach((node) => node.remove());
-            insertedPathsRef.current.delete(movedTokenPath);
+          const movedTokenDragId = event.dataTransfer.getData(LOOM_INLINE_TOKEN_DRAG_MIME);
+          const editor = editorRef.current;
+          const movedToken =
+            movedTokenDragId && editor
+              ? editor.querySelector<HTMLElement>(
+                  `[data-loom-drag-id="${CSS.escape(movedTokenDragId)}"]`
+                )
+              : null;
+          if (movedToken && editor?.contains(movedToken)) {
+            const range = getDropRange(event);
+            if (!range || movedToken.contains(range.startContainer)) {
+              delete movedToken.dataset.loomDragId;
+              return;
+            }
+            if (event.altKey) {
+              delete movedToken.dataset.loomDragId;
+              insertTokenAtRange(
+                { ...link, referenceOccurrenceIndex: undefined },
+                range,
+                "reference-insert"
+              );
+              return;
+            }
+            const insertionRange = range.cloneRange();
+            insertionRange.collapse(true);
+            insertionRange.insertNode(document.createTextNode(" "));
+            insertionRange.insertNode(movedToken);
+            insertionRange.setStartAfter(movedToken);
+            insertionRange.collapse(true);
+            const selection = window.getSelection();
+            selection?.removeAllRanges();
+            selection?.addRange(insertionRange);
+            delete movedToken.dataset.loomDragId;
+            syncInsertedPaths(extractDraftFromEditor());
+            normalizeEditorReferenceTokens();
+            revealEditorInsertion(movedToken);
+            window.requestAnimationFrame(() => commitDraftChange("reference-move"));
+            return;
           }
           const range = getDropRange(event);
           if (range) {
-            insertTokenAtRange(
-              link,
-              range,
-              movedTokenPath ? "reference-move" : "reference-insert"
-            );
+            insertTokenAtRange(link, range);
           } else {
             const resolvedLink = insertTokenAtEnd(link);
             onDropLink(resolvedLink);
-            window.requestAnimationFrame(() =>
-              commitDraftChange(movedTokenPath ? "reference-move" : "reference-insert")
-            );
+            window.requestAnimationFrame(() => commitDraftChange("reference-insert"));
           }
         }}
         onClickCapture={handleReferenceClickCapture}
@@ -18083,6 +18634,7 @@ function PromptComposer({
           }}
           onInput={() => {
             updateMention();
+            storeEditorRange();
             resizeEditorToContent();
             const nextDraft = extractDraftFromEditor();
             const history = getHistoryState();
@@ -18100,13 +18652,21 @@ function PromptComposer({
             followTranscriptAfterComposerLayout();
             pendingInputRef.current = null;
           }}
-          onKeyUp={updateMention}
-          onFocus={updateMention}
+          onKeyUp={() => {
+            storeEditorRange();
+            updateMention();
+          }}
+          onMouseUp={storeEditorRange}
+          onFocus={() => {
+            storeEditorRange();
+            updateMention();
+          }}
           onClick={handleEditorClick}
           onContextMenu={handleTokenContextMenu}
           onKeyDown={handleEditorKeyDown}
           onPaste={handleEditorPaste}
           onDragStart={handleEditorDragStart}
+          onDragEnd={handleEditorDragEnd}
         >
         </div>
 
@@ -18127,6 +18687,7 @@ function PromptComposer({
             style={{
               left: addressHint.x,
               top: addressHint.y,
+              maxHeight: addressHint.maxHeight,
               transform:
                 addressHint.placement === "top"
                   ? "translateY(-100%)"
@@ -18398,6 +18959,7 @@ function PromptComposer({
                   onCopyReferenceAddress(link);
                   setReferenceOpenError(null);
                 }}
+                onDuplicate={duplicateLinkedReference}
                 onRemove={removeLinkedReference}
                 onClose={() => {
                   setReferencePickerOpen(false);
@@ -18779,6 +19341,7 @@ function LinkedReferenceDropdown({
   onSelectedIndexChange,
   onOpen,
   onCopy,
+  onDuplicate,
   onRemove,
   onClose,
 }: {
@@ -18792,6 +19355,7 @@ function LinkedReferenceDropdown({
   onSelectedIndexChange: (index: number | ((current: number) => number)) => void;
   onOpen: (link: LoomLink) => void;
   onCopy: (link: LoomLink) => void;
+  onDuplicate: (link: LoomLink) => void;
   onRemove: (link: LoomLink) => void;
   onClose: () => void;
 }) {
@@ -18890,7 +19454,7 @@ function LinkedReferenceDropdown({
                   rowRefs.current[index] = node;
                 }}
                 className={selected ? "linked-reference-row selected" : "linked-reference-row"}
-                key={`${link.id}-${link.path}`}
+                key={`${link.id}-${link.path}-${link.referenceOccurrenceIndex ?? "1"}-${index}`}
                 role="option"
                 aria-selected={selected}
                 data-selected={selected ? "true" : "false"}
@@ -18914,7 +19478,19 @@ function LinkedReferenceDropdown({
                   <small>{secondaryLabel}</small>
                 </span>
                 <button
-                  className="linked-reference-remove"
+                  className="linked-reference-action"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    setContextMenu(null);
+                    onDuplicate(link);
+                  }}
+                  title="Duplicate Reference"
+                  aria-label="Duplicate Reference"
+                >
+                  <Copy size={13} />
+                </button>
+                <button
+                  className="linked-reference-action linked-reference-remove"
                   onClick={(event) => {
                     event.stopPropagation();
                     setContextMenu(null);
@@ -18954,7 +19530,8 @@ function LinkedReferenceDropdown({
 
 function visibleLinkedReferenceLabel(link: LoomLink) {
   const customLabel = link.referenceCustomLabel?.trim();
-  return customLabel || link.title;
+  const label = customLabel || link.title;
+  return link.referenceOccurrenceIndex ? `${label} #${link.referenceOccurrenceIndex}` : label;
 }
 
 function AttachContentDropdown({
@@ -19469,7 +20046,7 @@ function RightPanel({
             <div className="empty-state">Archived conversations will appear here.</div>
           ) : (
             archived.map((conversation) => {
-              const title = cleanMarkdownDisplayTitle(conversation.title);
+              const title = cleanPolishedDisplayTitle(conversation.title);
               const destination: LoomLink = {
                 id: conversation.id,
                 type: "conversation",

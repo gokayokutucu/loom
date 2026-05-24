@@ -1,7 +1,12 @@
 import { Copy } from "lucide-react";
 import type { CSSProperties } from "react";
 import type { LoomLink } from "../types";
-import { canonicalReferenceAddress, referenceCodeForLink } from "../services/referenceDisplay";
+import {
+  addressBarReferenceAddress,
+  canonicalReferenceAddress,
+  isLoomReferenceAddress,
+  referenceCodeForLink,
+} from "../services/referenceDisplay";
 
 function previewReferencedText(value: string) {
   const normalized = value.replace(/\s+/g, " ").trim();
@@ -27,8 +32,14 @@ export function AddressHintPopover({
   onClose?: () => void;
 }) {
   const code = referenceCodeForLink(link);
-  const address = canonicalReferenceAddress(link);
-  const addressKind = link.canonicalUri ?? link.meta?.canonicalUri ? "canonical" : "temporary";
+  const originalAddress = canonicalReferenceAddress(link);
+  const address = addressBarReferenceAddress(link);
+  const addressAvailable = isLoomReferenceAddress(address);
+  const addressKind =
+    addressAvailable && (link.canonicalUri ?? link.meta?.canonicalUri)
+      ? "canonical"
+      : "temporary";
+  const addressLabel = address === originalAddress ? "Loom address" : "Source Loom address";
   const selectedTextPreview =
     link.type === "fragment" && link.selectedText
       ? previewReferencedText(link.selectedText)
@@ -59,16 +70,16 @@ export function AddressHintPopover({
         className={`address-hint-address ${addressKind}`}
         data-address-kind={addressKind}
       >
-        <code>{address}</code>
-        {onCopy && (
+        <span className="address-hint-address-label">{addressLabel}</span>
+        <code>{addressAvailable ? address : "Loom address unavailable"}</code>
+        {addressAvailable && onCopy && (
           <button
             type="button"
-            aria-label="Copy Loom Address"
-            title="Copy Loom Address"
+            aria-label={`Copy ${addressLabel}`}
+            title={`Copy ${addressLabel}`}
             onClick={() =>
               onCopy({
-                path: link.path,
-                canonicalUri: link.canonicalUri ?? link.meta?.canonicalUri,
+                path: address,
               })
             }
           >

@@ -40,6 +40,14 @@ export function normalizeResponseLinkSource(link: LoomLink): LoomLink {
 export function selectedReferenceKeysForLink(link: LoomLink) {
   const stableLink = normalizeResponseLinkSource(link);
   const keys = new Set<string>();
+  const preciseFragment =
+    stableLink.type === "fragment" &&
+    Boolean(
+      stableLink.fragmentHash ||
+        stableLink.targetObjectId ||
+        stableLink.canonicalUri?.includes("#") ||
+        stableLink.path?.includes("#")
+    );
   if (
     stableLink.type === "fragment" &&
     stableLink.sourceLoomId &&
@@ -53,11 +61,13 @@ export function selectedReferenceKeysForLink(link: LoomLink) {
   if (stableLink.type === "response" && stableLink.id) {
     keys.add(`response:${stableLink.id}`);
   }
-  if (stableLink.targetObjectId) keys.add(`object:${stableLink.targetObjectId}`);
+  if (stableLink.targetObjectId && !preciseFragment) {
+    keys.add(`object:${stableLink.targetObjectId}`);
+  }
   if (stableLink.canonicalUri) {
     keys.add(`canonical:${normalizeReferenceAddress(stableLink.canonicalUri)}`);
   }
-  if (stableLink.sourceCanonicalUri) {
+  if (stableLink.sourceCanonicalUri && !preciseFragment) {
     keys.add(`canonical:${normalizeReferenceAddress(stableLink.sourceCanonicalUri)}`);
   }
   if (stableLink.path) keys.add(`address:${normalizeReferenceAddress(stableLink.path)}`);
