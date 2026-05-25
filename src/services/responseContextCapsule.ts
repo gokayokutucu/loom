@@ -213,7 +213,7 @@ export function createHeuristicResponseContextCapsule(
 }
 
 function questionNeedsExactText(question: string) {
-  return /\b(quote|exact|copy|sentence|verbatim|aynen|alıntı|cümle|tam olarak)\b/i.test(question);
+  return /\b(quote|exact|copy|sentence|verbatim)\b/i.test(question);
 }
 
 function questionNeedsCode(question: string) {

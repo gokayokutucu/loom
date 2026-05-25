@@ -2819,12 +2819,12 @@ export function AIProviderSettingsModal({
                 <div className="settings-danger-confirm-warning">
                   <AlertTriangle size={16} />
                   <strong>
-                    Tüm konuşmalar, yanıtlar, yer imleri ve geçmiş kalıcı olarak silinecek.
-                    Bu işlem geri alınamaz.
+                    All conversations, responses, bookmarks and history will be permanently deleted.
+                    This action cannot be undone.
                   </strong>
                 </div>
                 <div className="settings-danger-confirm-actions">
-                  <button onClick={() => setResetConfirm("idle")}>İptal</button>
+                  <button onClick={() => setResetConfirm("idle")}>Cancel</button>
                   <button
                     className="settings-danger-confirm-button"
                     onClick={async () => {
@@ -2836,14 +2836,14 @@ export function AIProviderSettingsModal({
                       }
                     }}
                   >
-                    Evet, sıfırla
+                    Yes, reset
                   </button>
                 </div>
               </div>
             )}
             {resetConfirm === "working" && (
               <div className="settings-danger-idle">
-                <span>Siliniyor…</span>
+                <span>Resetting…</span>
               </div>
             )}
           </section>
