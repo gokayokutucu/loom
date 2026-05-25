@@ -12417,20 +12417,30 @@ function App() {
                               Return to Origin
                             </button>
                           )}
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => copySplitPanelAddress(splitPanelMenu.panel)}
-                          >
-                            Copy Loom Address
-                          </button>
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => focusSplitPanel(splitPanelMenu.panel, { graph: true })}
-                          >
-                            Open in Graph View
-                          </button>
+                          {(() => {
+                            const panelConv = splitPanelMenu.panel === "origin" ? originConversation : activeConversation;
+                            const isPanelAddressable = Boolean(panelConv?.meta?.code);
+                            return (
+                              <>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  disabled={!isPanelAddressable}
+                                  onClick={() => copySplitPanelAddress(splitPanelMenu.panel)}
+                                >
+                                  Copy Loom Address
+                                </button>
+                                <button
+                                  type="button"
+                                  role="menuitem"
+                                  disabled={!isPanelAddressable}
+                                  onClick={() => focusSplitPanel(splitPanelMenu.panel, { graph: true })}
+                                >
+                                  Open in Graph View
+                                </button>
+                              </>
+                            );
+                          })()}
                         </div>
                       )}
                     </div>
@@ -15243,10 +15253,10 @@ function ChatTranscript({
               showHint={false}
               title={`Full code: ${conversation.meta.code ?? conversation.meta.displayCode}`}
               ariaLabel={`Full code: ${conversation.meta.code ?? conversation.meta.displayCode}`}
-              onContextMenu={(event, link) => {
+              onContextMenu={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                onCopyAddressWithToast(link);
+                void onCopyCode(formatBadgeCode(conversation.meta));
               }}
             >
               {formatBadgeCode(conversation.meta)}
@@ -15256,15 +15266,14 @@ function ChatTranscript({
         <div className="conversation-context-title-row">
           <h1>{cleanPolishedDisplayTitle(conversation.title)}</h1>
           {onReturnToOrigin && (
-            <Tooltip label="Return to Origin">
-              <button
-                className="link-chip return-origin-chip"
-                onClick={() => onReturnToOrigin()}
-                aria-label="Return to Origin"
-              >
-                <CornerDownLeft size={13} />
-              </button>
-            </Tooltip>
+            <button
+              className="link-chip return-origin-chip"
+              onClick={() => onReturnToOrigin()}
+              aria-label="Return to Origin"
+              title="Return to Origin"
+            >
+              <CornerDownLeft size={13} />
+            </button>
           )}
         </div>
         <p>{cleanMarkdownDisplayTitle(conversation.summary)}</p>
@@ -15612,10 +15621,10 @@ function ChatTranscript({
                     showHint={false}
                     title={`Full code: ${displayResponse.meta.code ?? displayResponse.meta.displayCode}`}
                     ariaLabel={`Full code: ${displayResponse.meta.code ?? displayResponse.meta.displayCode}`}
-                    onContextMenu={(event, link) => {
+                    onContextMenu={(event) => {
                       event.preventDefault();
                       event.stopPropagation();
-                      onCopyAddressWithToast(link);
+                      void onCopyCode(formatBadgeCode(displayResponse.meta));
                     }}
                   >
                     {formatBadgeCode(displayResponse.meta)}
