@@ -4,6 +4,7 @@
  * Product runtime must go through LoomEngineClient -> RustHttpLoomEngineClient -> loom-service.
  */
 import type { ResponseItem } from "../types";
+import { cleanMarkdownDisplayText } from "./assistantMarkdown";
 
 export interface AskContextCapsule {
   sourceLoomId: string;
@@ -189,12 +190,12 @@ export function createHeuristicResponseContextCapsule(
     sourceLoomId: loomId,
     sourceResponseId: response.id,
     sourceResponseCode: response.meta?.code,
-    sourceTitle: response.meta?.title || response.title,
+    sourceTitle: response.meta?.title || cleanMarkdownDisplayText(response.title) || response.title,
     sourceCanonicalUri: response.meta?.canonicalUri,
     responseId: response.id,
     loomId,
     responseCode: response.meta?.code,
-    title: response.meta?.title || response.title,
+    title: response.meta?.title || cleanMarkdownDisplayText(response.title) || response.title,
     canonicalUri: response.meta?.canonicalUri,
     summary: response.meta?.summary || firstSentence(text),
     keyPoints: extractKeyPoints(text),

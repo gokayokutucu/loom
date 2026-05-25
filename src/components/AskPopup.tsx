@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Bot, CornerDownLeft, CornerDownRight, Square, X } from "lucide-react";
 import type { LoomLink, ResponseItem } from "../types";
+import { cleanMarkdownDisplayText } from "../services/assistantMarkdown";
 import { AssistantMarkdownContent } from "./AssistantMarkdownContent";
 
 export interface AskPopupState {
@@ -400,7 +401,7 @@ export function AskPopup({
         <div className="ask-header">
           <div>
             <span>Ask</span>
-            <h2 id="ask-title">{state.response.title}</h2>
+            <h2 id="ask-title">{cleanMarkdownDisplayText(state.response.title) || state.response.title}</h2>
           </div>
           <button
             className="icon-button"
