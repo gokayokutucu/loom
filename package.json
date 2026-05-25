@@ -16,7 +16,9 @@
     "test:e2e": "playwright test",
     "service:dev": "cargo run --manifest-path services/loom-service/Cargo.toml",
     "service:check": "cargo check --manifest-path services/loom-service/Cargo.toml",
-    "service:test": "cargo test --manifest-path services/loom-service/Cargo.toml"
+    "service:test": "cargo test --manifest-path services/loom-service/Cargo.toml",
+    "test:unit": "vitest run",
+    "test:unit:watch": "vitest"
   },
   "build": {
     "mac": {
@@ -36,6 +38,7 @@
     "@playwright/test": "^1.59.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
-    "electron": "^41.6.1"
+    "electron": "^41.6.1",
+    "vitest": "^4.1.7"
   }
 }
