@@ -6043,6 +6043,28 @@ function App() {
     });
   }
 
+  async function resetAllData() {
+    const allConversations = [...conversations, ...archived];
+    for (const conversation of allConversations) {
+      try {
+        await loomEngineClient.deleteLoom({ loomId: conversation.id });
+      } catch {
+        // best-effort: continue even if one delete fails
+      }
+    }
+    setConversations([]);
+    setArchived([]);
+    setConversationResponses({});
+    setForkRecords([]);
+    setBookmarks([]);
+    setHistory([]);
+    setPinnedConversationIds([]);
+    setNavigationStack([]);
+    setNavigationIndex(0);
+    openNewConversationDraft();
+    showToast({ title: "Reset complete", message: "All data has been deleted.", color: "neutral" });
+  }
+
   function updateComposerDraft(key: string, updater: (draft: ComposerDraft) => ComposerDraft) {
     const nextDrafts = {
       ...composerDraftsRef.current,
@@ -12680,6 +12702,7 @@ function App() {
           onSave={saveProviderSettings}
           onAppSettingsSave={saveAppSettings}
           onClose={() => setProviderSettingsOpen(false)}
+          onResetAllData={resetAllData}
         />
       )}
 

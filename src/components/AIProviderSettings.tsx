@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import {
+  AlertTriangle,
   Bot,
   CheckCircle2,
   Database,
@@ -246,6 +247,7 @@ export function AIProviderSettingsModal({
   onSave,
   onAppSettingsSave,
   onClose,
+  onResetAllData,
   initialCategory = "runtime",
 }: {
   settings: AIProviderSettings;
@@ -258,6 +260,7 @@ export function AIProviderSettingsModal({
   onSave: (settings: AIProviderSettings) => void;
   onAppSettingsSave: (settings: AppSettings) => void;
   onClose: () => void;
+  onResetAllData?: () => Promise<void>;
   initialCategory?: SettingsCategoryId;
 }) {
   const [draft, setDraft] = useState(settings);
@@ -266,6 +269,7 @@ export function AIProviderSettingsModal({
   const [shortcutQuery, setShortcutQuery] = useState("");
   const [working, setWorking] = useState<string | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [resetConfirm, setResetConfirm] = useState<"idle" | "confirming" | "working">("idle");
   const [serviceStatus, setServiceStatus] = useState<{
     health?: ServiceHealthStatus;
     config?: ServiceConfigStatus;
@@ -2787,6 +2791,63 @@ export function AIProviderSettingsModal({
             </span>
           </div>
         </section>
+
+        {onResetAllData && (
+          <section className="provider-section settings-danger-zone">
+            <div className="provider-section-heading">
+              <div>
+                <span>Danger zone</span>
+                <h3>Reset all data</h3>
+              </div>
+            </div>
+            {resetConfirm === "idle" && (
+              <div className="settings-danger-idle">
+                <span>
+                  Permanently deletes all conversations, responses, bookmarks, and history.
+                  This cannot be undone.
+                </span>
+                <button
+                  className="settings-danger-button"
+                  onClick={() => setResetConfirm("confirming")}
+                >
+                  Reset all data…
+                </button>
+              </div>
+            )}
+            {resetConfirm === "confirming" && (
+              <div className="settings-danger-confirm">
+                <div className="settings-danger-confirm-warning">
+                  <AlertTriangle size={16} />
+                  <strong>
+                    Tüm konuşmalar, yanıtlar, yer imleri ve geçmiş kalıcı olarak silinecek.
+                    Bu işlem geri alınamaz.
+                  </strong>
+                </div>
+                <div className="settings-danger-confirm-actions">
+                  <button onClick={() => setResetConfirm("idle")}>İptal</button>
+                  <button
+                    className="settings-danger-confirm-button"
+                    onClick={async () => {
+                      setResetConfirm("working");
+                      try {
+                        await onResetAllData();
+                      } finally {
+                        setResetConfirm("idle");
+                      }
+                    }}
+                  >
+                    Evet, sıfırla
+                  </button>
+                </div>
+              </div>
+            )}
+            {resetConfirm === "working" && (
+              <div className="settings-danger-idle">
+                <span>Siliniyor…</span>
+              </div>
+            )}
+          </section>
+        )}
       </>
     );
   }
