@@ -4615,14 +4615,14 @@ function App() {
     };
   }
 
-  function isDestinationBookmarked(destination: LoomLink) {
+  function findBookmarkForDestination(destination: LoomLink): BookmarkItem | undefined {
     const destinationResolution = resolveLoomAddress(destination.path, loomGraphRepository);
     const destinationObjectId =
       destinationResolution.status === "resolved"
         ? (destinationResolution.targetObject ?? destinationResolution.object)?.objectId
         : destination.targetObjectId;
     const destinationCandidates = linkIdentityCandidates(destination);
-    return bookmarks.some((bookmark) => {
+    return bookmarks.find((bookmark) => {
       const bookmarkCandidates = bookmarkIdentityCandidates(bookmark);
       if (
         Array.from(bookmarkCandidates).some((candidate) =>
@@ -4640,6 +4640,10 @@ function App() {
           : bookmark.targetObjectId;
       return Boolean(destinationObjectId && bookmarkTargetId === destinationObjectId);
     });
+  }
+
+  function isDestinationBookmarked(destination: LoomLink) {
+    return Boolean(findBookmarkForDestination(destination));
   }
 
   function getWeftOrigin(loomId: string) {
@@ -11896,7 +11900,12 @@ function App() {
         onForward={() => handleBackForward("forward")}
         onJumpTraversal={jumpNavigationTraversal}
         onBookmarkCurrent={() => {
-          bookmarkLoomLink(currentActiveDestination);
+          const existing = findBookmarkForDestination(currentActiveDestination);
+          if (existing) {
+            void removeBookmark(existing);
+          } else {
+            void bookmarkLoomLink(currentActiveDestination);
+          }
         }}
         onCopyShareItem={copyShareItem}
         onExportCurrentLoom={exportCurrentLoom}
@@ -15256,10 +15265,10 @@ function ChatTranscript({
               onContextMenu={(event) => {
                 event.preventDefault();
                 event.stopPropagation();
-                void onCopyCode(formatBadgeCode(conversation.meta));
+                void onCopyCode(formatBadgeCode(conversation.meta!));
               }}
             >
-              {formatBadgeCode(conversation.meta)}
+              {formatBadgeCode(conversation.meta!)}
             </AddressMetadataBadge>
           )}
         </div>
@@ -15624,10 +15633,10 @@ function ChatTranscript({
                     onContextMenu={(event) => {
                       event.preventDefault();
                       event.stopPropagation();
-                      void onCopyCode(formatBadgeCode(displayResponse.meta));
+                      void onCopyCode(formatBadgeCode(displayResponse.meta!));
                     }}
                   >
-                    {formatBadgeCode(displayResponse.meta)}
+                    {formatBadgeCode(displayResponse.meta!)}
                   </AddressMetadataBadge>
                 </div>
               )}
