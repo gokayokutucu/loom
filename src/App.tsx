@@ -168,10 +168,15 @@ import {
   isReusableCodeSnippet,
 } from "./services/codeSnippetDisplay";
 import {
+  getElectronAddressBarBridge,
   getElectronPermissionsBridge,
   getElectronRuntimeInfo,
   getElectronWindowControls,
 } from "./electronRuntime";
+import {
+  extractCleanLoomAddress,
+  type AddressBarContextMenuResult,
+} from "./services/addressBarContextMenu";
 import {
   applyMetadataRefinement,
   buildRuntimeMetadataRecord,
@@ -13449,6 +13454,7 @@ interface TopBrowserBarProps {
   onToggleSidebar: () => void;
   onTogglePanel: (panel: "bookmarks" | "history" | "looms") => void;
   onToggleGraph: () => void;
+  onAddressContextMenu?: (result: AddressBarContextMenuResult) => void;
 }
 
 function TopBrowserBar({
@@ -13485,10 +13491,12 @@ function TopBrowserBar({
   onToggleSidebar,
   onTogglePanel,
   onToggleGraph,
+  onAddressContextMenu,
 }: TopBrowserBarProps) {
   const backButtonRef = useRef<HTMLButtonElement | null>(null);
   const forwardButtonRef = useRef<HTMLButtonElement | null>(null);
   const shareButtonRef = useRef<HTMLButtonElement | null>(null);
+  const addressInputRef = useRef<HTMLInputElement | null>(null);
   const longPressTimerRef = useRef<number | null>(null);
   const suppressClickRef = useRef(false);
   const [traversalMenu, setTraversalMenu] = useState<{
@@ -13513,6 +13521,101 @@ function TopBrowserBar({
     if (longPressTimerRef.current === null) return;
     window.clearTimeout(longPressTimerRef.current);
     longPressTimerRef.current = null;
+  }
+
+  async function handleAddressInputContextMenu(event: React.MouseEvent<HTMLInputElement>) {
+    const addressBridge = getElectronAddressBarBridge();
+    if (!addressBridge) return; // browser: allow native context menu
+    event.preventDefault();
+
+    const input = event.currentTarget;
+    const value = addressFocused ? addressQuery : "";
+    const selStart = input.selectionStart ?? 0;
+    const selEnd = input.selectionEnd ?? 0;
+    const hasSelection = selStart !== selEnd;
+    const hasText = value.length > 0;
+    const allSelected = hasText && selStart === 0 && selEnd === value.length;
+
+    // Determine if a clean loom:// address is available for "Copy Clean Link"
+    const selectedText = hasSelection ? value.slice(selStart, selEnd) : "";
+    const destinationClean =
+      extractCleanLoomAddress(currentDestination.canonicalUri ?? "") ??
+      extractCleanLoomAddress(currentDestination.path ?? "");
+    const hasLoomAddress =
+      Boolean(destinationClean) || Boolean(extractCleanLoomAddress(selectedText));
+
+    let result: AddressBarContextMenuResult;
+    try {
+      result = await addressBridge.showContextMenu({ hasText, hasSelection, allSelected, hasLoomAddress });
+    } catch {
+      return;
+    }
+
+    // Re-focus the input after menu closes
+    input.focus();
+
+    // Execute action — kept here so we have direct access to the DOM input
+    const { action, clipboardText } = result;
+    switch (action) {
+      case "undo":
+        document.execCommand("undo");
+        break;
+      case "redo":
+        document.execCommand("redo");
+        break;
+      case "cut": {
+        const selected = value.slice(selStart, selEnd);
+        void navigator.clipboard.writeText(selected).catch(() => undefined);
+        const next = value.slice(0, selStart) + value.slice(selEnd);
+        onAddressChange(next);
+        requestAnimationFrame(() => input.setSelectionRange(selStart, selStart));
+        break;
+      }
+      case "copy":
+        void navigator.clipboard.writeText(value.slice(selStart, selEnd)).catch(() => undefined);
+        break;
+      case "paste": {
+        if (!clipboardText) break;
+        const next = value.slice(0, selStart) + clipboardText + value.slice(selEnd);
+        onAddressChange(next);
+        const newCursor = selStart + clipboardText.length;
+        requestAnimationFrame(() => input.setSelectionRange(newCursor, newCursor));
+        break;
+      }
+      case "delete": {
+        const next = value.slice(0, selStart) + value.slice(selEnd);
+        onAddressChange(next);
+        requestAnimationFrame(() => input.setSelectionRange(selStart, selStart));
+        break;
+      }
+      case "selectAll":
+        input.setSelectionRange(0, value.length);
+        break;
+      case "pasteAndGo":
+      case "pasteAndGoToLoom": {
+        const text = clipboardText.trim();
+        if (!text) break;
+        onAddressChange(text);
+        if (isAddressBarAddressLike(text)) {
+          onVisit({ id: `address-${Date.now()}`, type: "recent", title: text, path: text, badge: "Address" });
+        } else {
+          onStartNewLoomFromAddressBar(text);
+        }
+        break;
+      }
+      case "copyCleanLink": {
+        const clean =
+          destinationClean ??
+          extractCleanLoomAddress(selectedText) ??
+          extractCleanLoomAddress(value);
+        if (clean) void navigator.clipboard.writeText(clean).catch(() => undefined);
+        break;
+      }
+      default:
+        break;
+    }
+
+    onAddressContextMenu?.(result);
   }
 
   function openTraversalMenu(
@@ -13832,11 +13935,13 @@ function TopBrowserBar({
             <Compass size={16} />
           </span>
           <input
+            ref={addressInputRef}
             value={addressFocused ? addressQuery : ""}
             onChange={(event) => onAddressChange(event.target.value)}
             onFocus={onAddressFocus}
             onClick={onAddressFocus}
             onKeyDown={onAddressKeyDown}
+            onContextMenu={handleAddressInputContextMenu}
             aria-label="Loom Address Bar"
             role="combobox"
             aria-expanded={addressFocused && addressSuggestionsVisible}

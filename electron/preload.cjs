@@ -37,4 +37,8 @@ contextBridge.exposeInMainWorld("loomDesktop", {
     microphoneStatus: () => ipcRenderer.invoke("loom:microphone-permission-status"),
     openMicrophoneSettings: () => ipcRenderer.invoke("loom:open-microphone-settings"),
   },
+  addressBar: {
+    showContextMenu: (params) =>
+      ipcRenderer.invoke("loom:address-bar-context-menu", params),
+  },
 });

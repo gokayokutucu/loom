@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, nativeImage, shell, systemPreferences } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, shell, systemPreferences } from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -311,6 +311,68 @@ ipcMain.handle("loom:open-microphone-settings", async () => {
     opened: true,
     status: systemPreferences.getMediaAccessStatus("microphone"),
   };
+});
+
+// Address bar context menu — shows a native OS menu with text-editing actions
+// plus Loom-specific address actions (Paste and Go, Copy Clean Link).
+ipcMain.handle("loom:address-bar-context-menu", (event, params) => {
+  const clipboardText = clipboard.readText();
+  const trimmedClipboard = clipboardText.trim();
+  const isLoomClipboard = trimmedClipboard.startsWith("loom://");
+  const hasClipboard = clipboardText.length > 0;
+  const { hasText = false, hasSelection = false, allSelected = false, hasLoomAddress = false } = params ?? {};
+
+  return new Promise((resolve) => {
+    const send = (action) => () => resolve({ action, clipboardText });
+
+    /** @type {import("electron").MenuItemConstructorOptions[]} */
+    const template = [
+      // Standard edit actions
+      // NOTE: exact undo/redo state is not detectable from the renderer —
+      // included unconditionally; the browser engine no-ops if no history.
+      { label: "Undo", accelerator: "CmdOrCtrl+Z", click: send("undo") },
+      { label: "Redo", accelerator: process.platform === "darwin" ? "CmdOrCtrl+Shift+Z" : "CmdOrCtrl+Y", click: send("redo") },
+      { type: "separator" },
+      { label: "Cut", accelerator: "CmdOrCtrl+X", enabled: hasSelection, click: send("cut") },
+      { label: "Copy", accelerator: "CmdOrCtrl+C", enabled: hasSelection, click: send("copy") },
+      // Paste: always show; enable when clipboard has text (Clipboard API may
+      // not be accessible in main process for permission reasons on some OSes,
+      // so we fall back to enabled=true when clipboardText is unavailable).
+      { label: "Paste", accelerator: "CmdOrCtrl+V", enabled: hasClipboard || true, click: send("paste") },
+      { label: "Delete", enabled: hasSelection, click: send("delete") },
+      { type: "separator" },
+      // Select All: disable if input is empty or already fully selected
+      { label: "Select All", accelerator: "CmdOrCtrl+A", enabled: hasText && !allSelected, click: send("selectAll") },
+    ];
+
+    // Loom-specific: Paste and Go / Paste and Go to Loom
+    if (hasClipboard) {
+      template.push({ type: "separator" });
+      if (isLoomClipboard) {
+        const preview = trimmedClipboard.length > 50
+          ? trimmedClipboard.slice(0, 50) + "…"
+          : trimmedClipboard;
+        template.push({
+          label: `Paste and Go to Loom: ${preview}`,
+          click: send("pasteAndGoToLoom"),
+        });
+      } else {
+        template.push({ label: "Paste and Go", click: send("pasteAndGo") });
+      }
+    }
+
+    // Copy Clean Link: only when the current address is a loom:// URL
+    if (hasLoomAddress) {
+      template.push({ type: "separator" });
+      template.push({ label: "Copy Clean Link", click: send("copyCleanLink") });
+    }
+
+    const menu = Menu.buildFromTemplate(template);
+    menu.popup({
+      window: BrowserWindow.fromWebContents(event.sender),
+      callback: () => resolve({ action: "none", clipboardText }),
+    });
+  });
 });
 
 app.whenReady().then(async () => {

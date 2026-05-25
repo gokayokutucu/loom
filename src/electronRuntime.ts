@@ -43,6 +43,11 @@ export interface LoomDesktopMicrophonePermissionStatus {
   opened?: boolean;
 }
 
+import type {
+  AddressBarContextMenuParams,
+  AddressBarContextMenuResult,
+} from "./services/addressBarContextMenu";
+
 interface LoomDesktopBridge {
   getRuntimeInfo: () => LoomDesktopRuntimeInfo;
   runtime?: {
@@ -63,6 +68,11 @@ interface LoomDesktopBridge {
   permissions?: {
     microphoneStatus: () => Promise<LoomDesktopMicrophonePermissionStatus>;
     openMicrophoneSettings: () => Promise<LoomDesktopMicrophonePermissionStatus>;
+  };
+  addressBar?: {
+    showContextMenu: (
+      params: AddressBarContextMenuParams
+    ) => Promise<AddressBarContextMenuResult>;
   };
 }
 
@@ -102,6 +112,11 @@ export function getElectronRuntimeBridge() {
 export function getElectronPermissionsBridge() {
   if (typeof window === "undefined") return null;
   return window.loomDesktop?.permissions ?? null;
+}
+
+export function getElectronAddressBarBridge() {
+  if (typeof window === "undefined") return null;
+  return window.loomDesktop?.addressBar ?? null;
 }
 
 export function logElectronEvent(
