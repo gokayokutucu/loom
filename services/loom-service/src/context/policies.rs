@@ -1,7 +1,8 @@
 use crate::context::{
     contributors::{
         AttachedReferencesContributor, ContextContributor, LoomCheckpointContributor,
-        RecentTurnsContributor, ResponseCapsuleContributor, WeftOriginContributor,
+        ProfileMemoryContributor, RecentTurnsContributor, ResponseCapsuleContributor,
+        WeftOriginContributor,
     },
     types::{BuildContextInput, ContextSource, ContextStrategy},
 };
@@ -32,6 +33,7 @@ pub fn default_contributors() -> Vec<Box<dyn ContextContributor>> {
         Box::new(WeftOriginContributor),
         Box::new(AttachedReferencesContributor),
         Box::new(ResponseCapsuleContributor),
+        Box::new(ProfileMemoryContributor),
         Box::new(RecentTurnsContributor),
     ]
 }

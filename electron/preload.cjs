@@ -23,9 +23,22 @@ contextBridge.exposeInMainWorld("loomDesktop", {
     restart: () => ipcRenderer.invoke("loom:runtime-restart"),
   },
   runtimeStatus: () => ipcRenderer.invoke("loom:runtime-status"),
+  logs: {
+    info: (event, data) => ipcRenderer.invoke("loom:app-log", { level: "info", event, data }),
+    warn: (event, data) => ipcRenderer.invoke("loom:app-log", { level: "warn", event, data }),
+    error: (event, data) => ipcRenderer.invoke("loom:app-log", { level: "error", event, data }),
+  },
   windowControls: {
     minimize: () => ipcRenderer.invoke("loom:window-minimize"),
     toggleMaximize: () => ipcRenderer.invoke("loom:window-toggle-maximize"),
     close: () => ipcRenderer.invoke("loom:window-close"),
+  },
+  permissions: {
+    microphoneStatus: () => ipcRenderer.invoke("loom:microphone-permission-status"),
+    openMicrophoneSettings: () => ipcRenderer.invoke("loom:open-microphone-settings"),
+  },
+  addressBar: {
+    showContextMenu: (params) =>
+      ipcRenderer.invoke("loom:address-bar-context-menu", params),
   },
 });

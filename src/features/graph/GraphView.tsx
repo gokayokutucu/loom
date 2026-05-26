@@ -1,9 +1,11 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type ReactNode,
 } from "react";
 import {
@@ -50,6 +52,11 @@ import {
 import { graphResponsePreviewForNode } from "./graphNodePreview";
 import { LoomGraphEdge, type LoomGraphFlowEdge } from "./LoomGraphEdge";
 import { LoomGraphNode, type LoomGraphFlowNode } from "./LoomGraphNode";
+import {
+  compactGraphNodePositions,
+  GRAPH_FALLBACK_NODE_HEIGHT,
+  GRAPH_NODE_VERTICAL_GAP,
+} from "./graphLayout";
 
 export interface GraphViewProps {
   engineClient: LoomEngineClient;
@@ -67,7 +74,9 @@ export interface GraphViewProps {
     response: ResponseItem,
     currentlyBookmarked?: boolean
   ) => void;
+  onBookmarkLoom?: (loomId: string, currentlyBookmarked: boolean) => void;
   onLinkResponse: (loomId: string, response: ResponseItem) => void;
+  onLinkLoom?: (loomId: string) => void;
   onWeftResponse: (loomId: string, response: ResponseItem) => void;
   renderContinuationComposer: (props: {
     loomId: string;
@@ -86,7 +95,7 @@ const GRAPH_FOCUS_TOP_OFFSET = 20;
 const GRAPH_NODE_WIDTH = 292;
 const GRAPH_COMPOSER_WIDTH = 620;
 const GRAPH_COMPOSER_NODE_GAP = 60;
-const GRAPH_FALLBACK_NODE_HEIGHT = 220;
+const GRAPH_PREVIEW_QUESTION_COLLAPSE_LINES = 10;
 
 interface LoomGraphComposerNodeData extends Record<string, unknown> {
   content: ReactNode;
@@ -218,6 +227,65 @@ function LoomGraphComposerNode({ data }: NodeProps<LoomGraphComposerFlowNode>) {
   );
 }
 
+function GraphResponsePreviewQuestion({ question }: { question: string }) {
+  const questionRef = useRef<HTMLParagraphElement | null>(null);
+  const [expanded, setExpanded] = useState(false);
+  const [collapsible, setCollapsible] = useState(false);
+
+  useEffect(() => {
+    setExpanded(false);
+  }, [question]);
+
+  useLayoutEffect(() => {
+    const element = questionRef.current;
+    if (!element) return;
+
+    function measure() {
+      if (!element) return;
+      const overflowing = element.scrollHeight > element.clientHeight + 2;
+      setCollapsible((current) => (expanded ? current || overflowing : overflowing));
+    }
+
+    measure();
+    const resizeObserver =
+      typeof ResizeObserver === "undefined" ? null : new ResizeObserver(measure);
+    resizeObserver?.observe(element);
+    return () => resizeObserver?.disconnect();
+  }, [question, expanded]);
+
+  return (
+    <div
+      className="graph-response-preview-question-content"
+      data-expanded={expanded ? "true" : "false"}
+    >
+      <p
+        ref={questionRef}
+        className={expanded ? undefined : "is-clamped"}
+        style={
+          expanded
+            ? undefined
+            : ({
+                "--graph-preview-question-clamp-lines":
+                  GRAPH_PREVIEW_QUESTION_COLLAPSE_LINES,
+              } as CSSProperties)
+        }
+      >
+        {question}
+      </p>
+      {collapsible && (
+        <button
+          type="button"
+          className="graph-response-preview-question-toggle"
+          aria-expanded={expanded}
+          onClick={() => setExpanded((current) => !current)}
+        >
+          {expanded ? "Show less" : "Show full message"}
+        </button>
+      )}
+    </div>
+  );
+}
+
 const nodeTypes: NodeTypes = {
   loomGraphNode: LoomGraphNode,
   loomGraphComposerNode: LoomGraphComposerNode,
@@ -264,7 +332,9 @@ function GraphViewInner({
   onOpenLoom,
   onOpenResponse,
   onBookmarkResponse,
+  onBookmarkLoom,
   onLinkResponse,
+  onLinkLoom,
   onWeftResponse,
   renderContinuationComposer,
 }: GraphViewProps) {
@@ -294,6 +364,7 @@ function GraphViewInner({
   const [responsePreviewWeftPickerOpen, setResponsePreviewWeftPickerOpen] = useState(false);
   const [selectedGraphRevisionByResponseId, setSelectedGraphRevisionByResponseId] =
     useState<Record<string, number>>({});
+  const [nodeHeights, setNodeHeights] = useState<Record<string, number>>({});
   const initializedViewportKey = useRef<string | undefined>(undefined);
   const skipNextFollowAfterWeftFocusRef = useRef(false);
   const skipNextFollowAfterContinuationFocusRef = useRef(false);
@@ -313,6 +384,46 @@ function GraphViewInner({
     }),
     [conversationTitlesById]
   );
+
+  const compactNodePositions = useMemo(
+    () => compactGraphNodePositions(projection.nodes, nodeHeights),
+    [nodeHeights, projection.nodes]
+  );
+
+  const graphNodeRenderPosition = useCallback(
+    (node: LoomGraphProjectionNode) =>
+      compactNodePositions[node.id] ?? node.position,
+    [compactNodePositions]
+  );
+
+  useLayoutEffect(() => {
+    const shell = graphShellRef.current;
+    if (!shell || projection.nodes.length === 0) return;
+    const zoom = reactFlow.getZoom() || graphZoom || GRAPH_DEFAULT_ZOOM;
+    const measuredEntries = projection.nodes
+      .map((node) => {
+        const element = shell.querySelector<HTMLElement>(
+          `.react-flow__node[data-id="${CSS.escape(node.id)}"] .loom-graph-node`
+        );
+        const measuredHeight = element
+          ? element.getBoundingClientRect().height / zoom
+          : undefined;
+        return measuredHeight && measuredHeight > 0
+          ? ([node.id, Math.ceil(measuredHeight)] as const)
+          : undefined;
+      })
+      .filter((entry): entry is readonly [string, number] => Boolean(entry));
+    if (measuredEntries.length === 0) return;
+    const nextHeights = Object.fromEntries(measuredEntries);
+    setNodeHeights((current) => {
+      const currentKeys = Object.keys(current);
+      const nextKeys = Object.keys(nextHeights);
+      const changed =
+        currentKeys.length !== nextKeys.length ||
+        nextKeys.some((key) => current[key] !== nextHeights[key]);
+      return changed ? nextHeights : current;
+    });
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -360,13 +471,14 @@ function GraphViewInner({
       if (!nodeId) return;
       const node = projection.nodes.find((item) => item.id === nodeId);
       if (!node) return;
-      reactFlow.setCenter(node.position.x + 150, node.position.y + 80, {
+      const position = graphNodeRenderPosition(node);
+      reactFlow.setCenter(position.x + 150, position.y + 80, {
         zoom: GRAPH_DEFAULT_ZOOM,
         duration: 420,
       });
       setSelectedNodeId(nodeId);
     },
-    [projection.nodes, reactFlow]
+    [graphNodeRenderPosition, projection.nodes, reactFlow]
   );
 
   const focusNodeNearTop = useCallback(
@@ -380,17 +492,20 @@ function GraphViewInner({
         centerNode(nodeId);
         return;
       }
+      const position = graphNodeRenderPosition(node);
       reactFlow.setViewport(
         {
-          x: width / 2 - (node.position.x + GRAPH_NODE_WIDTH / 2) * GRAPH_DEFAULT_ZOOM,
-          y: GRAPH_FOCUS_TOP_OFFSET - node.position.y * GRAPH_DEFAULT_ZOOM,
+          x:
+            width / 2 -
+            (position.x + GRAPH_NODE_WIDTH / 2) * GRAPH_DEFAULT_ZOOM,
+          y: GRAPH_FOCUS_TOP_OFFSET - position.y * GRAPH_DEFAULT_ZOOM,
           zoom: GRAPH_DEFAULT_ZOOM,
         },
         { duration }
       );
       setSelectedNodeId(nodeId);
     },
-    [centerNode, projection.nodes, reactFlow]
+    [centerNode, graphNodeRenderPosition, projection.nodes, reactFlow]
   );
 
   const positionContinuationComposer = useCallback((nodeId: string | undefined) => {
@@ -404,11 +519,12 @@ function GraphViewInner({
     const measuredHeight = nodeElement
       ? nodeElement.getBoundingClientRect().height / zoom
       : GRAPH_FALLBACK_NODE_HEIGHT;
+    const position = graphNodeRenderPosition(projectionNode);
     setContinuationComposerPosition({
-      x: projectionNode.position.x + (GRAPH_NODE_WIDTH - GRAPH_COMPOSER_WIDTH) / 2,
-      y: projectionNode.position.y + measuredHeight + GRAPH_COMPOSER_NODE_GAP / zoom,
+      x: position.x + (GRAPH_NODE_WIDTH - GRAPH_COMPOSER_WIDTH) / 2,
+      y: position.y + measuredHeight + GRAPH_COMPOSER_NODE_GAP / zoom,
     });
-  }, [projection.nodes, reactFlow]);
+  }, [graphNodeRenderPosition, projection.nodes, reactFlow]);
 
   const latestActiveResponse = useMemo(() => {
     if (!activeLoomId) return undefined;
@@ -762,11 +878,22 @@ function GraphViewInner({
     () => {
       const nodes: LoomGraphAnyNode[] = projection.nodes.map((projectionNode) => {
         const response = responseForGraphNode(projectionNode, responsesByConversation);
-        const isBookmarked =
-          bookmarkOverrideForResponse(response) ??
-          (Boolean(projectionNode.isBookmarked) ||
-          Boolean(response?.bookmarked) ||
-          responseIsBookmarkedBySet(response, projectionNode, bookmarkedResponseAddresses));
+        // Root (loom) nodes aren't tracked in bookmarkedResponseAddresses via the
+        // response-specific helper, so derive their bookmark state from the loom path.
+        const isBookmarked = projectionNode.kind === "root"
+          ? (() => {
+              const loom = conversations.find((c) => c.id === projectionNode.loomId);
+              if (!loom) return false;
+              return (
+                bookmarkedResponseAddresses.has(loom.path) ||
+                bookmarkedResponseAddresses.has(loom.id) ||
+                Boolean(loom.meta?.canonicalUri && bookmarkedResponseAddresses.has(loom.meta.canonicalUri))
+              );
+            })()
+          : bookmarkOverrideForResponse(response) ??
+            (Boolean(projectionNode.isBookmarked) ||
+            Boolean(response?.bookmarked) ||
+            responseIsBookmarkedBySet(response, projectionNode, bookmarkedResponseAddresses));
         const responsePairIds = responsePairIdsForGraphNode(response);
         const responseForkRecords = forkRecords.filter(
           (record) =>
@@ -813,7 +940,7 @@ function GraphViewInner({
         return {
           id: projectionNode.id,
           type: "loomGraphNode",
-          position: projectionNode.position,
+          position: graphNodeRenderPosition(projectionNode),
           data: {
             projectionNode: {
               ...visibleProjectionNode,
@@ -831,12 +958,17 @@ function GraphViewInner({
             onBookmark: (node, nodeResponse) => {
               if (nodeResponse) {
                 onBookmarkResponse(node.loomId, nodeResponse, Boolean(node.isBookmarked));
+              } else if (node.kind === "root") {
+                onBookmarkLoom?.(node.loomId, Boolean(node.isBookmarked));
               }
             },
             onLink: (node, nodeResponse) => {
-              if (!nodeResponse) return;
-              openContinuationForResponse(node, nodeResponse);
-              onLinkResponse(node.loomId, nodeResponse);
+              if (nodeResponse) {
+                openContinuationForResponse(node, nodeResponse);
+                onLinkResponse(node.loomId, nodeResponse);
+              } else if (node.kind === "root") {
+                onLinkLoom?.(node.loomId);
+              }
             },
             onWeft: (node, nodeResponse) => {
               if (nodeResponse) onWeftResponse(node.loomId, nodeResponse);
@@ -895,12 +1027,15 @@ function GraphViewInner({
     },
     [
       onBookmarkResponse,
+      onBookmarkLoom,
       onLinkResponse,
+      onLinkLoom,
       onOpenLoom,
       onOpenResponse,
       onWeftResponse,
       bookmarkedResponseAddresses,
       bookmarkOverrideForResponse,
+      conversations,
       displayForkRecord,
       forkRecords,
       projection.edges,
@@ -913,6 +1048,7 @@ function GraphViewInner({
       continuationNodeId,
       continuationTarget,
       graphZoom,
+      graphNodeRenderPosition,
       handleContinuationResponseCreated,
       openContinuationForResponse,
       latestActiveResponse,
@@ -1068,7 +1204,7 @@ function GraphViewInner({
             variant={BackgroundVariant.Dots}
             gap={28}
             size={1}
-            color="rgba(229, 225, 190, 0.12)"
+            color="var(--loom-graph-grid)"
           />
           <GraphControls
             onFirst={() => centerNode(projection.firstNodeId)}
@@ -1111,26 +1247,14 @@ function GraphViewInner({
               if (event.target === event.currentTarget) setResponsePreviewNodeId(null);
             }}
           >
-            <button
-              type="button"
-              className="graph-response-preview-close"
-              aria-label="Close response preview"
-              onClick={() => setResponsePreviewNodeId(null)}
-            >
-              <X size={18} />
-            </button>
             <section
               className="graph-response-preview-modal"
               role="dialog"
               aria-modal="true"
               aria-label="Response question and answer"
             >
-              <div className="graph-response-preview-header">
-                <div className="graph-response-preview-block graph-response-preview-question">
-                  <span>Question</span>
-                  <p>{responsePreview.question}</p>
-                </div>
-                {responsePreviewTarget && (
+              {responsePreviewTarget && (
+                <div className="graph-response-preview-toolbar">
                   <div className="graph-response-preview-actions" aria-label="Response actions">
                     <div className="graph-response-preview-action-group">
                       <button
@@ -1248,15 +1372,13 @@ function GraphViewInner({
                                   <GitFork size={13} />
                                   <span>
                                     <strong>{record.title}</strong>
-                                    <em>
-                                      {[
-                                        `${branchIndex + 1} of ${responsePreviewTarget.weftCount}`,
-                                        formatRelativeTimestamp(
-                                          record.createdAt || record.updatedAt || new Date().toISOString()
-                                        ),
-                                      ]
-                                        .filter(Boolean)
-                                        .join(" · ")}
+                                    <em className="weft-branch-picker-meta">
+                                      <span>{branchIndex + 1} of {responsePreviewTarget.weftCount}</span>
+                                      <span>
+                                        {formatRelativeTimestamp(record.createdAt) ||
+                                          formatRelativeTimestamp(record.updatedAt) ||
+                                          formatRelativeTimestamp(new Date().toISOString())}
+                                      </span>
                                     </em>
                                   </span>
                                 </button>
@@ -1283,10 +1405,26 @@ function GraphViewInner({
                         <ExternalLink size={14} />
                       </button>
                     </div>
+                    <span className="graph-response-preview-action-separator" aria-hidden="true" />
+                    <div className="graph-response-preview-action-group">
+                      <button
+                        type="button"
+                        className="graph-response-preview-close"
+                        title="Close"
+                        aria-label="Close response preview"
+                        onClick={() => setResponsePreviewNodeId(null)}
+                      >
+                        <X size={16} />
+                      </button>
+                    </div>
                   </div>
-                )}
-              </div>
-              <div className="graph-response-preview-scroll">
+                </div>
+              )}
+              <article className="graph-response-preview-scroll">
+                <div className="graph-response-preview-block graph-response-preview-question">
+                  <span>Question</span>
+                  <GraphResponsePreviewQuestion question={responsePreview.question} />
+                </div>
                 <div className="graph-response-preview-block graph-response-preview-answer">
                   <span>Answer</span>
                   {responsePreviewPending ? (
@@ -1298,7 +1436,7 @@ function GraphViewInner({
                     <AssistantMarkdownContent markdown={responsePreview.answerMarkdown} />
                   )}
                 </div>
-              </div>
+              </article>
             </section>
           </div>
         )}

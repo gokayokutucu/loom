@@ -5,6 +5,7 @@ export type LoomObjectType =
   | "loom"
   | "response"
   | "fragment"
+  | "attachment"
   | "bookmark"
   | "semantic"
   | "recent";
@@ -223,6 +224,8 @@ export type ReferenceDisplayMode = "title" | "code";
 export interface Conversation {
   id: string;
   title: string;
+  /** Optional display label shown only in the sidebar tab. Does not affect the Loom Surface title. */
+  tabLabel?: string;
   path: string;
   folder: string;
   summary: string;
@@ -255,7 +258,7 @@ export interface LoomLink {
   badge?: string;
   selectedAt?: number;
   targetObjectId?: string;
-  targetKind?: "loom" | "response" | "weft" | "fragment" | "code_block" | "external";
+  targetKind?: "loom" | "response" | "weft" | "fragment" | "code_block" | "attachment" | "external";
   canonicalUri?: string;
   meta?: LoomMetadata;
   referenceCode?: string;
@@ -369,6 +372,12 @@ export interface ResponseItem {
   thinkingStallReason?: string;
   thinkingContinueCount?: number;
   thinkingStopped?: boolean;
+  /** Live thinking token count: estimated during streaming, overwritten by authoritative eval_count on completion. */
+  thinkingTokenCount?: number;
+  /** Finalized authoritative total elapsed inference time (ms). Set from Ollama completion payload and persisted. */
+  inferenceMs?: number;
+  /** Finalized authoritative total token count (eval_count). Set from Ollama completion payload and persisted. */
+  inferenceTokenCount?: number;
   visiblePlan?: VisibleAnswerPlan;
   visibleProgress?: VisibleAnswerProgress;
   codeBlocks?: ResponseCodeBlock[];

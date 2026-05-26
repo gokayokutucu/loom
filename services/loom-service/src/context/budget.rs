@@ -525,6 +525,7 @@ mod tests {
             source: ContextSource::Composer,
             weft_origin: None,
             checkpoint: None,
+            memory_messages: Vec::new(),
             recent_messages: Vec::new(),
         }
     }
@@ -550,6 +551,7 @@ mod tests {
                 capsule_summary: None,
             },
             response_capsule: None,
+            attachment: None,
         }
     }
 

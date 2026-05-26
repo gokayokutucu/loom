@@ -333,6 +333,58 @@ impl ResponseRepository {
         self.update_response_metadata(response_id, &metadata).await
     }
 
+    /// Persists authoritative inference metrics (total elapsed time and token count)
+    /// into `metadata_json`. Safe to call multiple times; later calls only overwrite
+    /// if the provided values are `Some`.
+    pub async fn update_response_inference_metadata(
+        &self,
+        response_id: &str,
+        inference_ms: Option<u64>,
+        eval_token_count: Option<u64>,
+    ) -> Result<(), ServiceError> {
+        if inference_ms.is_none() && eval_token_count.is_none() {
+            return Ok(());
+        }
+        let response = self
+            .get_response(response_id)
+            .await?
+            .ok_or_else(|| ServiceError::storage("Response not found for inference metadata"))?;
+        let mut metadata = response
+            .metadata_json
+            .as_deref()
+            .and_then(|json| serde_json::from_str::<serde_json::Value>(json).ok())
+            .and_then(|value| value.as_object().cloned())
+            .unwrap_or_default();
+        if let Some(ms) = inference_ms {
+            metadata.insert(
+                "inferenceMs".to_string(),
+                serde_json::Value::Number(ms.into()),
+            );
+        }
+        if let Some(tokens) = eval_token_count {
+            metadata.insert(
+                "evalTokenCount".to_string(),
+                serde_json::Value::Number(tokens.into()),
+            );
+        }
+        let metadata_json = serde_json::to_string(&metadata).map_err(|error| {
+            ServiceError::storage(format!("failed to serialize inference metadata: {error}"))
+        })?;
+        reject_forbidden_payload(Some(&metadata_json))?;
+        sqlx::query(
+            "UPDATE responses SET metadata_json = ?2, updated_at = ?3 WHERE response_id = ?1",
+        )
+        .bind(response_id)
+        .bind(&metadata_json)
+        .bind(timestamp())
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to persist inference metadata: {error}"))
+        })?;
+        Ok(())
+    }
+
     pub async fn list_responses_for_loom(
         &self,
         loom_id: &str,
@@ -788,6 +840,7 @@ mod tests {
         db::test_database,
         repositories::looms::{LoomRepository, NewLoom},
     };
+    use sqlx::Row;
 
     #[tokio::test]
     async fn insert_and_list_responses_for_loom() {
@@ -922,6 +975,86 @@ mod tests {
             .expect_err("raw thinking rejected");
 
         assert!(error.to_string().contains("raw_thinking"));
+    }
+
+    #[tokio::test]
+    async fn retry_soft_delete_marks_downstream_responses_and_preserves_wefts() {
+        let database = test_database().await;
+        insert_test_loom(&database).await;
+        let looms = LoomRepository::new(&database);
+        looms
+            .insert_loom(&NewLoom {
+                loom_id: "weft-1".to_string(),
+                title: "Persisted Weft".to_string(),
+                summary: None,
+                code: None,
+                canonical_uri: None,
+                kind: "weft".to_string(),
+                origin_loom_id: Some("loom-1".to_string()),
+                origin_response_id: Some("assistant-1".to_string()),
+                created_at: "2026-05-08T00:00:04Z".to_string(),
+                updated_at: "2026-05-08T00:00:04Z".to_string(),
+                metadata_json: None,
+            })
+            .await
+            .expect("insert Weft");
+        let responses = ResponseRepository::new(&database);
+        for response in [
+            sample_response("user-1", "user", "First prompt", 0, "{}"),
+            sample_response("assistant-1", "assistant", "First answer", 1, "{}"),
+            sample_response("user-2", "user", "Follow up", 2, "{}"),
+            sample_response("assistant-2", "assistant", "Follow up answer", 3, "{}"),
+        ] {
+            responses
+                .insert_response(&response)
+                .await
+                .expect("insert response");
+        }
+
+        let deleted = responses
+            .soft_delete_responses_after("loom-1", 0, "retry_from_user_message", "user-1")
+            .await
+            .expect("soft-delete downstream");
+
+        assert_eq!(deleted.len(), 3);
+        assert_eq!(
+            responses
+                .list_responses_for_loom("loom-1")
+                .await
+                .expect("list active")
+                .iter()
+                .map(|response| response.response_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["user-1"]
+        );
+        assert!(responses
+            .is_response_deleted("assistant-1")
+            .await
+            .expect("assistant deleted"));
+        let deleted_reason: String =
+            sqlx::query("SELECT deleted_reason FROM responses WHERE response_id = 'assistant-1'")
+                .fetch_one(database.pool())
+                .await
+                .expect("query deleted reason")
+                .get("deleted_reason");
+        assert_eq!(deleted_reason, "retry_from_user_message");
+        assert!(
+            looms
+                .get_loom("weft-1")
+                .await
+                .expect("get Weft")
+                .expect("Weft exists")
+                .is_deleted
+                == false
+        );
+        assert_eq!(
+            looms
+                .list_wefts_by_origin_response("assistant-1")
+                .await
+                .expect("list origin Wefts")
+                .len(),
+            1
+        );
     }
 
     async fn insert_test_loom(database: &crate::storage::db::Database) {

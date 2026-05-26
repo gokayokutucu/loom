@@ -42,7 +42,7 @@ pub use refinement::{
 };
 pub use retrieval::{
     ContextRetrievalCandidate, ContextRetrievalCandidateKind, ContextRetrievalIncludeMode,
-    ContextRetrievalResult, ContextRetriever,
+    ContextRetrievalResult, ContextRetriever, ContextSourceLevel, QueryIntentKind,
 };
 pub use types::{
     AnswerPlanSummary, ArtifactStatus, AttachedReferenceInput, BuildContextInput, BuiltContext,

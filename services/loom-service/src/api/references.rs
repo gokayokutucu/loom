@@ -656,10 +656,10 @@ fn parse_metadata(metadata_json: Option<&str>) -> Option<Value> {
 
 fn validate_target_kind(kind: &str) -> Result<(), (StatusCode, Json<ReferenceApiError>)> {
     match kind {
-        "loom" | "response" | "weft" | "fragment" | "code_block" | "external" => Ok(()),
+        "loom" | "response" | "weft" | "fragment" | "code_block" | "attachment" | "external" => Ok(()),
         _ => Err(bad_request(
             "INVALID_TARGET_KIND",
-            "Reference targetKind must be loom, response, weft, fragment, code_block, or external.",
+            "Reference targetKind must be loom, response, weft, fragment, code_block, attachment, or external.",
         )),
     }
 }

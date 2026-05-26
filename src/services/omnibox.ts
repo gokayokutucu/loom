@@ -1,4 +1,5 @@
 import type { AddressSuggestion, Conversation } from "../types";
+import { polishDisplayTitle } from "./displayTitlePolish";
 import { isLoomAddress } from "./loomProtocol";
 
 export function isAddressBarAddressLike(value: string) {
@@ -15,7 +16,7 @@ function conversationSuggestion(conversation: Conversation): AddressSuggestion {
   return {
     id: conversation.id,
     type: isWeft ? "loom" : "conversation",
-    title: conversation.title,
+    title: polishDisplayTitle(conversation.title),
     subtitle: conversation.summary,
     path: conversation.path,
     canonicalUri: conversation.meta?.canonicalUri,

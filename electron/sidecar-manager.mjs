@@ -140,6 +140,16 @@ function resolveBinaryPath(repoRoot, app) {
 }
 
 function resolveElectronDataPaths(repoRoot, app) {
+  if (app?.isPackaged || isPackagedRuntime()) {
+    const dataDir = path.join(app.getPath("userData"), "loom-service");
+    return {
+      dataMode: "packaged",
+      dataDir,
+      configPath: path.join(dataDir, "loom-service.toml"),
+      dbPath: path.join(dataDir, "loom.db"),
+    };
+  }
+
   const devRuntime = readDevRuntimeMetadata(repoRoot);
   if (devRuntime) {
     const serviceDataDir = path.join(devRuntime.repoRoot, "services", "loom-service", ".data");
@@ -152,16 +162,6 @@ function resolveElectronDataPaths(repoRoot, app) {
         devRuntime.dataMode === "shared-dev"
           ? path.join(serviceDataDir, "loom.db")
           : path.join(electronConfigDir, "loom.db"),
-    };
-  }
-
-  if (app?.isPackaged || isPackagedRuntime()) {
-    const dataDir = path.join(app.getPath("userData"), "loom-service");
-    return {
-      dataMode: "packaged",
-      dataDir,
-      configPath: path.join(dataDir, "loom-service.toml"),
-      dbPath: path.join(dataDir, "loom.db"),
     };
   }
 
@@ -233,11 +233,12 @@ function canAttachExternalRuntime(runtimeStatus) {
 }
 
 export class LoomServiceSidecarManager {
-  constructor({ app, repoRoot = resolveRepoRoot(), preferredPort = DEFAULT_PORT } = {}) {
+  constructor({ app, repoRoot = resolveRepoRoot(), preferredPort = DEFAULT_PORT, logger } = {}) {
     this.app = app;
     this.repoRoot = repoRoot;
     this.preferredPort = Number(process.env.LOOM_ELECTRON_SERVICE_PORT || preferredPort);
     this.host = process.env.LOOM_ELECTRON_SERVICE_HOST || DEFAULT_HOST;
+    this.logger = logger;
     this.child = null;
     this.lifecycle = createSidecarLifecycleState();
     this.status = {
@@ -252,6 +253,8 @@ export class LoomServiceSidecarManager {
       health: undefined,
       error: undefined,
       startedByElectron: false,
+      appSessionId: logger?.sessionId,
+      logPath: logger?.logPath,
       lastCheckedAt: undefined,
     };
   }
@@ -269,6 +272,10 @@ export class LoomServiceSidecarManager {
     if (this.child && this.status.serviceUrl) return this.getStatus();
 
     this.transition("START_REQUESTED");
+    this.logger?.info("sidecar.start_requested", {
+      preferredPort: this.preferredPort,
+      host: this.host,
+    });
     const binaryPath = resolveBinaryPath(this.repoRoot, this.app);
     const binaryExists = fs.existsSync(binaryPath);
     const binaryTransition = this.transition(sidecarEventForBinaryResolution(binaryExists));
@@ -278,8 +285,11 @@ export class LoomServiceSidecarManager {
         state: binaryTransition.state,
         binaryPath,
         error: `loom-service binary is missing at ${binaryPath}. Build it first.`,
+        appSessionId: this.logger?.sessionId,
+        logPath: this.logger?.logPath,
         lastCheckedAt: new Date().toISOString(),
       };
+      this.logger?.error("sidecar.binary_missing", { binaryPath });
       throw new Error(`loom-service binary is missing at ${binaryPath}. Build it first.`);
     }
 
@@ -300,8 +310,17 @@ export class LoomServiceSidecarManager {
       dataMode,
       error: undefined,
       startedByElectron: true,
+      appSessionId: this.logger?.sessionId,
+      logPath: this.logger?.logPath,
       lastCheckedAt: new Date().toISOString(),
     };
+    this.logger?.info("sidecar.starting", {
+      serviceUrl,
+      binaryPath,
+      configPath,
+      dbPath,
+      dataMode,
+    });
 
     if (typeof options.onStarting === "function") {
       options.onStarting(this.getStatus());
@@ -325,8 +344,11 @@ export class LoomServiceSidecarManager {
         ...this.status,
         state: portTransition.state,
         error: `loom-service port ${port} is already in use by an unknown runtime. Refusing to start a second SQLite writer.`,
+        appSessionId: this.logger?.sessionId,
+        logPath: this.logger?.logPath,
         lastCheckedAt: new Date().toISOString(),
       };
+      this.logger?.error("sidecar.port_occupied_unknown", { serviceUrl, port });
       throw new Error(
         `loom-service port ${port} is already in use by an unknown runtime. Refusing to start a second SQLite writer.`,
       );
@@ -341,6 +363,7 @@ export class LoomServiceSidecarManager {
         LOOM_SERVICE_CONFIG_PATH: configPath,
         LOOM_SERVICE_DB_PATH: dbPath,
         LOOM_SERVICE_RUNTIME_OWNER_KIND: "electron",
+        LOOM_SERVICE_RESOURCES_PATH: process.resourcesPath,
         LOOM_SERVICE_OWNER_PID: String(process.pid),
         LOOM_SERVICE_GRACEFUL_DRAIN_TIMEOUT_MS: String(DEFAULT_GRACEFUL_DRAIN_TIMEOUT_MS),
         LOOM_SERVICE_ORPHAN_IDLE_TIMEOUT_MS: String(DEFAULT_ORPHAN_IDLE_TIMEOUT_MS),
@@ -350,6 +373,11 @@ export class LoomServiceSidecarManager {
     });
 
     this.status.pid = this.child.pid;
+    this.logger?.info("sidecar.process_spawned", {
+      pid: this.child.pid,
+      serviceUrl,
+      binaryPath,
+    });
     this.transition("PROCESS_SPAWNED");
     writeRuntimeLock(path.dirname(configPath), {
       kind: "loom-service-runtime-lock",
@@ -366,9 +394,17 @@ export class LoomServiceSidecarManager {
     });
 
     this.child.stdout?.on("data", (chunk) => {
+      this.logger?.info("loom_service.stdout", {
+        pid: this.child?.pid,
+        chunk: chunk.toString(),
+      });
       process.stdout.write(`[loom-service:${this.child?.pid ?? "stopped"}] ${chunk}`);
     });
     this.child.stderr?.on("data", (chunk) => {
+      this.logger?.warn("loom_service.stderr", {
+        pid: this.child?.pid,
+        chunk: chunk.toString(),
+      });
       process.stderr.write(`[loom-service:${this.child?.pid ?? "stopped"}] ${chunk}`);
     });
     this.child.once("exit", (code, signal) => {
@@ -380,8 +416,15 @@ export class LoomServiceSidecarManager {
         ...this.status,
         state: wasStopping ? "stopped" : exitTransition.state,
         error: wasStopping ? undefined : `loom-service exited with code ${code ?? "null"} signal ${signal ?? "null"}`,
+        appSessionId: this.logger?.sessionId,
+        logPath: this.logger?.logPath,
         lastCheckedAt: new Date().toISOString(),
       };
+      this.logger?.info("sidecar.process_exited", {
+        code,
+        signal,
+        state: this.status.state,
+      });
     });
 
     let health;
@@ -396,8 +439,11 @@ export class LoomServiceSidecarManager {
         ...this.status,
         state: failureTransition.state,
         error: failureTransition.error,
+        appSessionId: this.logger?.sessionId,
+        logPath: this.logger?.logPath,
         lastCheckedAt: new Date().toISOString(),
       };
+      this.logger?.error("sidecar.health_failed", { error });
       throw error;
     }
     this.transition("HEALTH_READY");
@@ -423,8 +469,15 @@ export class LoomServiceSidecarManager {
       health,
       runtimeStatus,
       error: undefined,
+      appSessionId: this.logger?.sessionId,
+      logPath: this.logger?.logPath,
       lastCheckedAt: new Date().toISOString(),
     };
+    this.logger?.info("sidecar.health_ready", {
+      serviceUrl,
+      pid: runtimeStatus?.pid ?? this.child.pid,
+      lifecycleState: runtimeStatus?.lifecycleState,
+    });
     this.lifecycle = createSidecarLifecycleState("ready");
     return this.getStatus();
   }
@@ -486,8 +539,15 @@ export class LoomServiceSidecarManager {
           health,
           error: undefined,
           startedByElectron: false,
+          appSessionId: this.logger?.sessionId,
+          logPath: this.logger?.logPath,
           lastCheckedAt: new Date().toISOString(),
         };
+        this.logger?.info("sidecar.attached_external_runtime", {
+          serviceUrl: runtimeUrl,
+          pid: runtimeStatus.pid ?? lock?.pid,
+          runtimeOwnerKind: runtimeStatus.runtimeOwnerKind,
+        });
         this.lifecycle = createSidecarLifecycleState("ready");
         return this.getStatus();
       }
@@ -510,8 +570,14 @@ export class LoomServiceSidecarManager {
         dataMode,
         runtimeStatus,
         startedByElectron: false,
+        appSessionId: this.logger?.sessionId,
+        logPath: this.logger?.logPath,
         lastCheckedAt: new Date().toISOString(),
       };
+      this.logger?.info("sidecar.waiting_for_draining_runtime", {
+        serviceUrl: runtimeUrl,
+        pid: runtimeStatus.pid ?? lock?.pid,
+      });
       if (typeof onStarting === "function") {
         onStarting(this.getStatus());
       }
@@ -542,8 +608,15 @@ export class LoomServiceSidecarManager {
       health: await fetchHealth(runtimeUrl).catch(() => undefined),
       error: undefined,
       startedByElectron: true,
+      appSessionId: this.logger?.sessionId,
+      logPath: this.logger?.logPath,
       lastCheckedAt: new Date().toISOString(),
     };
+    this.logger?.info("sidecar.recovered_electron_runtime", {
+      serviceUrl: runtimeUrl,
+      pid: runtimeStatus.pid ?? lock?.pid,
+      lifecycleState: runtimeStatus.lifecycleState,
+    });
     this.lifecycle = createSidecarLifecycleState("ready");
     writeRuntimeLock(dataDir, {
       ...(lock ?? {}),
@@ -579,6 +652,8 @@ export class LoomServiceSidecarManager {
         health,
         runtimeStatus,
         error: undefined,
+        appSessionId: this.logger?.sessionId,
+        logPath: this.logger?.logPath,
         lastCheckedAt: new Date().toISOString(),
       };
     } catch (error) {
@@ -586,8 +661,11 @@ export class LoomServiceSidecarManager {
         ...this.status,
         state: this.child ? "error" : this.status.state,
         error: error instanceof Error ? error.message : String(error),
+        appSessionId: this.logger?.sessionId,
+        logPath: this.logger?.logPath,
         lastCheckedAt: new Date().toISOString(),
       };
+      this.logger?.warn("sidecar.refresh_failed", { error });
     }
     return this.getStatus();
   }
@@ -600,6 +678,8 @@ export class LoomServiceSidecarManager {
         ...this.status,
         state: "stopped",
         error: undefined,
+        appSessionId: this.logger?.sessionId,
+        logPath: this.logger?.logPath,
         lastCheckedAt: new Date().toISOString(),
       };
       return this.getStatus();
@@ -607,6 +687,11 @@ export class LoomServiceSidecarManager {
     const child = this.child;
     this.transition("STOP_REQUESTED");
     this.status = { ...this.status, state: "stopping", lastCheckedAt: new Date().toISOString() };
+    this.logger?.info("sidecar.stop_requested", {
+      serviceUrl: this.status.serviceUrl,
+      pid: this.status.pid,
+      startedByElectron: this.status.startedByElectron,
+    });
 
     try {
       const runtimeStatus = await fetchRuntimeStatus(this.status.serviceUrl);
@@ -626,8 +711,11 @@ export class LoomServiceSidecarManager {
         ...this.status,
         state: "error",
         error: error instanceof Error ? error.message : String(error),
+        appSessionId: this.logger?.sessionId,
+        logPath: this.logger?.logPath,
         lastCheckedAt: new Date().toISOString(),
       };
+      this.logger?.error("sidecar.stop_failed", { error });
       return this.getStatus();
     }
 
@@ -638,8 +726,14 @@ export class LoomServiceSidecarManager {
         state: "draining",
         health: undefined,
         error: undefined,
+        appSessionId: this.logger?.sessionId,
+        logPath: this.logger?.logPath,
         lastCheckedAt: new Date().toISOString(),
       };
+      this.logger?.info("sidecar.stop_waiting_for_drain", {
+        serviceUrl: this.status.serviceUrl,
+        pid: this.status.pid,
+      });
       return this.getStatus();
     }
 
@@ -651,8 +745,11 @@ export class LoomServiceSidecarManager {
       pid: undefined,
       health: undefined,
       error: undefined,
+      appSessionId: this.logger?.sessionId,
+      logPath: this.logger?.logPath,
       lastCheckedAt: new Date().toISOString(),
     };
+    this.logger?.info("sidecar.stopped");
     this.lifecycle = createSidecarLifecycleState("stopped");
     return this.getStatus();
   }
@@ -665,8 +762,14 @@ export class LoomServiceSidecarManager {
       ...this.status,
       state: "restarting",
       error: undefined,
+      appSessionId: this.logger?.sessionId,
+      logPath: this.logger?.logPath,
       lastCheckedAt: new Date().toISOString(),
     };
+    this.logger?.info("sidecar.restart_requested", {
+      previousServiceUrl,
+      previousPort,
+    });
     if (typeof options.onRestarting === "function") {
       options.onRestarting(this.getStatus());
     }

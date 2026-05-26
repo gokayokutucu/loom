@@ -1,11 +1,14 @@
 import type {
   AddReferenceInput,
   AddReferenceResult,
+  ArchiveLoomInput,
   BookmarkResponseInput,
   BookmarkResult,
   CancelMessageInput,
   CancelMessageResult,
   CreateBookmarkInput,
+  CreateAttachmentInput,
+  CreateAttachmentResult,
   CreateLoomInput,
   CreateLoomResult,
   CreateOrOpenWeftInput,
@@ -18,6 +21,7 @@ import type {
   ExportResponseInput,
   CapabilitySummary,
   DeleteBookmarkInput,
+  DeleteAttachmentInput,
   GetBookmarkForTargetInput,
   GetBookmarkInput,
   GetReferenceInput,
@@ -27,9 +31,12 @@ import type {
   GraphProjectionResult,
   ListReferencesInput,
   ListReferencesResult,
+  ListAttachmentsInput,
+  ListAttachmentsResult,
   ListCodeSnippetsInput,
   ListCodeSnippetsResult,
   ListHistoryResult,
+  ListLoomsInput,
   ListBookmarksResult,
   LoomDetail,
   LoomSummary,
@@ -40,14 +47,20 @@ import type {
   QuickAskResult,
   RegenerateFromResponseInput,
   RemoveReferenceInput,
+  RetryUserMessageInput,
   RenameLoomInput,
+  RestoreLoomInput,
   RecordHistoryInput,
   ResolveAddressInput,
   ResolveAddressResult,
   LoomServiceRuntimeConfig,
+  OcrProviderHealth,
+  RuntimeModelDownloadJob,
+  RuntimeModelsResult,
   ServiceConfigUpdateResult,
   ServiceConfigStatus,
   SpeechProviderHealth,
+  SpeechSetupStatus,
   ServiceHealthStatus,
   SendMessageInput,
   SaveUiStateInput,
@@ -70,16 +83,31 @@ export interface LoomEngineClient {
   getServiceConfigStatus(): Promise<ServiceConfigStatus>;
   getServiceConfig(): Promise<LoomServiceRuntimeConfig>;
   updateServiceConfig(input: UpdateServiceConfigInput): Promise<ServiceConfigUpdateResult>;
+  getRuntimeModels(): Promise<RuntimeModelsResult>;
+  startModelDownload(modelName: string): Promise<RuntimeModelDownloadJob>;
+  getModelDownload(jobId: string): Promise<RuntimeModelDownloadJob>;
+  cancelModelDownload(jobId: string): Promise<RuntimeModelDownloadJob>;
+  getOcrProviderHealth(): Promise<OcrProviderHealth>;
   getSpeechProviderHealth(): Promise<SpeechProviderHealth>;
+  getSpeechSetupStatus(): Promise<SpeechSetupStatus>;
+  downloadSpeechSetupModel(): Promise<SpeechSetupStatus>;
+  configureSpeechSetup(): Promise<SpeechSetupStatus>;
   getCapabilitySummary(): Promise<CapabilitySummary>;
-  listLooms(): Promise<LoomSummary[]>;
+  listLooms(input?: ListLoomsInput): Promise<LoomSummary[]>;
   getLoom(loomId: string): Promise<LoomDetail>;
   createLoom(input: CreateLoomInput): Promise<CreateLoomResult>;
   renameLoom(input: RenameLoomInput): Promise<void>;
   updateLoomMetadata(input: UpdateLoomInput): Promise<CreateLoomResult>;
+  archiveLoom(input: ArchiveLoomInput): Promise<CreateLoomResult>;
+  restoreLoom(input: RestoreLoomInput): Promise<CreateLoomResult>;
   deleteLoom(input: DeleteLoomInput): Promise<void>;
+  hardReset(): Promise<void>;
   sendMessage(input: SendMessageInput): AsyncIterable<EngineResponseEvent>;
+  createAttachment(input: CreateAttachmentInput): Promise<CreateAttachmentResult>;
+  listAttachments(input: ListAttachmentsInput): Promise<ListAttachmentsResult>;
+  deleteAttachment(input: DeleteAttachmentInput): Promise<void>;
   regenerateFromResponse(input: RegenerateFromResponseInput): AsyncIterable<EngineResponseEvent>;
+  retryUserMessage(input: RetryUserMessageInput): AsyncIterable<EngineResponseEvent>;
   cancelMessage(input: CancelMessageInput): Promise<CancelMessageResult>;
   getGenerationResponseState(workflowRunId: string): Promise<GenerationResponseStateResult>;
   quickAsk(input: QuickAskInput): Promise<QuickAskResult>;

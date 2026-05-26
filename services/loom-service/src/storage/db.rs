@@ -1,8 +1,11 @@
 #![allow(dead_code)]
 
 use crate::{config::ServiceConfig, error::ServiceError, storage::migrations::run_migrations};
-use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
-use std::{path::Path, path::PathBuf};
+use sqlx::{
+    sqlite::{SqliteConnectOptions, SqlitePoolOptions},
+    SqlitePool,
+};
+use std::{path::Path, path::PathBuf, str::FromStr, time::Duration};
 
 #[derive(Debug, Clone)]
 pub struct Database {
@@ -48,9 +51,15 @@ impl DatabaseConfig {
 
 impl Database {
     pub async fn connect(config: &DatabaseConfig) -> Result<Self, ServiceError> {
+        let connect_options = SqliteConnectOptions::from_str(&config.url)
+            .map_err(|error| {
+                ServiceError::storage(format!("failed to configure SQLite database: {error}"))
+            })?
+            .busy_timeout(Duration::from_secs(5));
+
         let pool = SqlitePoolOptions::new()
-            .max_connections(5)
-            .connect(&config.url)
+            .max_connections(1)
+            .connect_with(connect_options)
             .await
             .map_err(|error| {
                 ServiceError::storage(format!("failed to connect SQLite database: {error}"))

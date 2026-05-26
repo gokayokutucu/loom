@@ -24,10 +24,29 @@ export interface LoomDesktopRuntimeStatus {
   health?: unknown;
   error?: string;
   startedByElectron?: boolean;
+  appSessionId?: string;
+  logPath?: string;
   lastCheckedAt?: string;
   previousServiceUrl?: string;
   serviceUrlChanged?: boolean;
 }
+
+export interface LoomDesktopMicrophonePermissionStatus {
+  platform: LoomDesktopRuntimeInfo["platform"];
+  status:
+    | "not-determined"
+    | "granted"
+    | "denied"
+    | "restricted"
+    | "unknown"
+    | "unsupported";
+  opened?: boolean;
+}
+
+import type {
+  AddressBarContextMenuParams,
+  AddressBarContextMenuResult,
+} from "./services/addressBarContextMenu";
 
 interface LoomDesktopBridge {
   getRuntimeInfo: () => LoomDesktopRuntimeInfo;
@@ -36,10 +55,24 @@ interface LoomDesktopBridge {
     restart: () => Promise<LoomDesktopRuntimeStatus>;
   };
   runtimeStatus?: () => Promise<unknown>;
+  logs?: {
+    info: (event: string, data?: Record<string, unknown>) => Promise<void>;
+    warn: (event: string, data?: Record<string, unknown>) => Promise<void>;
+    error: (event: string, data?: Record<string, unknown>) => Promise<void>;
+  };
   windowControls?: {
     minimize: () => Promise<void>;
     toggleMaximize: () => Promise<void>;
     close: () => Promise<void>;
+  };
+  permissions?: {
+    microphoneStatus: () => Promise<LoomDesktopMicrophonePermissionStatus>;
+    openMicrophoneSettings: () => Promise<LoomDesktopMicrophonePermissionStatus>;
+  };
+  addressBar?: {
+    showContextMenu: (
+      params: AddressBarContextMenuParams
+    ) => Promise<AddressBarContextMenuResult>;
   };
 }
 
@@ -74,4 +107,25 @@ export function getElectronWindowControls() {
 export function getElectronRuntimeBridge() {
   if (typeof window === "undefined") return null;
   return window.loomDesktop?.runtime ?? null;
+}
+
+export function getElectronPermissionsBridge() {
+  if (typeof window === "undefined") return null;
+  return window.loomDesktop?.permissions ?? null;
+}
+
+export function getElectronAddressBarBridge() {
+  if (typeof window === "undefined") return null;
+  return window.loomDesktop?.addressBar ?? null;
+}
+
+export function logElectronEvent(
+  level: "info" | "warn" | "error",
+  event: string,
+  data?: Record<string, unknown>
+) {
+  if (typeof window === "undefined") return;
+  const logs = window.loomDesktop?.logs;
+  if (!logs) return;
+  void logs[level](event, data).catch(() => undefined);
 }

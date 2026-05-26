@@ -1074,6 +1074,7 @@ fn loom_to_dto(loom: LoomRecord) -> LoomDto {
         display_code,
         created_at: loom.created_at,
         updated_at: loom.updated_at,
+        archived_at: loom.archived_at,
         metadata: loom
             .metadata_json
             .as_deref()

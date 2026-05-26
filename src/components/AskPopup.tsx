@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { Bot, CornerDownLeft, CornerDownRight, Square, X } from "lucide-react";
 import type { LoomLink, ResponseItem } from "../types";
+import { cleanMarkdownDisplayText } from "../services/assistantMarkdown";
 import { AssistantMarkdownContent } from "./AssistantMarkdownContent";
 
 export interface AskPopupState {
@@ -335,6 +336,7 @@ export function AskPopup({
   onLoom,
   onSubmit,
   onStop,
+  showDebug,
 }: {
   state: AskPopupState;
   onUpdate: (state: AskPopupState) => void;
@@ -342,6 +344,7 @@ export function AskPopup({
   onLoom: () => void;
   onSubmit: () => void;
   onStop: () => void;
+  showDebug: boolean;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const answerListRef = useRef<HTMLDivElement | null>(null);
@@ -398,7 +401,7 @@ export function AskPopup({
         <div className="ask-header">
           <div>
             <span>Ask</span>
-            <h2 id="ask-title">{state.response.title}</h2>
+            <h2 id="ask-title">{cleanMarkdownDisplayText(state.response.title) || state.response.title}</h2>
           </div>
           <button
             className="icon-button"
@@ -468,7 +471,7 @@ export function AskPopup({
             })}
           </div>
         )}
-        {latestDebugTrace !== undefined && latestDebugTrace !== null && (
+        {showDebug && latestDebugTrace !== undefined && latestDebugTrace !== null && (
           <QuickAskDebugPanel trace={latestDebugTrace} />
         )}
         <textarea

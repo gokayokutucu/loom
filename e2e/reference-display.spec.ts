@@ -3,6 +3,7 @@
 // - LEGACY_TYPESCRIPT_LOCAL for seeded Reference token rendering tests below.
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import { createServiceTestHarness } from "./helpers/serviceTestHarness";
+import { addressBarReferenceAddress } from "../src/services/referenceDisplay";
 
 interface ReferenceDto {
   referenceId: string;
@@ -29,6 +30,21 @@ interface ReferenceListResponse {
 interface ServiceGraphProjection {
   edges: Array<{ kind: string; source: string; target: string; label?: string; metadata?: unknown }>;
 }
+
+test.describe("[pure-ui-rendering] Reference address display helpers", () => {
+  test("Fragment popover copy address prefers source Loom address over internal workflow ids", () => {
+    const address = addressBarReferenceAddress({
+      path: "response-workflow-1779538084945094000-assistant#fragment=abc",
+      canonicalUri: "response-workflow-1779538084945094000-assistant#fragment=abc",
+      sourceCanonicalUri:
+        "loom://i-want-to-design-a-local-first-ai-runtime/L-JTHRW?id=a15d2d47-1c40-4852-ab0d-74778a0fea6a",
+    });
+
+    expect(address).toBe(
+      "loom://i-want-to-design-a-local-first-ai-runtime/L-JTHRW?id=a15d2d47-1c40-4852-ab0d-74778a0fea6a"
+    );
+  });
+});
 
 async function openApp(page: Page) {
   await page.addInitScript(() => {
@@ -190,6 +206,116 @@ test.describe("[product-service-backed] Reference product proof", () => {
       await expect.poll(() => tokenOccurrenceMarker(thirdToken)).toBe(" #3");
       await expect(page.locator(".prompt-editor")).toBeFocused();
 
+      const tokenCountBeforeMove = await page.getByTestId("inline-loom-token").count();
+      const promptMoveResult = await page.locator(".prompt-editor").evaluate(async (editor) => {
+        const editorElement = editor as HTMLElement;
+        const tokens = Array.from(
+          editorElement.querySelectorAll<HTMLElement>(".inline-loom-token")
+        );
+        const source = tokens[1];
+        const surface = editorElement.closest<HTMLElement>("[data-testid='prompt-surface']");
+        if (!source || !surface) return { moved: false, tokenCount: tokens.length };
+        const transfer = new DataTransfer();
+        source.dispatchEvent(
+          new DragEvent("dragstart", {
+            bubbles: true,
+            cancelable: true,
+            dataTransfer: transfer,
+          })
+        );
+        const rect = editorElement.getBoundingClientRect();
+        const dropOptions = {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer: transfer,
+          clientX: rect.right - 8,
+          clientY: rect.top + Math.max(8, rect.height / 2),
+        };
+        surface.dispatchEvent(new DragEvent("dragenter", dropOptions));
+        surface.dispatchEvent(new DragEvent("dragover", dropOptions));
+        surface.dispatchEvent(new DragEvent("drop", dropOptions));
+        source.dispatchEvent(
+          new DragEvent("dragend", {
+            bubbles: true,
+            cancelable: true,
+            dataTransfer: transfer,
+          })
+        );
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        return {
+          moved: true,
+          tokenCount: editorElement.querySelectorAll(".inline-loom-token").length,
+        };
+      });
+      expect(promptMoveResult).toEqual({
+        moved: true,
+        tokenCount: tokenCountBeforeMove,
+      });
+      await expect(page.getByTestId("inline-loom-token")).toHaveCount(tokenCountBeforeMove);
+
+      const tokenCountBeforeOptionDuplicate = await page.getByTestId("inline-loom-token").count();
+      const promptOptionDuplicateResult = await page.locator(".prompt-editor").evaluate(async (editor) => {
+        const editorElement = editor as HTMLElement;
+        const tokens = Array.from(
+          editorElement.querySelectorAll<HTMLElement>(".inline-loom-token")
+        );
+        const source = tokens[1];
+        const surface = editorElement.closest<HTMLElement>("[data-testid='prompt-surface']");
+        if (!source || !surface) return { duplicated: false, tokenCount: tokens.length };
+        const transfer = new DataTransfer();
+        source.dispatchEvent(
+          new DragEvent("dragstart", {
+            bubbles: true,
+            cancelable: true,
+            dataTransfer: transfer,
+          })
+        );
+        const rect = editorElement.getBoundingClientRect();
+        const dropOptions = {
+          bubbles: true,
+          cancelable: true,
+          dataTransfer: transfer,
+          clientX: rect.right - 8,
+          clientY: rect.top + Math.max(8, rect.height / 2),
+          altKey: true,
+        };
+        surface.dispatchEvent(new DragEvent("dragenter", dropOptions));
+        surface.dispatchEvent(new DragEvent("dragover", dropOptions));
+        surface.dispatchEvent(new DragEvent("drop", dropOptions));
+        source.dispatchEvent(
+          new DragEvent("dragend", {
+            bubbles: true,
+            cancelable: true,
+            dataTransfer: transfer,
+          })
+        );
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+        return {
+          duplicated: true,
+          tokenCount: editorElement.querySelectorAll(".inline-loom-token").length,
+        };
+      });
+      expect(promptOptionDuplicateResult).toEqual({
+        duplicated: true,
+        tokenCount: tokenCountBeforeOptionDuplicate + 1,
+      });
+      await expect(page.getByTestId("inline-loom-token")).toHaveCount(
+        tokenCountBeforeOptionDuplicate + 1
+      );
+      await expect.poll(() => tokenOccurrenceMarker(page.getByTestId("inline-loom-token").last())).toBe(" #4");
+
+      await page.getByRole("button", { name: /^References$/ }).first().click();
+      const linkedReferences = page.locator(".linked-reference-dropdown");
+      await expect(linkedReferences.getByRole("option")).toHaveCount(4);
+      await expect(linkedReferences).toContainText("#4");
+      await linkedReferences.getByRole("button", { name: "Duplicate Reference" }).first().click();
+      await expect(page.getByTestId("inline-loom-token")).toHaveCount(
+        tokenCountBeforeOptionDuplicate + 2
+      );
+      await expect.poll(() => tokenOccurrenceMarker(page.getByTestId("inline-loom-token").last())).toBe(" #5");
+      await expect(linkedReferences.getByRole("option")).toHaveCount(5);
+      await expect(linkedReferences).toContainText("#5");
+
       const matchingTokens = await page.getByTestId("inline-loom-token").evaluateAll(
         (tokens, expected) =>
           tokens.filter(
@@ -200,7 +326,28 @@ test.describe("[product-service-backed] Reference product proof", () => {
           ).length,
         { sourceResponseId, sourceCanonicalUri }
       );
-      expect(matchingTokens).toBe(3);
+      expect(matchingTokens).toBe(5);
+      const promptTokenVisibility = await page.locator(".prompt-editor").evaluate((editor) => {
+        const editorElement = editor as HTMLElement;
+        const editorRect = editorElement.getBoundingClientRect();
+        return Array.from(
+          editorElement.querySelectorAll<HTMLElement>(".inline-loom-token")
+        ).map((token) => {
+          const tokenRect = token.getBoundingClientRect();
+          const visibleHeight =
+            Math.min(tokenRect.bottom, editorRect.bottom) -
+            Math.max(tokenRect.top, editorRect.top);
+          return {
+            text: token.textContent,
+            visible: visibleHeight >= Math.min(10, tokenRect.height),
+            editorHeight: editorElement.clientHeight,
+            editorScrollHeight: editorElement.scrollHeight,
+          };
+        });
+      });
+      expect(promptTokenVisibility).toHaveLength(5);
+      expect(promptTokenVisibility.every((token) => token.visible)).toBe(true);
+      expect(promptTokenVisibility[0].editorHeight).toBeGreaterThan(40);
       await expect.poll(() => transcriptBottomGap(page)).toBeLessThanOrEqual(96);
 
       await page.keyboard.insertText(
@@ -357,6 +504,23 @@ test.describe("[product-service-backed] Reference product proof", () => {
       await expect(page.getByText("CQRS, Event Sourcing").last()).toBeVisible({
         timeout: 30_000,
       });
+
+      await page.locator(".chat-transcript").evaluate((element) => {
+        const transcript = element as HTMLElement;
+        transcript.scrollTop = transcript.scrollHeight;
+      });
+      const addressInput = page.getByLabel("Loom Address Bar");
+      await addressInput.click();
+      await addressInput.fill(reference.targetUri!);
+      await addressInput.press("Enter");
+      const sourceResponse = page.locator(
+        `[data-response-id="${reference.sourceResponseId}"]`
+      );
+      await expect(sourceResponse).toHaveClass(/response-scroll-highlight/, {
+        timeout: 5_000,
+      });
+      await expect.poll(() => transcriptBottomGap(page)).toBeGreaterThan(96);
+
       const exported = await scenario.client.exportLoom({
         loomId,
         format: "json",
@@ -557,6 +721,41 @@ test.describe("[legacy-typescript-local] Reference display tokens", () => {
     await expect(hint).toContainText(/R-[0-9A-HJKMNP-TV-Z]{5}/);
   });
 
+  test("pasting a Loom markdown link into the prompt restores an inline Reference chip", async ({
+    page,
+  }) => {
+    await openApp(page);
+    await openArchitectureLoom(page);
+
+    const editor = page.getByRole("textbox", { name: "Prompt" }).first();
+    const referenceButton = page.getByRole("button", { name: /^References$/ }).first();
+    const initialReferenceCount = await referenceButton.evaluate((element) => {
+      const match = (element.textContent ?? "").match(/\d+/);
+      return match ? Number(match[0]) : 0;
+    });
+    await editor.click();
+    await page.evaluate(() => {
+      const target = document.querySelector<HTMLElement>(".prompt-editor");
+      if (!target) throw new Error("Prompt editor not found");
+      const data = new DataTransfer();
+      data.setData(
+        "text/plain",
+        "Compare [Address Bar as local AI web navigator](loom://loom-ai/navigation-architecture/loom/browser/r-address-bar?id=r-address-bar) next."
+      );
+      target.dispatchEvent(
+        new ClipboardEvent("paste", {
+          clipboardData: data,
+          bubbles: true,
+          cancelable: true,
+        })
+      );
+    });
+
+    const token = page.getByTestId("inline-loom-token").last();
+    await expect(token).toContainText("[[Address Bar as local AI web navigator]]");
+    await expect(referenceButton).toContainText(String(initialReferenceCount + 1));
+  });
+
   test("Ctrl-clicking a Reference navigates through session history", async ({ page }) => {
     await openApp(page);
     await openArchitectureLoom(page);
@@ -606,6 +805,35 @@ test.describe("[legacy-typescript-local] Reference display tokens", () => {
       "placeholder",
       /Address Bar as local AI web navigator/
     );
+  });
+
+  test("Fragment Reference rename only updates the selected chip", async ({ page }) => {
+    await openApp(page);
+    await openArchitectureLoom(page);
+
+    await page.locator(".prompt-editor").evaluate((editor) => {
+      const sourceCanonicalUri =
+        "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar?id=r-address-bar";
+      editor.innerHTML = [
+        `<span class="inline-loom-token" contenteditable="false" draggable="true" data-testid="inline-loom-token" data-loom-id="fragment-one" data-loom-path="${sourceCanonicalUri}#fragment=fragment-one" data-loom-title="First fragment" data-loom-type="fragment" data-loom-badge="Fragment" data-loom-source-loom-id="c-architecture" data-loom-source-response-id="r-address-bar" data-loom-source-canonical-uri="${sourceCanonicalUri}" data-loom-fragment-hash="fragment-one" data-loom-selected-text="First selected text">[[First fragment]]</span>`,
+        `<span class="inline-loom-token" contenteditable="false" draggable="true" data-testid="inline-loom-token" data-loom-id="fragment-two" data-loom-path="${sourceCanonicalUri}#fragment=fragment-two" data-loom-title="Second fragment" data-loom-type="fragment" data-loom-badge="Fragment" data-loom-source-loom-id="c-architecture" data-loom-source-response-id="r-address-bar" data-loom-source-canonical-uri="${sourceCanonicalUri}" data-loom-fragment-hash="fragment-two" data-loom-selected-text="Second selected text">[[Second fragment]]</span>`,
+      ].join(" ");
+    });
+
+    const tokens = page.getByTestId("inline-loom-token");
+    await expect(tokens).toHaveCount(2);
+    await expect(tokens.nth(0)).toContainText("[[First fragment]]");
+    await expect(tokens.nth(1)).toContainText("[[Second fragment]]");
+
+    await tokens.nth(1).click({ button: "right" });
+    await page.getByRole("button", { name: "Rename" }).click();
+    const input = page.getByLabel("Reference name");
+    await expect(input).toBeFocused();
+    await input.fill("Second fragment alias");
+    await input.press("Enter");
+
+    await expect(tokens.nth(0)).toContainText("[[First fragment]]");
+    await expect(tokens.nth(1)).toContainText("[[Second fragment alias]]");
   });
 
   test("Reference rename can be cancelled with no label change", async ({ page }) => {

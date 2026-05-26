@@ -32,6 +32,9 @@ pub trait ContextContributor {
 pub struct RecentTurnsContributor;
 
 #[derive(Debug, Clone, Copy)]
+pub struct ProfileMemoryContributor;
+
+#[derive(Debug, Clone, Copy)]
 pub struct LoomCheckpointContributor;
 
 #[derive(Debug, Clone, Copy)]
@@ -91,6 +94,40 @@ impl ContextContributor for RecentTurnsContributor {
             "Recent conversation",
             content,
             ContextSourceKind::RecentTurn,
+        )]
+    }
+}
+
+impl ContextContributor for ProfileMemoryContributor {
+    fn id(&self) -> &'static str {
+        "profile_memory"
+    }
+
+    fn label(&self) -> &'static str {
+        "Profile memory"
+    }
+
+    fn priority(&self) -> i32 {
+        45
+    }
+
+    fn can_contribute(&self, input: &BuildContextInput) -> bool {
+        !input.memory_messages.is_empty()
+    }
+
+    fn contribute(&self, input: &BuildContextInput) -> Vec<ContextContribution> {
+        let content = input
+            .memory_messages
+            .iter()
+            .map(|message| message.content.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        vec![contribution(
+            "profile-memory",
+            "User profile and saved Memory",
+            content,
+            ContextSourceKind::RetrievedMemory,
         )]
     }
 }
@@ -187,7 +224,13 @@ impl ContextContributor for AttachedReferencesContributor {
         input
             .attached_references
             .iter()
-            .map(|attached| reference_contribution(&attached.reference))
+            .map(|attached| {
+                attached
+                    .attachment
+                    .as_ref()
+                    .map(attachment_contribution)
+                    .unwrap_or_else(|| reference_contribution(&attached.reference))
+            })
             .collect()
     }
 }
@@ -286,6 +329,13 @@ impl ContextContributor for RetrievedMemoryContributor {
                     crate::context::retrieval::ContextRetrievalCandidateKind::Reference => {
                         "reference"
                     }
+                    crate::context::retrieval::ContextRetrievalCandidateKind::Memory => "memory",
+                    crate::context::retrieval::ContextRetrievalCandidateKind::AttachmentChunk => {
+                        "attachment_chunk"
+                    }
+                    crate::context::retrieval::ContextRetrievalCandidateKind::WeftOrigin => {
+                        "weft_origin"
+                    }
                 };
                 let content = format!(
                     "Use as older background context ({mode}).\nWhy it may be relevant: {}\n{}",
@@ -304,6 +354,22 @@ impl ContextContributor for RetrievedMemoryContributor {
                 contribution
                     .metadata
                     .insert("candidateKind".to_string(), Value::String(kind.to_string()));
+                contribution.metadata.insert(
+                    "sourceLevel".to_string(),
+                    serde_json::json!(candidate.source_level),
+                );
+                contribution.metadata.insert(
+                    "queryIntent".to_string(),
+                    serde_json::json!(candidate.query_intent),
+                );
+                contribution.metadata.insert(
+                    "scoringReason".to_string(),
+                    Value::String(candidate.scoring_reason.clone()),
+                );
+                contribution.metadata.insert(
+                    "retrievalBudgetUsedTokens".to_string(),
+                    serde_json::json!(candidate.budget_used_tokens),
+                );
                 contribution
             })
             .collect()
@@ -427,6 +493,33 @@ fn reference_contribution(reference: &ReferenceContext) -> ContextContribution {
     )
 }
 
+fn attachment_contribution(
+    attachment: &crate::context::types::AttachmentContext,
+) -> ContextContribution {
+    let content = match (&attachment.content_text, attachment.parse_status.as_str()) {
+        (Some(content), "ready") => format!(
+            "Attachment: {}\nType: {}\nParser: {}\n\n{}",
+            attachment.file_name,
+            attachment
+                .content_kind
+                .as_deref()
+                .unwrap_or(&attachment.kind),
+            attachment.parser.as_deref().unwrap_or("unknown"),
+            content
+        ),
+        _ => format!(
+            "Attachment '{}' is referenced but parsed content is not ready (status: {}).",
+            attachment.file_name, attachment.parse_status
+        ),
+    };
+    contribution(
+        attachment.attachment_id.clone(),
+        attachment.file_name.clone(),
+        content,
+        ContextSourceKind::Attachment,
+    )
+}
+
 fn contribution(
     source_id: impl Into<String>,
     title: impl Into<String>,
@@ -527,6 +620,7 @@ mod tests {
                 source_hash: None,
                 status: ArtifactStatus::Ready,
             }),
+            memory_messages: Vec::new(),
             recent_messages: Vec::new(),
         }
     }
@@ -562,6 +656,7 @@ mod tests {
                     generator: Some("heuristic_parts_tags".to_string()),
                     status: ArtifactStatus::Ready,
                 }),
+                attachment: None,
             }],
             response_mode: ResponseMode::Auto,
             resolved_num_ctx,
@@ -569,6 +664,7 @@ mod tests {
             source: ContextSource::Composer,
             weft_origin: None,
             checkpoint: None,
+            memory_messages: Vec::new(),
             recent_messages: Vec::new(),
         }
     }

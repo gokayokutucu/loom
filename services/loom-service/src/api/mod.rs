@@ -1,4 +1,5 @@
 mod ask;
+mod attachments;
 mod bookmarks;
 mod capabilities;
 mod code_snippets;
@@ -11,9 +12,13 @@ pub(crate) mod graph;
 mod health;
 mod history;
 mod looms;
+mod memory;
+mod model_runtime;
+mod ocr;
 mod ollama;
 mod orchestration;
 mod references;
+mod reset;
 pub(crate) mod resolve;
 mod responses;
 mod runtime_api;
@@ -28,6 +33,7 @@ use crate::runtime::{OperationTracker, RestartState};
 use crate::storage::db::Database;
 use axum::{
     body::Body,
+    extract::DefaultBodyLimit,
     http::{header, HeaderValue, Method, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -63,12 +69,49 @@ pub fn router(
         .route("/runtime/restart", post(config::request_restart))
         .route("/runtime/status", get(runtime_api::status))
         .route("/runtime/shutdown", post(runtime_api::shutdown))
+        .route("/runtime/providers", get(model_runtime::providers))
+        .route(
+            "/runtime/models",
+            get(model_runtime::models).post(model_runtime::discover_models),
+        )
+        .route(
+            "/runtime/models/:model_name/download",
+            post(model_runtime::start_download),
+        )
+        .route("/runtime/downloads", get(model_runtime::list_downloads))
+        .route(
+            "/runtime/downloads/:job_id",
+            get(model_runtime::get_download),
+        )
+        .route(
+            "/runtime/downloads/:job_id/events",
+            get(model_runtime::download_events),
+        )
+        .route(
+            "/runtime/downloads/:job_id/cancel",
+            post(model_runtime::cancel_download),
+        )
         .route("/resolve", post(resolve::resolve))
+        .route("/hard-reset", post(reset::hard_reset))
         .route("/dev/seed-fixtures", post(dev::seed_fixtures))
         .route("/dev/e2e-proof/:loom_id", get(dev::e2e_proof))
         .route("/ask/quick", post(ask::quick))
-        .route("/speech/transcribe", post(speech::transcribe))
+        .route(
+            "/speech/transcribe",
+            post(speech::transcribe)
+                .layer(DefaultBodyLimit::max(
+                    speech::SPEECH_TRANSCRIBE_HTTP_BODY_LIMIT_BYTES,
+                ))
+                .layer(middleware::from_fn(speech_transcribe_body_limit)),
+        )
         .route("/speech/provider/health", get(speech::provider_health))
+        .route("/ocr/provider/health", get(ocr::provider_health))
+        .route("/speech/setup/status", get(speech::setup_status))
+        .route(
+            "/speech/setup/download-model",
+            post(speech::download_setup_model),
+        )
+        .route("/speech/setup/configure", post(speech::configure_setup))
         .route(
             "/bookmarks",
             get(bookmarks::list_bookmarks).post(bookmarks::create_bookmark),
@@ -80,6 +123,16 @@ pub fn router(
         .route(
             "/ui/state/:key",
             get(ui_state::get_ui_state).put(ui_state::put_ui_state),
+        )
+        .route(
+            "/memory",
+            get(memory::list_memory).post(memory::create_memory),
+        )
+        .route(
+            "/memory/:memory_id",
+            get(memory::get_memory)
+                .patch(memory::patch_memory)
+                .delete(memory::delete_memory),
         )
         .route("/bookmarks/target", get(bookmarks::get_bookmark_for_target))
         .route(
@@ -100,6 +153,14 @@ pub fn router(
             "/responses/:response_id/references",
             get(references::list_response_references),
         )
+        .route(
+            "/looms/:loom_id/attachments",
+            get(attachments::list_attachments).post(attachments::create_attachment),
+        )
+        .route(
+            "/attachments/:attachment_id",
+            get(attachments::get_attachment).delete(attachments::delete_attachment),
+        )
         .route("/code-snippets", get(code_snippets::list_code_snippets))
         .route("/wefts", post(wefts::create_weft))
         .route("/looms", get(looms::list_looms).post(looms::create_loom))
@@ -109,6 +170,8 @@ pub fn router(
                 .patch(looms::patch_loom)
                 .delete(looms::delete_loom),
         )
+        .route("/looms/:loom_id/archive", post(looms::archive_loom))
+        .route("/looms/:loom_id/restore", post(looms::restore_loom))
         .route("/looms/:loom_id/wefts", get(wefts::list_wefts_for_loom))
         .route(
             "/responses/:response_id/wefts",
@@ -124,6 +187,10 @@ pub fn router(
         .route(
             "/responses/:response_id/regenerate",
             post(orchestration::regenerate_response),
+        )
+        .route(
+            "/responses/:response_id/retry",
+            post(orchestration::retry_response),
         )
         .route("/responses/:response_id", patch(responses::patch_response))
         .route("/context/prepare", post(context::prepare))
@@ -194,6 +261,27 @@ async fn local_cors(request: Request<Body>, next: Next) -> Response {
     }
 
     with_cors_headers(next.run(request).await)
+}
+
+async fn speech_transcribe_body_limit(request: Request<Body>, next: Next) -> Response {
+    let content_length = request
+        .headers()
+        .get(header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<u64>().ok());
+    if content_length
+        .map(|length| length > speech::SPEECH_TRANSCRIBE_HTTP_BODY_LIMIT_BYTES as u64)
+        .unwrap_or(false)
+    {
+        tracing::warn!(
+            content_length,
+            http_body_limit_bytes = speech::SPEECH_TRANSCRIBE_HTTP_BODY_LIMIT_BYTES,
+            "speech transcription rejected before body extraction"
+        );
+        return speech::payload_too_large_error(content_length).into_response();
+    }
+
+    next.run(request).await
 }
 
 fn with_cors_headers(mut response: Response) -> Response {

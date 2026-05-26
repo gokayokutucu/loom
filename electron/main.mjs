@@ -1,6 +1,9 @@
-import { app, BrowserWindow, ipcMain, nativeImage } from "electron";
+import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, shell, systemPreferences } from "electron";
+import crypto from "node:crypto";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createAppLogger } from "./app-logger.mjs";
 import { LoomServiceSidecarManager } from "./sidecar-manager.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -12,6 +15,37 @@ const devServerUrl = process.env.LOOM_ELECTRON_DEV_SERVER_URL;
 let mainWindow;
 let sidecar;
 let quitInProgress = false;
+const appSessionId = crypto.randomUUID();
+let appLogger;
+
+function sanitizeLogValue(value, depth = 0) {
+  if (value == null) return value;
+  if (typeof value === "string") return value.length > 500 ? `${value.slice(0, 500)}...` : value;
+  if (typeof value === "number" || typeof value === "boolean") return value;
+  if (value instanceof Error) {
+    return {
+      name: value.name,
+      message: value.message,
+    };
+  }
+  if (depth >= 3) return "[truncated]";
+  if (Array.isArray(value)) {
+    return value.slice(0, 20).map((entry) => sanitizeLogValue(entry, depth + 1));
+  }
+  if (typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value)
+        .slice(0, 40)
+        .map(([key, entry]) => [key, sanitizeLogValue(entry, depth + 1)])
+    );
+  }
+  return String(value);
+}
+
+function sanitizeRendererLogPayload(payload) {
+  if (!payload || typeof payload !== "object") return {};
+  return sanitizeLogValue(payload);
+}
 
 function getAppIconPath() {
   const extension = process.platform === "darwin" ? "icns" : "ico";
@@ -109,12 +143,49 @@ function errorHtml(message) {
   </html>`;
 }
 
+function windowStatePath() {
+  return path.join(app.getPath("userData"), "window-state.json");
+}
+
+function loadWindowState() {
+  try {
+    const raw = fs.readFileSync(windowStatePath(), "utf8");
+    const state = JSON.parse(raw);
+    if (
+      typeof state.width === "number" && state.width >= 980 &&
+      typeof state.height === "number" && state.height >= 680
+    ) {
+      return state;
+    }
+  } catch {
+    // no saved state yet
+  }
+  return null;
+}
+
+function saveWindowState(window) {
+  try {
+    const isMaximized = window.isMaximized();
+    const bounds = window.getNormalBounds();
+    fs.writeFileSync(windowStatePath(), JSON.stringify({ ...bounds, isMaximized }), "utf8");
+  } catch {
+    // ignore
+  }
+}
+
 function createWindow(runtimeStatus) {
   const serviceUrl = runtimeStatus.serviceUrl ?? "http://127.0.0.1:17633";
   const appIcon = getAppIcon();
+  const savedState = loadWindowState();
+  appLogger?.info("window.create", {
+    serviceUrl,
+    runtimeState: runtimeStatus?.state,
+  });
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
+    width: savedState?.width ?? 1280,
+    height: savedState?.height ?? 860,
+    x: savedState?.x,
+    y: savedState?.y,
     minWidth: 980,
     minHeight: 680,
     title: "Loom",
@@ -132,7 +203,25 @@ function createWindow(runtimeStatus) {
     },
   });
 
+  if (savedState?.isMaximized) {
+    mainWindow.maximize();
+  }
+
+  mainWindow.webContents.session.setPermissionRequestHandler((_webContents, permission, callback, details) => {
+    if (permission !== "media") {
+      callback(false);
+      return;
+    }
+    const mediaTypes = Array.isArray(details?.mediaTypes) ? details.mediaTypes : [];
+    callback(mediaTypes.length === 0 || mediaTypes.includes("audio"));
+  });
+
+  mainWindow.on("close", () => {
+    if (mainWindow) saveWindowState(mainWindow);
+  });
+
   mainWindow.once("ready-to-show", () => {
+    appLogger?.info("window.ready_to_show");
     mainWindow?.show();
   });
 
@@ -147,9 +236,11 @@ function createWindow(runtimeStatus) {
 async function loadRenderer() {
   if (!mainWindow) return;
   if (devServerUrl) {
+    appLogger?.info("renderer.load.dev", { url: devServerUrl });
     await mainWindow.loadURL(devServerUrl);
     return;
   }
+  appLogger?.info("renderer.load.file", { file: path.join(repoRoot, "dist", "index.html") });
   await mainWindow.loadFile(path.join(repoRoot, "dist", "index.html"));
 }
 
@@ -167,6 +258,17 @@ ipcMain.handle("loom:runtime-restart", async () => {
   });
   mainWindow?.webContents.send("loom:runtime-status-changed", status);
   return status;
+});
+
+ipcMain.handle("loom:app-log", (_event, payload) => {
+  const entry = sanitizeRendererLogPayload(payload);
+  const level = entry.level === "warn" || entry.level === "error" ? entry.level : "info";
+  const event = typeof entry.event === "string" ? entry.event : "renderer.event";
+  const data = entry.data && typeof entry.data === "object" ? entry.data : {};
+  appLogger?.[level](event, {
+    source: "renderer",
+    ...data,
+  });
 });
 
 ipcMain.handle("loom:window-minimize", () => {
@@ -187,13 +289,108 @@ ipcMain.handle("loom:window-close", () => {
   BrowserWindow.getFocusedWindow()?.close();
 });
 
+ipcMain.handle("loom:microphone-permission-status", () => {
+  if (process.platform !== "darwin") {
+    return { platform: process.platform, status: "unsupported" };
+  }
+  return {
+    platform: process.platform,
+    status: systemPreferences.getMediaAccessStatus("microphone"),
+  };
+});
+
+ipcMain.handle("loom:open-microphone-settings", async () => {
+  if (process.platform !== "darwin") {
+    return { platform: process.platform, opened: false, status: "unsupported" };
+  }
+  await shell.openExternal(
+    "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+  );
+  return {
+    platform: process.platform,
+    opened: true,
+    status: systemPreferences.getMediaAccessStatus("microphone"),
+  };
+});
+
+// Address bar context menu — shows a native OS menu with text-editing actions
+// plus Loom-specific address actions (Paste and Go, Copy Clean Link).
+ipcMain.handle("loom:address-bar-context-menu", (event, params) => {
+  const clipboardText = clipboard.readText();
+  const trimmedClipboard = clipboardText.trim();
+  const isLoomClipboard = trimmedClipboard.startsWith("loom://");
+  const hasClipboard = clipboardText.length > 0;
+  const { hasText = false, hasSelection = false, allSelected = false, hasLoomAddress = false } = params ?? {};
+
+  return new Promise((resolve) => {
+    const send = (action) => () => resolve({ action, clipboardText });
+
+    /** @type {import("electron").MenuItemConstructorOptions[]} */
+    const template = [
+      // Standard edit actions
+      // NOTE: exact undo/redo state is not detectable from the renderer —
+      // included unconditionally; the browser engine no-ops if no history.
+      { label: "Undo", accelerator: "CmdOrCtrl+Z", click: send("undo") },
+      { label: "Redo", accelerator: process.platform === "darwin" ? "CmdOrCtrl+Shift+Z" : "CmdOrCtrl+Y", click: send("redo") },
+      { type: "separator" },
+      { label: "Cut", accelerator: "CmdOrCtrl+X", enabled: hasSelection, click: send("cut") },
+      { label: "Copy", accelerator: "CmdOrCtrl+C", enabled: hasSelection, click: send("copy") },
+      // Paste: always show; enable when clipboard has text (Clipboard API may
+      // not be accessible in main process for permission reasons on some OSes,
+      // so we fall back to enabled=true when clipboardText is unavailable).
+      { label: "Paste", accelerator: "CmdOrCtrl+V", enabled: hasClipboard || true, click: send("paste") },
+      { label: "Delete", enabled: hasSelection, click: send("delete") },
+      { type: "separator" },
+      // Select All: disable if input is empty or already fully selected
+      { label: "Select All", accelerator: "CmdOrCtrl+A", enabled: hasText && !allSelected, click: send("selectAll") },
+    ];
+
+    // Loom-specific: Paste and Go / Paste and Go to Loom
+    if (hasClipboard) {
+      template.push({ type: "separator" });
+      if (isLoomClipboard) {
+        const preview = trimmedClipboard.length > 50
+          ? trimmedClipboard.slice(0, 50) + "…"
+          : trimmedClipboard;
+        template.push({
+          label: `Paste and Go to Loom: ${preview}`,
+          click: send("pasteAndGoToLoom"),
+        });
+      } else {
+        template.push({ label: "Paste and Go", click: send("pasteAndGo") });
+      }
+    }
+
+    // Copy Clean Link: only when the current address is a loom:// URL
+    if (hasLoomAddress) {
+      template.push({ type: "separator" });
+      template.push({ label: "Copy Clean Link", click: send("copyCleanLink") });
+    }
+
+    const menu = Menu.buildFromTemplate(template);
+    menu.popup({
+      window: BrowserWindow.fromWebContents(event.sender),
+      callback: () => resolve({ action: "none", clipboardText }),
+    });
+  });
+});
+
 app.whenReady().then(async () => {
+  appLogger = createAppLogger({ app, sessionId: appSessionId });
+  appLogger.info("app.session_started", {
+    appVersion: app.getVersion(),
+    isPackaged: app.isPackaged,
+    platform: process.platform,
+    pid: process.pid,
+    repoRoot,
+    devServerUrl,
+  });
   const appIcon = getAppIcon();
   if (process.platform === "darwin" && appIcon && app.dock) {
     app.dock.setIcon(appIcon);
   }
 
-  sidecar = new LoomServiceSidecarManager({ app, repoRoot });
+  sidecar = new LoomServiceSidecarManager({ app, repoRoot, logger: appLogger });
   try {
     const runtimeStatus = await sidecar.start({
       onStarting: (startingStatus) => {
@@ -203,9 +400,15 @@ app.whenReady().then(async () => {
     if (mainWindow?.webContents) {
       mainWindow.webContents.send("loom:runtime-ready", runtimeStatus);
     }
+    appLogger.info("app.runtime_ready", {
+      serviceUrl: runtimeStatus.serviceUrl,
+      pid: runtimeStatus.pid,
+      startedByElectron: runtimeStatus.startedByElectron,
+    });
     await loadRenderer();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
+    appLogger.error("app.start_failed", { error });
     if (!mainWindow) createWindow({ serviceUrl: undefined });
     await mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(errorHtml(message))}`);
     mainWindow.show();
@@ -226,9 +429,11 @@ app.on("before-quit", async (event) => {
   if (!sidecar || sidecar.getStatus().state === "stopped") return;
   event.preventDefault();
   quitInProgress = true;
+  appLogger?.info("app.before_quit", { runtimeState: sidecar.getStatus().state });
   try {
     await sidecar.stop();
   } finally {
+    appLogger?.info("app.session_ended");
     sidecar = null;
     app.quit();
   }

@@ -68,6 +68,8 @@ pub struct LoomServiceConfig {
     pub ollama: OllamaSection,
     pub providers: ProviderSection,
     pub speech: SpeechToTextConfig,
+    pub ocr: OcrSection,
+    pub memory: MemorySection,
     pub context: ContextSection,
     pub runtime: RuntimeSection,
     pub features: FeatureSection,
@@ -108,11 +110,39 @@ pub struct ProviderSection {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
+pub struct OcrSection {
+    pub enabled: bool,
+    pub provider: String,
+    pub command_path: Option<String>,
+    pub pdf_rasterizer_command_path: Option<String>,
+    pub language: String,
+    pub dpi: u32,
+    pub timeout_seconds: u64,
+    pub max_pages_per_file: u32,
+    pub max_image_pixels: u64,
+    pub temp_dir: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct ContextSection {
     pub max_context_length: u32,
     pub default_num_ctx_small: u32,
     pub default_num_ctx_medium: u32,
     pub default_num_ctx_large: u32,
+    pub max_recent_candidate_responses: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MemorySection {
+    pub enabled: bool,
+    pub reference_recent_looms: bool,
+    pub reference_saved_memories: bool,
+    pub nickname: String,
+    pub occupation: String,
+    pub style_preferences: String,
+    pub more_about_you: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -150,6 +180,8 @@ pub struct ConfigPatch {
     pub ollama: Option<OllamaPatch>,
     pub providers: Option<ProviderPatch>,
     pub speech: Option<SpeechToTextPatch>,
+    pub ocr: Option<OcrPatch>,
+    pub memory: Option<MemoryPatch>,
     pub context: Option<ContextPatch>,
     pub runtime: Option<RuntimePatch>,
     pub features: Option<FeaturePatch>,
@@ -190,11 +222,39 @@ pub struct ProviderPatch {
 
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct OcrPatch {
+    pub enabled: Option<bool>,
+    pub provider: Option<String>,
+    pub command_path: Option<Option<String>>,
+    pub pdf_rasterizer_command_path: Option<Option<String>>,
+    pub language: Option<String>,
+    pub dpi: Option<u32>,
+    pub timeout_seconds: Option<u64>,
+    pub max_pages_per_file: Option<u32>,
+    pub max_image_pixels: Option<u64>,
+    pub temp_dir: Option<Option<String>>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ContextPatch {
     pub max_context_length: Option<u32>,
     pub default_num_ctx_small: Option<u32>,
     pub default_num_ctx_medium: Option<u32>,
     pub default_num_ctx_large: Option<u32>,
+    pub max_recent_candidate_responses: Option<u32>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MemoryPatch {
+    pub enabled: Option<bool>,
+    pub reference_recent_looms: Option<bool>,
+    pub reference_saved_memories: Option<bool>,
+    pub nickname: Option<String>,
+    pub occupation: Option<String>,
+    pub style_preferences: Option<String>,
+    pub more_about_you: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -280,11 +340,22 @@ impl Default for LoomServiceConfig {
                 )],
             },
             speech: SpeechToTextConfig::default(),
+            ocr: OcrSection::default(),
+            memory: MemorySection {
+                enabled: true,
+                reference_recent_looms: true,
+                reference_saved_memories: false,
+                nickname: String::new(),
+                occupation: String::new(),
+                style_preferences: String::new(),
+                more_about_you: String::new(),
+            },
             context: ContextSection {
                 max_context_length: 8_192,
                 default_num_ctx_small: 2_048,
                 default_num_ctx_medium: 4_096,
                 default_num_ctx_large: 8_192,
+                max_recent_candidate_responses: 24,
             },
             runtime: RuntimeSection {
                 event_heartbeat_ms: 15_000,
@@ -310,6 +381,23 @@ impl Default for SecuritySection {
             allow_unsafe_ollama_model_management: false,
             minimum_recommended_ollama_version: "0.17.1".to_string(),
             warn_on_windows_ollama_updater_risk: true,
+        }
+    }
+}
+
+impl Default for OcrSection {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            provider: "tesseract".to_string(),
+            command_path: None,
+            pdf_rasterizer_command_path: None,
+            language: "eng".to_string(),
+            dpi: 200,
+            timeout_seconds: 60,
+            max_pages_per_file: 20,
+            max_image_pixels: 24_000_000,
+            temp_dir: None,
         }
     }
 }
@@ -653,6 +741,103 @@ fn serialize_config(config: &LoomServiceConfig) -> String {
     )
     .expect("write speech warnings");
 
+    writeln!(&mut output, "\n[ocr]").expect("write ocr config");
+    writeln!(&mut output, "enabled = {}", config.ocr.enabled).expect("write ocr enabled");
+    writeln!(
+        &mut output,
+        "provider = \"{}\"",
+        escape_toml_string(&config.ocr.provider)
+    )
+    .expect("write ocr provider");
+    if let Some(command_path) = &config.ocr.command_path {
+        writeln!(
+            &mut output,
+            "commandPath = \"{}\"",
+            escape_toml_string(command_path)
+        )
+        .expect("write ocr command path");
+    }
+    if let Some(command_path) = &config.ocr.pdf_rasterizer_command_path {
+        writeln!(
+            &mut output,
+            "pdfRasterizerCommandPath = \"{}\"",
+            escape_toml_string(command_path)
+        )
+        .expect("write pdf rasterizer command path");
+    }
+    writeln!(
+        &mut output,
+        "language = \"{}\"",
+        escape_toml_string(&config.ocr.language)
+    )
+    .expect("write ocr language");
+    writeln!(&mut output, "dpi = {}", config.ocr.dpi).expect("write ocr dpi");
+    writeln!(
+        &mut output,
+        "timeoutSeconds = {}",
+        config.ocr.timeout_seconds
+    )
+    .expect("write ocr timeout");
+    writeln!(
+        &mut output,
+        "maxPagesPerFile = {}",
+        config.ocr.max_pages_per_file
+    )
+    .expect("write ocr page limit");
+    writeln!(
+        &mut output,
+        "maxImagePixels = {}",
+        config.ocr.max_image_pixels
+    )
+    .expect("write ocr pixel limit");
+    if let Some(temp_dir) = &config.ocr.temp_dir {
+        writeln!(
+            &mut output,
+            "tempDir = \"{}\"",
+            escape_toml_string(temp_dir)
+        )
+        .expect("write ocr temp dir");
+    }
+
+    writeln!(&mut output, "\n[memory]").expect("write memory config");
+    writeln!(&mut output, "enabled = {}", config.memory.enabled).expect("write memory enabled");
+    writeln!(
+        &mut output,
+        "referenceRecentLooms = {}",
+        config.memory.reference_recent_looms
+    )
+    .expect("write reference recent Looms");
+    writeln!(
+        &mut output,
+        "referenceSavedMemories = {}",
+        config.memory.reference_saved_memories
+    )
+    .expect("write reference saved memories");
+    writeln!(
+        &mut output,
+        "nickname = \"{}\"",
+        escape_toml_string(&config.memory.nickname)
+    )
+    .expect("write memory nickname");
+    writeln!(
+        &mut output,
+        "occupation = \"{}\"",
+        escape_toml_string(&config.memory.occupation)
+    )
+    .expect("write memory occupation");
+    writeln!(
+        &mut output,
+        "stylePreferences = \"{}\"",
+        escape_toml_string(&config.memory.style_preferences)
+    )
+    .expect("write memory style preferences");
+    writeln!(
+        &mut output,
+        "moreAboutYou = \"{}\"",
+        escape_toml_string(&config.memory.more_about_you)
+    )
+    .expect("write memory more about you");
+
     writeln!(&mut output, "\n[context]").expect("write context config");
     writeln!(
         &mut output,
@@ -678,6 +863,12 @@ fn serialize_config(config: &LoomServiceConfig) -> String {
         config.context.default_num_ctx_large
     )
     .expect("write large ctx");
+    writeln!(
+        &mut output,
+        "maxRecentCandidateResponses = {}",
+        config.context.max_recent_candidate_responses
+    )
+    .expect("write max recent candidate responses");
 
     writeln!(&mut output, "\n[runtime]").expect("write runtime config");
     writeln!(
@@ -1040,6 +1231,49 @@ fn set_config_value(
         ("speech", "warnings") => {
             config.speech.warnings = parse_toml_string_array(value, line_number)?;
         }
+        ("ocr", "enabled") => config.ocr.enabled = parse_toml_bool(value, line_number)?,
+        ("ocr", "provider") => config.ocr.provider = parse_toml_string(value, line_number)?,
+        ("ocr", "commandPath") => {
+            config.ocr.command_path = Some(parse_toml_string(value, line_number)?);
+        }
+        ("ocr", "pdfRasterizerCommandPath") => {
+            config.ocr.pdf_rasterizer_command_path = Some(parse_toml_string(value, line_number)?);
+        }
+        ("ocr", "language") => config.ocr.language = parse_toml_string(value, line_number)?,
+        ("ocr", "dpi") => config.ocr.dpi = parse_toml_u32(value, line_number)?,
+        ("ocr", "timeoutSeconds") => {
+            config.ocr.timeout_seconds = parse_toml_u64(value, line_number)?;
+        }
+        ("ocr", "maxPagesPerFile") => {
+            config.ocr.max_pages_per_file = parse_toml_u32(value, line_number)?;
+        }
+        ("ocr", "maxImagePixels") => {
+            config.ocr.max_image_pixels = parse_toml_u64(value, line_number)?;
+        }
+        ("ocr", "tempDir") => {
+            config.ocr.temp_dir = Some(parse_toml_string(value, line_number)?);
+        }
+        ("memory", "enabled") => {
+            config.memory.enabled = parse_toml_bool(value, line_number)?;
+        }
+        ("memory", "referenceRecentLooms") => {
+            config.memory.reference_recent_looms = parse_toml_bool(value, line_number)?;
+        }
+        ("memory", "referenceSavedMemories") => {
+            config.memory.reference_saved_memories = parse_toml_bool(value, line_number)?;
+        }
+        ("memory", "nickname") => {
+            config.memory.nickname = parse_toml_string(value, line_number)?;
+        }
+        ("memory", "occupation") => {
+            config.memory.occupation = parse_toml_string(value, line_number)?;
+        }
+        ("memory", "stylePreferences") => {
+            config.memory.style_preferences = parse_toml_string(value, line_number)?;
+        }
+        ("memory", "moreAboutYou") => {
+            config.memory.more_about_you = parse_toml_string(value, line_number)?;
+        }
         ("context", "maxContextLength") => {
             config.context.max_context_length = parse_toml_u32(value, line_number)?;
         }
@@ -1051,6 +1285,9 @@ fn set_config_value(
         }
         ("context", "defaultNumCtxLarge") => {
             config.context.default_num_ctx_large = parse_toml_u32(value, line_number)?;
+        }
+        ("context", "maxRecentCandidateResponses") => {
+            config.context.max_recent_candidate_responses = parse_toml_u32(value, line_number)?;
         }
         ("runtime", "eventHeartbeatMs") => {
             config.runtime.event_heartbeat_ms = parse_toml_u64(value, line_number)?;
@@ -1388,6 +1625,13 @@ pub fn validate_config(config: &LoomServiceConfig) -> Result<(), ServiceError> {
             "context.maxContextLength must be between 512 and 262144",
         ));
     }
+    if config.context.max_recent_candidate_responses < 2
+        || config.context.max_recent_candidate_responses > 200
+    {
+        return Err(ServiceError::config(
+            "context.maxRecentCandidateResponses must be between 2 and 200",
+        ));
+    }
     reject_forbidden_config_value(&serde_json::to_value(config).map_err(|error| {
         ServiceError::config(format!(
             "failed to inspect config for forbidden fields: {error}"
@@ -1395,7 +1639,40 @@ pub fn validate_config(config: &LoomServiceConfig) -> Result<(), ServiceError> {
     })?)?;
     validate_provider_profiles(&config.providers.profiles)?;
     validate_speech_config(&config.speech)?;
+    validate_ocr_config(&config.ocr)?;
 
+    Ok(())
+}
+
+fn validate_ocr_config(config: &OcrSection) -> Result<(), ServiceError> {
+    if config.provider != "tesseract" {
+        return Err(ServiceError::config(
+            "ocr.provider must be \"tesseract\" for the v1 OCR pipeline",
+        ));
+    }
+    if config.enabled && config.language.trim().is_empty() {
+        return Err(ServiceError::config(
+            "ocr.language must not be empty when OCR is enabled",
+        ));
+    }
+    if !(100..=600).contains(&config.dpi) {
+        return Err(ServiceError::config("ocr.dpi must be between 100 and 600"));
+    }
+    if config.timeout_seconds == 0 || config.timeout_seconds > 600 {
+        return Err(ServiceError::config(
+            "ocr.timeoutSeconds must be between 1 and 600",
+        ));
+    }
+    if config.max_pages_per_file == 0 || config.max_pages_per_file > 200 {
+        return Err(ServiceError::config(
+            "ocr.maxPagesPerFile must be between 1 and 200",
+        ));
+    }
+    if config.max_image_pixels < 1_000_000 || config.max_image_pixels > 200_000_000 {
+        return Err(ServiceError::config(
+            "ocr.maxImagePixels must be between 1000000 and 200000000",
+        ));
+    }
     Ok(())
 }
 
@@ -1527,6 +1804,61 @@ fn apply_patch(config: &mut LoomServiceConfig, patch: ConfigPatch) {
     if let Some(speech) = patch.speech {
         apply_speech_patch(&mut config.speech, speech);
     }
+    if let Some(ocr) = patch.ocr {
+        if let Some(value) = ocr.enabled {
+            config.ocr.enabled = value;
+        }
+        if let Some(value) = ocr.provider {
+            config.ocr.provider = value;
+        }
+        if let Some(value) = ocr.command_path {
+            config.ocr.command_path = value;
+        }
+        if let Some(value) = ocr.pdf_rasterizer_command_path {
+            config.ocr.pdf_rasterizer_command_path = value;
+        }
+        if let Some(value) = ocr.language {
+            config.ocr.language = value;
+        }
+        if let Some(value) = ocr.dpi {
+            config.ocr.dpi = value;
+        }
+        if let Some(value) = ocr.timeout_seconds {
+            config.ocr.timeout_seconds = value;
+        }
+        if let Some(value) = ocr.max_pages_per_file {
+            config.ocr.max_pages_per_file = value;
+        }
+        if let Some(value) = ocr.max_image_pixels {
+            config.ocr.max_image_pixels = value;
+        }
+        if let Some(value) = ocr.temp_dir {
+            config.ocr.temp_dir = value;
+        }
+    }
+    if let Some(memory) = patch.memory {
+        if let Some(value) = memory.enabled {
+            config.memory.enabled = value;
+        }
+        if let Some(value) = memory.reference_recent_looms {
+            config.memory.reference_recent_looms = value;
+        }
+        if let Some(value) = memory.reference_saved_memories {
+            config.memory.reference_saved_memories = value;
+        }
+        if let Some(value) = memory.nickname {
+            config.memory.nickname = value;
+        }
+        if let Some(value) = memory.occupation {
+            config.memory.occupation = value;
+        }
+        if let Some(value) = memory.style_preferences {
+            config.memory.style_preferences = value;
+        }
+        if let Some(value) = memory.more_about_you {
+            config.memory.more_about_you = value;
+        }
+    }
     if let Some(context) = patch.context {
         if let Some(value) = context.max_context_length {
             config.context.max_context_length = value;
@@ -1539,6 +1871,9 @@ fn apply_patch(config: &mut LoomServiceConfig, patch: ConfigPatch) {
         }
         if let Some(value) = context.default_num_ctx_large {
             config.context.default_num_ctx_large = value;
+        }
+        if let Some(value) = context.max_recent_candidate_responses {
+            config.context.max_recent_candidate_responses = value;
         }
     }
     if let Some(runtime) = patch.runtime {
@@ -1681,10 +2016,18 @@ pub fn classify_restart_requirement(
         );
     }
     check!("speech", current.speech, candidate.speech, false);
+    check!("ocr", current.ocr, candidate.ocr, false);
+    check!("memory", current.memory, candidate.memory, false);
     check!(
         "context.maxContextLength",
         current.context.max_context_length,
         candidate.context.max_context_length,
+        false
+    );
+    check!(
+        "context.maxRecentCandidateResponses",
+        current.context.max_recent_candidate_responses,
+        candidate.context.max_recent_candidate_responses,
         false
     );
     check!(
@@ -1789,7 +2132,7 @@ mod tests {
     use super::{
         apply_env_overrides_from, classify_restart_requirement, load_or_create_config,
         serialize_config, validate_config, write_config_atomic, ConfigManager, ConfigPatch,
-        LoomServiceConfig, ProviderPatch, ServicePatch,
+        LoomServiceConfig, MemoryPatch, OcrPatch, ProviderPatch, ServicePatch,
     };
     use crate::providers::config::{
         classify_provider_config_change, normalize_provider_request_options,
@@ -1978,6 +2321,36 @@ mod tests {
     }
 
     #[test]
+    fn memory_config_parses_and_patches_without_restart() {
+        let mut config = LoomServiceConfig::default();
+        config.memory.reference_recent_looms = false;
+        config.memory.reference_saved_memories = true;
+        let path = test_path("memory-config");
+        write_config_atomic(&path, &config).expect("write config");
+
+        let loaded = load_or_create_config(&path).expect("load config");
+        assert!(!loaded.memory.reference_recent_looms);
+        assert!(loaded.memory.reference_saved_memories);
+
+        let manager = ConfigManager::new(path, loaded);
+        let result = manager
+            .patch(ConfigPatch {
+                memory: Some(MemoryPatch {
+                    reference_recent_looms: Some(true),
+                    reference_saved_memories: Some(false),
+                    ..MemoryPatch::default()
+                }),
+                ..ConfigPatch::default()
+            })
+            .expect("patch memory config");
+
+        assert!(!result.restart.restart_required);
+        assert_eq!(result.restart.changed_paths, vec!["memory".to_string()]);
+        assert!(result.config.memory.reference_recent_looms);
+        assert!(!result.config.memory.reference_saved_memories);
+    }
+
+    #[test]
     fn speech_config_serializes_without_secrets_or_raw_thinking() {
         let serialized = serialize_config(&LoomServiceConfig::default());
         assert!(serialized.contains("[speech]"));
@@ -1997,6 +2370,45 @@ mod tests {
         ] {
             assert!(!serialized.contains(forbidden));
         }
+    }
+
+    #[test]
+    fn ocr_config_serializes_parses_and_patches_without_restart() {
+        let mut config = LoomServiceConfig::default();
+        config.ocr.enabled = true;
+        config.ocr.command_path = Some("/opt/homebrew/bin/tesseract".to_string());
+        config.ocr.pdf_rasterizer_command_path = Some("/opt/homebrew/bin/pdftoppm".to_string());
+        config.ocr.language = "eng+tur".to_string();
+        config.ocr.dpi = 300;
+        let path = test_path("ocr-config");
+        write_config_atomic(&path, &config).expect("write config");
+
+        let loaded = load_or_create_config(&path).expect("load config");
+        assert!(loaded.ocr.enabled);
+        assert_eq!(loaded.ocr.provider, "tesseract");
+        assert_eq!(loaded.ocr.language, "eng+tur");
+        assert_eq!(loaded.ocr.dpi, 300);
+        assert_eq!(
+            loaded.ocr.command_path.as_deref(),
+            Some("/opt/homebrew/bin/tesseract")
+        );
+
+        let manager = ConfigManager::new(path, loaded);
+        let result = manager
+            .patch(ConfigPatch {
+                ocr: Some(OcrPatch {
+                    enabled: Some(false),
+                    command_path: Some(None),
+                    ..OcrPatch::default()
+                }),
+                ..ConfigPatch::default()
+            })
+            .expect("patch ocr config");
+
+        assert!(!result.restart.restart_required);
+        assert_eq!(result.restart.changed_paths, vec!["ocr".to_string()]);
+        assert!(!result.config.ocr.enabled);
+        assert!(result.config.ocr.command_path.is_none());
     }
 
     #[test]

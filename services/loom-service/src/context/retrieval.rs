@@ -5,6 +5,7 @@ use crate::{
         types::{BuildContextInput, ContextSource},
     },
     error::ServiceError,
+    storage::repositories::code_blocks::is_reusable_code_artifact,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -81,6 +82,9 @@ pub enum ContextRetrievalCandidateKind {
     CodeBlock,
     Topic,
     Reference,
+    Memory,
+    AttachmentChunk,
+    WeftOrigin,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -91,6 +95,35 @@ pub enum ContextRetrievalIncludeMode {
     ReferenceOnly,
     CodeExact,
     CodeSummary,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ContextSourceLevel {
+    Summary,
+    Checkpoint,
+    ExactResponsePart,
+    AttachmentChunk,
+    CodeBlock,
+    Memory,
+    WeftOrigin,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum QueryIntentKind {
+    EntityFactual,
+    Code,
+    Temporal,
+    Decision,
+    FileDocument,
+    General,
+}
+
+impl Default for QueryIntentKind {
+    fn default() -> Self {
+        Self::General
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -104,6 +137,11 @@ pub struct ContextRetrievalCandidate {
     pub reasons: Vec<String>,
     pub text_preview: String,
     pub include_mode: ContextRetrievalIncludeMode,
+    pub source_level: ContextSourceLevel,
+    pub query_intent: QueryIntentKind,
+    pub estimated_tokens: usize,
+    pub budget_used_tokens: usize,
+    pub scoring_reason: String,
     pub metadata: BTreeMap<String, Value>,
 }
 
@@ -111,6 +149,7 @@ pub struct ContextRetrievalCandidate {
 #[serde(rename_all = "camelCase")]
 pub struct ContextRetrievalResult {
     pub query_terms: Vec<String>,
+    pub query_intent: QueryIntentKind,
     pub candidates: Vec<ContextRetrievalCandidate>,
     pub selected: Vec<ContextRetrievalCandidate>,
     pub warnings: Vec<String>,
@@ -156,10 +195,14 @@ impl ContextRetriever {
             .await?;
         self.score_weft_origin(input, &query, &mut accumulator)
             .await?;
+        self.score_fts_documents(input, &query, &mut accumulator)
+            .await?;
 
         let mut candidates = accumulator.finish();
         self.enrich_filter_and_rank_candidates(input, &mut candidates)
             .await?;
+        apply_query_intent_scores(&query, &mut candidates);
+        set_retrieval_diagnostics(&query, &mut candidates);
         candidates.sort_by(|left, right| {
             right
                 .score
@@ -181,6 +224,7 @@ impl ContextRetriever {
 
         Ok(ContextRetrievalResult {
             query_terms: query.terms.into_iter().collect(),
+            query_intent: query.intent,
             candidates,
             selected,
             warnings,
@@ -265,6 +309,9 @@ impl ContextRetriever {
                 }
             }
 
+            candidate.source_level =
+                source_level_for(&candidate.candidate_kind, &candidate.include_mode);
+            candidate.estimated_tokens = estimated;
             if used_tokens.saturating_add(estimated) > retrieval_budget && !selected.is_empty() {
                 continue;
             }
@@ -272,6 +319,19 @@ impl ContextRetriever {
                 used_code_tokens = used_code_tokens.saturating_add(estimated);
             }
             used_tokens = used_tokens.saturating_add(estimated);
+            candidate.budget_used_tokens = used_tokens;
+            candidate.metadata.insert(
+                "retrievalBudgetUsedTokens".to_string(),
+                serde_json::json!(candidate.budget_used_tokens),
+            );
+            candidate.metadata.insert(
+                "sourceLevel".to_string(),
+                serde_json::json!(candidate.source_level),
+            );
+            candidate.metadata.insert(
+                "queryIntent".to_string(),
+                serde_json::json!(candidate.query_intent),
+            );
             selected.push(candidate);
             if selected.len() >= max_selected {
                 break;
@@ -619,6 +679,9 @@ impl ContextRetriever {
             let code: String = row.get("code");
             reject_forbidden_payload(&code)?;
             let language: Option<String> = row.get("language");
+            if !is_reusable_code_artifact(language.as_deref(), &code) {
+                continue;
+            }
             let code_block_id: String = row.get("code_block_id");
             let response_id: String = row.get("response_id");
             let exact_hash: String = row.get("exact_hash");
@@ -719,7 +782,7 @@ impl ContextRetriever {
         let overlap = query.overlap_score(&origin.origin_summary);
         if overlap > 0.0 {
             accumulator.add_candidate(
-                ContextRetrievalCandidateKind::ResponseCapsule,
+                ContextRetrievalCandidateKind::WeftOrigin,
                 origin.context_id.clone(),
                 Some(origin.origin_response_id.clone()),
                 overlap + 2.0,
@@ -727,6 +790,185 @@ impl ContextRetriever {
                 preview(&origin.origin_summary),
                 ContextRetrievalIncludeMode::Capsule,
             );
+        }
+        Ok(())
+    }
+
+    async fn score_fts_documents(
+        &self,
+        input: &BuildContextInput,
+        query: &QueryTerms,
+        accumulator: &mut CandidateAccumulator,
+    ) -> Result<(), ServiceError> {
+        let fts_query = fts_match_query(query);
+        if fts_query.is_empty() {
+            return Ok(());
+        }
+
+        let rows = sqlx::query(
+            "SELECT d.doc_id,
+                    d.source_kind,
+                    d.source_id,
+                    d.loom_id,
+                    d.response_id,
+                    d.attachment_id,
+                    d.parse_artifact_id,
+                    d.title,
+                    d.body,
+                    d.tags,
+                    d.source_rank,
+                    d.updated_at,
+                    d.metadata_json,
+                    bm25(search_documents_fts) AS bm25_score
+             FROM search_documents_fts
+             JOIN search_documents d ON d.rowid = search_documents_fts.rowid
+             WHERE search_documents_fts MATCH ?1
+               AND d.is_deleted = 0
+               AND (
+                    d.loom_id = ?2
+                    OR (d.loom_id IS NULL AND d.source_kind = 'memory')
+               )
+               AND d.source_kind IN (
+                    'response',
+                    'response_capsule',
+                    'checkpoint',
+                    'memory',
+                    'attachment_chunk',
+                    'attachment_summary',
+                    'code_block'
+               )
+             ORDER BY d.source_rank DESC, bm25(search_documents_fts), d.updated_at DESC
+             LIMIT 24",
+        )
+        .bind(fts_query)
+        .bind(&input.loom_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| ServiceError::storage(format!("failed to retrieve FTS docs: {error}")))?;
+
+        for row in rows {
+            let doc = FtsDocument::from_row(row);
+            reject_forbidden_payload(doc.title.as_deref().unwrap_or_default())?;
+            reject_forbidden_payload(&doc.body)?;
+            reject_forbidden_payload(doc.tags.as_deref().unwrap_or_default())?;
+            reject_forbidden_payload(doc.metadata_json.as_deref().unwrap_or_default())?;
+
+            let Some(candidate_kind) = fts_candidate_kind(&doc.source_kind) else {
+                continue;
+            };
+            let include_mode = match candidate_kind {
+                ContextRetrievalCandidateKind::CodeBlock => {
+                    ContextRetrievalIncludeMode::CodeSummary
+                }
+                _ => ContextRetrievalIncludeMode::Capsule,
+            };
+            let mut metadata = BTreeMap::new();
+            metadata.insert(
+                "retrievalSource".to_string(),
+                Value::String("fts".to_string()),
+            );
+            metadata.insert("ftsDocId".to_string(), Value::String(doc.doc_id.clone()));
+            metadata.insert(
+                "ftsSourceKind".to_string(),
+                Value::String(doc.source_kind.clone()),
+            );
+            metadata.insert(
+                "ftsSourceId".to_string(),
+                Value::String(doc.source_id.clone()),
+            );
+            metadata.insert("ftsBm25".to_string(), serde_json::json!(doc.bm25_score));
+            metadata.insert(
+                "ftsSourceRank".to_string(),
+                serde_json::json!(doc.source_rank),
+            );
+            metadata.insert(
+                "ftsUpdatedAt".to_string(),
+                Value::String(doc.updated_at.clone()),
+            );
+            if let Some(attachment_id) = doc.attachment_id.as_ref() {
+                metadata.insert(
+                    "attachmentId".to_string(),
+                    Value::String(attachment_id.clone()),
+                );
+            }
+            if let Some(parse_artifact_id) = doc.parse_artifact_id.as_ref() {
+                metadata.insert(
+                    "parseArtifactId".to_string(),
+                    Value::String(parse_artifact_id.clone()),
+                );
+            }
+            if let Some(title) = doc.title.as_ref() {
+                metadata.insert("title".to_string(), Value::String(title.clone()));
+            }
+
+            let mut score = fts_base_score(doc.source_rank, doc.bm25_score);
+            let mut reasons = vec!["fts_match".to_string()];
+            if doc.loom_id.as_deref() == Some(&input.loom_id) {
+                score += 1.0;
+                reasons.push("fts_current_loom_boost".to_string());
+            }
+            if is_explicit_attachment_reference(input, doc.attachment_id.as_deref()) {
+                score += 8.0;
+                reasons.push("fts_explicit_attachment_reference_boost".to_string());
+            }
+            if doc
+                .response_id
+                .as_deref()
+                .is_some_and(|response_id| is_explicit_response_reference(input, response_id))
+            {
+                score += 4.0;
+                reasons.push("fts_explicit_response_reference_boost".to_string());
+            }
+            if fts_exact_title_match(query, doc.title.as_deref()) {
+                score += 3.0;
+                reasons.push("fts_exact_title_boost".to_string());
+            }
+            if query.intent == QueryIntentKind::Code && fts_code_signal(&doc) {
+                score += 2.0;
+                reasons.push("fts_code_intent_boost".to_string());
+            }
+            if query.intent == QueryIntentKind::FileDocument
+                && matches!(
+                    candidate_kind,
+                    ContextRetrievalCandidateKind::AttachmentChunk
+                )
+            {
+                score += 2.0;
+                reasons.push("fts_file_document_intent_boost".to_string());
+            }
+            metadata.insert(
+                "ftsRankingContribution".to_string(),
+                serde_json::json!(score),
+            );
+
+            let title = doc.title.as_deref().unwrap_or(doc.source_kind.as_str());
+            let text_preview = preview(&format!("{title}\n{}", doc.body));
+            let candidate_id = fts_candidate_id(&doc);
+            let first_reason = reasons
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "fts_match".to_string());
+            accumulator.add_candidate_with_metadata(
+                candidate_kind,
+                candidate_id,
+                doc.response_id.clone(),
+                score,
+                &first_reason,
+                text_preview,
+                include_mode,
+                metadata,
+            );
+            for reason in reasons.into_iter().skip(1) {
+                accumulator.add_candidate(
+                    fts_candidate_kind(&doc.source_kind).expect("candidate kind"),
+                    fts_candidate_id(&doc),
+                    doc.response_id.clone(),
+                    0.0,
+                    &reason,
+                    String::new(),
+                    ContextRetrievalIncludeMode::ReferenceOnly,
+                );
+            }
         }
         Ok(())
     }
@@ -857,6 +1099,7 @@ struct QueryTerms {
     terms: BTreeSet<String>,
     exact_terms: BTreeSet<String>,
     code_relevant: bool,
+    intent: QueryIntentKind,
 }
 
 impl QueryTerms {
@@ -931,11 +1174,83 @@ fn extract_query_terms(prompt: &str, input: &BuildContextInput) -> QueryTerms {
                         .any(|needle| lower.contains(needle))
                 })
         });
+    let intent = classify_query_intent(prompt, input, code_relevant);
     QueryTerms {
         terms,
         exact_terms,
         code_relevant,
+        intent,
     }
+}
+
+fn classify_query_intent(
+    prompt: &str,
+    input: &BuildContextInput,
+    code_relevant: bool,
+) -> QueryIntentKind {
+    let lower = prompt.to_lowercase();
+    if code_relevant {
+        return QueryIntentKind::Code;
+    }
+    if input
+        .attached_references
+        .iter()
+        .any(|attached| attached.attachment.is_some())
+        || [
+            "file",
+            "document",
+            "attachment",
+            "pdf",
+            "docx",
+            "xlsx",
+            "spreadsheet",
+            "sheet",
+            "dosya",
+            "belge",
+            "ek",
+        ]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        return QueryIntentKind::FileDocument;
+    }
+    if [
+        "decision",
+        "decide",
+        "chosen",
+        "tradeoff",
+        "constraint",
+        "risk",
+        "karar",
+        "seçim",
+        "secim",
+        "neden seçtik",
+        "neden sectik",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        return QueryIntentKind::Decision;
+    }
+    if [
+        "latest", "recent", "when", "timeline", "before", "after", "last", "son", "ne zaman",
+        "tarih",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        return QueryIntentKind::Temporal;
+    }
+    if [
+        "what", "who", "which", "where", "codename", "name", "id", "nedir", "kim", "hangi",
+        "nerede", "adı", "adi",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        return QueryIntentKind::EntityFactual;
+    }
+    QueryIntentKind::General
 }
 
 fn quoted_phrases(prompt: &str) -> Vec<String> {
@@ -1082,13 +1397,18 @@ impl CandidateAccumulator {
             .entry(key)
             .or_insert_with(|| ContextRetrievalCandidate {
                 candidate_id,
-                candidate_kind,
+                candidate_kind: candidate_kind.clone(),
                 loom_id: self.loom_id.clone(),
                 response_id,
                 score: 0.0,
                 reasons: Vec::new(),
                 text_preview: String::new(),
                 include_mode: include_mode.clone(),
+                source_level: source_level_for(&candidate_kind, &include_mode),
+                query_intent: QueryIntentKind::General,
+                estimated_tokens: 0,
+                budget_used_tokens: 0,
+                scoring_reason: reason.to_string(),
                 metadata: metadata.clone(),
             });
         for (key, value) in metadata {
@@ -1098,8 +1418,12 @@ impl CandidateAccumulator {
         if !entry.reasons.iter().any(|item| item == reason) {
             entry.reasons.push(reason.to_string());
         }
+        if entry.scoring_reason.is_empty() {
+            entry.scoring_reason = reason.to_string();
+        }
         if include_mode_priority(&include_mode) > include_mode_priority(&entry.include_mode) {
             entry.include_mode = include_mode;
+            entry.source_level = source_level_for(&entry.candidate_kind, &entry.include_mode);
         }
         if entry.text_preview.is_empty() || entry.text_preview.len() < text_preview.len() {
             entry.text_preview = text_preview;
@@ -1133,8 +1457,269 @@ impl CandidateAccumulator {
                 "currentSequence".to_string(),
                 serde_json::json!(current_sequence),
             );
+            candidate.estimated_tokens = estimate_tokens(&candidate.text_preview).max(8);
         }
         self.candidates.into_values().collect()
+    }
+}
+
+fn source_level_for(
+    kind: &ContextRetrievalCandidateKind,
+    include_mode: &ContextRetrievalIncludeMode,
+) -> ContextSourceLevel {
+    match (kind, include_mode) {
+        (ContextRetrievalCandidateKind::WeftOrigin, _) => ContextSourceLevel::WeftOrigin,
+        (ContextRetrievalCandidateKind::Checkpoint, _) => ContextSourceLevel::Checkpoint,
+        (ContextRetrievalCandidateKind::CodeBlock, ContextRetrievalIncludeMode::CodeExact) => {
+            ContextSourceLevel::CodeBlock
+        }
+        (ContextRetrievalCandidateKind::CodeBlock, _) => ContextSourceLevel::Summary,
+        (ContextRetrievalCandidateKind::ResponsePart, ContextRetrievalIncludeMode::Full) => {
+            ContextSourceLevel::ExactResponsePart
+        }
+        (ContextRetrievalCandidateKind::ResponsePart, _) => ContextSourceLevel::Summary,
+        (ContextRetrievalCandidateKind::Response, ContextRetrievalIncludeMode::Full) => {
+            ContextSourceLevel::ExactResponsePart
+        }
+        (ContextRetrievalCandidateKind::Response, _) => ContextSourceLevel::Summary,
+        (ContextRetrievalCandidateKind::ResponseCapsule, _) => ContextSourceLevel::Summary,
+        (ContextRetrievalCandidateKind::Topic, _) => ContextSourceLevel::Summary,
+        (ContextRetrievalCandidateKind::Reference, _) => ContextSourceLevel::Memory,
+        (ContextRetrievalCandidateKind::Memory, _) => ContextSourceLevel::Memory,
+        (ContextRetrievalCandidateKind::AttachmentChunk, _) => ContextSourceLevel::AttachmentChunk,
+    }
+}
+
+fn apply_query_intent_scores(query: &QueryTerms, candidates: &mut [ContextRetrievalCandidate]) {
+    for candidate in candidates {
+        candidate.query_intent = query.intent.clone();
+        match query.intent {
+            QueryIntentKind::Code
+                if candidate.candidate_kind == ContextRetrievalCandidateKind::CodeBlock =>
+            {
+                candidate.score += 2.0;
+                push_reason(candidate, "intent_code_boost");
+            }
+            QueryIntentKind::Decision => {
+                let text = candidate.text_preview.to_lowercase();
+                if candidate.candidate_kind == ContextRetrievalCandidateKind::ResponseCapsule
+                    || candidate.candidate_kind == ContextRetrievalCandidateKind::Checkpoint
+                    || text.contains("decision")
+                    || text.contains("karar")
+                    || text.contains("constraint")
+                    || text.contains("risk")
+                {
+                    candidate.score += 1.25;
+                    push_reason(candidate, "intent_decision_summary_boost");
+                }
+            }
+            QueryIntentKind::EntityFactual => {
+                if matches!(
+                    candidate.candidate_kind,
+                    ContextRetrievalCandidateKind::ResponsePart
+                        | ContextRetrievalCandidateKind::ResponseCapsule
+                        | ContextRetrievalCandidateKind::Response
+                        | ContextRetrievalCandidateKind::Memory
+                        | ContextRetrievalCandidateKind::WeftOrigin
+                ) {
+                    candidate.score += 0.6;
+                    push_reason(candidate, "intent_entity_factual_boost");
+                }
+            }
+            QueryIntentKind::Temporal => {
+                if candidate.metadata.contains_key("sequenceIndex")
+                    || candidate.text_preview.contains("202")
+                    || candidate.text_preview.to_lowercase().contains("latest")
+                {
+                    candidate.score += 0.5;
+                    push_reason(candidate, "intent_temporal_boost");
+                }
+            }
+            QueryIntentKind::FileDocument => {
+                if candidate.candidate_kind == ContextRetrievalCandidateKind::AttachmentChunk {
+                    candidate.score += 1.0;
+                    push_reason(candidate, "intent_file_document_boost");
+                }
+            }
+            QueryIntentKind::Code | QueryIntentKind::General => {}
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FtsDocument {
+    doc_id: String,
+    source_kind: String,
+    source_id: String,
+    loom_id: Option<String>,
+    response_id: Option<String>,
+    attachment_id: Option<String>,
+    parse_artifact_id: Option<String>,
+    title: Option<String>,
+    body: String,
+    tags: Option<String>,
+    source_rank: f64,
+    updated_at: String,
+    metadata_json: Option<String>,
+    bm25_score: f64,
+}
+
+impl FtsDocument {
+    fn from_row(row: sqlx::sqlite::SqliteRow) -> Self {
+        Self {
+            doc_id: row.get("doc_id"),
+            source_kind: row.get("source_kind"),
+            source_id: row.get("source_id"),
+            loom_id: row.get("loom_id"),
+            response_id: row.get("response_id"),
+            attachment_id: row.get("attachment_id"),
+            parse_artifact_id: row.get("parse_artifact_id"),
+            title: row.get("title"),
+            body: row.get("body"),
+            tags: row.get("tags"),
+            source_rank: row.get("source_rank"),
+            updated_at: row.get("updated_at"),
+            metadata_json: row.get("metadata_json"),
+            bm25_score: row.get("bm25_score"),
+        }
+    }
+}
+
+fn fts_candidate_kind(source_kind: &str) -> Option<ContextRetrievalCandidateKind> {
+    match source_kind {
+        "response" => Some(ContextRetrievalCandidateKind::Response),
+        "response_capsule" => Some(ContextRetrievalCandidateKind::ResponseCapsule),
+        "checkpoint" => Some(ContextRetrievalCandidateKind::Checkpoint),
+        "memory" => Some(ContextRetrievalCandidateKind::Memory),
+        "attachment_chunk" | "attachment_summary" => {
+            Some(ContextRetrievalCandidateKind::AttachmentChunk)
+        }
+        "code_block" => Some(ContextRetrievalCandidateKind::CodeBlock),
+        _ => None,
+    }
+}
+
+fn fts_candidate_id(doc: &FtsDocument) -> String {
+    match doc.source_kind.as_str() {
+        "response" => doc
+            .response_id
+            .clone()
+            .unwrap_or_else(|| doc.source_id.clone()),
+        _ => doc.doc_id.clone(),
+    }
+}
+
+fn fts_match_query(query: &QueryTerms) -> String {
+    let mut terms = query
+        .terms
+        .iter()
+        .filter(|term| term.chars().count() >= 2)
+        .map(|term| format!("\"{}\"", term.replace('"', "\"\"")))
+        .collect::<Vec<_>>();
+    terms.sort();
+    terms.dedup();
+    terms.join(" OR ")
+}
+
+fn fts_base_score(source_rank: f64, bm25_score: f64) -> f64 {
+    let bm25_component = if bm25_score.is_sign_negative() {
+        (-bm25_score).min(8.0)
+    } else {
+        (1.0 / (1.0 + bm25_score.abs())).min(2.0)
+    };
+    1.0 + source_rank.max(0.0) * 2.0 + bm25_component
+}
+
+fn is_explicit_attachment_reference(
+    input: &BuildContextInput,
+    attachment_id: Option<&str>,
+) -> bool {
+    let Some(attachment_id) = attachment_id else {
+        return false;
+    };
+    input.attached_references.iter().any(|attached| {
+        attached
+            .attachment
+            .as_ref()
+            .is_some_and(|attachment| attachment.attachment_id == attachment_id)
+            || (matches!(
+                attached.reference.target_kind.as_str(),
+                "attachment" | "attachment_chunk" | "file"
+            ) && attached.reference.target_id.as_deref() == Some(attachment_id))
+    })
+}
+
+fn is_explicit_response_reference(input: &BuildContextInput, response_id: &str) -> bool {
+    input.attached_references.iter().any(|attached| {
+        attached.reference.target_kind == "response"
+            && attached.reference.target_id.as_deref() == Some(response_id)
+    })
+}
+
+fn fts_exact_title_match(query: &QueryTerms, title: Option<&str>) -> bool {
+    let Some(title) = title else {
+        return false;
+    };
+    let normalized = normalize_text(title);
+    query
+        .exact_terms
+        .iter()
+        .any(|term| normalized.contains(term.as_str()))
+        || query
+            .terms
+            .iter()
+            .filter(|term| term.chars().count() >= 4)
+            .any(|term| normalized.contains(term.as_str()))
+}
+
+fn fts_code_signal(doc: &FtsDocument) -> bool {
+    let text = format!(
+        "{}\n{}\n{}\n{}",
+        doc.source_kind,
+        doc.title.as_deref().unwrap_or_default(),
+        doc.tags.as_deref().unwrap_or_default(),
+        doc.metadata_json.as_deref().unwrap_or_default()
+    )
+    .to_lowercase();
+    text.contains("code")
+        || CODE_LANGUAGE_TERMS
+            .iter()
+            .any(|language| text.contains(language))
+}
+
+fn set_retrieval_diagnostics(query: &QueryTerms, candidates: &mut [ContextRetrievalCandidate]) {
+    for candidate in candidates {
+        candidate.source_level =
+            source_level_for(&candidate.candidate_kind, &candidate.include_mode);
+        candidate.query_intent = query.intent.clone();
+        candidate.estimated_tokens = estimate_tokens(&candidate.text_preview).max(8);
+        candidate.scoring_reason = candidate
+            .reasons
+            .first()
+            .cloned()
+            .unwrap_or_else(|| "retrieval_score".to_string());
+        candidate.metadata.insert(
+            "sourceLevel".to_string(),
+            serde_json::json!(candidate.source_level),
+        );
+        candidate.metadata.insert(
+            "queryIntent".to_string(),
+            serde_json::json!(candidate.query_intent),
+        );
+        candidate.metadata.insert(
+            "estimatedTokens".to_string(),
+            serde_json::json!(candidate.estimated_tokens),
+        );
+        candidate.metadata.insert(
+            "scoringReason".to_string(),
+            Value::String(candidate.scoring_reason.clone()),
+        );
+    }
+}
+
+fn push_reason(candidate: &mut ContextRetrievalCandidate, reason: &str) {
+    if !candidate.reasons.iter().any(|existing| existing == reason) {
+        candidate.reasons.push(reason.to_string());
     }
 }
 
@@ -1303,15 +1888,18 @@ fn is_stale_metadata(metadata: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContextRetrievalCandidateKind, ContextRetrievalIncludeMode, ContextRetriever};
+    use super::{
+        ContextRetrievalCandidateKind, ContextRetrievalIncludeMode, ContextRetriever,
+        ContextSourceLevel, QueryIntentKind,
+    };
     use crate::{
         capabilities::strategy::{ExecutionStrategy, ExecutionStrategyDecision},
         context::{
             manager::ContextManager,
             types::{
-                AttachedReferenceInput, BuildContextInput, ContextMessage, ContextMessageRole,
-                ContextSource, ContextSourceKind, ReferenceContext, ResponseMode,
-                WeftOriginContext,
+                AttachedReferenceInput, AttachmentContext, BuildContextInput, ContextMessage,
+                ContextMessageRole, ContextSource, ContextSourceKind, ReferenceContext,
+                ResponseMode, WeftOriginContext,
             },
         },
         storage::{
@@ -1322,9 +1910,11 @@ mod tests {
                 },
                 looms::{LoomRepository, NewLoom},
                 responses::{NewResponse, ResponseRepository},
+                search_index::SearchIndexRepository,
             },
         },
     };
+    use serde_json::Value;
 
     #[tokio::test]
     async fn event_sourcing_query_retrieves_old_tagged_capsule() {
@@ -1365,6 +1955,56 @@ mod tests {
             candidate.response_id.as_deref() == Some("r-event")
                 && candidate.text_preview.contains("Event Sourcing")
         }));
+    }
+
+    #[tokio::test]
+    async fn retrieval_diagnostics_include_source_level_reason_and_budget() {
+        let fixture = Fixture::new().await;
+        fixture
+            .insert_response(
+                "r-event",
+                "assistant",
+                "Event Sourcing uses Event Store and Replay.",
+                1,
+                None,
+            )
+            .await;
+        fixture
+            .insert_capsule(
+                "r-event",
+                "Event Sourcing capsule",
+                "Event Sourcing summary with Replay.",
+                &["Event Sourcing", "Replay"],
+                &[],
+            )
+            .await;
+        fixture
+            .insert_response(
+                "r-current",
+                "user",
+                "What is Event Sourcing Replay?",
+                9,
+                None,
+            )
+            .await;
+
+        let result = fixture
+            .retriever()
+            .retrieve(&fixture.input("What is Event Sourcing Replay?", Some("r-current")))
+            .await
+            .expect("retrieve");
+        let selected = result.selected.first().expect("selected candidate");
+
+        assert_eq!(result.query_intent, QueryIntentKind::EntityFactual);
+        assert!(matches!(
+            selected.source_level,
+            ContextSourceLevel::Summary | ContextSourceLevel::ExactResponsePart
+        ));
+        assert!(!selected.scoring_reason.is_empty());
+        assert!(selected.estimated_tokens > 0);
+        assert!(selected.budget_used_tokens >= selected.estimated_tokens);
+        assert!(selected.metadata.contains_key("sourceLevel"));
+        assert!(selected.metadata.contains_key("queryIntent"));
     }
 
     #[tokio::test]
@@ -1480,10 +2120,15 @@ mod tests {
             )
             .await
             .expect("retrieve");
+        assert_eq!(exact.query_intent, QueryIntentKind::Code);
         assert!(
             exact.selected.iter().any(|candidate| {
                 candidate.candidate_kind == ContextRetrievalCandidateKind::CodeBlock
                     && candidate.include_mode == ContextRetrievalIncludeMode::CodeExact
+                    && candidate
+                        .reasons
+                        .iter()
+                        .any(|reason| reason == "intent_code_boost")
             }),
             "selected={:?}; candidates={:?}",
             exact.selected,
@@ -1529,6 +2174,7 @@ mod tests {
                     capsule_summary: None,
                 },
                 response_capsule: None,
+                attachment: None,
             }],
             ..fixture.input("Bu referansı açıkla", Some("r-current"))
         };
@@ -1580,6 +2226,7 @@ mod tests {
                     capsule_summary: None,
                 },
                 response_capsule: None,
+                attachment: None,
             }],
             ..fixture.input("Bu snippet'i açıkla", Some("r-current"))
         };
@@ -1601,6 +2248,68 @@ mod tests {
             .reasons
             .iter()
             .any(|reason| reason == "explicit_code_reference"));
+    }
+
+    #[tokio::test]
+    async fn illustrative_artifact_metadata_blocks_are_not_retrieved_as_code() {
+        let fixture = Fixture::new().await;
+        fixture
+            .insert_response(
+                "r-fake-artifact",
+                "assistant",
+                "Illustrative generated artifact metadata example.",
+                1,
+                None,
+            )
+            .await;
+        sqlx::query(
+            "INSERT INTO response_code_blocks (
+                code_block_id, response_id, loom_id, block_index, language, code,
+                exact_hash, fence, metadata_json, created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, ?9, ?10)",
+        )
+        .bind("codeblock-fake-artifact")
+        .bind("r-fake-artifact")
+        .bind("loom-1")
+        .bind(0i64)
+        .bind("text")
+        .bind(
+            "Assistant: Kod review artifact'ı oluşturulur\n- Hash: abc123def456\n- Type: Security Analysis\n- Provenance: [timestamp, user, tool]\n",
+        )
+        .bind("fnv1a64:fake")
+        .bind("```")
+        .bind("1")
+        .bind("1")
+        .execute(fixture.database.pool())
+        .await
+        .expect("insert fake code block");
+        fixture
+            .insert_response(
+                "r-current",
+                "user",
+                "Kod artifact hash provenance nedir?",
+                9,
+                None,
+            )
+            .await;
+
+        let result = fixture
+            .retriever()
+            .retrieve_with_strategy(
+                &fixture.input("Kod artifact hash provenance nedir?", Some("r-current")),
+                Some(&strong_strategy()),
+            )
+            .await
+            .expect("retrieve");
+
+        assert!(
+            result
+                .candidates
+                .iter()
+                .all(|candidate| candidate.candidate_id != "codeblock-fake-artifact"),
+            "candidates={:?}",
+            result.candidates
+        );
     }
 
     #[tokio::test]
@@ -1880,6 +2589,402 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fts_retrieval_returns_relevant_response_candidate_with_diagnostics() {
+        let fixture = Fixture::new().await;
+        fixture
+            .insert_response(
+                "r-fts",
+                "assistant",
+                "Blue Otter is the launch codename for the local-first search work.",
+                1,
+                None,
+            )
+            .await;
+        fixture
+            .insert_response(
+                "r-current",
+                "user",
+                "What is the Blue Otter codename?",
+                9,
+                None,
+            )
+            .await;
+        SearchIndexRepository::new(&fixture.database)
+            .upsert_response_docs("r-fts")
+            .await
+            .expect("index response");
+
+        let result = fixture
+            .retriever()
+            .retrieve(&fixture.input("What is the Blue Otter codename?", Some("r-current")))
+            .await
+            .expect("retrieve");
+
+        let fts = result
+            .selected
+            .iter()
+            .find(|candidate| candidate.response_id.as_deref() == Some("r-fts"))
+            .expect("fts response candidate");
+        assert!(fts.reasons.iter().any(|reason| reason == "fts_match"));
+        assert_eq!(
+            fts.metadata.get("retrievalSource").and_then(Value::as_str),
+            Some("fts")
+        );
+        assert!(fts.metadata.contains_key("ftsBm25"));
+        assert!(fts.metadata.contains_key("ftsRankingContribution"));
+    }
+
+    #[tokio::test]
+    async fn fts_current_loom_memory_is_boosted_over_global_memory() {
+        let fixture = Fixture::new().await;
+        fixture
+            .insert_search_doc(TestSearchDoc {
+                doc_id: "memory:global".to_string(),
+                source_kind: "memory".to_string(),
+                source_id: "memory-global".to_string(),
+                loom_id: None,
+                response_id: None,
+                attachment_id: None,
+                title: Some("Global codename memory".to_string()),
+                body: "Blue Otter global memory".to_string(),
+                tags: Some("explicit_user_memory".to_string()),
+                source_rank: 1.0,
+                is_deleted: false,
+                metadata_json: None,
+            })
+            .await;
+        fixture
+            .insert_search_doc(TestSearchDoc {
+                doc_id: "memory:loom".to_string(),
+                source_kind: "memory".to_string(),
+                source_id: "memory-loom".to_string(),
+                loom_id: Some("loom-1".to_string()),
+                response_id: None,
+                attachment_id: None,
+                title: Some("Loom codename memory".to_string()),
+                body: "Blue Otter current Loom memory".to_string(),
+                tags: Some("explicit_user_memory".to_string()),
+                source_rank: 1.0,
+                is_deleted: false,
+                metadata_json: None,
+            })
+            .await;
+
+        let result = fixture
+            .retriever()
+            .retrieve(&fixture.input("Blue Otter codename", None))
+            .await
+            .expect("retrieve");
+
+        let first = result.selected.first().expect("selected");
+        assert_eq!(first.candidate_id, "memory:loom");
+        assert!(first
+            .reasons
+            .iter()
+            .any(|reason| reason == "fts_current_loom_boost"));
+    }
+
+    #[tokio::test]
+    async fn fts_explicit_attachment_reference_outranks_generic_hits() {
+        let fixture = Fixture::new().await;
+        fixture
+            .insert_search_doc(TestSearchDoc {
+                doc_id: "memory:generic".to_string(),
+                source_kind: "memory".to_string(),
+                source_id: "memory-generic".to_string(),
+                loom_id: None,
+                response_id: None,
+                attachment_id: None,
+                title: Some("Generic Blue Otter note".to_string()),
+                body: "Blue Otter generic background".to_string(),
+                tags: Some("memory".to_string()),
+                source_rank: 4.0,
+                is_deleted: false,
+                metadata_json: None,
+            })
+            .await;
+        fixture
+            .insert_search_doc(TestSearchDoc {
+                doc_id: "attachment:att-1:chunk:0".to_string(),
+                source_kind: "attachment_chunk".to_string(),
+                source_id: "chunk-1".to_string(),
+                loom_id: Some("loom-1".to_string()),
+                response_id: None,
+                attachment_id: Some("att-1".to_string()),
+                title: Some("blue-otter-plan.md".to_string()),
+                body: "Blue Otter attachment plan with launch constraints.".to_string(),
+                tags: Some("md".to_string()),
+                source_rank: 0.5,
+                is_deleted: false,
+                metadata_json: Some(serde_json::json!({ "chunkIndex": 0 }).to_string()),
+            })
+            .await;
+
+        let input = BuildContextInput {
+            attached_references: vec![fixture.attachment_reference("att-1", "blue-otter-plan.md")],
+            ..fixture.input("Blue Otter constraints", None)
+        };
+        let result = fixture
+            .retriever()
+            .retrieve(&input)
+            .await
+            .expect("retrieve");
+
+        let first = result.selected.first().expect("selected");
+        assert_eq!(
+            first.candidate_kind,
+            ContextRetrievalCandidateKind::AttachmentChunk
+        );
+        assert_eq!(
+            first.metadata.get("attachmentId").and_then(Value::as_str),
+            Some("att-1")
+        );
+        assert!(first
+            .reasons
+            .iter()
+            .any(|reason| reason == "fts_explicit_attachment_reference_boost"));
+    }
+
+    #[tokio::test]
+    async fn fts_attachment_chunks_do_not_leak_across_looms() {
+        let fixture = Fixture::new().await;
+        fixture
+            .insert_search_doc(TestSearchDoc {
+                doc_id: "attachment:other:chunk:0".to_string(),
+                source_kind: "attachment_chunk".to_string(),
+                source_id: "other-chunk".to_string(),
+                loom_id: Some("loom-other".to_string()),
+                response_id: None,
+                attachment_id: Some("att-other".to_string()),
+                title: Some("other.md".to_string()),
+                body: "Blue Otter should not leak from another Loom.".to_string(),
+                tags: Some("md".to_string()),
+                source_rank: 9.0,
+                is_deleted: false,
+                metadata_json: None,
+            })
+            .await;
+
+        let result = fixture
+            .retriever()
+            .retrieve(&fixture.input("Blue Otter leak", None))
+            .await
+            .expect("retrieve");
+
+        assert!(!result.candidates.iter().any(|candidate| {
+            candidate
+                .metadata
+                .get("attachmentId")
+                .and_then(Value::as_str)
+                == Some("att-other")
+        }));
+    }
+
+    #[tokio::test]
+    async fn fts_does_not_replace_weft_hidden_origin_context() {
+        let fixture = Fixture::new().await;
+        fixture.insert_weft_origin().await;
+        fixture
+            .insert_search_doc(TestSearchDoc {
+                doc_id: "memory:event".to_string(),
+                source_kind: "memory".to_string(),
+                source_id: "memory-event".to_string(),
+                loom_id: None,
+                response_id: None,
+                attachment_id: None,
+                title: Some("Event Sourcing memory".to_string()),
+                body: "Event Sourcing Replay from FTS memory.".to_string(),
+                tags: Some("memory".to_string()),
+                source_rank: 1.0,
+                is_deleted: false,
+                metadata_json: None,
+            })
+            .await;
+        let mut input = fixture.input("Event Sourcing Replay", None);
+        input.source = ContextSource::Weft;
+        input.loom_id = "weft-1".to_string();
+        input.weft_origin = Some(WeftOriginContext {
+            context_id: "weft-origin-1".to_string(),
+            weft_loom_id: "weft-1".to_string(),
+            origin_loom_id: "loom-1".to_string(),
+            origin_response_id: "r-origin".to_string(),
+            origin_capsule_id: Some("capsule-origin".to_string()),
+            origin_summary: "Hidden origin: Event Sourcing Replay with Event Store.".to_string(),
+            source_hash: None,
+            status: crate::context::types::ArtifactStatus::Ready,
+        });
+
+        let result = fixture
+            .retriever()
+            .retrieve(&input)
+            .await
+            .expect("retrieve");
+
+        assert!(result.candidates.iter().any(|candidate| {
+            candidate
+                .reasons
+                .iter()
+                .any(|reason| reason == "weft_hidden_origin_match")
+        }));
+        assert!(result.candidates.iter().any(|candidate| {
+            candidate
+                .metadata
+                .get("retrievalSource")
+                .and_then(Value::as_str)
+                == Some("fts")
+        }));
+    }
+
+    #[tokio::test]
+    async fn fts_query_intent_boosts_code_documents() {
+        let fixture = Fixture::new().await;
+        fixture
+            .insert_search_doc(TestSearchDoc {
+                doc_id: "response:generic-code".to_string(),
+                source_kind: "response".to_string(),
+                source_id: "generic-code".to_string(),
+                loom_id: Some("loom-1".to_string()),
+                response_id: None,
+                attachment_id: None,
+                title: Some("Rust architecture".to_string()),
+                body: "Rust build error and implementation note.".to_string(),
+                tags: Some("assistant".to_string()),
+                source_rank: 1.0,
+                is_deleted: false,
+                metadata_json: None,
+            })
+            .await;
+        fixture
+            .insert_search_doc(TestSearchDoc {
+                doc_id: "code:block-1".to_string(),
+                source_kind: "code_block".to_string(),
+                source_id: "block-1".to_string(),
+                loom_id: Some("loom-1".to_string()),
+                response_id: None,
+                attachment_id: None,
+                title: Some("Rust code block".to_string()),
+                body: "fn build_index() { compile(); }".to_string(),
+                tags: Some("rust code".to_string()),
+                source_rank: 1.0,
+                is_deleted: false,
+                metadata_json: Some(serde_json::json!({ "language": "rust" }).to_string()),
+            })
+            .await;
+
+        let result = fixture
+            .retriever()
+            .retrieve(&fixture.input("Rust code compile bug", None))
+            .await
+            .expect("retrieve");
+
+        assert_eq!(result.query_intent, QueryIntentKind::Code);
+        let first = result.selected.first().expect("selected");
+        assert_eq!(
+            first.candidate_kind,
+            ContextRetrievalCandidateKind::CodeBlock
+        );
+        assert!(first
+            .reasons
+            .iter()
+            .any(|reason| reason == "fts_code_intent_boost"));
+    }
+
+    #[tokio::test]
+    async fn fts_excludes_deleted_docs_and_rejects_raw_thinking_payloads() {
+        let fixture = Fixture::new().await;
+        fixture
+            .insert_search_doc(TestSearchDoc {
+                doc_id: "memory:deleted".to_string(),
+                source_kind: "memory".to_string(),
+                source_id: "memory-deleted".to_string(),
+                loom_id: None,
+                response_id: None,
+                attachment_id: None,
+                title: Some("Deleted Blue Otter".to_string()),
+                body: "Blue Otter deleted content".to_string(),
+                tags: Some("memory".to_string()),
+                source_rank: 9.0,
+                is_deleted: true,
+                metadata_json: None,
+            })
+            .await;
+        let deleted = fixture
+            .retriever()
+            .retrieve(&fixture.input("Blue Otter deleted", None))
+            .await
+            .expect("retrieve");
+        assert!(deleted.candidates.is_empty());
+
+        fixture
+            .insert_search_doc(TestSearchDoc {
+                doc_id: "memory:raw".to_string(),
+                source_kind: "memory".to_string(),
+                source_id: "memory-raw".to_string(),
+                loom_id: None,
+                response_id: None,
+                attachment_id: None,
+                title: Some("Unsafe memory".to_string()),
+                body: "raw thinking payload includes raw_thinking and must fail.".to_string(),
+                tags: Some("memory".to_string()),
+                source_rank: 1.0,
+                is_deleted: false,
+                metadata_json: None,
+            })
+            .await;
+        let error = fixture
+            .retriever()
+            .retrieve(&fixture.input("raw thinking", None))
+            .await
+            .expect_err("raw thinking payload should fail");
+        assert!(error.to_string().contains("forbidden key"));
+    }
+
+    #[tokio::test]
+    async fn fts_retrieval_respects_selection_budget() {
+        let fixture = Fixture::new().await;
+        for index in 0..8 {
+            fixture
+                .insert_search_doc(TestSearchDoc {
+                    doc_id: format!("memory:budget-{index}"),
+                    source_kind: "memory".to_string(),
+                    source_id: format!("memory-budget-{index}"),
+                    loom_id: None,
+                    response_id: None,
+                    attachment_id: None,
+                    title: Some(format!("Budget Blue Otter {index}")),
+                    body: format!(
+                        "Blue Otter budget candidate {index}. {}",
+                        "Detailed context ".repeat(80)
+                    ),
+                    tags: Some("memory".to_string()),
+                    source_rank: 1.0,
+                    is_deleted: false,
+                    metadata_json: None,
+                })
+                .await;
+        }
+
+        let result = fixture
+            .retriever()
+            .retrieve(&BuildContextInput {
+                resolved_num_ctx: 2048,
+                ..fixture.input("Blue Otter budget", None)
+            })
+            .await
+            .expect("retrieve");
+
+        assert!(result.selected.len() <= 3);
+        assert!(result
+            .warnings
+            .iter()
+            .any(|warning| warning == "retrieval_candidates_capped"));
+        assert!(result
+            .selected
+            .iter()
+            .all(|candidate| candidate.budget_used_tokens > 0));
+    }
+
+    #[tokio::test]
     async fn retrieval_rejects_raw_thinking_payloads() {
         let fixture = Fixture::new().await;
         sqlx::query(
@@ -1935,6 +3040,21 @@ mod tests {
             warnings: Vec::new(),
             created_at: "1".to_string(),
         }
+    }
+
+    struct TestSearchDoc {
+        doc_id: String,
+        source_kind: String,
+        source_id: String,
+        loom_id: Option<String>,
+        response_id: Option<String>,
+        attachment_id: Option<String>,
+        title: Option<String>,
+        body: String,
+        tags: Option<String>,
+        source_rank: f64,
+        is_deleted: bool,
+        metadata_json: Option<String>,
     }
 
     struct Fixture {
@@ -2071,6 +3191,37 @@ mod tests {
                 .expect("insert weft origin");
         }
 
+        async fn insert_search_doc(&self, doc: TestSearchDoc) {
+            sqlx::query(
+                "INSERT INTO search_documents (
+                    doc_id, source_kind, source_id, loom_id, response_id, attachment_id,
+                    parse_artifact_id, title, body, tags, source_rank, is_deleted,
+                    updated_at, metadata_json
+                ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, NULL, ?7, ?8, ?9, ?10, ?11, '1', ?12)",
+            )
+            .bind(doc.doc_id)
+            .bind(doc.source_kind)
+            .bind(doc.source_id)
+            .bind(doc.loom_id)
+            .bind(doc.response_id)
+            .bind(doc.attachment_id)
+            .bind(doc.title)
+            .bind(doc.body)
+            .bind(doc.tags)
+            .bind(doc.source_rank)
+            .bind(if doc.is_deleted { 1 } else { 0 })
+            .bind(doc.metadata_json)
+            .execute(self.database.pool())
+            .await
+            .expect("insert search doc");
+            sqlx::query(
+                "INSERT INTO search_documents_fts(search_documents_fts) VALUES ('rebuild')",
+            )
+            .execute(self.database.pool())
+            .await
+            .expect("rebuild fts");
+        }
+
         fn input(&self, prompt: &str, current_head_response_id: Option<&str>) -> BuildContextInput {
             BuildContextInput {
                 loom_id: "loom-1".to_string(),
@@ -2083,6 +3234,7 @@ mod tests {
                 source: ContextSource::Composer,
                 weft_origin: None,
                 checkpoint: None,
+                memory_messages: Vec::new(),
                 recent_messages: Vec::new(),
             }
         }
@@ -2123,6 +3275,38 @@ mod tests {
                     capsule_summary: None,
                 },
                 response_capsule: None,
+                attachment: None,
+            }
+        }
+
+        fn attachment_reference(
+            &self,
+            attachment_id: &str,
+            file_name: &str,
+        ) -> AttachedReferenceInput {
+            AttachedReferenceInput {
+                reference: ReferenceContext {
+                    reference_id: format!("ref-{attachment_id}"),
+                    target_kind: "attachment".to_string(),
+                    target_id: Some(attachment_id.to_string()),
+                    target_uri: None,
+                    label: Some(file_name.to_string()),
+                    selected_text: None,
+                    capsule_summary: None,
+                },
+                response_capsule: None,
+                attachment: Some(AttachmentContext {
+                    attachment_id: attachment_id.to_string(),
+                    loom_id: "loom-1".to_string(),
+                    file_name: file_name.to_string(),
+                    mime_type: Some("text/markdown".to_string()),
+                    kind: "file".to_string(),
+                    parse_status: "ready".to_string(),
+                    parser: Some("text_v1".to_string()),
+                    content_text: Some("Blue Otter attachment plan".to_string()),
+                    content_kind: Some("text".to_string()),
+                    char_count: Some(27),
+                }),
             }
         }
     }

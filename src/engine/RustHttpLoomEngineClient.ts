@@ -2,17 +2,22 @@ import type { LoomEngineClient } from "./LoomEngineClient";
 import type {
   AddReferenceInput,
   AddReferenceResult,
+  ArchiveLoomInput,
   BookmarkResponseInput,
   BookmarkResult,
   CancelMessageInput,
   CancelMessageResult,
   CapabilitySummary,
+  AttachmentItem,
+  CreateAttachmentInput,
+  CreateAttachmentResult,
   CreateBookmarkInput,
   CreateLoomInput,
   CreateLoomResult,
   CreateOrOpenWeftInput,
   CreateOrOpenWeftResult,
   DeleteLoomInput,
+  DeleteAttachmentInput,
   EngineHealth,
   EngineResponseEvent,
   ExportLoomInput,
@@ -37,8 +42,11 @@ import type {
   OpenReferenceInput,
   ListBookmarksResult,
   ListHistoryResult,
+  ListLoomsInput,
   ListReferencesInput,
   ListReferencesResult,
+  ListAttachmentsInput,
+  ListAttachmentsResult,
   PersistedWeftTurn,
   PersistWeftTurnsInput,
   PersistWeftTurnsResult,
@@ -47,17 +55,25 @@ import type {
   RegenerateFromResponseInput,
   RecordHistoryInput,
   RemoveReferenceInput,
+  RetryUserMessageInput,
   RenameLoomInput,
+  RestoreLoomInput,
   ResolveAddressInput,
   ResolveAddressResult,
   RustHttpLoomEngineClientOptions,
   LoomServiceRuntimeConfig,
+  OcrProviderHealth,
+  RuntimeModelDownloadJob,
+  RuntimeModelItem,
+  RuntimeModelProviderStatus,
+  RuntimeModelsResult,
   ServiceConfigUpdateResult,
   ServiceConfigStatus,
   ServiceHealthStatus,
   SendMessageInput,
   SaveUiStateInput,
   SpeechProviderHealth,
+  SpeechSetupStatus,
   SpeechToTextProviderKind,
   SpeechToTextRuntimeConfig,
   SuggestReferencesInput,
@@ -99,6 +115,10 @@ export type RustHttpLoomEngineErrorKind =
   | "provider_error"
   | "invalid_config"
   | "model_missing"
+  | "no_speech_detected"
+  | "payload_too_large"
+  | "provider_timeout"
+  | "unsupported_audio"
   | "request_failed"
   | "request_aborted"
   | "unsupported_method"
@@ -142,6 +162,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function isJsonValue(value: unknown): value is JsonValue {
+  if (value === null) return true;
+  if (["string", "number", "boolean"].includes(typeof value)) return true;
+  if (Array.isArray(value)) return value.every(isJsonValue);
+  if (!isRecord(value)) return false;
+  return Object.values(value).every(isJsonValue);
+}
+
 function sanitizeEnginePayload(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(sanitizeEnginePayload);
   if (!isRecord(value)) return value;
@@ -171,20 +199,25 @@ async function serviceErrorFromResponse(
   }
   const sanitizedPayload = sanitizeEnginePayload(payload);
   if (isRecord(sanitizedPayload)) {
-    const serviceKind = stringValue(sanitizedPayload, "kind");
+    const serviceKind = stringValue(sanitizedPayload, "code") ?? stringValue(sanitizedPayload, "kind");
     const message =
       stringValue(sanitizedPayload, "message") ??
       messageForHttpStatus(response.status, path);
     const details = isRecord(sanitizedPayload.details)
       ? sanitizeEnginePayload(sanitizedPayload.details)
       : undefined;
+    const diagnostics = isRecord(sanitizedPayload.diagnostics)
+      ? sanitizeEnginePayload(sanitizedPayload.diagnostics)
+      : undefined;
     return new RustHttpLoomEngineError(mapServiceErrorKind(serviceKind, response.status), message, {
       ...baseDetails,
       serviceKind,
+      serviceErrorCode: stringValue(sanitizedPayload, "code"),
       providerErrorKind: serviceKind,
       retryable: booleanValue(sanitizedPayload, "retryable"),
       correlationId: stringValue(sanitizedPayload, "correlationId"),
       details,
+      diagnostics,
     });
   }
   return new RustHttpLoomEngineError(mapServiceErrorKind(undefined, response.status), messageForHttpStatus(response.status, path), {
@@ -198,6 +231,20 @@ function mapServiceErrorKind(
   status: number
 ): RustHttpLoomEngineErrorKind {
   switch (serviceKind) {
+    case "audio_too_large":
+    case "payload_too_large":
+    case "ATTACHMENT_TOO_LARGE":
+      return "payload_too_large";
+    case "no_speech_detected":
+      return "no_speech_detected";
+    case "provider_timeout":
+      return "provider_timeout";
+    case "unsupported_audio":
+    case "unsupported_audio_type":
+      return "unsupported_audio";
+    case "provider_failed":
+    case "transcription_failed":
+      return "provider_error";
     case "invalid_config":
       return "invalid_config";
     case "runtime_unavailable":
@@ -214,6 +261,7 @@ function mapServiceErrorKind(
     case "aborted":
       return "request_aborted";
     default:
+      if (status === 413) return "payload_too_large";
       if (status === 408 || status === 504) return "timeout";
       if (status === 502 || status === 503) return "provider_unavailable";
       if (status === 400 || status === 422) return "request_failed";
@@ -222,6 +270,9 @@ function mapServiceErrorKind(
 }
 
 function messageForHttpStatus(status: number, path: string): string {
+  if (status === 413 && path === "/speech/transcribe") {
+    return "Recording is too long. Try a shorter recording.";
+  }
   if (status === 502 || status === 503) {
     return `loom-service provider request failed for ${path}.`;
   }
@@ -549,6 +600,7 @@ function validateLoomSummary(value: unknown, endpoint: string): LoomSummary {
     weftKind: weftKindFromMetadata(metadata),
     createdAt: stringValue(value, "createdAt"),
     updatedAt: stringValue(value, "updatedAt"),
+    archivedAt: stringValue(value, "archivedAt"),
     metadata,
   };
 }
@@ -731,6 +783,7 @@ function loomObjectTypeValue(value: unknown): LoomLink["type"] | undefined {
     value === "loom" ||
     value === "response" ||
     value === "fragment" ||
+    value === "attachment" ||
     value === "bookmark" ||
     value === "semantic" ||
     value === "recent"
@@ -747,6 +800,7 @@ function referenceTargetKindValue(value: unknown): LoomLink["targetKind"] | unde
     value === "weft" ||
     value === "fragment" ||
     value === "code_block" ||
+    value === "attachment" ||
     value === "external"
   ) {
     return value;
@@ -891,6 +945,8 @@ function buildResponseItemsFromRows(rows: ServiceResponseRow[]): ResponseItem[] 
     const metadata = isRecord(row.metadata) ? row.metadata : {};
     const workflowRunId = stringValue(metadata, "workflowRunId");
     const serviceGenerationStatus = stringValue(metadata, "status");
+    const inferenceMs = numberValue(metadata, "inferenceMs");
+    const inferenceTokenCount = numberValue(metadata, "evalTokenCount");
     items.push({
       id: row.responseId,
       title,
@@ -907,6 +963,8 @@ function buildResponseItemsFromRows(rows: ServiceResponseRow[]): ResponseItem[] 
       serviceGenerationStatus,
       serviceUserResponseId: pendingUser?.responseId,
       meta: responseMetaFromRow(row, title),
+      inferenceMs,
+      inferenceTokenCount,
     });
     pendingUser = null;
   }
@@ -1111,6 +1169,139 @@ function validateSpeechProviderHealth(value: unknown): SpeechProviderHealth {
   };
 }
 
+function validateSpeechSetupStatus(value: unknown, endpoint: string): SpeechSetupStatus {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid speech setup status.", {
+      endpoint,
+    });
+  }
+  const model = isRecord(value.model) ? value.model : {};
+  const providerHealth = validateSpeechProviderHealth(value.providerHealth);
+  return {
+    state: stringValue(value, "state") ?? "unknown",
+    message: stringValue(value, "message") ?? "Speech-to-Text setup status is unavailable.",
+    runningInElectron: booleanValue(value, "runningInElectron") ?? false,
+    installCommand:
+      stringValue(value, "installCommand") ??
+      "Install the Loom local speech engine from Settings.",
+    detectedBinaryPath: nullableStringValue(value, "detectedBinaryPath"),
+    detectedRuntimeSource: stringValue(value, "detectedRuntimeSource") ?? "missing",
+    runtimeVersion: nullableStringValue(value, "runtimeVersion"),
+    binaryCandidates: Array.isArray(value.binaryCandidates)
+      ? value.binaryCandidates.filter(isRecord).map((candidate) => ({
+          path: stringValue(candidate, "path") ?? "",
+          exists: booleanValue(candidate, "exists") ?? false,
+          executable: booleanValue(candidate, "executable") ?? false,
+          preferred: booleanValue(candidate, "preferred") ?? false,
+          source: stringValue(candidate, "source") ?? "unknown",
+        }))
+      : [],
+    modelDirectory: stringValue(value, "modelDirectory") ?? "",
+    model: {
+      name: stringValue(model, "name") ?? "ggml-base.bin",
+      path: stringValue(model, "path") ?? "",
+      exists: booleanValue(model, "exists") ?? false,
+      sizeBytes: numberValue(model, "sizeBytes"),
+      downloadUrl: stringValue(model, "downloadUrl") ?? "",
+    },
+    recommendedArgs: arrayOfStrings(value.recommendedArgs),
+    providerHealth,
+  };
+}
+
+function speechSetupStatusFromEnvelope(value: unknown, endpoint: string): SpeechSetupStatus {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid speech setup result.", {
+      endpoint,
+    });
+  }
+  return validateSpeechSetupStatus(value.status, endpoint);
+}
+
+function validateRuntimeModelsResult(value: unknown): RuntimeModelsResult {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid runtime models.", {
+      endpoint: "/runtime/models",
+    });
+  }
+  return {
+    provider: validateRuntimeModelProviderStatus(value.provider),
+    models: Array.isArray(value.models) ? value.models.map(validateRuntimeModelItem) : [],
+    jobs: Array.isArray(value.jobs) ? value.jobs.map(validateRuntimeModelDownloadJob) : [],
+  };
+}
+
+function validateRuntimeModelProviderStatus(value: unknown): RuntimeModelProviderStatus {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid runtime provider status.", {
+      endpoint: "/runtime/models",
+    });
+  }
+  return {
+    providerKind: stringValue(value, "providerKind") ?? "unknown",
+    providerProfileId: stringValue(value, "providerProfileId") ?? "unknown",
+    status: stringValue(value, "status") ?? "unknown",
+    baseUrl: stringValue(value, "baseUrl"),
+    version: stringValue(value, "version"),
+    modelsEndpointReachable: booleanValue(value, "modelsEndpointReachable"),
+    runtimeOwnedBy: stringValue(value, "runtimeOwnedBy") ?? "unknown",
+    modelStorePath: stringValue(value, "modelStorePath"),
+    supportsDownloads: booleanValue(value, "supportsDownloads") ?? false,
+    supportsStart: booleanValue(value, "supportsStart") ?? false,
+    supportsStop: booleanValue(value, "supportsStop") ?? false,
+    warnings: arrayOfStrings(value.warnings),
+  };
+}
+
+function validateRuntimeModelItem(value: unknown): RuntimeModelItem {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid runtime model item.", {
+      endpoint: "/runtime/models",
+    });
+  }
+  return {
+    assetId: stringValue(value, "assetId") ?? "",
+    providerKind: stringValue(value, "providerKind") ?? "unknown",
+    providerProfileId: nullableStringValue(value, "providerProfileId"),
+    modelName: stringValue(value, "modelName") ?? "unknown",
+    displayName: stringValue(value, "displayName") ?? stringValue(value, "modelName") ?? "Unknown",
+    installed: booleanValue(value, "installed") ?? false,
+    status: stringValue(value, "status") ?? "missing",
+    localPath: nullableStringValue(value, "localPath"),
+    sizeBytes: numberValue(value, "sizeBytes"),
+    digest: nullableStringValue(value, "digest"),
+    supportsQuick: booleanValue(value, "supportsQuick") ?? true,
+    supportsMain: booleanValue(value, "supportsMain") ?? true,
+    supportsThinking: booleanValue(value, "supportsThinking") ?? false,
+    source: stringValue(value, "source") ?? "runtime",
+  };
+}
+
+function validateRuntimeModelDownloadJob(value: unknown): RuntimeModelDownloadJob {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid model download job.", {
+      endpoint: "/runtime/downloads",
+    });
+  }
+  return {
+    jobId: stringValue(value, "jobId") ?? "",
+    providerKind: stringValue(value, "providerKind") ?? "unknown",
+    providerProfileId: nullableStringValue(value, "providerProfileId"),
+    modelName: stringValue(value, "modelName") ?? "unknown",
+    status: stringValue(value, "status") ?? "queued",
+    progressPercent: numberValue(value, "progressPercent") ?? 0,
+    downloadedBytes: numberValue(value, "downloadedBytes"),
+    totalBytes: numberValue(value, "totalBytes"),
+    digest: nullableStringValue(value, "digest"),
+    error: nullableStringValue(value, "error"),
+    cancelRequested: booleanValue(value, "cancelRequested") ?? false,
+    metadataJson: isJsonValue(value.metadataJson) ? value.metadataJson : undefined,
+    createdAt: stringValue(value, "createdAt") ?? "",
+    updatedAt: stringValue(value, "updatedAt") ?? "",
+    completedAt: nullableStringValue(value, "completedAt"),
+  };
+}
+
 function validateServiceConfig(value: unknown): LoomServiceRuntimeConfig {
   if (!isRecord(value)) {
     throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid config.", {
@@ -1120,9 +1311,62 @@ function validateServiceConfig(value: unknown): LoomServiceRuntimeConfig {
   const database = isRecord(value.database)
     ? { path: stringValue(value.database, "path") }
     : undefined;
+  const memory = isRecord(value.memory)
+    ? {
+        enabled: booleanValue(value.memory, "enabled"),
+        referenceRecentLooms: booleanValue(value.memory, "referenceRecentLooms"),
+        referenceSavedMemories: booleanValue(value.memory, "referenceSavedMemories"),
+        nickname: stringValue(value.memory, "nickname"),
+        occupation: stringValue(value.memory, "occupation"),
+        stylePreferences: stringValue(value.memory, "stylePreferences"),
+        moreAboutYou: stringValue(value.memory, "moreAboutYou"),
+      }
+    : undefined;
+  const providers = isRecord(value.providers)
+    ? {
+        defaultMainModel: stringValue(value.providers, "defaultMainModel"),
+        defaultQuickModel: stringValue(value.providers, "defaultQuickModel"),
+      }
+    : undefined;
+  const ocr = isRecord(value.ocr)
+    ? {
+        enabled: Boolean(booleanValue(value.ocr, "enabled")),
+        provider: stringValue(value.ocr, "provider") ?? "tesseract",
+        commandPath: nullableStringValue(value.ocr, "commandPath"),
+        pdfRasterizerCommandPath: nullableStringValue(value.ocr, "pdfRasterizerCommandPath"),
+        language: stringValue(value.ocr, "language") ?? "eng",
+        dpi: numberValue(value.ocr, "dpi") ?? 200,
+        timeoutSeconds: numberValue(value.ocr, "timeoutSeconds") ?? 60,
+        maxPagesPerFile: numberValue(value.ocr, "maxPagesPerFile") ?? 20,
+        maxImagePixels: numberValue(value.ocr, "maxImagePixels") ?? 24_000_000,
+        tempDir: nullableStringValue(value.ocr, "tempDir"),
+      }
+    : undefined;
   return {
     speech: validateSpeechConfig(value.speech),
+    ocr,
+    memory,
+    providers,
     database,
+  };
+}
+
+function validateOcrProviderHealth(value: unknown): OcrProviderHealth {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid OCR provider health.", {
+      endpoint: "/ocr/provider/health",
+    });
+  }
+  return {
+    status: stringValue(value, "status") ?? "unavailable",
+    provider: stringValue(value, "provider") ?? "tesseract",
+    enabled: Boolean(booleanValue(value, "enabled")),
+    commandPath: nullableStringValue(value, "commandPath"),
+    rasterizerCommandPath: nullableStringValue(value, "rasterizerCommandPath"),
+    language: stringValue(value, "language") ?? "eng",
+    dpi: numberValue(value, "dpi") ?? 200,
+    message: stringValue(value, "message") ?? "OCR provider health is unavailable.",
+    warnings: arrayOfStrings(value.warnings),
   };
 }
 
@@ -1171,6 +1415,77 @@ function mapReferenceForService(reference: LoomLink) {
     targetId: reference.targetObjectId ?? reference.id,
     sourceResponseCode: reference.sourceResponseCode,
     sourceTitle: reference.title,
+  };
+}
+
+function attachmentParseStatusValue(value: unknown): AttachmentItem["parseStatus"] {
+  if (
+    value === "queued" ||
+    value === "parsing" ||
+    value === "extracting_text" ||
+    value === "ocr_needed" ||
+    value === "ocr_running" ||
+    value === "ready" ||
+    value === "failed" ||
+    value === "unsupported"
+  ) {
+    return value;
+  }
+  return "failed";
+}
+
+function validateAttachment(value: unknown, endpoint: string): AttachmentItem {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Attachment.", {
+      endpoint,
+    });
+  }
+  const attachmentId = stringValue(value, "attachmentId");
+  const loomId = stringValue(value, "loomId");
+  const fileName = stringValue(value, "fileName");
+  const sizeBytes = numberValue(value, "sizeBytes");
+  const kind = stringValue(value, "kind");
+  if (!attachmentId || !loomId || !fileName || sizeBytes === undefined || !kind) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service Attachment was missing required fields.", {
+      endpoint,
+    });
+  }
+  return {
+    attachmentId,
+    loomId,
+    fileName,
+    mimeType: stringValue(value, "mimeType"),
+    extension: stringValue(value, "extension"),
+    sizeBytes,
+    kind,
+    parseStatus: attachmentParseStatusValue(value.parseStatus),
+    parser: stringValue(value, "parser"),
+    error: stringValue(value, "error"),
+    thumbnailDataUrl: stringValue(value, "thumbnailDataUrl"),
+    parsedCharCount: numberValue(value, "parsedCharCount"),
+    metadataJson: isJsonValue(value.metadataJson) ? value.metadataJson : undefined,
+    createdAt: stringValue(value, "createdAt") ?? "",
+    updatedAt: stringValue(value, "updatedAt") ?? "",
+  };
+}
+
+function validateAttachmentEnvelope(value: unknown, endpoint: string): CreateAttachmentResult {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Attachment envelope.", {
+      endpoint,
+    });
+  }
+  return { attachment: validateAttachment(value.attachment, endpoint) };
+}
+
+function validateAttachmentList(value: unknown, endpoint: string): ListAttachmentsResult {
+  if (!isRecord(value) || !Array.isArray(value.attachments)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Attachment list.", {
+      endpoint,
+    });
+  }
+  return {
+    attachments: value.attachments.map((attachment) => validateAttachment(attachment, endpoint)),
   };
 }
 
@@ -1307,6 +1622,22 @@ function regeneratePayload(input: RegenerateFromResponseInput) {
     responseMode: serviceResponseMode(input.responseMode),
     replaceStale: false,
     source: input.source ?? "prompt_edit_regenerate",
+    model: input.model ?? "qwen3:latest",
+    options: input.options
+      ? {
+          numCtx: input.options.numCtx,
+          numPredict: input.options.numPredict,
+          temperature: input.options.temperature,
+        }
+      : undefined,
+  };
+}
+
+function retryPayload(input: RetryUserMessageInput) {
+  return {
+    responseMode: serviceResponseMode(input.responseMode),
+    softDeleteDownstream: input.softDeleteDownstream ?? true,
+    reason: input.reason ?? "retry_from_user_message",
     model: input.model ?? "qwen3:latest",
     options: input.options
       ? {
@@ -1584,7 +1915,8 @@ function quickAskTransportDiagnostics(
   }) as JsonValue;
 }
 
-function referenceTargetKind(link: LoomLink): "loom" | "response" | "weft" | "fragment" | "external" {
+function referenceTargetKind(link: LoomLink): "loom" | "response" | "weft" | "fragment" | "attachment" | "external" {
+  if (link.targetKind === "attachment" || link.type === "attachment") return "attachment";
   if (link.type === "fragment") return "fragment";
   if (link.type === "response") return "response";
   if (link.type === "conversation" || link.type === "loom") return "loom";
@@ -1969,6 +2301,7 @@ function mapServiceEventToEngineEvents(value: unknown): EngineResponseEvent[] {
           payload: {
             status: "running",
             durationMs: numberValue(thinking, "durationMs"),
+            tokenEstimate: numberValue(thinking, "tokenEstimate"),
           },
         },
       ];
@@ -1989,7 +2322,14 @@ function mapServiceEventToEngineEvents(value: unknown): EngineResponseEvent[] {
     return [
       {
         type: "response_completed",
-        payload: { responseId, doneReason: servicePayloadString(payload, "doneReason"), loomTitle },
+        payload: {
+          responseId,
+          doneReason: servicePayloadString(payload, "doneReason"),
+          loomTitle,
+          elapsedMs: numberValue(payload, "elapsedMs"),
+          evalTokenCount: numberValue(payload, "evalTokenCount"),
+          promptTokenCount: numberValue(payload, "promptTokenCount"),
+        },
       },
     ];
   }
@@ -1998,7 +2338,14 @@ function mapServiceEventToEngineEvents(value: unknown): EngineResponseEvent[] {
     return [
       {
         type: "response_truncated",
-        payload: { responseId, doneReason: servicePayloadString(payload, "doneReason"), loomTitle },
+        payload: {
+          responseId,
+          doneReason: servicePayloadString(payload, "doneReason"),
+          loomTitle,
+          elapsedMs: numberValue(payload, "elapsedMs"),
+          evalTokenCount: numberValue(payload, "evalTokenCount"),
+          promptTokenCount: numberValue(payload, "promptTokenCount"),
+        },
       },
     ];
   }
@@ -2252,9 +2599,70 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     return validateConfigUpdateResult(response);
   }
 
+  async getRuntimeModels(): Promise<RuntimeModelsResult> {
+    const response = await this.requestJson<unknown>("/runtime/models");
+    return validateRuntimeModelsResult(response);
+  }
+
+  async startModelDownload(modelName: string): Promise<RuntimeModelDownloadJob> {
+    const response = await this.requestJson<unknown>(
+      `/runtime/models/${encodeURIComponent(modelName)}/download`,
+      {
+        method: "POST",
+        body: JSON.stringify({ providerProfileId: "ollama-local" }),
+      }
+    );
+    if (!isRecord(response)) {
+      throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid model download job.", {
+        endpoint: "/runtime/models/:model/download",
+      });
+    }
+    return validateRuntimeModelDownloadJob(response.job);
+  }
+
+  async getModelDownload(jobId: string): Promise<RuntimeModelDownloadJob> {
+    const response = await this.requestJson<unknown>(
+      `/runtime/downloads/${encodeURIComponent(jobId)}`
+    );
+    return validateRuntimeModelDownloadJob(response);
+  }
+
+  async cancelModelDownload(jobId: string): Promise<RuntimeModelDownloadJob> {
+    const response = await this.requestJson<unknown>(
+      `/runtime/downloads/${encodeURIComponent(jobId)}/cancel`,
+      { method: "POST" }
+    );
+    return validateRuntimeModelDownloadJob(response);
+  }
+
+  async getOcrProviderHealth(): Promise<OcrProviderHealth> {
+    const response = await this.requestJson<unknown>("/ocr/provider/health");
+    return validateOcrProviderHealth(response);
+  }
+
   async getSpeechProviderHealth(): Promise<SpeechProviderHealth> {
     const response = await this.requestJson<unknown>("/speech/provider/health");
     return validateSpeechProviderHealth(response);
+  }
+
+  async getSpeechSetupStatus(): Promise<SpeechSetupStatus> {
+    const response = await this.requestJson<unknown>("/speech/setup/status");
+    return validateSpeechSetupStatus(response, "/speech/setup/status");
+  }
+
+  async downloadSpeechSetupModel(): Promise<SpeechSetupStatus> {
+    const response = await this.requestJson<unknown>("/speech/setup/download-model", {
+      method: "POST",
+      timeoutMs: 300_000,
+    });
+    return speechSetupStatusFromEnvelope(response, "/speech/setup/download-model");
+  }
+
+  async configureSpeechSetup(): Promise<SpeechSetupStatus> {
+    const response = await this.requestJson<unknown>("/speech/setup/configure", {
+      method: "POST",
+    });
+    return speechSetupStatusFromEnvelope(response, "/speech/setup/configure");
   }
 
   async getCapabilitySummary(): Promise<CapabilitySummary> {
@@ -2360,14 +2768,15 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     };
   }
 
-  async listLooms(): Promise<LoomSummary[]> {
-    const response = await this.requestJson<unknown>("/looms", { method: "GET" });
+  async listLooms(input: ListLoomsInput = {}): Promise<LoomSummary[]> {
+    const endpoint = input.archived ? "/looms?archived=true" : "/looms";
+    const response = await this.requestJson<unknown>(endpoint, { method: "GET" });
     if (!isRecord(response) || !Array.isArray(response.looms)) {
       throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid Loom list.", {
-        endpoint: "/looms",
+        endpoint,
       });
     }
-    return response.looms.map((loom) => validateLoomSummary(loom, "/looms"));
+    return response.looms.map((loom) => validateLoomSummary(loom, endpoint));
   }
 
   async getLoom(loomId: string): Promise<LoomDetail> {
@@ -2398,9 +2807,25 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     return validateLoomEnvelope(response, endpoint);
   }
 
+  async archiveLoom(input: ArchiveLoomInput): Promise<CreateLoomResult> {
+    const endpoint = `/looms/${encodeURIComponent(input.loomId)}/archive`;
+    const response = await this.requestJson<unknown>(endpoint, { method: "POST" });
+    return validateLoomEnvelope(response, endpoint);
+  }
+
+  async restoreLoom(input: RestoreLoomInput): Promise<CreateLoomResult> {
+    const endpoint = `/looms/${encodeURIComponent(input.loomId)}/restore`;
+    const response = await this.requestJson<unknown>(endpoint, { method: "POST" });
+    return validateLoomEnvelope(response, endpoint);
+  }
+
   async deleteLoom(input: DeleteLoomInput): Promise<void> {
     const endpoint = `/looms/${encodeURIComponent(input.loomId)}`;
     await this.requestJson<unknown>(endpoint, { method: "DELETE" });
+  }
+
+  async hardReset(): Promise<void> {
+    await this.requestJson<unknown>("/hard-reset", { method: "POST" });
   }
 
   async *sendMessage(input: SendMessageInput): AsyncIterable<EngineResponseEvent> {
@@ -2643,6 +3068,125 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     }
   }
 
+  async *retryUserMessage(input: RetryUserMessageInput): AsyncIterable<EngineResponseEvent> {
+    const endpoint = `/responses/${encodeURIComponent(input.userResponseId)}/retry`;
+    const controller = new AbortController();
+    const abortFromInputSignal = () => controller.abort();
+    if (input.signal?.aborted) {
+      controller.abort();
+    } else {
+      input.signal?.addEventListener("abort", abortFromInputSignal, { once: true });
+    }
+    const timeout = globalThis.setTimeout(
+      () => controller.abort(),
+      Math.max(this.requestTimeoutMs, GENERATION_STREAM_OPEN_TIMEOUT_MS)
+    );
+    let response: Response;
+    try {
+      response = await this.fetchImpl(`${this.serviceUrl}${endpoint}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(retryPayload(input)),
+        signal: controller.signal,
+      });
+    } catch (error) {
+      globalThis.clearTimeout(timeout);
+      input.signal?.removeEventListener("abort", abortFromInputSignal);
+      if (error instanceof DOMException && error.name === "AbortError") {
+        if (input.signal?.aborted) {
+          throw new RustHttpLoomEngineError("request_failed", "loom-service retry request was cancelled.", {
+            path: endpoint,
+          });
+        }
+        throw new RustHttpLoomEngineError(
+          "timeout",
+          "loom-service retry stream did not open before the startup timeout.",
+          {
+            path: endpoint,
+            timeoutMs: Math.max(this.requestTimeoutMs, GENERATION_STREAM_OPEN_TIMEOUT_MS),
+            requestKind: "user_message_retry",
+          }
+        );
+      }
+      throw new RustHttpLoomEngineError("service_unavailable", "loom-service is not reachable.", {
+        path: endpoint,
+      });
+    }
+    globalThis.clearTimeout(timeout);
+
+    if (response.status === 404 || response.status === 501) {
+      input.signal?.removeEventListener("abort", abortFromInputSignal);
+      throw new RustHttpLoomEngineError("unsupported_method", "loom-service endpoint is not available yet.", {
+        path: endpoint,
+        status: response.status,
+      });
+    }
+    if (!response.ok) {
+      input.signal?.removeEventListener("abort", abortFromInputSignal);
+      throw new RustHttpLoomEngineError("request_failed", "loom-service retry request failed.", {
+        path: endpoint,
+        status: response.status,
+      });
+    }
+    if (!response.body) {
+      input.signal?.removeEventListener("abort", abortFromInputSignal);
+      throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an empty retry stream.", {
+        path: endpoint,
+      });
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    const buffer = { text: "" };
+    try {
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const text = decoder.decode(value, { stream: true });
+        for (const data of parseSseEvents(buffer, text)) {
+          let parsed: unknown;
+          try {
+            parsed = sanitizeEnginePayload(JSON.parse(data));
+          } catch {
+            throw new RustHttpLoomEngineError("invalid_response", "loom-service returned malformed SSE data.", {
+              path: endpoint,
+            });
+          }
+          for (const event of mapServiceEventToEngineEvents(parsed)) {
+            yield sanitizeEngineResponseEvent(event);
+          }
+        }
+      }
+      const trailing = decoder.decode();
+      for (const data of parseSseEvents(buffer, trailing)) {
+        let parsed: unknown;
+        try {
+          parsed = sanitizeEnginePayload(JSON.parse(data));
+        } catch {
+          throw new RustHttpLoomEngineError("invalid_response", "loom-service returned malformed SSE data.", {
+            path: endpoint,
+          });
+        }
+        for (const event of mapServiceEventToEngineEvents(parsed)) {
+          yield sanitizeEngineResponseEvent(event);
+        }
+      }
+    } catch (error) {
+      if (error instanceof RustHttpLoomEngineError) throw error;
+      if (input.signal?.aborted) {
+        throw new RustHttpLoomEngineError("request_failed", "loom-service retry stream was cancelled.", {
+          path: endpoint,
+        });
+      }
+      throw new RustHttpLoomEngineError("service_unavailable", "loom-service retry stream failed.", {
+        path: endpoint,
+      });
+    } finally {
+      input.signal?.removeEventListener("abort", abortFromInputSignal);
+      reader.releaseLock();
+    }
+  }
+
   async cancelMessage(input: CancelMessageInput): Promise<CancelMessageResult> {
     const endpoint = `/orchestration/cancel/${encodeURIComponent(input.workflowRunId)}`;
     let response: Response;
@@ -2771,6 +3315,31 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
       body: JSON.stringify(createReferencePayload(input)),
     });
     return validateReferenceEnvelope(response, "/references");
+  }
+
+  async createAttachment(input: CreateAttachmentInput): Promise<CreateAttachmentResult> {
+    const endpoint = `/looms/${encodeURIComponent(input.loomId)}/attachments`;
+    const response = await this.requestJson<unknown>(endpoint, {
+      method: "POST",
+      body: JSON.stringify({
+        fileName: input.fileName,
+        mimeType: input.mimeType,
+        sizeBytes: input.sizeBytes,
+        contentBase64: input.contentBase64,
+      }),
+    });
+    return validateAttachmentEnvelope(response, endpoint);
+  }
+
+  async listAttachments(input: ListAttachmentsInput): Promise<ListAttachmentsResult> {
+    const endpoint = `/looms/${encodeURIComponent(input.loomId)}/attachments`;
+    const response = await this.requestJson<unknown>(endpoint, { method: "GET" });
+    return validateAttachmentList(response, endpoint);
+  }
+
+  async deleteAttachment(input: DeleteAttachmentInput): Promise<void> {
+    const endpoint = `/attachments/${encodeURIComponent(input.attachmentId)}`;
+    await this.requestJson<unknown>(endpoint, { method: "DELETE" });
   }
 
   async removeReference(input: RemoveReferenceInput): Promise<void> {
