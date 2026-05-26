@@ -24,7 +24,8 @@
       "Bash(sed -n '8155,8175p' /Users/gokay/Documents/Workspace/LoomAI/src/styles.css)",
       "Bash(sed -n '9068,9110p' /Users/gokay/Documents/Workspace/LoomAI/src/styles.css)",
       "Bash(sed -n '4628,4632p' /Users/gokay/Documents/Workspace/LoomAI/src/styles.css)",
-      "Bash(sed -n '9096,9122p' /Users/gokay/Documents/Workspace/LoomAI/src/styles.css)"
+      "Bash(sed -n '9096,9122p' /Users/gokay/Documents/Workspace/LoomAI/src/styles.css)",
+      "Bash(npx vitest *)"
     ]
   }
 }
