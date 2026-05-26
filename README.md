@@ -1,4 +1,4 @@
-# Loom
+# Loom — Your Personal AI Web
 
 <p align="center">
   <img src="public/loom_logo.png" alt="Loom logo" width="96" />
@@ -25,7 +25,7 @@
   <!-- Loom demo GIF preview -->
 </p>
 
-Loom is a local-first AI runtime and desktop app for turning useful AI work into durable, reusable knowledge artifacts. Instead of losing answers inside long transcripts, you can browse them, ask across them, reference them, branch from them, attach local files, inspect retrieval lineage, and reconstruct why a model saw a piece of context.
+Loom turns conversations with AI into reusable, addressable knowledge instead of disposable chat history. Instead of losing answers inside long transcripts, you can browse them, ask across them, reference them, branch from them, attach local files, inspect retrieval lineage, and reconstruct why a model saw a piece of context.
 
 It is not a hosted SaaS, not a generic chat UI, not just RAG, and not an opaque memory wrapper. Loom is built around explicit context, provenance, graph navigation, and local ownership.
 
@@ -33,11 +33,11 @@ It is not a hosted SaaS, not a generic chat UI, not just RAG, and not an opaque 
 
 **Looms** are addressable spaces for AI work. A Loom contains Responses, References, Wefts, attachments, and retrieval history.
 
+**Wefts** are exploration branches. They let an idea split into a new path while preserving origin context without copying hidden seed rows into the visible transcript.
+
 **Quick Ask** is the lightweight ask/search surface. It behaves more like an AI-native Spotlight or browser omnibox than a full transcript: fast, contextual, and ephemeral until you promote useful output into a Loom, Reference, or Weft.
 
-Quick Ask reduces context inflation. Instead of repeatedly replaying large conversations, you can ask lightweight contextual questions, then promote only the useful results into Looms, References, or Wefts when they become important.
-
-**Wefts** are exploration branches. They let an idea split into a new path while preserving origin context without copying hidden seed rows into the visible transcript.
+Quick Ask reduces context inflation. Instead of reopening giant conversations and replaying the same context, you can branch from exactly where the idea already exists. Ask lightweight contextual questions, then promote only the useful results into Looms, References, or Wefts when they become important.
 
 **References** make prior work reusable. A Response can be referenced in a new prompt, keeping provenance attached instead of relying on copy and paste.
 
@@ -112,7 +112,8 @@ Loom treats AI work as a local web of reusable artifacts:
 
 The goal is not to automate the user out of the loop.
 
-Chat apps optimize for conversations. Loom optimizes for continuity. The system is designed to reduce context waste by turning AI work into reusable, addressable artifacts instead of repeatedly rebuilding the same context window from scratch.
+> Chat apps optimize for conversations. Loom optimizes for continuity.
+The system is designed to reduce context waste by turning AI work into reusable, addressable artifacts instead of repeatedly rebuilding the same context window from scratch.
 
 The goal is to make serious AI work navigable.
 
@@ -133,6 +134,10 @@ Loom is intentionally small at the top level:
 Loom uses a hybrid store: normalized SQLite domain records plus event/log-style records where they help with provenance, replay, diagnostics, and reconstruction. It shares lineage/replay/provenance ideas with event-centric systems, but remains a UX-first, human-in-the-loop AI browser/runtime rather than a pure reactive agent runtime.
 
 ## Local-First Philosophy
+
+Local-first is not just a deployment model. It is a product boundary.
+
+Your conversations, references, provenance graph, retrieval history, and reusable context remain inspectable and user-owned.
 
 Loom is designed around local ownership:
 
@@ -296,6 +301,29 @@ git diff --check
 
 Service/runtime changes should also run the Rust and service checks described in the project docs.
 
+## Example Flow
+
+1. Ask a question in Quick Ask.
+2. Promote the useful answer into a Loom.
+3. Create a Weft from a specific Response.
+4. Attach local files as explicit context.
+5. Reuse prior Responses through References.
+6. Explore how ideas connect through Graph.
+
 ## License
 
-License information has not been finalized yet.
+Loom is source-available under the Business Source License (BUSL).
+
+Commercial licensing will be available separately.
+
+This repository is not open source.
+
+You may:
+- view the source
+- modify it
+- use it personally or internally
+
+You may NOT:
+- offer Loom as a hosted commercial service
+- resell Loom
+- build competing commercial products from Loom without permission

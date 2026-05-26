@@ -472,6 +472,25 @@ body {
   font-size: var(--font-body-size);
   line-height: var(--font-body-line);
   background: var(--bg-app);
+  /* Native app feel: disable accidental text selection on chrome/UI elements.
+     Content areas (messages, code blocks, inputs) re-enable it explicitly below. */
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+/* ── Re-enable text selection for actual content ─────────────────────────── */
+input,
+textarea,
+[contenteditable="true"],
+[contenteditable="plaintext-only"],
+.user-message,
+.assistant-body,
+.assistant-code-block pre,
+.assistant-code-block code,
+.address-hint-popover,
+.loom-graph-composer-node .prompt-editor {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 #root {
@@ -4607,6 +4626,7 @@ kbd {
   opacity: 1;
   transition: opacity 180ms ease;
   animation: address-hint-popover-in 120ms ease-out;
+  -webkit-user-select: text;
   user-select: text;
 }
 
@@ -8324,10 +8344,20 @@ kbd {
   border: 1px solid var(--loom-border-subtle, rgba(255, 255, 255, 0.06));
   border-radius: 10px;
   background: var(--loom-graph-canvas);
+  /* Lock down the entire canvas — nodes, labels, edge labels, controls */
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .loom-graph-shell .react-flow {
   background: var(--loom-graph-canvas);
+}
+
+/* Re-enable selection only inside the detail/preview modal content */
+.graph-response-preview-block,
+.graph-response-preview-question-content {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .graph-response-preview-backdrop {
@@ -8584,7 +8614,9 @@ kbd {
   background: var(--loom-graph-node-bg);
   color: var(--text-primary);
   box-shadow: 0 16px 36px rgba(0, 0, 0, 0.24);
-  overflow: hidden;
+  /* overflow must be visible so handles and the terminal-continue button
+     can render outside the node bounds */
+  overflow: visible;
 }
 
 .loom-graph-node.is-focused {
@@ -8903,6 +8935,7 @@ kbd {
 .loom-graph-handle {
   width: 8px;
   height: 8px;
+  border-radius: 50%;
   border-color: var(--loom-border-strong);
   background: color-mix(in srgb, var(--accent-fallback) 75%, transparent);
   pointer-events: none;
@@ -9075,6 +9108,7 @@ kbd {
     0 22px 54px rgba(0, 0, 0, 0.34),
     0 0 0 1px color-mix(in srgb, var(--accent-fallback) 22%, transparent);
   overflow: hidden;
+  -webkit-user-select: text;
   user-select: text;
 }
 
@@ -9097,6 +9131,7 @@ kbd {
   font-size: 13px;
   line-height: 1.5;
   cursor: text;
+  -webkit-user-select: text;
   user-select: text;
 }
 

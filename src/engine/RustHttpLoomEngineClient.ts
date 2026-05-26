@@ -2824,6 +2824,10 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     await this.requestJson<unknown>(endpoint, { method: "DELETE" });
   }
 
+  async hardReset(): Promise<void> {
+    await this.requestJson<unknown>("/hard-reset", { method: "POST" });
+  }
+
   async *sendMessage(input: SendMessageInput): AsyncIterable<EngineResponseEvent> {
     const controller = new AbortController();
     const abortFromInputSignal = () => controller.abort();

@@ -74,7 +74,9 @@ export interface GraphViewProps {
     response: ResponseItem,
     currentlyBookmarked?: boolean
   ) => void;
+  onBookmarkLoom?: (loomId: string, currentlyBookmarked: boolean) => void;
   onLinkResponse: (loomId: string, response: ResponseItem) => void;
+  onLinkLoom?: (loomId: string) => void;
   onWeftResponse: (loomId: string, response: ResponseItem) => void;
   renderContinuationComposer: (props: {
     loomId: string;
@@ -330,7 +332,9 @@ function GraphViewInner({
   onOpenLoom,
   onOpenResponse,
   onBookmarkResponse,
+  onBookmarkLoom,
   onLinkResponse,
+  onLinkLoom,
   onWeftResponse,
   renderContinuationComposer,
 }: GraphViewProps) {
@@ -874,11 +878,22 @@ function GraphViewInner({
     () => {
       const nodes: LoomGraphAnyNode[] = projection.nodes.map((projectionNode) => {
         const response = responseForGraphNode(projectionNode, responsesByConversation);
-        const isBookmarked =
-          bookmarkOverrideForResponse(response) ??
-          (Boolean(projectionNode.isBookmarked) ||
-          Boolean(response?.bookmarked) ||
-          responseIsBookmarkedBySet(response, projectionNode, bookmarkedResponseAddresses));
+        // Root (loom) nodes aren't tracked in bookmarkedResponseAddresses via the
+        // response-specific helper, so derive their bookmark state from the loom path.
+        const isBookmarked = projectionNode.kind === "root"
+          ? (() => {
+              const loom = conversations.find((c) => c.id === projectionNode.loomId);
+              if (!loom) return false;
+              return (
+                bookmarkedResponseAddresses.has(loom.path) ||
+                bookmarkedResponseAddresses.has(loom.id) ||
+                Boolean(loom.meta?.canonicalUri && bookmarkedResponseAddresses.has(loom.meta.canonicalUri))
+              );
+            })()
+          : bookmarkOverrideForResponse(response) ??
+            (Boolean(projectionNode.isBookmarked) ||
+            Boolean(response?.bookmarked) ||
+            responseIsBookmarkedBySet(response, projectionNode, bookmarkedResponseAddresses));
         const responsePairIds = responsePairIdsForGraphNode(response);
         const responseForkRecords = forkRecords.filter(
           (record) =>
@@ -943,12 +958,17 @@ function GraphViewInner({
             onBookmark: (node, nodeResponse) => {
               if (nodeResponse) {
                 onBookmarkResponse(node.loomId, nodeResponse, Boolean(node.isBookmarked));
+              } else if (node.kind === "root") {
+                onBookmarkLoom?.(node.loomId, Boolean(node.isBookmarked));
               }
             },
             onLink: (node, nodeResponse) => {
-              if (!nodeResponse) return;
-              openContinuationForResponse(node, nodeResponse);
-              onLinkResponse(node.loomId, nodeResponse);
+              if (nodeResponse) {
+                openContinuationForResponse(node, nodeResponse);
+                onLinkResponse(node.loomId, nodeResponse);
+              } else if (node.kind === "root") {
+                onLinkLoom?.(node.loomId);
+              }
             },
             onWeft: (node, nodeResponse) => {
               if (nodeResponse) onWeftResponse(node.loomId, nodeResponse);
@@ -1007,12 +1027,15 @@ function GraphViewInner({
     },
     [
       onBookmarkResponse,
+      onBookmarkLoom,
       onLinkResponse,
+      onLinkLoom,
       onOpenLoom,
       onOpenResponse,
       onWeftResponse,
       bookmarkedResponseAddresses,
       bookmarkOverrideForResponse,
+      conversations,
       displayForkRecord,
       forkRecords,
       projection.edges,

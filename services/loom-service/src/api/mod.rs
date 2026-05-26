@@ -18,6 +18,7 @@ mod ocr;
 mod ollama;
 mod orchestration;
 mod references;
+mod reset;
 pub(crate) mod resolve;
 mod responses;
 mod runtime_api;
@@ -91,6 +92,7 @@ pub fn router(
             post(model_runtime::cancel_download),
         )
         .route("/resolve", post(resolve::resolve))
+        .route("/hard-reset", post(reset::hard_reset))
         .route("/dev/seed-fixtures", post(dev::seed_fixtures))
         .route("/dev/e2e-proof/:loom_id", get(dev::e2e_proof))
         .route("/ask/quick", post(ask::quick))

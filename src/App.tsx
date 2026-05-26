@@ -2859,6 +2859,29 @@ function App() {
     ? ""
     : currentShareDestination.canonicalUri ?? currentShareDestination.path;
 
+  // The canonical bookmark-authority address: what the address bar actually shows.
+  // Derived from the navigation stack entry (what the user actually navigated to),
+  // NOT from activeObjectTitle / viewport scroll state.
+  // This ensures:
+  //   - Viewing loom://my-loom  → bookmarks the Loom, not the visible response
+  //   - Viewing loom://my-loom/r-abc (navigated directly) → bookmarks the Response
+  const currentAddressBarDestination = useMemo<LoomLink>(() => {
+    if (isNewConversationDraft) {
+      return {
+        id: EPHEMERAL_DRAFT_ID,
+        type: "recent",
+        title: "New conversation",
+        path: "loom://drafts/new-conversation",
+        badge: "Loom",
+      };
+    }
+    // Navigation stack entry preserves the exact type and path that was navigated to.
+    const stackEntry = navigationStack[navigationIndex];
+    if (stackEntry) return stackEntry;
+    // Fallback: conversation level (same as address bar display)
+    return currentShareDestination;
+  }, [isNewConversationDraft, navigationStack, navigationIndex, currentShareDestination]);
+
   const currentLoomExportTarget = useMemo(() => {
     if (!focusedSplitConversation) return null;
     return {
@@ -3404,12 +3427,24 @@ function App() {
       const responsesByLoom = conversationResponsesRef.current;
       const normalizeServiceBookmark = (bookmark: BookmarkItem): BookmarkItem => {
         if (bookmark.type !== "response") return bookmark;
+        // Extract the stable response UUID from the bookmark's URL path as a
+        // fallback match key. This handles bookmarks created when a response had
+        // no display code yet and the path fell back to "…/r/R-00000?id=<uuid>".
+        const urlResponseId =
+          responseIdFromReferenceAddress(bookmark.path) ??
+          responseIdFromReferenceAddress(bookmark.canonicalUri);
         for (const [loomId, responses] of Object.entries(responsesByLoom)) {
           const response = responses.find(
             (item) =>
               item.id === bookmark.targetObjectId ||
               item.serviceUserResponseId === bookmark.targetObjectId ||
               item.meta?.id === bookmark.targetObjectId ||
+              // URL-extracted ID covers the R-00000 fallback case
+              (urlResponseId && (
+                item.id === urlResponseId ||
+                item.serviceUserResponseId === urlResponseId ||
+                item.meta?.id === urlResponseId
+              )) ||
               item.address === bookmark.path ||
               item.address === bookmark.canonicalUri ||
               item.meta?.canonicalUri === bookmark.path ||
@@ -3420,9 +3455,15 @@ function App() {
             ...bookmark,
             path: response.address,
             canonicalUri: response.meta?.canonicalUri ?? bookmark.canonicalUri,
-            targetObjectId: bookmark.targetObjectId ?? response.id,
+            // Prefer the raw response UUID as both targetObjectId and sourceResponseId
+            // so future matching via bookmarkMatchesResponse fast-path always succeeds,
+            // and removeBookmark can clear the footer bookmark button reliably.
+            targetObjectId: response.id,
+            sourceResponseId: response.id,
             meta: response.meta ?? bookmark.meta,
-            referenceCode: response.meta?.code ?? bookmark.referenceCode,
+            // Always pull the display code from the live response — never from the
+            // stale service metadata that may carry R-00000.
+            referenceCode: response.meta?.displayCode ?? response.meta?.code ?? bookmark.referenceCode,
           };
         }
         return bookmark;
@@ -3451,6 +3492,56 @@ function App() {
     if (activePanel !== "bookmarks") return;
     void refreshServiceBookmarks();
   }, [activePanel, refreshServiceBookmarks]);
+
+  // Re-normalize response bookmarks in-place whenever conversationResponses is
+  // populated.  refreshServiceBookmarks runs on mount, but responses may not be
+  // loaded yet at that point.  This effect re-runs the same normalization logic
+  // locally (no network) so stale R-00000 paths are fixed once responses arrive.
+  useEffect(() => {
+    if (getConfiguredLoomEngineMode() !== "rust-service") return;
+    const responsesByLoom = conversationResponsesRef.current;
+    const hasAnyResponses = Object.values(responsesByLoom).some((r) => r.length > 0);
+    if (!hasAnyResponses) return;
+    setBookmarks((current) => {
+      const hasStale = current.some(
+        (bm) =>
+          bm.type === "response" &&
+          (!bm.referenceCode || bm.referenceCode === bm.meta?.code)
+      );
+      if (!hasStale) return current;
+      return current.map((bookmark) => {
+        if (bookmark.type !== "response") return bookmark;
+        const urlResponseId =
+          responseIdFromReferenceAddress(bookmark.path) ??
+          responseIdFromReferenceAddress(bookmark.canonicalUri);
+        for (const responses of Object.values(responsesByLoom)) {
+          const response = responses.find(
+            (item) =>
+              item.id === bookmark.targetObjectId ||
+              item.serviceUserResponseId === bookmark.targetObjectId ||
+              item.meta?.id === bookmark.targetObjectId ||
+              (urlResponseId && (
+                item.id === urlResponseId ||
+                item.serviceUserResponseId === urlResponseId
+              )) ||
+              item.address === bookmark.path ||
+              item.meta?.canonicalUri === bookmark.canonicalUri
+          );
+          if (!response) continue;
+          return {
+            ...bookmark,
+            path: response.address,
+            canonicalUri: response.meta?.canonicalUri ?? bookmark.canonicalUri,
+            targetObjectId: response.id,
+            meta: response.meta ?? bookmark.meta,
+            referenceCode: response.meta?.displayCode ?? response.meta?.code ?? bookmark.referenceCode,
+          };
+        }
+        return bookmark;
+      });
+    });
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationResponses]);
 
   useEffect(() => {
     if (getConfiguredLoomEngineMode() === "rust-service") return;
@@ -4621,6 +4712,10 @@ function App() {
   }
 
   function findBookmarkForDestination(destination: LoomLink): BookmarkItem | undefined {
+    // Type-level guard: "response" and "loom/conversation/weft" are distinct identities.
+    // A response bookmark must NEVER match a loom destination and vice versa.
+    const destinationIsResponse = destination.type === "response";
+
     const destinationResolution = resolveLoomAddress(destination.path, loomGraphRepository);
     const destinationObjectId =
       destinationResolution.status === "resolved"
@@ -4628,6 +4723,10 @@ function App() {
         : destination.targetObjectId;
     const destinationCandidates = linkIdentityCandidates(destination);
     return bookmarks.find((bookmark) => {
+      // Enforce type-level identity isolation: response ↔ non-response never cross-match.
+      const bookmarkIsResponse = bookmark.type === "response";
+      if (destinationIsResponse !== bookmarkIsResponse) return false;
+
       const bookmarkCandidates = bookmarkIdentityCandidates(bookmark);
       if (
         Array.from(bookmarkCandidates).some((candidate) =>
@@ -4755,8 +4854,15 @@ function App() {
         bookmark.targetObjectId,
         bookmark.sourceResponseId,
         bookmark.sourceCanonicalUri,
+        // Extract the stable ?id=responseId from URL-shaped paths so bookmarks
+        // created when a response had no display code (path = "…/r/R-00000?id=uuid")
+        // still match once the response receives its real display code.
+        responseIdFromReferenceAddress(bookmark.path),
+        responseIdFromReferenceAddress(bookmark.canonicalUri),
+        responseIdFromReferenceAddress(bookmark.sourceCanonicalUri),
         bookmark.meta?.id,
         bookmark.meta?.canonicalUri,
+        responseIdFromReferenceAddress(bookmark.meta?.canonicalUri),
       ].filter((value): value is string => Boolean(value))
     );
   }
@@ -4852,10 +4958,17 @@ function App() {
       loomId === draftConversation?.id
         ? draftConversation
         : conversations.find((item) => item.id === loomId) ?? activeConversation;
+    // Prefer activeObjectTitle for the focused loom: the conversations array title
+    // field may still be the raw service ID before the polished title is persisted.
+    const rawTitle = loom?.title ?? "Loom";
+    const title =
+      loom?.id === activeAddressableConversation?.id
+        ? addressBarObjectTitle || rawTitle
+        : rawTitle;
     return {
       id: loom?.id ?? loomId,
       type: getWeftOrigin(loomId) ? "loom" : "conversation",
-      title: loom?.title ?? "Loom",
+      title,
       path: loom?.path ?? `loom://unknown/${loomId}`,
       badge: getWeftOrigin(loomId) ? typeLabel.loom : typeLabel.conversation,
       canonicalUri: loom?.meta?.canonicalUri,
@@ -6053,14 +6166,22 @@ function App() {
   }
 
   async function resetAllData() {
-    const allConversations = [...conversations, ...archived];
-    for (const conversation of allConversations) {
-      try {
-        await loomEngineClient.deleteLoom({ loomId: conversation.id });
-      } catch {
-        // best-effort: continue even if one delete fails
-      }
+    // Hard delete: single service call that physically removes every user-data
+    // row in one transaction (looms, responses, bookmarks, history, memories,
+    // attachments, context summaries, search index, …).
+    try {
+      await loomEngineClient.hardReset();
+    } catch (error) {
+      showToast({
+        title: "Reset failed",
+        message: "The service could not complete the reset. Please try again.",
+        color: "red",
+      });
+      console.error("[resetAllData] hardReset failed:", error);
+      return;
     }
+
+    // Clear all in-memory client state
     setConversations([]);
     setArchived([]);
     setConversationResponses({});
@@ -6070,6 +6191,17 @@ function App() {
     setPinnedConversationIds([]);
     setNavigationStack([]);
     setNavigationIndex(0);
+    setResponseContextCapsules({});
+
+    // Clear persisted localStorage state
+    window.localStorage.removeItem(LAST_ACTIVE_LOOM_STORAGE_KEY);
+    window.localStorage.removeItem(COMPOSER_DRAFTS_STORAGE_KEY);
+
+    // Reset composer drafts in-memory ref to match cleared localStorage
+    const emptyDrafts: Record<string, ComposerDraft> = {};
+    composerDraftsRef.current = emptyDrafts;
+    setComposerDrafts(emptyDrafts);
+
     openNewConversationDraft();
     showToast({ title: "Reset complete", message: "All data has been deleted.", color: "neutral" });
   }
@@ -8573,6 +8705,16 @@ function App() {
         return false;
       }
     }
+    // For response bookmarks, persist the raw response UUID as sourceResponseId so
+    // removeBookmark can always resolve the matching response directly, regardless of
+    // whether targetObjectId ends up as the raw UUID or a runtime graph prefix.
+    if (promotedLink.type === "response" && promotedLink.sourceResponseId) {
+      bookmarkWithMetadata = {
+        ...bookmarkWithMetadata,
+        sourceResponseId:
+          bookmarkWithMetadata.sourceResponseId ?? promotedLink.sourceResponseId,
+      };
+    }
     const existingBookmark = bookmarks.find(
       (item) =>
         item.path === bookmarkWithMetadata.path ||
@@ -8655,6 +8797,36 @@ function App() {
       }
     }
     setBookmarks((current) => current.filter((item) => item.id !== bookmark.id));
+    // Clear response.bookmarked for any response that matched this bookmark so the
+    // footer bookmark button immediately reflects the unbookmarked state.
+    if (bookmark.type === "response") {
+      // Primary key: sourceResponseId is the raw UUID written at bookmark-creation time.
+      // Fallback chain: targetObjectId (raw UUID from rust-service), then ?id= extraction
+      // from URLs. Using direct UUID equality avoids relying on bookmarkMatchesResponse's
+      // candidate-set intersection, which can fail when targetObjectId is a runtime graph
+      // prefixed ID rather than the raw service UUID.
+      const responseId =
+        bookmark.sourceResponseId ??
+        bookmark.targetObjectId ??
+        responseIdFromReferenceAddress(bookmark.canonicalUri) ??
+        responseIdFromReferenceAddress(bookmark.path);
+      setConversationResponses((current) => {
+        const updated = { ...current };
+        for (const loomId of Object.keys(updated)) {
+          updated[loomId] = updated[loomId].map((response) => {
+            if (!response.bookmarked) return response;
+            const matches =
+              (responseId != null &&
+                (response.id === responseId ||
+                  response.serviceUserResponseId === responseId ||
+                  response.meta?.id === responseId)) ||
+              bookmarkMatchesResponse(bookmark, response);
+            return matches ? { ...response, bookmarked: false } : response;
+          });
+        }
+        return updated;
+      });
+    }
     return true;
   }
 
@@ -8676,6 +8848,19 @@ function App() {
 
   function bookmarkMatchesResponse(bookmark: BookmarkItem, response: ResponseItem) {
     if (bookmark.type !== "response") return false;
+    // Fast path: direct targetObjectId equality — the most stable identity signal.
+    // Uses raw response UUIDs; never display codes.
+    const tid = bookmark.targetObjectId;
+    if (tid) {
+      if (
+        tid === response.id ||
+        tid === response.serviceUserResponseId ||
+        tid === response.meta?.id
+      ) {
+        return true;
+      }
+    }
+    // Fallback: candidate-set overlap (covers address, URL ?id= param, meta.id, etc.)
     const bookmarkCandidates = bookmarkIdentityCandidates(bookmark);
     const responseCandidates = new Set([
       ...Array.from(responseBookmarkAddressCandidates(response)),
@@ -11881,7 +12066,7 @@ function App() {
         graphMode={graphMode}
         activePanel={activePanel}
         sidebarCollapsed={sidebarCollapsed}
-        currentBookmarked={isDestinationBookmarked(currentActiveDestination)}
+        currentBookmarked={isDestinationBookmarked(currentAddressBarDestination)}
         currentDestination={currentActiveDestination}
         canDragCurrentDestination={!isNewConversationDraft}
         onAddressFocus={focusAddressBar}
@@ -11905,11 +12090,26 @@ function App() {
         onForward={() => handleBackForward("forward")}
         onJumpTraversal={jumpNavigationTraversal}
         onBookmarkCurrent={() => {
-          const existing = findBookmarkForDestination(currentActiveDestination);
+          // Bookmark authority = canonical address bar address (navigation stack),
+          // NOT the scroll-position-driven currentActiveDestination.
+          // Title authority = addressBarObjectTitle, which resolves to activeObjectTitle
+          // for the focused loom. activeAddressableConversation.title may still hold the
+          // raw service ID (e.g. "c-1779797425749") before the AI-generated title is
+          // persisted back to the conversations array; addressBarObjectTitle always
+          // reflects the polished title the user actually sees in the address bar.
+          const dest = currentAddressBarDestination;
+          const isLoomDest = dest.type === "conversation" || dest.type === "loom";
+          const liveTitle =
+            isLoomDest && currentShareDestination.id === dest.id
+              ? addressBarObjectTitle || currentShareDestination.title || dest.title
+              : dest.title;
+          const enrichedDest: LoomLink =
+            liveTitle !== dest.title ? { ...dest, title: liveTitle } : dest;
+          const existing = findBookmarkForDestination(enrichedDest);
           if (existing) {
             void removeBookmark(existing);
           } else {
-            void bookmarkLoomLink(currentActiveDestination);
+            void bookmarkLoomLink(enrichedDest);
           }
         }}
         onCopyShareItem={copyShareItem}
@@ -12134,11 +12334,22 @@ function App() {
                       currentlyBookmarked ?? response.bookmarked
                     );
                   }}
+                  onBookmarkLoom={(loomId, currentlyBookmarked) => {
+                    void toggleSuggestedBookmark(loomLinkForId(loomId), currentlyBookmarked);
+                  }}
                   onLinkResponse={(loomId, response) => {
                     linkObjectForDraft(
                       responseLinkForNavigation(loomId, response),
                       loomId
                     );
+                    showToast({
+                      title: "Link added",
+                      message: "Added to the active composer.",
+                      icon: "copy",
+                    });
+                  }}
+                  onLinkLoom={(loomId) => {
+                    linkObjectForDraft(loomLinkForId(loomId), loomId);
                     showToast({
                       title: "Link added",
                       message: "Added to the active composer.",
@@ -13018,7 +13229,7 @@ function Sidebar({
         <div className="brand-mark">L</div>
         <div>
           <div className="brand-name">Loom AI</div>
-          <div className="brand-caption">Conversation Browser</div>
+          <div className="brand-caption">Your Personal AI Web</div>
         </div>
       </div>
 
@@ -13893,16 +14104,24 @@ function TopBrowserBar({
       </div>
 
       <AddressBar addressBarRef={addressBarRef} focused={addressFocused}>
-        <Tooltip label={currentBookmarked ? "Bookmarked" : "Bookmark"}>
-          <button
-            className={currentBookmarked ? "icon-button address-bookmark-button active" : "icon-button address-bookmark-button"}
-            onClick={onBookmarkCurrent}
-            aria-label={currentBookmarked ? "Loom address bookmarked" : "Bookmark current Loom address"}
-            title={currentBookmarked ? "Loom address bookmarked" : "Bookmark current Loom address"}
-          >
-            <Bookmark size={15} />
-          </button>
-        </Tooltip>
+        {(() => {
+          const isResponseDest = currentDestination.type === "response";
+          const bookmarkLabel = currentBookmarked
+            ? isResponseDest ? "Response bookmarked" : "Address bookmarked"
+            : isResponseDest ? "Bookmark Response" : "Bookmark Address";
+          return (
+            <Tooltip label={bookmarkLabel}>
+              <button
+                className={currentBookmarked ? "icon-button address-bookmark-button active" : "icon-button address-bookmark-button"}
+                onClick={onBookmarkCurrent}
+                aria-label={bookmarkLabel}
+                title={bookmarkLabel}
+              >
+                <Bookmark size={15} />
+              </button>
+            </Tooltip>
+          );
+        })()}
         <div className="address-shell">
           <span
             className={
@@ -15824,7 +16043,7 @@ function ChatTranscript({
                     <Copy size={13} />
                   </button>
                 </Tooltip>
-                <Tooltip label="Bookmark" placement="bottom-right">
+                <Tooltip label={isBookmarkedResponse ? "Response bookmarked" : "Bookmark Response"} placement="bottom-right">
                   <button
                     className={isBookmarkedResponse ? "link-chip response-bookmark-chip bookmarked" : "link-chip response-bookmark-chip"}
                     onClick={() =>
@@ -15834,7 +16053,7 @@ function ChatTranscript({
                       )
                     }
                     aria-pressed={isBookmarkedResponse}
-                    aria-label={isBookmarkedResponse ? `Remove bookmark for ${displayResponseTitle}` : `Bookmark suggested ${displayResponseTitle}`}
+                    aria-label={isBookmarkedResponse ? `Remove response bookmark for ${displayResponseTitle}` : `Bookmark response: ${displayResponseTitle}`}
                   >
                     <Bookmark size={13} fill={isBookmarkedResponse ? "currentColor" : "none"} />
                   </button>
@@ -20961,7 +21180,10 @@ function DestinationRow<T extends LoomLink>({
   ]
     .filter(Boolean)
     .join(" ");
-  const destinationCode = referenceCodeForLink(destination);
+  const destinationCode = formatBadgeCode({
+    code: referenceCodeForLink(destination),
+    displayCode: destination.meta?.displayCode,
+  });
   const metaRowClassName = [
     "bookmark-meta-row",
     showBadge ? "" : "no-label",
