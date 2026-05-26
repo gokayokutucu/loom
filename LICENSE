@@ -1,0 +1,43 @@
+Business Source License 1.1
+
+Copyright (c) 2026 Gokay Okutucu.
+All rights reserved.
+
+Licensed Work:
+Loom — Your Personal AI Web
+
+Additional Use Grant:
+You may:
+
+- view the source code
+- modify the source code
+- use Loom personally
+- use Loom internally within your organization
+
+You may NOT, without explicit written permission from the copyright holder:
+
+- offer Loom as a hosted or managed commercial service
+- resell Loom
+- sublicense Loom
+- create a competing commercial product or platform derived from Loom
+- commercially distribute modified versions of Loom
+- use Loom or derivative works as the basis of a commercial AI conversation platform, hosted AI workspace, or competing knowledge runtime
+
+This license applies to:
+- source code
+- runtime behavior
+- retrieval architecture
+- graph/navigation model
+- Weft lineage model
+- provenance/replay systems
+- associated product behavior and workflows
+
+Change Date:
+2029-01-01
+
+On the Change Date, this license converts to the Apache License 2.0 unless otherwise specified by the copyright holder.
+
+Disclaimer:
+THE SOFTWARE IS PROVIDED “AS IS”, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.
+
+This repository is source-available, not open source.

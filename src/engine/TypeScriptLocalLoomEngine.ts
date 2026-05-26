@@ -234,6 +234,10 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
     throw notImplemented("deleteLoom");
   }
 
+  async hardReset(): Promise<void> {
+    // No-op in mock/local mode — state is reset by the caller directly.
+  }
+
   sendMessage(_input: SendMessageInput): AsyncIterable<EngineResponseEvent> {
     if (this.dependencies.sendMessage) {
       return this.dependencies.sendMessage(_input);

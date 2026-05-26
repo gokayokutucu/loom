@@ -1,0 +1,104 @@
+# loom-service configuration
+# Non-secret runtime settings only.
+# Do not store API keys, tokens, credentials, or private secrets here.
+# Raw model thinking/internal monologue must never be persisted or exported.
+
+[service]
+host = "127.0.0.1"
+port = 17633
+logLevel = "info,sqlx=warn"
+localOnly = true
+
+[database]
+path = "services/loom-service/.data/loom.db"
+
+[ollama]
+baseUrl = "http://127.0.0.1:11434"
+requestTimeoutMs = 300000
+firstChunkTimeoutMs = 30000
+streamIdleTimeoutMs = 60000
+
+[providers]
+defaultMainModel = "qwen3.5:9b"
+defaultQuickModel = "llama3.2:latest"
+responseModeDefault = "auto"
+
+[[providers.profiles]]
+id = "ollama-local"
+providerKind = "ollama"
+displayName = "Ollama Local"
+enabled = true
+baseUrl = "http://127.0.0.1:11434"
+defaultModel = "qwen3.5:9b"
+requiresSecret = false
+modelDiscoveryEnabled = true
+modelDiscoveryEndpointPath = "/api/tags"
+modelDiscoveryRefreshIntervalSeconds = 300
+temperature = 0.2
+think = false
+stream = true
+localOnlyRequired = true
+allowRemoteEndpoint = false
+allowInsecureHttpRemote = false
+allowUnsafeModelManagement = false
+supportsStreaming = true
+supportsCancellation = true
+supportsModelListing = true
+supportsThinking = true
+supportsSystemPrompt = true
+supportsJsonMode = false
+
+[speech]
+enabled = false
+defaultProviderKind = "disabled"
+allowCloudStt = false
+persistAudio = false
+persistTranscript = false
+maxAudioBytes = 10485760
+allowedMimeTypes = ["audio/webm", "audio/wav", "audio/wave", "audio/x-wav", "audio/mpeg", "audio/mp4", "audio/ogg"]
+localCommandArgs = ["{audio_file}"]
+localCommandTimeoutMs = 120000
+warnings = ["speech_to_text_ui_deferred"]
+
+[ocr]
+enabled = false
+provider = "tesseract"
+language = "eng"
+dpi = 200
+timeoutSeconds = 60
+maxPagesPerFile = 20
+maxImagePixels = 24000000
+
+[memory]
+enabled = true
+referenceRecentLooms = true
+referenceSavedMemories = false
+nickname = ""
+occupation = ""
+stylePreferences = ""
+moreAboutYou = ""
+
+[context]
+maxContextLength = 8192
+defaultNumCtxSmall = 2048
+defaultNumCtxMedium = 4096
+defaultNumCtxLarge = 8192
+maxRecentCandidateResponses = 24
+
+[runtime]
+eventHeartbeatMs = 15000
+maxActiveGenerations = 2
+
+[features]
+enableOllama = true
+enableExports = true
+enableExtensions = false
+enableMcp = false
+enableLlmArtifactRefinement = false
+
+[security]
+enforceLocalOllama = true
+allowRemoteOllama = false
+allowUnsafeOllamaModelManagement = false
+minimumRecommendedOllamaVersion = "0.17.1"
+warnOnWindowsOllamaUpdaterRisk = true

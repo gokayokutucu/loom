@@ -101,6 +101,7 @@ export interface LoomEngineClient {
   archiveLoom(input: ArchiveLoomInput): Promise<CreateLoomResult>;
   restoreLoom(input: RestoreLoomInput): Promise<CreateLoomResult>;
   deleteLoom(input: DeleteLoomInput): Promise<void>;
+  hardReset(): Promise<void>;
   sendMessage(input: SendMessageInput): AsyncIterable<EngineResponseEvent>;
   createAttachment(input: CreateAttachmentInput): Promise<CreateAttachmentResult>;
   listAttachments(input: ListAttachmentsInput): Promise<ListAttachmentsResult>;
