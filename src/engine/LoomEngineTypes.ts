@@ -503,6 +503,8 @@ export interface DeleteAttachmentInput {
 
 export interface MaterializeAttachmentInput {
   attachmentId: string;
+  /** Loom that owns the attachment. Verified server-side before bytes are returned. */
+  loomId: string;
 }
 
 export interface MaterializeAttachmentResult {

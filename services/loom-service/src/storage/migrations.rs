@@ -242,7 +242,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn migration_0020_creates_response_attachment_references_table() {
+    async fn migration_0020_response_attachment_references_table_does_not_exist() {
+        // Migration 0020 was voided: the table was descoped because attachment
+        // references are already persisted via metadata_json.references on the
+        // user response row. The migration SQL now issues a DROP TABLE IF EXISTS
+        // to clean up any DB that ran the original DDL.
         let database = test_database().await;
         let count = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'response_attachment_references'",
@@ -250,7 +254,10 @@ mod tests {
         .fetch_one(database.pool())
         .await
         .expect("table query should work");
-        assert_eq!(count, 1);
+        assert_eq!(
+            count, 0,
+            "response_attachment_references table must not exist after migration 0020"
+        );
     }
 
     #[tokio::test]

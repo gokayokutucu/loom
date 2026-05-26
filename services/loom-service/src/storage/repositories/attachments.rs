@@ -298,10 +298,16 @@ impl AttachmentRepository {
     }
 
     /// Returns the raw blob bytes and file name for an attachment.
-    /// Used by the materialize endpoint to write a temp file for OS open.
+    /// Verifies that the attachment belongs to `loom_id` before returning bytes —
+    /// if the attachment exists but belongs to a different loom, `None` is returned
+    /// (same as "not found") to prevent cross-loom data access.
+    ///
+    /// Returns a controlled `ServiceError` (not a panic) when the blob bytes are
+    /// NULL in both blob tables, which can happen due to data inconsistency.
     pub async fn get_attachment_blob(
         &self,
         attachment_id: &str,
+        loom_id: &str,
     ) -> Result<Option<(String, Vec<u8>)>, ServiceError> {
         let row = sqlx::query(
             "SELECT a.file_name,
@@ -309,20 +315,30 @@ impl AttachmentRepository {
              FROM attachments a
              LEFT JOIN attachment_blob_objects o ON o.blob_id = a.blob_id
              LEFT JOIN attachment_blobs b ON b.attachment_id = a.attachment_id
-             WHERE a.attachment_id = ?1",
+             WHERE a.attachment_id = ?1 AND a.loom_id = ?2",
         )
         .bind(attachment_id)
+        .bind(loom_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(|error| {
             ServiceError::storage(format!("failed to get Attachment blob: {error}"))
         })?;
 
-        Ok(row.map(|row| {
-            let file_name: String = row.get("file_name");
-            let bytes: Vec<u8> = row.get("bytes");
-            (file_name, bytes)
-        }))
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let file_name: String = row.get("file_name");
+        // Decode as Option to avoid a panic when COALESCE returns NULL (both
+        // blob tables have no matching row, e.g. data inconsistency).
+        let bytes: Option<Vec<u8>> = row.get("bytes");
+        match bytes {
+            Some(bytes) => Ok(Some((file_name, bytes))),
+            None => Err(ServiceError::storage(
+                "attachment blob data is missing — the file content could not be retrieved",
+            )),
+        }
     }
 
     pub async fn delete_attachment(&self, attachment_id: &str) -> Result<bool, ServiceError> {
@@ -411,7 +427,12 @@ impl AttachmentRepository {
         let mime_type: Option<String> = row.get("mime_type");
         let extension: Option<String> = row.get("extension");
         let sha256: Option<String> = row.get("sha256");
-        let bytes: Vec<u8> = row.get("bytes");
+        // Decode as Option to avoid panicking when COALESCE returns NULL
+        // (both blob tables have no matching row, e.g. data inconsistency).
+        let bytes: Option<Vec<u8>> = row.get("bytes");
+        let Some(bytes) = bytes else {
+            return Ok(None);
+        };
         let sha256 = sha256.unwrap_or_else(|| sha256_hex(&bytes));
         sqlx::query(
             "UPDATE attachments SET sha256 = ?2 WHERE attachment_id = ?1 AND sha256 IS NULL",

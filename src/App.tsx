@@ -7066,30 +7066,49 @@ function App() {
   }
 
   async function openSentAttachment(link: LoomLink): Promise<void> {
-    const attachmentId = link.targetObjectId ?? link.path;
-    if (!attachmentId || !attachmentId.startsWith("att-")) return;
+    // Resolve the attachment ID — must be a service-persisted "att-" ID.
+    const attachmentId = link.targetObjectId?.startsWith("att-")
+      ? link.targetObjectId
+      : undefined;
+    if (!attachmentId) {
+      showToast({
+        title: "Cannot open file",
+        message: "This attachment cannot be opened — the file reference is incomplete.",
+      });
+      return;
+    }
+
+    // Resolve the loom that owns this attachment.
+    // Primary: parse from path ("loom://{loomId}/attachments/{attachmentId}").
+    // Fallback: sourceLoomId if available.
+    const loomIdMatch = link.path ? /^loom:\/\/([^/]+)\/attachments\//.exec(link.path) : null;
+    const loomId = (loomIdMatch?.[1] ?? link.sourceLoomId) as string | undefined;
+    if (!loomId) {
+      showToast({
+        title: "Cannot open file",
+        message: "This attachment cannot be opened — the loom context is missing.",
+      });
+      return;
+    }
+
+    const electronBridge = getElectronAttachmentsBridge();
+    if (!electronBridge) {
+      // Running in browser / dev mode — file:// navigation is blocked by browsers.
+      showToast({
+        title: "Opening files requires the desktop app",
+        message: "Attachment files can only be opened in the Loom desktop application.",
+      });
+      return;
+    }
+
     try {
-      const result = await loomEngineClient.materializeAttachment({ attachmentId });
-      const electronBridge = getElectronAttachmentsBridge();
-      if (electronBridge) {
-        const openResult = await electronBridge.openPath(result.path);
-        if (!openResult.opened) {
-          showToast({
-            title: "Cannot open file",
-            message: openResult.error ?? "The file could not be opened.",
-          });
-        }
-      } else {
-        // Browser / dev mode: download the blob directly from the service.
-        const serviceUrl = getElectronLoomServiceUrl() ?? "http://127.0.0.1:17633";
-        const url = `${serviceUrl}/attachments/${encodeURIComponent(attachmentId)}/materialize`;
-        const response = await fetch(url, { method: "POST" });
-        if (!response.ok) throw new Error("Materialize request failed");
-        const json = await response.json() as { path: string; fileName: string };
-        const a = document.createElement("a");
-        a.href = `file://${json.path}`;
-        a.download = json.fileName;
-        a.click();
+      const result = await loomEngineClient.materializeAttachment({ attachmentId, loomId });
+      const openResult = await electronBridge.openPath(result.path);
+      if (!openResult.opened) {
+        showToast({
+          title: "Cannot open file",
+          message: openResult.error ?? "The file could not be opened.",
+        });
       }
     } catch (error) {
       showToast({
