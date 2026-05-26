@@ -501,6 +501,16 @@ export interface DeleteAttachmentInput {
   attachmentId: string;
 }
 
+export interface MaterializeAttachmentInput {
+  attachmentId: string;
+}
+
+export interface MaterializeAttachmentResult {
+  /** Absolute OS temp-file path for the materialized attachment blob. */
+  path: string;
+  fileName: string;
+}
+
 export interface RegenerateFromResponseInput {
   loomId: string;
   userResponseId: string;

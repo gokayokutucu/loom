@@ -74,6 +74,9 @@ interface LoomDesktopBridge {
       params: AddressBarContextMenuParams
     ) => Promise<AddressBarContextMenuResult>;
   };
+  attachments?: {
+    openPath: (tempPath: string) => Promise<{ opened: boolean; error?: string }>;
+  };
 }
 
 declare global {
@@ -117,6 +120,11 @@ export function getElectronPermissionsBridge() {
 export function getElectronAddressBarBridge() {
   if (typeof window === "undefined") return null;
   return window.loomDesktop?.addressBar ?? null;
+}
+
+export function getElectronAttachmentsBridge() {
+  if (typeof window === "undefined") return null;
+  return window.loomDesktop?.attachments ?? null;
 }
 
 export function logElectronEvent(

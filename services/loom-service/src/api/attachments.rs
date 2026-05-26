@@ -12,6 +12,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -151,6 +152,80 @@ pub async fn get_attachment(
     Ok(Json(AttachmentEnvelope {
         attachment: attachment_to_dto(record),
     }))
+}
+
+/// Writes the attachment blob to an OS temp file and returns the path.
+/// Filename is sanitized to prevent directory traversal.
+pub async fn materialize_attachment(
+    State(state): State<AppState>,
+    Path(attachment_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<AttachmentApiError>)> {
+    let repo = AttachmentRepository::new(&state.database);
+    let (file_name, bytes) = repo
+        .get_attachment_blob(&attachment_id)
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(not_found)?;
+
+    let safe_name = sanitize_file_name(&file_name);
+    let temp_path = write_to_temp_file(&safe_name, &bytes).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AttachmentApiError {
+                code: "MATERIALIZE_FAILED".to_string(),
+                message: error,
+            }),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "path": temp_path.display().to_string(),
+        "fileName": safe_name,
+    })))
+}
+
+/// Sanitizes a filename for safe use in the OS temp directory.
+/// Strips directory separators and limits length, preserving extension.
+fn sanitize_file_name(name: &str) -> String {
+    // Strip any directory components.
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .trim()
+        .to_string();
+    // Reject or replace dangerous characters; allow alphanumerics, dash, underscore, dot.
+    let safe: String = base
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // Limit to 128 chars total while preserving extension.
+    const MAX_LEN: usize = 128;
+    if safe.len() <= MAX_LEN {
+        if safe.is_empty() {
+            "attachment".to_string()
+        } else {
+            safe
+        }
+    } else {
+        let ext = safe.rfind('.').map(|i| &safe[i..]).unwrap_or("");
+        let stem_limit = MAX_LEN - ext.len();
+        format!("{}{}", &safe[..stem_limit], ext)
+    }
+}
+
+fn write_to_temp_file(safe_name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
+    let dir = std::env::temp_dir().join("loom-attachments");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create temp directory: {e}"))?;
+    let path = dir.join(safe_name);
+    std::fs::write(&path, bytes).map_err(|e| format!("failed to write temp file: {e}"))?;
+    Ok(path)
 }
 
 pub async fn delete_attachment(

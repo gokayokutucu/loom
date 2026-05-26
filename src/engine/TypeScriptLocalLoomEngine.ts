@@ -31,6 +31,8 @@ import type {
   GetUiStateResult,
   DeleteBookmarkInput,
   DeleteAttachmentInput,
+  MaterializeAttachmentInput,
+  MaterializeAttachmentResult,
   DeleteLoomInput,
   GetBookmarkForTargetInput,
   GetBookmarkInput,
@@ -288,6 +290,10 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
     if (this.dependencies.deleteAttachment) {
       return this.dependencies.deleteAttachment(input);
     }
+  }
+
+  async materializeAttachment(_input: MaterializeAttachmentInput): Promise<MaterializeAttachmentResult> {
+    throw notImplemented("materializeAttachment");
   }
 
   regenerateFromResponse(input: RegenerateFromResponseInput): AsyncIterable<EngineResponseEvent> {

@@ -18,6 +18,8 @@ import type {
   CreateOrOpenWeftResult,
   DeleteLoomInput,
   DeleteAttachmentInput,
+  MaterializeAttachmentInput,
+  MaterializeAttachmentResult,
   EngineHealth,
   EngineResponseEvent,
   ExportLoomInput,
@@ -1598,12 +1600,44 @@ function serviceResponseMode(mode: SendMessageInput["responseMode"]) {
   return mode;
 }
 
+function attachmentReferencesForService(
+  attachments: JsonValue[] | undefined
+): Array<ReturnType<typeof mapReferenceForService>> {
+  if (!attachments || attachments.length === 0) return [];
+  const result: Array<ReturnType<typeof mapReferenceForService>> = [];
+  for (const attachment of attachments) {
+    if (!isRecord(attachment)) continue;
+    const id = stringValue(attachment, "id");
+    // Only include attachments that have been persisted to the service.
+    // Service-generated IDs start with "att-"; local pending keys are
+    // "name:size:lastModified" and are excluded.
+    if (!id || !id.startsWith("att-")) continue;
+    const name = stringValue(attachment, "name") ?? id;
+    result.push({
+      referenceId: id,
+      label: name,
+      selectedTextPreview: undefined,
+      targetKind: "attachment" as const,
+      targetId: id,
+      sourceResponseCode: undefined,
+      sourceTitle: name,
+    });
+  }
+  return result;
+}
+
 function executePayload(input: SendMessageInput) {
+  const attachmentRefs = attachmentReferencesForService(
+    Array.isArray(input.attachments) ? (input.attachments as JsonValue[]) : undefined
+  );
   return {
     loomId: input.loomId,
     responseId: input.focusedResponseId,
     prompt: input.promptText,
-    references: input.references.map(mapReferenceForService),
+    references: [
+      ...input.references.map(mapReferenceForService),
+      ...attachmentRefs,
+    ],
     responseMode: serviceResponseMode(input.responseMode),
     model: input.model ?? "qwen3:latest",
     options: input.options
@@ -3340,6 +3374,17 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
   async deleteAttachment(input: DeleteAttachmentInput): Promise<void> {
     const endpoint = `/attachments/${encodeURIComponent(input.attachmentId)}`;
     await this.requestJson<unknown>(endpoint, { method: "DELETE" });
+  }
+
+  async materializeAttachment(input: MaterializeAttachmentInput): Promise<MaterializeAttachmentResult> {
+    const endpoint = `/attachments/${encodeURIComponent(input.attachmentId)}/materialize`;
+    const response = await this.requestJson<{ path: string; fileName: string }>(endpoint, {
+      method: "POST",
+    });
+    if (!response || typeof response.path !== "string" || typeof response.fileName !== "string") {
+      throw new Error("Unexpected materialize response from service");
+    }
+    return { path: response.path, fileName: response.fileName };
   }
 
   async removeReference(input: RemoveReferenceInput): Promise<void> {

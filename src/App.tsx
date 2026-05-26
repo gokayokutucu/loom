@@ -169,6 +169,8 @@ import {
 } from "./services/codeSnippetDisplay";
 import {
   getElectronAddressBarBridge,
+  getElectronAttachmentsBridge,
+  getElectronLoomServiceUrl,
   getElectronPermissionsBridge,
   getElectronRuntimeInfo,
   getElectronWindowControls,
@@ -7063,6 +7065,40 @@ function App() {
     return resolution.reason ?? "This Reference target cannot be opened.";
   }
 
+  async function openSentAttachment(link: LoomLink): Promise<void> {
+    const attachmentId = link.targetObjectId ?? link.path;
+    if (!attachmentId || !attachmentId.startsWith("att-")) return;
+    try {
+      const result = await loomEngineClient.materializeAttachment({ attachmentId });
+      const electronBridge = getElectronAttachmentsBridge();
+      if (electronBridge) {
+        const openResult = await electronBridge.openPath(result.path);
+        if (!openResult.opened) {
+          showToast({
+            title: "Cannot open file",
+            message: openResult.error ?? "The file could not be opened.",
+          });
+        }
+      } else {
+        // Browser / dev mode: download the blob directly from the service.
+        const serviceUrl = getElectronLoomServiceUrl() ?? "http://127.0.0.1:17633";
+        const url = `${serviceUrl}/attachments/${encodeURIComponent(attachmentId)}/materialize`;
+        const response = await fetch(url, { method: "POST" });
+        if (!response.ok) throw new Error("Materialize request failed");
+        const json = await response.json() as { path: string; fileName: string };
+        const a = document.createElement("a");
+        a.href = `file://${json.path}`;
+        a.download = json.fileName;
+        a.click();
+      }
+    } catch (error) {
+      showToast({
+        title: "Cannot open file",
+        message: error instanceof Error ? error.message : "Unknown error.",
+      });
+    }
+  }
+
   function nextGroupName(groups: TabGroup[]) {
     let index = 1;
     while (
@@ -12492,6 +12528,7 @@ function App() {
                             onCopyCode={copyCodeBlockWithToast}
                             onAddCodeReference={addCodeBlockAsReference}
                             onOpenReference={openComposerReference}
+                            onOpenAttachment={(link) => void openSentAttachment(link)}
                             onReturnToOrigin={returnToOrigin}
                             highlightedResponseId={recentResponseFeedbackId}
                             onTranscriptScroll={(event) => {
@@ -12581,6 +12618,7 @@ function App() {
                             onCopyCode={copyCodeBlockWithToast}
                             onAddCodeReference={addCodeBlockAsReference}
                             onOpenReference={openComposerReference}
+                            onOpenAttachment={(link) => void openSentAttachment(link)}
                             onReturnToOrigin={returnToOrigin}
                             highlightedResponseId={recentResponseFeedbackId}
                             onTranscriptScroll={(event) => {
@@ -12710,6 +12748,7 @@ function App() {
                     onCopyCode={copyCodeBlockWithToast}
                     onAddCodeReference={addCodeBlockAsReference}
                     onOpenReference={openComposerReference}
+                    onOpenAttachment={(link) => void openSentAttachment(link)}
                     onReturnToOrigin={activeWeftOrigin ? returnToOrigin : undefined}
                     highlightedResponseId={recentResponseFeedbackId}
                     onTranscriptScroll={handleTranscriptScroll}
@@ -15243,6 +15282,43 @@ function CornerDownRightIcon() {
   );
 }
 
+function SentAttachmentChips({
+  attachmentLinks,
+  onOpenAttachment,
+}: {
+  attachmentLinks: LoomLink[];
+  onOpenAttachment?: (link: LoomLink) => void;
+}) {
+  if (attachmentLinks.length === 0) return null;
+  return (
+    <div className="sent-attachment-chips" aria-label="Sent attachments">
+      {attachmentLinks.map((link) => (
+        <button
+          key={referenceIdentityKey(link)}
+          type="button"
+          className="sent-attachment-chip"
+          title={link.title}
+          aria-label={`Open attachment: ${link.title}`}
+          onClick={() => onOpenAttachment?.(link)}
+        >
+          <Paperclip size={12} aria-hidden="true" />
+          <span className="sent-attachment-chip-name">{truncateFilename(link.title, 32)}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function truncateFilename(name: string, maxLen: number): string {
+  if (name.length <= maxLen) return name;
+  const dotIdx = name.lastIndexOf(".");
+  const ext = dotIdx > 0 ? name.slice(dotIdx) : "";
+  const stem = dotIdx > 0 ? name.slice(0, dotIdx) : name;
+  const keepStem = maxLen - ext.length - 1;
+  if (keepStem <= 0) return name.slice(0, maxLen) + "…";
+  return stem.slice(0, keepStem) + "…" + ext;
+}
+
 function isScrollContainerNearBottom(transcript: HTMLElement, threshold = 96) {
   return transcript.scrollHeight - transcript.scrollTop - transcript.clientHeight <= threshold;
 }
@@ -15340,6 +15416,7 @@ function ChatTranscript({
   onCopyCode,
   onAddCodeReference,
   onOpenReference,
+  onOpenAttachment,
   onReturnToOrigin,
   highlightedResponseId,
   onTranscriptScroll,
@@ -15390,6 +15467,7 @@ function ChatTranscript({
     codeBlock: ResponseCodeBlock
   ) => Promise<boolean>;
   onOpenReference: (link: LoomLink) => string | null;
+  onOpenAttachment?: (link: LoomLink) => void;
   onReturnToOrigin?: (options?: { keepPromptRevisionSelection?: boolean }) => void;
   highlightedResponseId?: string | null;
   onTranscriptScroll?: (event: React.UIEvent<HTMLElement>) => void;
@@ -15619,6 +15697,9 @@ function ChatTranscript({
         };
         const { attached: attachedPromptReferences, inline: inlinePromptReferences } =
           splitPromptReferences(displayResponse.questionReferences);
+        const sentAttachmentLinks = (displayResponse.questionReferences ?? []).filter(
+          isAttachmentReferenceLink
+        );
         const cleanPromptText = stripAttachedReferenceTokens(
           displayResponse.question,
           attachedPromptReferences
@@ -15790,6 +15871,10 @@ function ChatTranscript({
               data-prompt-response-id={displayResponse.id}
             >
               <div className="user-message">
+                <SentAttachmentChips
+                  attachmentLinks={sentAttachmentLinks}
+                  onOpenAttachment={onOpenAttachment}
+                />
                 <AttachedPromptReferences
                   references={attachedPromptReferences}
                   onOpenReference={onOpenReference}

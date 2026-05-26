@@ -297,6 +297,34 @@ impl AttachmentRepository {
         .map_err(|error| ServiceError::storage(format!("failed to get Attachment: {error}")))
     }
 
+    /// Returns the raw blob bytes and file name for an attachment.
+    /// Used by the materialize endpoint to write a temp file for OS open.
+    pub async fn get_attachment_blob(
+        &self,
+        attachment_id: &str,
+    ) -> Result<Option<(String, Vec<u8>)>, ServiceError> {
+        let row = sqlx::query(
+            "SELECT a.file_name,
+                    COALESCE(o.bytes, b.bytes) AS bytes
+             FROM attachments a
+             LEFT JOIN attachment_blob_objects o ON o.blob_id = a.blob_id
+             LEFT JOIN attachment_blobs b ON b.attachment_id = a.attachment_id
+             WHERE a.attachment_id = ?1",
+        )
+        .bind(attachment_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to get Attachment blob: {error}"))
+        })?;
+
+        Ok(row.map(|row| {
+            let file_name: String = row.get("file_name");
+            let bytes: Vec<u8> = row.get("bytes");
+            (file_name, bytes)
+        }))
+    }
+
     pub async fn delete_attachment(&self, attachment_id: &str) -> Result<bool, ServiceError> {
         let result = sqlx::query("DELETE FROM attachments WHERE attachment_id = ?1")
             .bind(attachment_id)

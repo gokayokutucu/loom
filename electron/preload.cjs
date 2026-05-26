@@ -41,4 +41,7 @@ contextBridge.exposeInMainWorld("loomDesktop", {
     showContextMenu: (params) =>
       ipcRenderer.invoke("loom:address-bar-context-menu", params),
   },
+  attachments: {
+    openPath: (tempPath) => ipcRenderer.invoke("loom:open-attachment-path", tempPath),
+  },
 });

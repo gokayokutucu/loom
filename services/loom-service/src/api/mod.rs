@@ -161,6 +161,10 @@ pub fn router(
             "/attachments/:attachment_id",
             get(attachments::get_attachment).delete(attachments::delete_attachment),
         )
+        .route(
+            "/attachments/:attachment_id/materialize",
+            post(attachments::materialize_attachment),
+        )
         .route("/code-snippets", get(code_snippets::list_code_snippets))
         .route("/wefts", post(wefts::create_weft))
         .route("/looms", get(looms::list_looms).post(looms::create_loom))
