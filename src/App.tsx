@@ -7065,7 +7065,7 @@ function App() {
     return resolution.reason ?? "This Reference target cannot be opened.";
   }
 
-  async function openSentAttachment(link: LoomLink): Promise<void> {
+  async function openSentAttachment(link: LoomLink, contextLoomId?: string): Promise<void> {
     // Resolve the attachment ID — must be a service-persisted "att-" ID.
     const attachmentId = link.targetObjectId?.startsWith("att-")
       ? link.targetObjectId
@@ -7079,10 +7079,15 @@ function App() {
     }
 
     // Resolve the loom that owns this attachment.
-    // Primary: parse from path ("loom://{loomId}/attachments/{attachmentId}").
-    // Fallback: sourceLoomId if available.
+    // Priority order:
+    //   1. Parse from link.path  ("loom://{loomId}/attachments/{attachmentId}") — present on
+    //      initial render; built by attachmentToLoomLink.
+    //   2. link.sourceLoomId — may be set by some code paths.
+    //   3. contextLoomId — the conversation that rendered this chip (passed by the caller).
+    //      On reload, loomLinkFromPlannerReference sets path = "att-xxx" (no loom prefix),
+    //      so the regex fails; the calling ChatTranscript passes its conversation.id here.
     const loomIdMatch = link.path ? /^loom:\/\/([^/]+)\/attachments\//.exec(link.path) : null;
-    const loomId = (loomIdMatch?.[1] ?? link.sourceLoomId) as string | undefined;
+    const loomId = loomIdMatch?.[1] ?? link.sourceLoomId ?? contextLoomId;
     if (!loomId) {
       showToast({
         title: "Cannot open file",
@@ -12547,7 +12552,7 @@ function App() {
                             onCopyCode={copyCodeBlockWithToast}
                             onAddCodeReference={addCodeBlockAsReference}
                             onOpenReference={openComposerReference}
-                            onOpenAttachment={(link) => void openSentAttachment(link)}
+                            onOpenAttachment={(link) => void openSentAttachment(link, originConversation?.id)}
                             onReturnToOrigin={returnToOrigin}
                             highlightedResponseId={recentResponseFeedbackId}
                             onTranscriptScroll={(event) => {
@@ -12637,7 +12642,7 @@ function App() {
                             onCopyCode={copyCodeBlockWithToast}
                             onAddCodeReference={addCodeBlockAsReference}
                             onOpenReference={openComposerReference}
-                            onOpenAttachment={(link) => void openSentAttachment(link)}
+                            onOpenAttachment={(link) => void openSentAttachment(link, activeConversation?.id)}
                             onReturnToOrigin={returnToOrigin}
                             highlightedResponseId={recentResponseFeedbackId}
                             onTranscriptScroll={(event) => {
@@ -12767,7 +12772,7 @@ function App() {
                     onCopyCode={copyCodeBlockWithToast}
                     onAddCodeReference={addCodeBlockAsReference}
                     onOpenReference={openComposerReference}
-                    onOpenAttachment={(link) => void openSentAttachment(link)}
+                    onOpenAttachment={(link) => void openSentAttachment(link, activeConversation?.id)}
                     onReturnToOrigin={activeWeftOrigin ? returnToOrigin : undefined}
                     highlightedResponseId={recentResponseFeedbackId}
                     onTranscriptScroll={handleTranscriptScroll}
