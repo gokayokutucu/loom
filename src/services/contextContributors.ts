@@ -105,8 +105,17 @@ export const AttachedReferencesContributor: ContextContributor = {
   async contribute(input) {
     const content = input.attachedReferences
       .map((reference) => {
+        const selectedText =
+          reference.link.selectedText ?? reference.capsule?.selectedText;
         if (reference.capsule) {
-          return `${reference.link.title}\n${reference.capsule.summary}`;
+          const parts = [`${reference.link.title}`];
+          if (selectedText) {
+            parts.push(`Primary selected fragment: ${selectedText}`);
+            parts.push(`Background source summary: ${reference.capsule.summary}`);
+          } else {
+            parts.push(reference.capsule.summary);
+          }
+          return parts.join("\n");
         }
         return `${reference.link.title}\n${reference.link.canonicalUri ?? reference.link.path}`;
       })

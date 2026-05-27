@@ -119,14 +119,19 @@ function renderTurn(
 }
 
 function renderCapsule(label: string, capsule: ResponseContextCapsule) {
+  // When a selected fragment is present, it is the primary focus.
+  // Source summary and key points are demoted to background context.
+  const hasFragment = Boolean(capsule.selectedText);
   return [
     `${label}: ${capsule.title}`,
     capsule.responseCode ? `Code: ${capsule.responseCode}` : "",
     capsule.canonicalUri ? `URI: ${capsule.canonicalUri}` : "",
-    capsule.selectedText ? `Selected fragment: ${capsule.selectedText}` : "",
-    `Summary: ${capsule.summary}`,
+    hasFragment ? `Primary selected fragment: ${capsule.selectedText}` : "",
+    hasFragment
+      ? `Background source summary: ${capsule.summary}`
+      : `Summary: ${capsule.summary}`,
     capsule.keyPoints.length > 0
-      ? `Key points:\n${capsule.keyPoints.map((point) => `- ${point}`).join("\n")}`
+      ? `${hasFragment ? "Background key points" : "Key points"}:\n${capsule.keyPoints.map((point) => `- ${point}`).join("\n")}`
       : "",
     capsule.keywords.length > 0 ? `Keywords: ${capsule.keywords.join(", ")}` : "",
     capsule.entities.length > 0 ? `Entities: ${capsule.entities.join(", ")}` : "",
@@ -245,18 +250,34 @@ function recentResponses(input: LoomContextBuilderInput) {
   return input.responses.slice(Math.max(0, endIndex - recentWindow), endIndex);
 }
 
+function hasFragmentReference(attachedReferences: LoomContextReference[]): boolean {
+  return attachedReferences.some(
+    (reference) =>
+      reference.link.selectedText ||
+      reference.capsule?.selectedText
+  );
+}
+
 export function buildLoomContext(input: LoomContextBuilderInput): LoomContextBuilderOutput {
   const budgetChars = contextBudgetChars(input.resolvedNumCtx);
   const context: string[] = [];
   const contextStrategy = input.contextStrategy ?? input.answerPlan?.contextStrategy ?? "standard";
   const questionUnits = input.questionUnits ?? input.answerPlan?.questionUnits;
+  const fragmentFocusClause = hasFragmentReference(input.attachedReferences)
+    ? " A selected fragment is attached as a reference." +
+      " Treat the selected fragment as the primary subject of the answer." +
+      " Use the source response only as supporting background." +
+      " For short prompts such as \"explain\", \"why?\", \"what does this mean?\", or \"give an example\"," +
+      " answer about the selected fragment." +
+      " Do not restate or summarize the full source response unless the user explicitly asks for that."
+    : "";
   const system = [
     "You are Loom AI. Continue the active Loom with continuity.",
     "Use recent turns, checkpoint summaries, Weft origin, and References as silent internal context.",
     "Prefer compact source summaries over full response text unless the prompt explicitly needs exact wording.",
     "Answer directly. Do not mention context blocks, capsules, wrapper labels, or artifact names.",
     "Do not assume unrelated Loom content.",
-  ].join(" ");
+  ].join(" ") + fragmentFocusClause;
 
   const includeHeavyLoomContext = contextStrategy !== "minimal";
   const includeCheckpoint =
