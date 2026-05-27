@@ -46,3 +46,6 @@ docs/typescript_runtime_deprecation_plan.md
 # Local source/tree dumps generated during development.
 loom_ai_all_source.txt
 tree_loom.txt
+
+# Claude Code local settings (machine-specific, should not be committed).
+.claude/settings.local.json
