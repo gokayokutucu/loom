@@ -6089,6 +6089,28 @@ function App() {
       });
       return;
     }
+    // Identify bookmarks pointing at deleted looms before clearing local state.
+    // Build a path set from the pre-deletion snapshots of conversations and archived
+    // so that response/fragment bookmarks (whose path starts with the loom's path)
+    // are caught even when sourceLoomId is absent (e.g. service-loaded bookmarks).
+    const deletedLoomPaths = new Set<string>();
+    for (const conv of [...conversations, ...archived]) {
+      if (deletedLoomIds.has(conv.id)) {
+        deletedLoomPaths.add(conv.path);
+      }
+    }
+    const bookmarksToRemove = bookmarks.filter((bookmark) => {
+      // Loom-level bookmark directly targets a deleted loom
+      if (bookmark.targetObjectId && deletedLoomIds.has(bookmark.targetObjectId)) return true;
+      // Response/fragment bookmark was created within a deleted loom
+      if (bookmark.sourceLoomId && deletedLoomIds.has(bookmark.sourceLoomId)) return true;
+      // Path-prefix fallback: covers service-loaded bookmarks that lack sourceLoomId
+      for (const loomPath of deletedLoomPaths) {
+        if (bookmark.path === loomPath || bookmark.path.startsWith(`${loomPath}/`)) return true;
+      }
+      return false;
+    });
+    const bookmarksToRemoveIds = new Set(bookmarksToRemove.map((b) => b.id));
     setConversations((current) =>
       current.filter((item) => !deletedLoomIds.has(item.id))
     );
@@ -6122,13 +6144,7 @@ function App() {
         )
       )
     );
-    setBookmarks((current) =>
-      current.map((bookmark) =>
-        bookmark.path.startsWith(conversation.path)
-          ? { ...bookmark, badge: "Broken reference" }
-          : bookmark
-      )
-    );
+    setBookmarks((current) => current.filter((bookmark) => !bookmarksToRemoveIds.has(bookmark.id)));
     setPinnedConversationIds((current) =>
       current.filter((id) => !deletedLoomIds.has(id))
     );
@@ -6157,6 +6173,15 @@ function App() {
     }
     if (getConfiguredLoomEngineMode() === "rust-service" && !mockDataEnabled) {
       void refreshServiceLooms();
+    }
+    // Fire-and-forget: remove orphaned bookmarks from the service so they cannot
+    // reappear the next time refreshServiceBookmarks is called.
+    if (getConfiguredLoomEngineMode() === "rust-service" && bookmarksToRemove.length > 0) {
+      void Promise.allSettled(
+        bookmarksToRemove.map((bookmark) =>
+          loomEngineClient.deleteBookmark({ bookmarkId: bookmark.id })
+        )
+      );
     }
     setDeleteTarget(null);
     setContextMenu(null);
@@ -8777,8 +8802,11 @@ function App() {
     }
     const existingBookmark = bookmarks.find(
       (item) =>
+        item.id === bookmarkWithMetadata.id ||
         item.path === bookmarkWithMetadata.path ||
-        item.targetObjectId === promotion.targetObject.objectId
+        item.targetObjectId === promotion.targetObject.objectId ||
+        (bookmarkWithMetadata.sourceResponseId != null &&
+          item.sourceResponseId === bookmarkWithMetadata.sourceResponseId)
     );
     const firstBookmarkFeedback =
       !existingBookmark &&
@@ -8787,8 +8815,15 @@ function App() {
     setBookmarks((current) => {
       const existingIndex = current.findIndex(
         (item) =>
+          item.id === bookmarkWithMetadata.id ||
           item.path === bookmarkWithMetadata.path ||
-          item.targetObjectId === promotion.targetObject.objectId
+          item.targetObjectId === promotion.targetObject.objectId ||
+          // After refreshServiceBookmarks the item uses response.address as path and response.id
+          // as targetObjectId, which never matches the runtime-graph alias/RSP_-prefixed values.
+          // Match by sourceResponseId (raw UUID) so re-creating an already-bookmarked response
+          // updates the existing entry instead of creating a stale duplicate row.
+          (bookmarkWithMetadata.sourceResponseId != null &&
+            item.sourceResponseId === bookmarkWithMetadata.sourceResponseId)
       );
       if (existingIndex >= 0) {
         return current.map((item, index) =>
@@ -8886,6 +8921,7 @@ function App() {
         }
         return updated;
       });
+    } else {
     }
     return true;
   }
@@ -15859,11 +15895,12 @@ function ChatTranscript({
           displayResponse,
           conversation
         );
+        const bookmarkedPathsHit = Array.from(responseBookmarkCandidates).find((candidate) =>
+          bookmarkedPaths.has(candidate)
+        );
         const isBookmarkedResponse =
-          displayResponse.bookmarked ||
-          Array.from(responseBookmarkCandidates).some((candidate) =>
-            bookmarkedPaths.has(candidate)
-          );
+          Boolean(displayResponse.bookmarked) ||
+          Boolean(bookmarkedPathsHit);
         return (
           <Fragment key={response.id}>
           {showDaySeparator && displayResponse.createdAt && (
