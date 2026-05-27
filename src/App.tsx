@@ -170,6 +170,7 @@ import {
 import {
   getElectronAddressBarBridge,
   getElectronAttachmentsBridge,
+  getElectronComposerBridge,
   getElectronLoomServiceUrl,
   getElectronPermissionsBridge,
   getElectronRuntimeInfo,
@@ -17615,16 +17616,60 @@ function PromptComposer({
 
   function handleTokenContextMenu(event: React.MouseEvent<HTMLDivElement>) {
     const token = getTokenFromEventTarget(event.target);
-    if (!token || !token.classList.contains("inline-loom-token")) return;
-    const link = linkFromInlineToken(token);
-    if (!link) return;
+
+    // Right-click on an inline loom token → show the token-specific context menu.
+    if (token?.classList.contains("inline-loom-token")) {
+      const link = linkFromInlineToken(token);
+      if (!link) return;
+      event.preventDefault();
+      event.stopPropagation();
+      closeAddressHint();
+      setTokenContextMenu({
+        link,
+        x: Math.max(8, Math.min(event.clientX, window.innerWidth - 220)),
+        y: Math.max(8, Math.min(event.clientY, window.innerHeight - 210)),
+      });
+      return;
+    }
+
+    // Right-click on plain text in the composer → show a standard text-editing
+    // context menu (cut / copy / paste / delete / select all) via the Electron
+    // bridge. Falls back to the native browser menu in non-Electron contexts.
+    const composerBridge = getElectronComposerBridge();
+    if (!composerBridge) return; // browser: native context menu allowed
+
     event.preventDefault();
     event.stopPropagation();
-    closeAddressHint();
-    setTokenContextMenu({
-      link,
-      x: Math.max(8, Math.min(event.clientX, window.innerWidth - 220)),
-      y: Math.max(8, Math.min(event.clientY, window.innerHeight - 210)),
+
+    const selection = window.getSelection();
+    const hasSelection = Boolean(selection && !selection.isCollapsed);
+    const hasContent = (event.currentTarget.textContent?.length ?? 0) > 0;
+
+    void composerBridge.showContextMenu({ hasSelection, hasContent }).then((result) => {
+      const { action, clipboardText } = result;
+      switch (action) {
+        case "cut":
+          document.execCommand("cut");
+          break;
+        case "copy":
+          document.execCommand("copy");
+          break;
+        case "paste":
+          if (clipboardText) {
+            // execCommand("paste") is blocked by Electron's security model;
+            // insert the clipboard text read by the main process instead.
+            document.execCommand("insertText", false, clipboardText);
+          }
+          break;
+        case "delete":
+          document.execCommand("delete");
+          break;
+        case "selectAll":
+          document.execCommand("selectAll");
+          break;
+        default:
+          break;
+      }
     });
   }
 

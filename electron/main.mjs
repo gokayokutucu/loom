@@ -376,6 +376,34 @@ ipcMain.handle("loom:address-bar-context-menu", (event, params) => {
   });
 });
 
+// Prompt-editor (contentEditable composer) right-click context menu.
+// Provides standard text-editing actions: cut, copy, paste, delete, select all.
+ipcMain.handle("loom:composer-context-menu", (event, params) => {
+  const clipboardText = clipboard.readText();
+  const hasClipboard = clipboardText.length > 0;
+  const { hasSelection = false, hasContent = false } = params ?? {};
+
+  return new Promise((resolve) => {
+    const send = (action) => () => resolve({ action, clipboardText });
+
+    /** @type {import("electron").MenuItemConstructorOptions[]} */
+    const template = [
+      { label: "Cut",       accelerator: "CmdOrCtrl+X", enabled: hasSelection, click: send("cut") },
+      { label: "Copy",      accelerator: "CmdOrCtrl+C", enabled: hasSelection, click: send("copy") },
+      { label: "Paste",     accelerator: "CmdOrCtrl+V", enabled: hasClipboard,  click: send("paste") },
+      { label: "Delete",    enabled: hasSelection, click: send("delete") },
+      { type: "separator" },
+      { label: "Select All", accelerator: "CmdOrCtrl+A", enabled: hasContent, click: send("selectAll") },
+    ];
+
+    const menu = Menu.buildFromTemplate(template);
+    menu.popup({
+      window: BrowserWindow.fromWebContents(event.sender),
+      callback: () => resolve({ action: "none", clipboardText }),
+    });
+  });
+});
+
 // Opens a materialized attachment temp-file path using the OS default app.
 // Only accepts absolute paths under the OS temp directory to prevent
 // the renderer from opening arbitrary filesystem paths.

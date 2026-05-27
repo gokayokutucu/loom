@@ -47,6 +47,10 @@ import type {
   AddressBarContextMenuParams,
   AddressBarContextMenuResult,
 } from "./services/addressBarContextMenu";
+import type {
+  ComposerContextMenuParams,
+  ComposerContextMenuResult,
+} from "./services/composerContextMenu";
 
 interface LoomDesktopBridge {
   getRuntimeInfo: () => LoomDesktopRuntimeInfo;
@@ -73,6 +77,11 @@ interface LoomDesktopBridge {
     showContextMenu: (
       params: AddressBarContextMenuParams
     ) => Promise<AddressBarContextMenuResult>;
+  };
+  composer?: {
+    showContextMenu: (
+      params: ComposerContextMenuParams
+    ) => Promise<ComposerContextMenuResult>;
   };
   attachments?: {
     openPath: (tempPath: string) => Promise<{ opened: boolean; error?: string }>;
@@ -125,6 +134,11 @@ export function getElectronAddressBarBridge() {
 export function getElectronAttachmentsBridge() {
   if (typeof window === "undefined") return null;
   return window.loomDesktop?.attachments ?? null;
+}
+
+export function getElectronComposerBridge() {
+  if (typeof window === "undefined") return null;
+  return window.loomDesktop?.composer ?? null;
 }
 
 export function logElectronEvent(
