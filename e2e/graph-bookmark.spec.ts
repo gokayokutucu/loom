@@ -510,4 +510,52 @@ test.describe("[product-service-backed][legacy-typescript-local] Graph bookmark 
     await expect(page.getByText("Link added")).toBeVisible();
     await expect(composer).toContainText("Focused graph positioning keeps work oriented");
   });
+
+  test("[legacy-typescript-local] Weft graph node shows Bookmark and Link actions independent from origin Loom", async ({
+    page,
+  }) => {
+    await openGraphMapGraph(page);
+
+    const weftNode = page.locator(
+      '[data-id="loom:c-graph-continuation:root"] .loom-graph-node--weft'
+    );
+    await expect(weftNode).toBeVisible();
+
+    // Bookmark and Link action buttons must be visible on the Weft node.
+    const weftBookmarkButton = weftNode.locator(".loom-graph-node-bookmark");
+    const weftLinkButton = weftNode.getByRole("button", { name: "Link" });
+    await expect(weftBookmarkButton).toBeVisible();
+    await expect(weftLinkButton).toBeVisible();
+
+    // Initial state: not bookmarked.
+    await expect(weftBookmarkButton).not.toHaveClass(/is-bookmarked/);
+    await expect(weftBookmarkButton).toHaveAttribute("aria-pressed", "false");
+
+    // Root Loom (origin) bookmark state — capture before touching the Weft.
+    const rootNode = page.locator(
+      '[data-id="loom:c-graph-map:root"] .loom-graph-node--root'
+    );
+    const rootBookmarkButton = rootNode.locator(".loom-graph-node-bookmark");
+    const rootBookmarkedBefore = await rootBookmarkButton.getAttribute("aria-pressed");
+
+    // Click Bookmark on the Weft node.
+    await weftBookmarkButton.click();
+    await expect(weftBookmarkButton).toHaveClass(/is-bookmarked/);
+    await expect(weftBookmarkButton).toHaveAttribute("aria-pressed", "true");
+
+    // Origin Loom bookmark state must remain independent.
+    await expect(rootBookmarkButton).toHaveAttribute("aria-pressed", rootBookmarkedBefore ?? "false");
+
+    // Click Bookmark again — should unmark.
+    await weftBookmarkButton.click();
+    await expect(weftBookmarkButton).not.toHaveClass(/is-bookmarked/);
+    await expect(weftBookmarkButton).toHaveAttribute("aria-pressed", "false");
+
+    // Link action must add to composer and show toast.
+    await page.getByRole("button", { name: "Continue Loom", exact: true }).click();
+    const composer = page.getByTestId("graph-continuation-composer");
+    await expect(composer).toBeVisible();
+    await weftLinkButton.click();
+    await expect(page.getByText("Link added")).toBeVisible();
+  });
 });
