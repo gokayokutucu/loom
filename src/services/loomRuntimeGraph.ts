@@ -20,7 +20,20 @@ import { canonicalLoomUri, resolveLoomAddress } from "./loomProtocol";
 const RUNTIME_STATE_KEY = "loom.runtime.graph.v1";
 export const RUNTIME_BOOKMARKS_KEY = "loom.runtime.bookmarks.v1";
 
+/**
+ * Schema version for the runtime graph localStorage payload.
+ *
+ * Version history:
+ *   1 (implicit, no field) — pre-authority-boundary; BMK/QQ objects from
+ *     pseudo-artifact sessions may exist. Discarded on read.
+ *   2 — authority-boundary enforced. Stale pre-v2 data is rejected so that
+ *     orphaned BMK aliases from old sessions do not affect bookmark state.
+ */
+export const RUNTIME_GRAPH_SCHEMA_VERSION = 2;
+
 interface RuntimeGraphState {
+  /** Schema version guard. Absent or < RUNTIME_GRAPH_SCHEMA_VERSION → discard. */
+  schemaVersion?: number;
   objects: LoomResolvedObject[];
   aliases: Array<{
     aliasUri: string;
@@ -43,10 +56,29 @@ const EMPTY_RUNTIME_STATE: RuntimeGraphState = {
   revisions: [],
 };
 
+/**
+ * Returns true when a stored runtime graph payload is compatible with the
+ * current schema version.  Exported for unit testing without browser APIs.
+ */
+export function isRuntimeStateCompatible(
+  parsed: Partial<RuntimeGraphState> | null | undefined
+): boolean {
+  if (!parsed || typeof parsed !== "object") return false;
+  return (
+    typeof parsed.schemaVersion === "number" &&
+    parsed.schemaVersion >= RUNTIME_GRAPH_SCHEMA_VERSION
+  );
+}
+
 function readRuntimeState(): RuntimeGraphState {
   try {
     const value = window.localStorage.getItem(RUNTIME_STATE_KEY);
-    return value ? { ...EMPTY_RUNTIME_STATE, ...JSON.parse(value) } : EMPTY_RUNTIME_STATE;
+    if (!value) return EMPTY_RUNTIME_STATE;
+    const parsed = JSON.parse(value) as Partial<RuntimeGraphState>;
+    // Discard state created before the authority-boundary schema version.
+    // Stale BMK/QQ aliases from pre-v2 sessions are not valid runtime objects.
+    if (!isRuntimeStateCompatible(parsed)) return EMPTY_RUNTIME_STATE;
+    return { ...EMPTY_RUNTIME_STATE, ...parsed };
   } catch {
     return EMPTY_RUNTIME_STATE;
   }
@@ -54,7 +86,10 @@ function readRuntimeState(): RuntimeGraphState {
 
 function writeRuntimeState(state: RuntimeGraphState) {
   try {
-    window.localStorage.setItem(RUNTIME_STATE_KEY, JSON.stringify(state));
+    window.localStorage.setItem(
+      RUNTIME_STATE_KEY,
+      JSON.stringify({ ...state, schemaVersion: RUNTIME_GRAPH_SCHEMA_VERSION })
+    );
   } catch {
     // Runtime graph persistence is an enhancement in the browser prototype.
   }

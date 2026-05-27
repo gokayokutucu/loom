@@ -858,6 +858,184 @@ mod tests {
         assert!(!blocks[0].code.contains("old"));
     }
 
+    // ──────────────────────────────────────────────────────────────────────────
+    // cleanup_pseudo_artifact_blocks
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Insert a pseudo-artifact code block directly into the DB (bypassing the
+    /// repository's `is_reusable_code_artifact` gate, which simulates the
+    /// pre-authority-boundary state), then verify cleanup removes it and its
+    /// associated context_graph_link.
+    #[tokio::test]
+    async fn cleanup_pseudo_artifact_blocks_removes_stale_blocks_and_links() {
+        use super::cleanup_pseudo_artifact_blocks;
+
+        let database = test_database().await;
+        insert_test_loom(&database).await;
+
+        // Insert a minimal response so the FK constraint is satisfied.
+        ResponseRepository::new(&database)
+            .insert_response(&NewResponse {
+                response_id: "resp-pseudo".to_string(),
+                loom_id: "loom-1".to_string(),
+                role: "assistant".to_string(),
+                content: "Illustrative block follows.".to_string(),
+                title: None,
+                code: None,
+                canonical_uri: None,
+                created_at: "1".to_string(),
+                updated_at: "1".to_string(),
+                sequence_index: 0,
+                metadata_json: None,
+            })
+            .await
+            .expect("insert response");
+
+        // Directly insert a pseudo-artifact code block (ASCII box-drawing diagram).
+        // This bypasses extract_fenced_code_blocks and simulates legacy data.
+        let pseudo_block_id = "codeblock-resp-pseudo-0-fnv1a64:0000000000000000";
+        sqlx::query(
+            "INSERT INTO response_code_blocks (
+                code_block_id, response_id, loom_id, block_index, language, code,
+                exact_hash, fence, metadata_json, created_at, updated_at
+            ) VALUES (?1, 'resp-pseudo', 'loom-1', 0, 'text',
+                      '┌────────┐\n│ Pseudo │\n└────────┘\n',
+                      'fnv1a64:0000000000000000', '```', NULL, '1', '1')",
+        )
+        .bind(pseudo_block_id)
+        .execute(database.pool())
+        .await
+        .expect("insert pseudo-artifact code block");
+
+        // Insert a context_graph_link that references this pseudo-artifact block.
+        sqlx::query(
+            "INSERT INTO context_graph_links (
+                link_id, loom_id, source_kind, source_id, target_kind, target_id,
+                link_kind, weight, metadata_json, created_at
+            ) VALUES ('link-pseudo-1', 'loom-1', 'code_block', ?1, 'response',
+                      'resp-pseudo', 'code_for', 0.86, NULL, '1')",
+        )
+        .bind(pseudo_block_id)
+        .execute(database.pool())
+        .await
+        .expect("insert pseudo graph link");
+
+        // Run cleanup.
+        let removed = cleanup_pseudo_artifact_blocks(database.pool())
+            .await
+            .expect("cleanup_pseudo_artifact_blocks");
+        assert_eq!(removed, 1, "one pseudo-artifact block should be removed");
+
+        // Verify the code block is gone.
+        let block_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM response_code_blocks WHERE code_block_id = ?1",
+        )
+        .bind(pseudo_block_id)
+        .fetch_one(database.pool())
+        .await
+        .expect("count code blocks");
+        assert_eq!(block_count, 0, "pseudo-artifact code block must be deleted");
+
+        // Verify the graph link is gone.
+        let link_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM context_graph_links WHERE source_id = ?1",
+        )
+        .bind(pseudo_block_id)
+        .fetch_one(database.pool())
+        .await
+        .expect("count graph links");
+        assert_eq!(link_count, 0, "graph link for pseudo-artifact must be deleted");
+    }
+
+    /// A real code block must survive `cleanup_pseudo_artifact_blocks`.
+    #[tokio::test]
+    async fn cleanup_pseudo_artifact_blocks_preserves_real_code_blocks() {
+        use super::cleanup_pseudo_artifact_blocks;
+
+        let database = test_database().await;
+        insert_test_loom(&database).await;
+
+        ResponseRepository::new(&database)
+            .insert_response(&NewResponse {
+                response_id: "resp-real".to_string(),
+                loom_id: "loom-1".to_string(),
+                role: "assistant".to_string(),
+                content: "```rust\nfn replay() -> Vec<Event> {\n    vec![]\n}\n```".to_string(),
+                title: None,
+                code: None,
+                canonical_uri: None,
+                created_at: "1".to_string(),
+                updated_at: "1".to_string(),
+                sequence_index: 0,
+                metadata_json: None,
+            })
+            .await
+            .expect("insert response");
+
+        let removed = cleanup_pseudo_artifact_blocks(database.pool())
+            .await
+            .expect("cleanup");
+        assert_eq!(removed, 0, "real code blocks must not be removed");
+
+        let block_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM response_code_blocks WHERE response_id = 'resp-real'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .expect("count blocks");
+        assert_eq!(block_count, 1, "real code block must survive cleanup");
+    }
+
+    /// Running `cleanup_pseudo_artifact_blocks` twice must return 0 on the
+    /// second call — confirms idempotency.
+    #[tokio::test]
+    async fn cleanup_pseudo_artifact_blocks_is_idempotent() {
+        use super::cleanup_pseudo_artifact_blocks;
+
+        let database = test_database().await;
+        insert_test_loom(&database).await;
+
+        ResponseRepository::new(&database)
+            .insert_response(&NewResponse {
+                response_id: "resp-idem".to_string(),
+                loom_id: "loom-1".to_string(),
+                role: "assistant".to_string(),
+                content: "No code.".to_string(),
+                title: None,
+                code: None,
+                canonical_uri: None,
+                created_at: "1".to_string(),
+                updated_at: "1".to_string(),
+                sequence_index: 0,
+                metadata_json: None,
+            })
+            .await
+            .expect("insert response");
+
+        // Plant a pseudo-artifact block directly.
+        sqlx::query(
+            "INSERT INTO response_code_blocks (
+                code_block_id, response_id, loom_id, block_index, language, code,
+                exact_hash, fence, metadata_json, created_at, updated_at
+            ) VALUES ('codeblock-idem', 'resp-idem', 'loom-1', 0, 'text',
+                      'Hash: abc123\nProvenance: [timestamp, user, tool]\n',
+                      'fnv1a64:aaaaaaaaaaaaaaaa', '```', NULL, '1', '1')",
+        )
+        .execute(database.pool())
+        .await
+        .expect("insert pseudo block");
+
+        let first = cleanup_pseudo_artifact_blocks(database.pool())
+            .await
+            .expect("first cleanup");
+        assert_eq!(first, 1);
+
+        let second = cleanup_pseudo_artifact_blocks(database.pool())
+            .await
+            .expect("second cleanup");
+        assert_eq!(second, 0, "idempotent: nothing to remove on second call");
+    }
+
     async fn insert_test_loom(database: &crate::storage::db::Database) {
         LoomRepository::new(database)
             .insert_loom(&NewLoom {

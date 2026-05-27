@@ -15,6 +15,7 @@ mod speech;
 mod storage;
 
 use storage::repositories::code_blocks::cleanup_pseudo_artifact_blocks;
+use storage::repositories::tags_graph::cleanup_orphaned_code_language_tags;
 
 use config::{ConfigManager, ServiceConfig};
 use providers::ollama::OllamaRuntime;
@@ -59,6 +60,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Err(error) => {
             tracing::warn!(%error, "loom-service pseudo-artifact cleanup failed; continuing")
         }
+    }
+
+    match cleanup_orphaned_code_language_tags(database.pool()).await {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(
+            count,
+            "loom-service removed orphaned code-language tags from deleted pseudo-artifact blocks"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            "loom-service orphaned code-language tag cleanup failed; continuing"
+        ),
     }
 
     let ollama = OllamaRuntime::new(config.ollama.clone());
