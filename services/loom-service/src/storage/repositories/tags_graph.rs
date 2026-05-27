@@ -1616,7 +1616,15 @@ mod tests {
         seed_loom(&database).await;
 
         // Insert a response without any content that would produce real code blocks.
-        insert_response(&database, "assistant-orphan", "assistant", 1, "No code here.", None).await;
+        insert_response(
+            &database,
+            "assistant-orphan",
+            "assistant",
+            1,
+            "No code here.",
+            None,
+        )
+        .await;
 
         // Directly insert a stale 'code' kind tag simulating a pseudo-artifact block
         // that was deleted by migration 0019 (no corresponding response_code_blocks row).
@@ -1645,7 +1653,10 @@ mod tests {
         let removed = cleanup_orphaned_code_language_tags(database.pool())
             .await
             .expect("cleanup should succeed");
-        assert_eq!(removed, 1, "exactly one orphaned code tag should be removed");
+        assert_eq!(
+            removed, 1,
+            "exactly one orphaned code tag should be removed"
+        );
 
         // Verify the stale tag is gone.
         let tags_after = ResponseTagRepository::new(&database)
@@ -1682,7 +1693,9 @@ mod tests {
             .await
             .expect("tags before");
         assert!(
-            tags_before.iter().any(|t| t.tag_kind == "code" && t.normalized_tag == "ts"),
+            tags_before
+                .iter()
+                .any(|t| t.tag_kind == "code" && t.normalized_tag == "ts"),
             "real code block should produce a 'ts' code tag"
         );
 
@@ -1690,14 +1703,19 @@ mod tests {
         let removed = cleanup_orphaned_code_language_tags(database.pool())
             .await
             .expect("cleanup should succeed");
-        assert_eq!(removed, 0, "no tags should be removed when code block exists");
+        assert_eq!(
+            removed, 0,
+            "no tags should be removed when code block exists"
+        );
 
         let tags_after = ResponseTagRepository::new(&database)
             .list_by_response("assistant-real")
             .await
             .expect("tags after");
         assert!(
-            tags_after.iter().any(|t| t.tag_kind == "code" && t.normalized_tag == "ts"),
+            tags_after
+                .iter()
+                .any(|t| t.tag_kind == "code" && t.normalized_tag == "ts"),
             "valid code tag must survive cleanup"
         );
     }
@@ -1710,7 +1728,15 @@ mod tests {
 
         let database = test_database().await;
         seed_loom(&database).await;
-        insert_response(&database, "assistant-idem", "assistant", 1, "No code.", None).await;
+        insert_response(
+            &database,
+            "assistant-idem",
+            "assistant",
+            1,
+            "No code.",
+            None,
+        )
+        .await;
 
         // Plant a stale tag.
         sqlx::query(
@@ -1743,7 +1769,15 @@ mod tests {
 
         let database = test_database().await;
         seed_loom(&database).await;
-        insert_response(&database, "assistant-keep", "assistant", 1, "Some answer.", None).await;
+        insert_response(
+            &database,
+            "assistant-keep",
+            "assistant",
+            1,
+            "Some answer.",
+            None,
+        )
+        .await;
 
         // Plant a stale code tag to trigger the cleanup predicate.
         sqlx::query(

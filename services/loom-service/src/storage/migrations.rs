@@ -355,7 +355,10 @@ mod tests {
         .fetch_one(database.pool())
         .await
         .expect("count valid tag");
-        assert_eq!(ts_tag_count, 1, "valid 'ts' tag backed by code block must survive");
+        assert_eq!(
+            ts_tag_count, 1,
+            "valid 'ts' tag backed by code block must survive"
+        );
     }
 
     #[tokio::test]

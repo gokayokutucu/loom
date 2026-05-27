@@ -2833,7 +2833,11 @@ fn execute_stream(
                 .as_ref()
                 .map(|lifecycle| lifecycle.user_response_id.clone())
                 .or_else(|| execution_input.response_id.clone()),
-            user_prompt: execution_input.prompt.clone(),
+            // Use the planner's rewritten_prompt so that fragment-anchored
+            // rewrites (e.g. `explain: "The Process of Trilateration"`) reach
+            // the context manager and the model.  The original prompt is
+            // preserved in execution_input for diagnostics/logging.
+            user_prompt: answer_plan.rewritten_prompt.clone(),
             attached_references,
             response_mode: context_response_mode(&execution_input.response_mode),
             resolved_num_ctx: execution_input.options.as_ref().and_then(|options| options.num_ctx).unwrap_or(2_048),

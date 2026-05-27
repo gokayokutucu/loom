@@ -944,7 +944,10 @@ mod tests {
         .fetch_one(database.pool())
         .await
         .expect("count graph links");
-        assert_eq!(link_count, 0, "graph link for pseudo-artifact must be deleted");
+        assert_eq!(
+            link_count, 0,
+            "graph link for pseudo-artifact must be deleted"
+        );
     }
 
     /// A real code block must survive `cleanup_pseudo_artifact_blocks`.
