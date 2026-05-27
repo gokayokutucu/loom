@@ -100,6 +100,7 @@ import type {
   ResponseCodeBlock,
   ResponseItem,
 } from "../types";
+import { isLoomLink } from "../types";
 import { parseLoomAddress } from "../services/loomProtocol";
 import {
   loomGraphRootNodeId,
@@ -1967,7 +1968,7 @@ function referenceTargetKind(link: LoomLink): "loom" | "response" | "weft" | "fr
   if (link.targetKind === "attachment" || link.type === "attachment") return "attachment";
   if (link.type === "fragment") return "fragment";
   if (link.type === "response") return "response";
-  if (link.type === "conversation" || link.type === "loom") return "loom";
+  if (isLoomLink(link)) return "loom";
   return "external";
 }
 

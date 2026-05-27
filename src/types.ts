@@ -10,6 +10,18 @@ export type LoomObjectType =
   | "semantic"
   | "recent";
 
+/**
+ * Returns `true` when `type` represents a persisted/addressable Loom
+ * destination — i.e. the object is a Loom regardless of whether the app
+ * currently identifies it as `"conversation"` or `"loom"`.
+ *
+ * Use this instead of repeating `type === "conversation" || type === "loom"`
+ * wherever the intent is "this is a Loom destination, not a response/fragment/etc."
+ */
+export function isLoomObjectType(type: LoomObjectType | undefined | null): boolean {
+  return type === "conversation" || type === "loom";
+}
+
 export type LoomObjectKind =
   | "conversation"
   | "response"
@@ -221,6 +233,20 @@ export interface LoomMetadata {
 
 export type ReferenceDisplayMode = "title" | "code";
 
+/**
+ * Semantic lineage role for a Loom conversation, carried forward from the
+ * service `LoomSummary.kind` / `LoomSummary.weftKind` fields.
+ *
+ * - `"weft"`     — a branched Loom (exploration weft or unspecified weft)
+ * - `"revision"` — a revision weft created to refine a specific response
+ *
+ * `undefined` means the root / primary Loom (i.e. not a branch of anything).
+ *
+ * Do NOT derive lineage role from `folder`, `iconKey`, or path patterns —
+ * use this field or the `isWeftConversation` helper instead.
+ */
+export type LoomLineageRole = "weft" | "revision";
+
 export interface Conversation {
   id: string;
   title: string;
@@ -234,6 +260,20 @@ export interface Conversation {
   iconColor?: string;
   pinned?: boolean;
   unread?: boolean;
+  /**
+   * Semantic lineage role populated from `LoomSummary.kind` / `LoomSummary.weftKind`.
+   * Present on Weft Looms; `undefined` for root (primary) Looms.
+   * Use `isWeftConversation()` for boolean weft checks.
+   */
+  lineageRole?: LoomLineageRole;
+}
+
+/**
+ * Returns `true` when the conversation is any kind of Weft Loom (exploration
+ * or revision). Prefer this over checking `folder`, `iconKey`, or path patterns.
+ */
+export function isWeftConversation(conversation: Conversation): boolean {
+  return conversation.lineageRole !== undefined;
 }
 
 export interface LoomForkRecord {
@@ -275,6 +315,14 @@ export interface LoomLink {
   sourceCanonicalUri?: string;
   fragmentHash?: string;
   createdAt?: number;
+}
+
+/**
+ * Returns `true` when the link's `type` is a Loom destination.
+ * Convenience wrapper around `isLoomObjectType` for `LoomLink` objects.
+ */
+export function isLoomLink(link: Pick<LoomLink, "type"> | undefined | null): boolean {
+  return Boolean(link && isLoomObjectType(link.type));
 }
 
 export type VisibleAnswerTaskStatus =

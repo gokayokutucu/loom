@@ -1,4 +1,5 @@
 import type { AddressSuggestion, Conversation } from "../types";
+import { isWeftConversation } from "../types";
 import { polishDisplayTitle } from "./displayTitlePolish";
 import { isLoomAddress } from "./loomProtocol";
 
@@ -11,8 +12,7 @@ function normalizeSearchText(value: string) {
 }
 
 function conversationSuggestion(conversation: Conversation): AddressSuggestion {
-  const code = conversation.meta?.displayCode ?? conversation.meta?.code ?? "";
-  const isWeft = conversation.path.includes("/wefts/") || code.startsWith("W-");
+  const isWeft = isWeftConversation(conversation);
   return {
     id: conversation.id,
     type: isWeft ? "loom" : "conversation",

@@ -35,6 +35,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  isLoomGraphDestinationNode,
   loomGraphRootNodeId,
   responseGraphNodeId,
   type LoomGraphProjectionNode,
@@ -878,9 +879,9 @@ function GraphViewInner({
     () => {
       const nodes: LoomGraphAnyNode[] = projection.nodes.map((projectionNode) => {
         const response = responseForGraphNode(projectionNode, responsesByConversation);
-        // Root (loom) and weft nodes aren't tracked in bookmarkedResponseAddresses via
-        // the response-specific helper, so derive their bookmark state from the loom path.
-        const isBookmarked = projectionNode.kind === "root" || projectionNode.kind === "weft"
+        // Loom destination nodes (root/weft) aren't tracked in bookmarkedResponseAddresses
+        // via the response-specific helper, so derive their bookmark state from the loom path.
+        const isBookmarked = isLoomGraphDestinationNode(projectionNode)
           ? (() => {
               const loom = conversations.find((c) => c.id === projectionNode.loomId);
               if (!loom) return false;
@@ -958,7 +959,7 @@ function GraphViewInner({
             onBookmark: (node, nodeResponse) => {
               if (nodeResponse) {
                 onBookmarkResponse(node.loomId, nodeResponse, Boolean(node.isBookmarked));
-              } else if (node.kind === "root" || node.kind === "weft") {
+              } else if (isLoomGraphDestinationNode(node)) {
                 onBookmarkLoom?.(node.loomId, Boolean(node.isBookmarked));
               }
             },
@@ -966,7 +967,7 @@ function GraphViewInner({
               if (nodeResponse) {
                 openContinuationForResponse(node, nodeResponse);
                 onLinkResponse(node.loomId, nodeResponse);
-              } else if (node.kind === "root" || node.kind === "weft") {
+              } else if (isLoomGraphDestinationNode(node)) {
                 onLinkLoom?.(node.loomId);
               }
             },

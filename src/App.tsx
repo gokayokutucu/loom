@@ -337,6 +337,7 @@ import type {
   VisibleAnswerPlan,
   VisibleAnswerProgress,
 } from "./types";
+import { isLoomLink } from "./types";
 
 const iconForType: Record<LoomObjectType, typeof Globe2> = {
   conversation: Globe2,
@@ -470,6 +471,18 @@ function asTemporaryWeftWorkspaceStatus(
   return status;
 }
 
+/**
+ * Quick Ask is an ephemeral interaction surface.
+ * Before promotion this workspace is the only record of the exchange — it is NOT
+ * a persisted Loom destination and does NOT appear in `conversations` state.
+ *
+ * When promoted, `forkResponseLoom` materializes the exchange as a standard Weft Loom
+ * (`Conversation` with `lineageRole: "weft"`) via `createOrOpenWeft`. The persisted
+ * object becomes a full Loom destination: bookmarkable, linkable, and graph-visible.
+ *
+ * Status machine: temporary → active → promoting → persisted (or discarded/error).
+ * `status === "persisted"` is the only state in which a real `Conversation` exists.
+ */
 interface TemporaryWeftWorkspace {
   temporaryId: string;
   originLoomId: string;
@@ -2127,6 +2140,12 @@ function conversationFromServiceLoom(loom: LoomSummary): Conversation {
     title,
     text: summary || title,
   });
+  const lineageRole =
+    loom.weftKind === "revision"
+      ? ("revision" as const)
+      : loom.kind === "weft"
+        ? ("weft" as const)
+        : undefined;
   return {
     id: loom.loomId,
     title,
@@ -2135,6 +2154,7 @@ function conversationFromServiceLoom(loom: LoomSummary): Conversation {
     summary,
     pinned: false,
     iconKey: loom.kind === "weft" ? "workflow" : "compass",
+    lineageRole,
     meta: {
       ...baseMeta,
       code: loom.code ?? baseMeta.code,
@@ -8722,7 +8742,7 @@ function App() {
   function bookmarkTargetKindForLink(link: LoomLink): CreateBookmarkInput["targetKind"] {
     if (link.type === "response") return "response";
     if (link.type === "fragment") return "fragment";
-    if (link.type === "conversation" || link.type === "loom") {
+    if (isLoomLink(link)) {
       return forkRecords.some((record) => record.childConversationId === link.id) ? "weft" : "loom";
     }
     return "external";
@@ -9665,6 +9685,10 @@ function App() {
         }),
       };
     };
+    // Materializes the persisted Weft Loom returned by createOrOpenWeft into a Conversation.
+    // For Quick Ask promotions (source: "quick_ask_convert") this is the moment the ephemeral
+    // exchange becomes a persistent Loom destination with lineageRole, canonical URI, and a
+    // LoomForkRecord. It is NOT a separate QuickAsk entity type.
     const materializeServiceWeftConversation = (weft: LoomSummary): Conversation => {
       const title = weft.title || normalizeLoomTitle(`Loom: ${response.title}`);
       const summary = weft.summary ?? `Branched from ${sourceConversation.title}.`;
@@ -9674,6 +9698,8 @@ function App() {
         title,
         text: metadataTextForLoom({ title, summary }),
       });
+      const weftLineageRole =
+        weft.weftKind === "revision" ? ("revision" as const) : ("weft" as const);
       return {
         id: weft.loomId,
         title,
@@ -9681,6 +9707,7 @@ function App() {
         folder: sourceConversation.folder,
         summary,
         iconKey: "workflow",
+        lineageRole: weftLineageRole,
         meta: {
           ...meta,
           code: weft.code ?? meta.code,
@@ -9768,6 +9795,10 @@ function App() {
           createOriginContextSnapshot: true,
           metadata: serviceMetadata,
         });
+        // Quick Ask promotion: the service returns a persisted Weft Loom.
+        // When serviceResult.weft is present, materializeServiceWeftConversation handles it.
+        // The fallback (weft details absent) still produces a Weft Loom destination — lineageRole
+        // must be set here too so all Loom destination helpers treat it correctly.
         const serviceWeftConversation = serviceResult.weft
           ? materializeServiceWeftConversation(serviceResult.weft)
           : {
@@ -9777,6 +9808,7 @@ function App() {
               folder: sourceConversation.folder,
               summary: `Branched from ${sourceConversation.title}.`,
               iconKey: "workflow",
+              lineageRole: "weft" as const,
               meta: createAddressableLoomMetadata({
                 id: createMetadataUuid(),
                 title: convertedAskTitle,
@@ -12194,7 +12226,7 @@ function App() {
           // persisted back to the conversations array; addressBarObjectTitle always
           // reflects the polished title the user actually sees in the address bar.
           const dest = currentAddressBarDestination;
-          const isLoomDest = dest.type === "conversation" || dest.type === "loom";
+          const isLoomDest = isLoomLink(dest);
           const liveTitle =
             isLoomDest && currentShareDestination.id === dest.id
               ? addressBarObjectTitle || currentShareDestination.title || dest.title

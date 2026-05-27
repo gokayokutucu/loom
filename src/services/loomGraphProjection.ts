@@ -3,7 +3,7 @@
  * Do not use this module as product runtime authority.
  * Product runtime must go through LoomEngineClient -> RustHttpLoomEngineClient -> loom-service.
  */
-import type { Conversation, LoomForkRecord, LoomLink, ResponseItem } from "../types";
+import type { Conversation, LoomForkRecord, LoomLineageRole, LoomLink, ResponseItem } from "../types";
 import { cleanMarkdownDisplayText } from "./assistantMarkdown";
 import { polishDisplayTitle } from "./displayTitlePolish";
 
@@ -83,6 +83,52 @@ const ROOT_Y = 0;
 const LANE_WIDTH = 460;
 const ROW_GAP = 340;
 const WEFT_EDGE_LABEL = "Weft from here";
+
+/**
+ * Returns true when the graph node represents a Loom destination — i.e. it is
+ * a persisted, addressable, bookmarkable Loom regardless of whether it is the
+ * active ("root") Loom in the current view or a branched ("weft") Loom.
+ *
+ * Semantic note: "root" and "weft" are both Loom destination nodes.
+ * The difference is topology/lineage, not ontology category.
+ *
+ * Use this instead of repeating `kind === "root" || kind === "weft"` at every
+ * action gate.  When a new Loom variant is introduced (revision node, imported
+ * Loom, …), update only this predicate.
+ */
+export function isLoomGraphDestinationNode(node: LoomGraphProjectionNode): boolean {
+  return node.kind === "root" || node.kind === "weft";
+}
+
+/**
+ * Returns the lineage role of a Loom destination graph node, mirroring
+ * `Conversation.lineageRole` at the projection layer.
+ *
+ * - `"weft"` for branched Loom nodes (kind === "weft")
+ * - `undefined` for the active/primary Loom (kind === "root")
+ * - `undefined` for non-Loom nodes (response, bookmark, reference)
+ *
+ * Use this when code needs to distinguish a weft from a root Loom for
+ * semantic reasons (e.g. navigation, badge copy) without coupling to the
+ * raw `kind` string.  Visual rendering may continue to check `kind` directly.
+ */
+export function graphNodeLineageRole(
+  node: LoomGraphProjectionNode
+): LoomLineageRole | undefined {
+  if (node.kind === "weft") return "weft";
+  return undefined;
+}
+
+/**
+ * Returns true when the node is a branched (weft) Loom, as opposed to the
+ * active primary Loom or a non-Loom node.
+ *
+ * This is the graph-layer equivalent of `isWeftConversation(conversation)`.
+ * Visual code should continue to use `node.kind === "weft"` directly.
+ */
+export function isWeftGraphNode(node: LoomGraphProjectionNode): boolean {
+  return node.kind === "weft";
+}
 
 export function loomGraphRootNodeId(loomId: string) {
   return `loom:${loomId}:root`;
