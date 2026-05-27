@@ -1,0 +1,12 @@
+-- Migration 0020 was originally intended to add a response_attachment_references
+-- table for persisting sent-attachment chips per response. This was descoped
+-- because attachment references are already persisted through the existing
+-- metadata_json.references field on the user response row (populated by the
+-- attachmentReferencesForService fix in the orchestration execute payload).
+-- No new table is needed and the original DDL has been voided.
+--
+-- This entry is kept in the migration registry so that schema_migrations
+-- remains contiguous and any DB that ran the original SQL can be detected.
+-- If the table was already created, it can be safely dropped; it is never
+-- read or written to by the service.
+DROP TABLE IF EXISTS response_attachment_references;

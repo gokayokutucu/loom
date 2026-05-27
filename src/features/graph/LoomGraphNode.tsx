@@ -90,7 +90,7 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
   const [weftPickerOpen, setWeftPickerOpen] = useState(false);
   const weftClusterRef = useRef<HTMLSpanElement | null>(null);
   const canActOnResponse = projectionNode.kind === "response" && Boolean(response);
-  const canActOnLoom = projectionNode.kind === "root";
+  const canActOnLoom = projectionNode.kind === "root" || projectionNode.kind === "weft";
   const canOpenNode = projectionNode.kind === "response" ? Boolean(response) : true;
   const showContinuationButton =
     canActOnResponse && isTerminalResponse && !continuationOpen;

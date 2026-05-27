@@ -12,6 +12,7 @@ use axum::{
     Json,
 };
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -151,6 +152,120 @@ pub async fn get_attachment(
     Ok(Json(AttachmentEnvelope {
         attachment: attachment_to_dto(record),
     }))
+}
+
+/// Writes the attachment blob to an OS temp file and returns the path.
+///
+/// Security: `loom_id` is verified against the attachment's stored loom before
+/// returning any bytes. A request with the wrong loom receives a 404 (not 403)
+/// to avoid confirming that the attachment ID exists in another loom.
+///
+/// Filename is sanitized to prevent directory traversal.
+/// The temp file is placed in an attachment-ID-scoped sub-directory so that
+/// concurrent requests for different attachments with the same filename do not
+/// overwrite each other.
+pub async fn materialize_attachment(
+    State(state): State<AppState>,
+    Path((loom_id, attachment_id)): Path<(String, String)>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<AttachmentApiError>)> {
+    let repo = AttachmentRepository::new(&state.database);
+    let (file_name, bytes) = repo
+        .get_attachment_blob(&attachment_id, &loom_id)
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(not_found)?;
+
+    let safe_name = sanitize_file_name(&file_name);
+    let temp_path = write_to_temp_file(&attachment_id, &safe_name, &bytes).map_err(|error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(AttachmentApiError {
+                code: "MATERIALIZE_FAILED".to_string(),
+                message: error,
+            }),
+        )
+    })?;
+
+    Ok(Json(serde_json::json!({
+        "path": temp_path.display().to_string(),
+        "fileName": safe_name,
+    })))
+}
+
+/// Sanitizes a filename for safe use in the OS temp directory.
+/// Strips directory separators and limits length, preserving extension.
+fn sanitize_file_name(name: &str) -> String {
+    // Strip any directory components.
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .trim()
+        .to_string();
+    // Reject or replace dangerous characters; allow alphanumerics, dash, underscore, dot.
+    let safe: String = base
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' || c == '.' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    // Limit to 128 chars total while preserving extension.
+    const MAX_LEN: usize = 128;
+    if safe.len() <= MAX_LEN {
+        if safe.is_empty() {
+            "attachment".to_string()
+        } else {
+            safe
+        }
+    } else {
+        let ext = safe.rfind('.').map(|i| &safe[i..]).unwrap_or("");
+        let stem_limit = MAX_LEN - ext.len();
+        format!("{}{}", &safe[..stem_limit], ext)
+    }
+}
+
+/// Writes the attachment blob to a temp file isolated in a per-attachment-ID
+/// sub-directory: `<tmpdir>/loom-attachments/<safe_attachment_id>/<safe_name>`.
+///
+/// Using the attachment ID as the sub-directory prevents filename collisions
+/// across concurrent requests for different attachments with the same filename.
+/// The Electron IPC handler already validates that returned paths remain under
+/// `os.tmpdir()`, so the extra sub-directory is safe.
+///
+/// Limitation: temp files are not proactively cleaned up. OS temp directory
+/// management handles eventual cleanup. Each open of the same attachment
+/// overwrites the previous copy in its sub-directory.
+fn write_to_temp_file(
+    attachment_id: &str,
+    safe_name: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, String> {
+    let base_dir = std::env::temp_dir().join("loom-attachments");
+    // Sanitize attachment_id for use as a directory name (keep alphanumerics and common separators).
+    let safe_id: String = attachment_id
+        .chars()
+        .map(|c| {
+            if c.is_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .take(64)
+        .collect();
+    let dir = base_dir.join(if safe_id.is_empty() {
+        "unknown".to_string()
+    } else {
+        safe_id
+    });
+    std::fs::create_dir_all(&dir).map_err(|e| format!("failed to create temp directory: {e}"))?;
+    let path = dir.join(safe_name);
+    std::fs::write(&path, bytes).map_err(|e| format!("failed to write temp file: {e}"))?;
+    Ok(path)
 }
 
 pub async fn delete_attachment(
@@ -337,7 +452,7 @@ mod tests {
 
     async fn insert_loom(state: &AppState, loom_id: &str) {
         sqlx::query(
-            "INSERT INTO looms (loom_id, title, created_at, updated_at)
+            "INSERT OR IGNORE INTO looms (loom_id, title, created_at, updated_at)
              VALUES (?1, ?1, '1', '1')",
         )
         .bind(loom_id)
@@ -363,6 +478,129 @@ mod tests {
             operations: OperationTracker::default(),
             restart: RestartState::default(),
         }
+    }
+
+    // ── materialize_attachment tests ──────────────────────────────────────
+
+    /// Creates a small text attachment in loom-mat-1 and returns (state, attachment_id).
+    async fn create_text_attachment_for_materialize(
+        state: &AppState,
+        loom_id: &str,
+        file_name: &str,
+        content: &str,
+    ) -> String {
+        insert_loom(state, loom_id).await;
+        let (status, Json(payload)) = create_attachment(
+            State(state.clone()),
+            Path(loom_id.to_string()),
+            Json(CreateAttachmentRequest {
+                file_name: file_name.to_string(),
+                mime_type: Some("text/plain".to_string()),
+                size_bytes: Some(content.len() as i64),
+                content_base64: base64_encode_for_test(content.as_bytes()),
+            }),
+        )
+        .await
+        .expect("create_attachment should succeed");
+        assert_eq!(status, StatusCode::CREATED, "expected 201 for create");
+        payload.attachment.attachment_id
+    }
+
+    #[tokio::test]
+    async fn materialize_attachment_succeeds_for_correct_loom() {
+        let state = test_state().await;
+        let attachment_id =
+            create_text_attachment_for_materialize(&state, "loom-mat-1", "hello.txt", "hello")
+                .await;
+
+        let result = materialize_attachment(
+            State(state),
+            Path(("loom-mat-1".to_string(), attachment_id)),
+        )
+        .await;
+
+        let Json(payload) = result.expect("materialize should succeed for correct loom");
+        assert!(
+            !payload["path"].as_str().unwrap_or("").is_empty(),
+            "path should be non-empty"
+        );
+        assert_eq!(payload["fileName"], "hello.txt");
+        // Verify file was actually written with the expected content.
+        let path = std::path::Path::new(payload["path"].as_str().unwrap());
+        assert!(path.exists(), "materialized file should exist on disk");
+        let written = std::fs::read_to_string(path).expect("read written file");
+        assert_eq!(written, "hello");
+    }
+
+    #[tokio::test]
+    async fn materialize_attachment_returns_404_for_wrong_loom() {
+        let state = test_state().await;
+        let attachment_id =
+            create_text_attachment_for_materialize(&state, "loom-mat-2", "secret.txt", "data")
+                .await;
+
+        // Request using a different loom's ID
+        let result = materialize_attachment(
+            State(state),
+            Path(("loom-wrong".to_string(), attachment_id)),
+        )
+        .await;
+
+        let (status, Json(error)) = result.expect_err("wrong loom should return error");
+        assert_eq!(
+            status,
+            StatusCode::NOT_FOUND,
+            "wrong loom must return 404, not a data response"
+        );
+        assert_eq!(error.code, "ATTACHMENT_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn materialize_attachment_returns_404_for_unknown_attachment() {
+        let state = test_state().await;
+        insert_loom(&state, "loom-mat-3").await;
+
+        let result = materialize_attachment(
+            State(state),
+            Path(("loom-mat-3".to_string(), "att-does-not-exist".to_string())),
+        )
+        .await;
+
+        let (status, Json(error)) = result.expect_err("unknown attachment should return error");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(error.code, "ATTACHMENT_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn materialize_attachment_unique_paths_for_same_filename_different_attachments() {
+        let state = test_state().await;
+        let id_a =
+            create_text_attachment_for_materialize(&state, "loom-mat-4", "report.txt", "content-a")
+                .await;
+        let id_b =
+            create_text_attachment_for_materialize(&state, "loom-mat-4", "report.txt", "content-b")
+                .await;
+
+        let Json(a) = materialize_attachment(
+            State(state.clone()),
+            Path(("loom-mat-4".to_string(), id_a.clone())),
+        )
+        .await
+        .expect("materialize a");
+        let Json(b) =
+            materialize_attachment(State(state), Path(("loom-mat-4".to_string(), id_b.clone())))
+                .await
+                .expect("materialize b");
+
+        assert_ne!(
+            a["path"], b["path"],
+            "same filename in different attachments must produce distinct temp paths"
+        );
+        // Both files should have the correct content
+        let content_a = std::fs::read_to_string(a["path"].as_str().unwrap()).expect("read a");
+        let content_b = std::fs::read_to_string(b["path"].as_str().unwrap()).expect("read b");
+        assert_eq!(content_a, "content-a");
+        assert_eq!(content_b, "content-b");
     }
 
     fn base64_encode_for_test(bytes: &[u8]) -> String {

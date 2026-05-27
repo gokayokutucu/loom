@@ -1,6 +1,7 @@
 import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, shell, systemPreferences } from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAppLogger } from "./app-logger.mjs";
@@ -373,6 +374,28 @@ ipcMain.handle("loom:address-bar-context-menu", (event, params) => {
       callback: () => resolve({ action: "none", clipboardText }),
     });
   });
+});
+
+// Opens a materialized attachment temp-file path using the OS default app.
+// Only accepts absolute paths under the OS temp directory to prevent
+// the renderer from opening arbitrary filesystem paths.
+ipcMain.handle("loom:open-attachment-path", async (_event, tempPath) => {
+  if (typeof tempPath !== "string") {
+    return { opened: false, error: "invalid path" };
+  }
+  const normalizedPath = path.normalize(tempPath);
+  const tempDir = path.normalize(os.tmpdir());
+  if (!normalizedPath.startsWith(tempDir + path.sep) && normalizedPath !== tempDir) {
+    return { opened: false, error: "path outside temp directory" };
+  }
+  if (!fs.existsSync(normalizedPath)) {
+    return { opened: false, error: "file not found" };
+  }
+  const error = await shell.openPath(normalizedPath);
+  if (error) {
+    return { opened: false, error };
+  }
+  return { opened: true };
 });
 
 app.whenReady().then(async () => {

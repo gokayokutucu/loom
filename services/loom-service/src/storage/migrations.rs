@@ -98,6 +98,16 @@ const MIGRATIONS: &[Migration] = &[
         name: "search_fts",
         sql: include_str!("../../migrations/0018_search_fts.sql"),
     },
+    Migration {
+        version: 19,
+        name: "cleanup_pseudo_artifact_code_blocks",
+        sql: include_str!("../../migrations/0019_cleanup_pseudo_artifact_code_blocks.sql"),
+    },
+    Migration {
+        version: 20,
+        name: "response_attachment_references",
+        sql: include_str!("../../migrations/0020_response_attachment_references.sql"),
+    },
 ];
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
@@ -229,6 +239,25 @@ mod tests {
                     .expect("table query should work");
             assert_eq!(count, 1, "{table} should exist");
         }
+    }
+
+    #[tokio::test]
+    async fn migration_0020_response_attachment_references_table_does_not_exist() {
+        // Migration 0020 was voided: the table was descoped because attachment
+        // references are already persisted via metadata_json.references on the
+        // user response row. The migration SQL now issues a DROP TABLE IF EXISTS
+        // to clean up any DB that ran the original DDL.
+        let database = test_database().await;
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'response_attachment_references'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .expect("table query should work");
+        assert_eq!(
+            count, 0,
+            "response_attachment_references table must not exist after migration 0020"
+        );
     }
 
     #[tokio::test]

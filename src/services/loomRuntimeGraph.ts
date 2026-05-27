@@ -551,7 +551,11 @@ export function createRuntimeLoomGraphRepository({
         return {
           bookmark: {
             id: existingBookmark.objectId,
-            type: "bookmark",
+            // Preserve the originating link type (e.g. "response", "conversation") so that
+            // callers can still distinguish response bookmarks from loom/conversation bookmarks.
+            // Using the hardcoded "bookmark" literal caused removeBookmark's type guard to skip
+            // clearing response.bookmarked, leaving the footer chip green after sidebar deletion.
+            type: link.type,
             title: existingBookmark.title,
             editableTitle: existingBookmark.title,
             path: existingBookmark.aliasUri ?? existingBookmark.canonicalUri,
