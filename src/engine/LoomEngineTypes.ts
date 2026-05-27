@@ -435,6 +435,9 @@ export interface SendMessageInput {
   draftKey?: string;
   promptText: string;
   references: LoomLink[];
+  /** Full LoomLink array (including badge and presentationMode) persisted as
+   *  metadata.questionReferences so presentation mode survives app reload. */
+  questionReferences?: LoomLink[];
   attachments?: JsonValue[];
   responseMode: ModelResponseMode;
   focusedResponseId?: string;

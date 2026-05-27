@@ -815,6 +815,10 @@ function referenceDisplayModeValue(value: unknown): LoomLink["referenceDisplayMo
   return value === "code" || value === "title" ? value : undefined;
 }
 
+function presentationModeValue(value: unknown): LoomLink["presentationMode"] | undefined {
+  return value === "attached-card" || value === "inline-chip" ? value : undefined;
+}
+
 function loomLinkFromQuestionReference(value: unknown): LoomLink | null {
   const sanitized = sanitizeEnginePayload(value);
   if (!isRecord(sanitized)) return null;
@@ -868,6 +872,7 @@ function loomLinkFromQuestionReference(value: unknown): LoomLink | null {
     sourceCanonicalUri: stringValue(sanitized, "sourceCanonicalUri"),
     fragmentHash: stringValue(sanitized, "fragmentHash"),
     createdAt: numberValue(sanitized, "createdAt"),
+    presentationMode: presentationModeValue(stringValue(sanitized, "presentationMode")),
   };
 }
 
@@ -885,6 +890,7 @@ function loomLinkFromPlannerReference(value: unknown): LoomLink | null {
   const title = label ?? selectedText ?? sourceTitle ?? id;
   if (!referenceId || !id || !title) return null;
 
+  const presentationMode = presentationModeValue(stringValue(sanitized, "presentationMode"));
   return {
     id,
     type:
@@ -895,14 +901,14 @@ function loomLinkFromPlannerReference(value: unknown): LoomLink | null {
         : "conversation",
     title,
     path: id,
-    // A fragment reference that carries selectedText originated from an "Ask to Loom"
-    // text selection. Restore "Selection" badge so it renders as an attached quote
-    // reference (with the CornerDownRight card) rather than as an inline chip.
+    // Restore badge from presentationMode when available so the renderer can
+    // distinguish attached-card (Selection) from inline-chip (Fragment) without
+    // requiring the full questionReferences metadata to be present.
     badge:
-      targetKind === "code_block"
-        ? "Code"
-        : targetKind === "fragment" && selectedText
+      presentationMode === "attached-card"
         ? "Selection"
+        : targetKind === "code_block"
+        ? "Code"
         : targetKind === "fragment"
         ? "Fragment"
         : targetKind === "response"
@@ -917,6 +923,7 @@ function loomLinkFromPlannerReference(value: unknown): LoomLink | null {
     selectedText,
     sourceResponseCode: stringValue(sanitized, "sourceResponseCode"),
     sourceResponseTitle: sourceTitle,
+    presentationMode,
   };
 }
 
@@ -1423,6 +1430,9 @@ function mapReferenceForService(reference: LoomLink) {
     targetId: reference.targetObjectId ?? reference.id,
     sourceResponseCode: reference.sourceResponseCode,
     sourceTitle: reference.title,
+    // Carry presentation mode so the service can persist it in planner-reference
+    // metadata and we can restore it on reload without full questionReferences.
+    presentationMode: reference.presentationMode,
   };
 }
 
@@ -1641,6 +1651,7 @@ function attachmentReferencesForService(
       targetId: id,
       sourceResponseCode: undefined,
       sourceTitle: name,
+      presentationMode: undefined,
     });
   }
   return result;
@@ -1658,6 +1669,11 @@ function executePayload(input: SendMessageInput) {
       ...input.references.map(mapReferenceForService),
       ...attachmentRefs,
     ],
+    // Full LoomLink array preserved so the service can store badge and
+    // presentationMode in metadata.questionReferences. On reload,
+    // questionReferencesFromRow reads this path first and the renderer
+    // correctly distinguishes attached-card from inline-chip references.
+    questionReferences: input.questionReferences ?? input.references,
     responseMode: serviceResponseMode(input.responseMode),
     model: input.model ?? "qwen3:latest",
     options: input.options

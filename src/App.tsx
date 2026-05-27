@@ -885,6 +885,10 @@ function isFragmentReference(link: LoomLink) {
 }
 
 function isAttachedQuoteReference(link: LoomLink) {
+  // Primary discriminator: presentationMode persisted with new data.
+  if (link.presentationMode === "attached-card") return true;
+  if (link.presentationMode === "inline-chip") return false;
+  // Legacy fallback for data created before presentationMode was stored.
   return isFragmentReference(link) && link.badge === "Selection";
 }
 
@@ -6352,6 +6356,10 @@ function App() {
         {
           ...stableLink,
           selectedAt: stableLink.selectedAt ?? Date.now(),
+          // All references inserted via linkObjectForDraft go into the prompt
+          // text as inline tokens.  Mark them so the renderer keeps them
+          // inline after reload instead of promoting them to attached cards.
+          presentationMode: stableLink.presentationMode ?? "inline-chip",
         },
         countInlineReferenceOccurrences(currentDraft.html, stableLink) + 1
       );
@@ -7988,6 +7996,11 @@ function App() {
           draftKey: targetLoomId,
           promptText: modelPrompt,
           references: draft.links,
+          // Carry the full LoomLink array (badge + presentationMode) alongside
+          // the planner-format references so the service can persist it in
+          // metadata.questionReferences.  This is the source of truth for
+          // attached-card vs inline-chip rendering after app restart.
+          questionReferences: draft.links,
           attachments: draft.attachments?.map((attachment) => ({
             id: attachment.id,
             name: attachment.name,
@@ -11821,6 +11834,10 @@ function App() {
     return {
       ...fragmentReferenceFromSelection(state),
       badge: "Selection",
+      // Marks this reference as an Ask-to-Loom attached card so the renderer
+      // can distinguish it from an inline-chip Add-as-Reference reference
+      // both during the session and after app restart.
+      presentationMode: "attached-card",
     };
   }
 

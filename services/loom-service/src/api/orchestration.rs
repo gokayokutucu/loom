@@ -690,6 +690,12 @@ pub struct OrchestrationExecuteInput {
     pub prompt: String,
     #[serde(default)]
     pub references: Vec<PlannerReference>,
+    /// Full LoomLink array sent by the frontend.  Stored verbatim in
+    /// metadata.questionReferences so that badge and presentationMode
+    /// survive app restart.  The renderer reads this path first; the
+    /// planner-format `references` field is kept as a fallback.
+    #[serde(default)]
+    pub question_references: Option<serde_json::Value>,
     pub response_mode: ResponseMode,
     pub model: String,
     pub options: Option<OrchestrationExecuteOptions>,
@@ -1082,6 +1088,11 @@ async fn create_persisted_response_lifecycle(
         "workflowRunId": run_id,
         "answerPlan": answer_plan_summary(answer_plan),
         "references": input.references,
+        // Full LoomLink array from the frontend.  The reload path reads
+        // metadata.questionReferences first (via questionReferencesFromRow)
+        // and preserves badge + presentationMode so attached-card vs
+        // inline-chip rendering survives app restart.
+        "questionReferences": input.question_references,
     })
     .to_string();
     let assistant_metadata = json!({
@@ -1799,6 +1810,7 @@ fn regenerate_response_stream(
             response_id: Some(user.response_id.clone()),
             prompt: user.content.clone(),
             references: references_from_response_metadata(user.metadata_json.as_deref()),
+            question_references: None,
             response_mode: input.response_mode,
             model: input.model.unwrap_or_else(|| "qwen3:latest".to_string()),
             options: input.options,
@@ -1883,6 +1895,7 @@ fn retry_response_stream(
             response_id: Some(user.response_id.clone()),
             prompt: user.content.clone(),
             references: references_from_response_metadata(user.metadata_json.as_deref()),
+            question_references: None,
             response_mode: input.response_mode,
             model: input.model.unwrap_or_else(|| "qwen3:latest".to_string()),
             options: input.options,
@@ -4213,6 +4226,7 @@ mod tests {
                 response_id: None,
                 prompt: "hello".to_string(),
                 references: Vec::new(),
+                question_references: None,
                 response_mode: ResponseMode::Instant,
                 model: "test-model".to_string(),
                 options: None,
@@ -4671,6 +4685,7 @@ mod tests {
             response_id: None,
             prompt: "o zaman .net bildiğin için onunla devam etmem daha doğru olur?".to_string(),
             references: Vec::new(),
+            question_references: None,
             response_mode: ResponseMode::Instant,
             model: "qwen3.5:9b".to_string(),
             options: None,
@@ -5904,6 +5919,7 @@ mod tests {
             response_id: None,
             prompt: "Event sourcing nedir?".to_string(),
             references: Vec::new(),
+            question_references: None,
             response_mode: ResponseMode::Auto,
             model: "qwen3.5:9b".to_string(),
             options: None,

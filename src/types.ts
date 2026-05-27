@@ -290,6 +290,19 @@ export interface LoomForkRecord {
   updatedAt?: string;
 }
 
+/**
+ * Discriminates how the user inserted a reference into a prompt.
+ *
+ * "attached-card"  — Ask to Loom from selected text; renders as a
+ *                    CornerDownRight reference card above/beside the prompt.
+ * "inline-chip"    — Add as Reference / # insertion; renders inline inside
+ *                    the prompt text at the cursor position.
+ *
+ * Persisted in question reference metadata so the original presentation
+ * survives app restart.
+ */
+export type ReferencePresentationMode = "attached-card" | "inline-chip";
+
 export interface LoomLink {
   id: string;
   type: LoomObjectType;
@@ -315,6 +328,13 @@ export interface LoomLink {
   sourceCanonicalUri?: string;
   fragmentHash?: string;
   createdAt?: number;
+  /**
+   * How this reference was inserted into the prompt. Persisted so the
+   * original card vs. inline-chip presentation survives app restart.
+   * Absent for legacy data — callers fall back to badge or prompt-text
+   * inference when undefined.
+   */
+  presentationMode?: ReferencePresentationMode;
 }
 
 /**
