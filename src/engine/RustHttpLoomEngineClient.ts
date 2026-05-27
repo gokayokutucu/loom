@@ -895,9 +895,14 @@ function loomLinkFromPlannerReference(value: unknown): LoomLink | null {
         : "conversation",
     title,
     path: id,
+    // A fragment reference that carries selectedText originated from an "Ask to Loom"
+    // text selection. Restore "Selection" badge so it renders as an attached quote
+    // reference (with the CornerDownRight card) rather than as an inline chip.
     badge:
       targetKind === "code_block"
         ? "Code"
+        : targetKind === "fragment" && selectedText
+        ? "Selection"
         : targetKind === "fragment"
         ? "Fragment"
         : targetKind === "response"
