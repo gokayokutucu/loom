@@ -11136,13 +11136,18 @@ function App() {
         ...payload.response,
         title: responseTitleOverrides[payload.response.id] ?? payload.response.title,
       };
+      // Resolve the canonical response address once — used for copy-address and copy-markdown.
+      // responseLinkForNavigation calls responseAddressForConversation which constructs
+      // the full `loom://…/r/<code>?id=<response-id>` canonical URL, matching what the
+      // footer Link chip uses. Never copy response.address directly (may lack ?id=).
+      const canonicalResponseLink = responseLinkForNavigation(payload.loomId, response);
       if (item.id === "ask") openAsk(response);
       if (item.id === "link") linkObject(toLinkFromResponse(response));
       if (item.id === "bookmark") bookmarkResponse(response);
-      if (item.id === "copy-address") void browserHostShell.copyText(response.address);
+      if (item.id === "copy-address") copyLoomAddress(canonicalResponseLink);
       if (item.id === "copy-markdown") {
         void browserHostShell.copyText(
-          toLoomMarkdown({ title: response.title, path: response.address })
+          toLoomMarkdown({ title: response.title, path: canonicalResponseLink.canonicalUri ?? canonicalResponseLink.path })
         );
       }
       if (item.id === "copy-answer-markdown") void copyResponseAsMarkdown(response);
@@ -12611,7 +12616,11 @@ function App() {
                             }}
                             responseTitleOverrides={responseTitleOverrides}
                             onOpenContextMenu={(event, response) =>
-                              openContextMenu(event, { kind: "response", response })
+                              openContextMenu(event, {
+                                kind: "response",
+                                response,
+                                loomId: originConversation.id,
+                              })
                             }
                             onCopyAddress={copyLoomAddress}
                             onCopyAddressWithToast={copyLoomAddressWithToast}
@@ -12701,7 +12710,11 @@ function App() {
                             }}
                             responseTitleOverrides={responseTitleOverrides}
                             onOpenContextMenu={(event, response) =>
-                              openContextMenu(event, { kind: "response", response })
+                              openContextMenu(event, {
+                                kind: "response",
+                                response,
+                                loomId: activeConversation.id,
+                              })
                             }
                             onCopyAddress={copyLoomAddress}
                             onCopyAddressWithToast={copyLoomAddressWithToast}
@@ -12831,7 +12844,11 @@ function App() {
                     onSelectionAsk={onSelectionAsk}
                     responseTitleOverrides={responseTitleOverrides}
                     onOpenContextMenu={(event, response) =>
-                      openContextMenu(event, { kind: "response", response })
+                      openContextMenu(event, {
+                        kind: "response",
+                        response,
+                        loomId: activeConversation?.id ?? activeConversationId,
+                      })
                     }
                     onCopyAddress={copyLoomAddress}
                     onCopyAddressWithToast={copyLoomAddressWithToast}
