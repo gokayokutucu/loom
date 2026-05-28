@@ -3988,10 +3988,29 @@ function App() {
         [assistant.loomId]: nextResponses,
       };
     });
-    if (!isLiveServiceGenerationStatus(serviceGenerationStatus)) {
+    if (isLiveServiceGenerationStatus(serviceGenerationStatus)) {
+      // Reload recovery: if there is no active generation controller the app
+      // was reloaded while the service was still streaming.  Sync the composer
+      // runtime state so scroll-follow and the Stop button work correctly.
+      if (!mainAbortRef.current) {
+        setGeneratingResponseId(assistant.responseId);
+        setComposerRuntimeTargetKey(assistant.loomId);
+        setComposerRuntimeState({ running: true, message: "Response streaming..." });
+      }
+    } else {
       setGeneratingResponseId((current) =>
         current === assistant.responseId ? null : current
       );
+      // Sync composer state to stopped when polling detects completion and no
+      // active controller is claiming running=true (covers reload recovery).
+      if (!mainAbortRef.current) {
+        setComposerRuntimeTargetKey((current) =>
+          current === assistant.loomId ? null : current
+        );
+        setComposerRuntimeState((current) =>
+          current.running ? { running: false, message: "Responded." } : current
+        );
+      }
       if (mainServiceCancellationRef.current?.workflowRunId === state.workflowRunId) {
         mainServiceCancellationRef.current = null;
       }
@@ -11114,12 +11133,24 @@ function App() {
       doneReason: undefined,
       truncated: false,
       bookmarked: false,
+      // Clear stale thinking/generation fields from the source response so the
+      // thinking panel starts fresh and doesn't show completed state immediately.
+      thinkingStartedAt: undefined,
+      thinkingEndedAt: undefined,
+      finalStartedAt: undefined,
+      elapsedThinkingSeconds: undefined,
+      thinkingStopped: false,
+      thinkingStalled: false,
+      thinkingStallReason: undefined,
+      thinkingTokenCount: undefined,
+      serviceGenerationStatus: undefined,
     };
     setConversationResponses((current) => ({
       ...current,
       [loomId]: replaceResponseAndPruneTail(current[loomId] ?? [], sourceResponse, retryResponse),
     }));
     setGeneratingResponseId(localResponseId);
+    setComposerRuntimeTargetKey(loomId);
     setComposerRuntimeState({
       running: true,
       message: `Retrying through loom-service with ${mainModelName}...`,

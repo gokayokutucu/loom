@@ -545,4 +545,187 @@ test.describe("[product-service-backed] Main composer submit", () => {
       expect(cleanup.tempDirRemoved).toBe(true);
     }
   });
+
+  test("Test G — Stop button is visible while the service is streaming a response", async ({ page }) => {
+    // Generation lifecycle: composerRuntimeState.running must be true during the
+    // whole streaming window so the send button shows a Stop icon.
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      deterministicStreamChunkDelayMs: 8,
+      deterministicThinkingDelayMs: 400,
+      startApp: true,
+    });
+
+    try {
+      await page.addInitScript(() => {
+        window.localStorage.setItem(
+          "loom-ai-app-settings-v1",
+          JSON.stringify({ mockDataEnabled: false, modelResponseMode: "thinking" })
+        );
+      });
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await fillPrompt(page, `stop-button-g-${Date.now()} event sourcing`);
+      await page.getByRole("button", { name: "Send" }).click();
+
+      // The send button must become the Stop button within a short time.
+      await expect(page.getByRole("button", { name: "Stop response" })).toBeVisible({
+        timeout: 10_000,
+      });
+
+      // It must stay visible while thinking is running.
+      await expect(page.locator(".thinking-panel.is-running").last()).toBeVisible({
+        timeout: 10_000,
+      });
+      await expect(page.getByRole("button", { name: "Stop response" })).toBeVisible();
+
+      // Wait for completion — the Stop button must revert to Send.
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        "Event Sourcing",
+        { timeout: 30_000 }
+      );
+      await expect(page.locator(".chat-transcript")).not.toHaveClass(
+        /is-generating-response/,
+        { timeout: 15_000 }
+      );
+      await expect(page.getByRole("button", { name: "Send" })).toBeVisible({ timeout: 5_000 });
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+    }
+  });
+
+  test("Test H — Retry shows thinking panel immediately and Stop button during streaming", async ({ page }) => {
+    // Generation lifecycle: executeRetryFromUserMessage must set
+    // composerRuntimeTargetKey and clear stale thinking state so the thinking
+    // panel is visible from the moment retry starts, not only after the first
+    // thinking_status event.
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      deterministicThinkingDelayMs: 800,
+      deterministicStreamChunkDelayMs: 8,
+      startApp: true,
+    });
+
+    try {
+      await page.addInitScript(() => {
+        window.localStorage.setItem(
+          "loom-ai-app-settings-v1",
+          JSON.stringify({ mockDataEnabled: false, modelResponseMode: "thinking" })
+        );
+      });
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      // Submit once and wait for the response to complete.
+      await fillPrompt(page, `retry-thinking-h-${Date.now()} event sourcing detay`);
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        "Event Sourcing",
+        { timeout: 30_000 }
+      );
+      await expect(page.locator(".chat-transcript")).not.toHaveClass(
+        /is-generating-response/,
+        { timeout: 15_000 }
+      );
+
+      // Hover over the user-turn to reveal the Retry button, then click it.
+      const retryTrigger = page.locator(".prompt-retry-trigger").last();
+      await retryTrigger.waitFor({ state: "attached", timeout: 5_000 });
+      await retryTrigger.hover();
+      await retryTrigger.click();
+
+      // The thinking panel must appear within 3 seconds of clicking Retry —
+      // before the first thinking_status event arrives from the service.
+      await expect(page.locator(".thinking-panel").last()).toBeVisible({ timeout: 3_000 });
+
+      // The Stop button must also be visible during the retry stream.
+      await expect(page.getByRole("button", { name: "Stop response" })).toBeVisible({
+        timeout: 5_000,
+      });
+
+      // Wait for retry to complete.
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        "Event Sourcing",
+        { timeout: 30_000 }
+      );
+      await expect(page.locator(".chat-transcript")).not.toHaveClass(
+        /is-generating-response/,
+        { timeout: 15_000 }
+      );
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+    }
+  });
+
+  test("Test I — reload mid-stream: Stop button reappears after page reload", async ({ page }) => {
+    // Generation lifecycle: after a page reload while the service is still
+    // streaming, the polling path (applyGenerationResponseState) must sync
+    // composerRuntimeState.running back to true so the Stop button reappears
+    // and scroll-follow resumes on the active loom.
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      deterministicStreamChunkDelayMs: 40,
+      deterministicThinkingDelayMs: 200,
+      startApp: true,
+    });
+
+    try {
+      await page.addInitScript(() => {
+        window.localStorage.setItem(
+          "loom-ai-app-settings-v1",
+          JSON.stringify({
+            mockDataEnabled: false,
+            modelResponseMode: "thinking",
+            // Auto-navigate back to the last active Loom on reload so the
+            // Stop button can appear for the correct composer.
+            startup: { continueFromLastLoom: true },
+          })
+        );
+      });
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await fillPrompt(page, `reload-recovery-i-${Date.now()} event sourcing`);
+      await page.getByRole("button", { name: "Send" }).click();
+
+      // Wait for thinking phase to be visible (streaming is now in progress).
+      await expect(page.locator(".thinking-panel.is-running").last()).toBeVisible({
+        timeout: 10_000,
+      });
+
+      // Reload the page while the service is still streaming.
+      await page.reload();
+
+      // After reload the app should:
+      //   1. Navigate back to the streaming Loom (continueFromLastLoom)
+      //   2. Detect the live workflow via liveServiceGenerationRunIds polling
+      //   3. Restore composerRuntimeState.running = true via applyGenerationResponseState
+      // The Stop button must become visible within the polling interval (≤ 2 s).
+      await expect(page.getByRole("button", { name: "Stop response" })).toBeVisible({
+        timeout: 15_000,
+      });
+
+      // The service must still complete and the Stop button must revert to Send.
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        "Event Sourcing",
+        { timeout: 30_000 }
+      );
+      await expect(page.getByRole("button", { name: "Send" })).toBeVisible({ timeout: 10_000 });
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+    }
+  });
 });
