@@ -9529,6 +9529,37 @@ function App() {
     if (!anchor || anchor.cancelled) return false;
     const transcript = transcriptForLoomId(anchor.loomId);
     if (!transcript) return false;
+
+    // ── Fit-content top-lock guard ──────────────────────────────────────────
+    // When the transcript has never been scrolled (scrollTop ≈ 0) AND all real
+    // rendered content is already visible in the safe viewport, do NOT scroll.
+    // Scrolling would push the Loom header (which lives inside the scroll
+    // container) above the visible area on short / new transcripts.
+    //
+    // We guard on scrollTop ≈ 0 to avoid false-positives on long transcripts
+    // where the user scrolled to the bottom before submitting: in that case the
+    // new partial response may be visible near the viewport bottom, but there is
+    // old content scrolled off the top that the anchor should reveal.
+    if (transcript.scrollTop < 8) {
+      const realContentEnd = transcript.querySelector<HTMLElement>(
+        "[data-transcript-content-end]"
+      );
+      const composerEl = currentPromptComposerElement();
+      if (!hasRealContentBelowViewport({
+        transcriptRect: transcript.getBoundingClientRect(),
+        composerTop: composerEl ? composerEl.getBoundingClientRect().top : null,
+        realContentEndBottom: realContentEnd
+          ? realContentEnd.getBoundingClientRect().bottom
+          : null,
+        tolerance: 24,
+      })) {
+        if (!anchor.anchored) {
+          latestUserTurnAnchorRef.current = { ...anchor, anchored: true };
+        }
+        return true;
+      }
+    }
+
     const target = transcript.querySelector<HTMLElement>(
       `[data-prompt-response-id="${CSS.escape(anchor.responseId)}"]`
     );
@@ -12212,6 +12243,34 @@ function App() {
     return true;
   }
 
+  // Completion snap: scroll just enough so the real content end marker
+  // (data-transcript-content-end, placed after all responses including the
+  // reference-strip that appears at completion) sits at the safe viewport
+  // boundary.  Uses the same delta geometry as followLatestTurnTailToComposerBoundary
+  // but queries the full-content marker rather than the per-response tail.
+  function scrollRealContentEndIntoSafeView(transcript: HTMLElement, gap = 16): boolean {
+    const realContentEnd = transcript.querySelector<HTMLElement>(
+      "[data-transcript-content-end]"
+    );
+    const composerEl = currentPromptComposerElement();
+    const delta = latestTurnTailScrollDelta({
+      tailRect: realContentEnd ? realContentEnd.getBoundingClientRect() : null,
+      composerRect: composerEl ? composerEl.getBoundingClientRect() : null,
+      transcriptRect: transcript.getBoundingClientRect(),
+      gap,
+    });
+    if (delta === null || delta <= 0) return false;
+    transcriptProgrammaticScrollRef.current = true;
+    transcript.scrollTo({
+      top: Math.min(transcript.scrollHeight, transcript.scrollTop + delta),
+      behavior: "smooth",
+    });
+    window.setTimeout(() => {
+      transcriptProgrammaticScrollRef.current = false;
+    }, 260);
+    return true;
+  }
+
   function handleTranscriptScroll(event: React.UIEvent<HTMLElement>) {
     if (!composerRuntimeState.running || transcriptProgrammaticScrollRef.current) return;
     const hasUserScrollIntent =
@@ -12325,9 +12384,13 @@ function App() {
           if (!anchor.anchored) {
             scrollLatestUserTurnIntoReadingPosition("auto");
           } else {
+            // Rule D completion snap: scroll so the real content end
+            // (data-transcript-content-end, which now includes the reference-strip
+            // that just appeared at completion) is visible above the composer.
+            // Using the response tail here would miss the reference-strip.
             const transcript = transcriptRef.current;
-            if (transcript && shouldFollowAfterAnchor(transcript, anchor.responseId)) {
-              followLatestTurnTailToComposerBoundary(transcript, anchor.responseId, "auto");
+            if (transcript) {
+              scrollRealContentEndIntoSafeView(transcript);
             }
           }
           latestUserTurnAnchorRef.current = null;
@@ -12342,7 +12405,12 @@ function App() {
         return;
       }
       window.requestAnimationFrame(() => {
-        followTranscriptToBottom("smooth");
+        // Rule D: snap to real content end (respects composer boundary) rather
+        // than scrollHeight which may be stale or larger than visible area.
+        const transcript = transcriptRef.current;
+        if (transcript && !scrollRealContentEndIntoSafeView(transcript)) {
+          followTranscriptToBottom("smooth");
+        }
         transcriptAutoFollowPausedRef.current = false;
       });
     }

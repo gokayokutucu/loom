@@ -322,13 +322,77 @@ test.describe("[product-service-backed] Main composer submit", () => {
       //    320-560 px CSS padding-bottom as real content overflow.
       await expect(page.locator(".scroll-to-bottom-button")).not.toBeVisible();
 
-      // 5. scrollTop must not have jumped to the artificial bottom.
+      // 5. scrollTop must be 0 (top-lock: all content fits, no anchor scroll).
+      //    Before the fit-content guard, the anchor scroll would move scrollTop
+      //    to ~(header height - 24 px) ≈ 26, hiding the Loom header above the
+      //    viewport.  With the guard active, the transcript stays at position 0.
       const scrollTop = await page.locator(".chat-transcript").evaluate(
         (el) => (el as HTMLElement).scrollTop
       );
-      // A premature followTranscriptToBottom would send scrollTop to ~scrollHeight.
-      // It should be near 0 (first prompt, nothing above to scroll past).
-      expect(scrollTop).toBeLessThan(200);
+      expect(scrollTop).toBeLessThan(8);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+    }
+  });
+
+  test("Test B — Loom header stays visible after submit on a short / new Loom", async ({ page }) => {
+    // Rule A: when all real content fits the safe viewport, no anchor scroll
+    // should hide the Loom header.  The transcript scrollTop must remain 0 and
+    // the header h1 must be fully visible inside the transcript bounds.
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      deterministicThinkingDelayMs: 800,
+      startApp: true,
+    });
+
+    try {
+      await page.addInitScript(() => {
+        window.localStorage.setItem(
+          "loom-ai-app-settings-v1",
+          JSON.stringify({ mockDataEnabled: false, modelResponseMode: "thinking" })
+        );
+      });
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await fillPrompt(page, `toplock-header-b-${Date.now()} event sourcing detay`);
+      await page.getByRole("button", { name: "Send" }).click();
+
+      // Wait for thinking indicator — header must stay visible throughout.
+      await expect(page.locator(".thinking-panel.is-running").last()).toBeVisible({
+        timeout: 30_000,
+      });
+
+      // Header h1 must be visible and within the transcript visible area.
+      await expect(page.locator(".conversation-context-title-row h1")).toBeVisible();
+
+      // scrollTop must be 0: the top-lock guard must have blocked the anchor scroll
+      // that would otherwise scroll the header (which lives inside the transcript)
+      // above the visible area.
+      const scrollTop = await page.locator(".chat-transcript").evaluate(
+        (el) => (el as HTMLElement).scrollTop
+      );
+      expect(scrollTop).toBeLessThan(8);
+
+      // The header must be within the transcript's visible bounding rect.
+      const headerInViewport = await page.evaluate(() => {
+        const header = document.querySelector<HTMLElement>(".conversation-context-title-row h1");
+        const transcript = document.querySelector<HTMLElement>(".chat-transcript");
+        if (!header || !transcript) return null;
+        const headerRect = header.getBoundingClientRect();
+        const transcriptRect = transcript.getBoundingClientRect();
+        return {
+          // top of header relative to transcript top: ≥ 0 means visible
+          marginTop: headerRect.top - transcriptRect.top,
+        };
+      });
+      expect(headerInViewport).not.toBeNull();
+      // Header top must be within the transcript (no scrolled-off negative margin).
+      expect(headerInViewport!.marginTop).toBeGreaterThanOrEqual(-4);
     } finally {
       const cleanup = await scenario.cleanup();
       expect(cleanup.serviceStopped).toBe(true);
@@ -371,32 +435,35 @@ test.describe("[product-service-backed] Main composer submit", () => {
         { timeout: 15_000 }
       );
 
-      // After completion, [data-response-tail] of the last response must be
-      // within the safe viewport (above the composer top).
+      // After completion, the real content end (data-transcript-content-end)
+      // must be within the safe viewport.  This marker sits after the
+      // reference-strip (copy / bookmark) that appears only at completion, so
+      // checking it is stricter than checking [data-response-tail] alone.
       const visibility = await page.evaluate(() => {
-        const tails = document.querySelectorAll("[data-response-tail]");
-        const lastTail = tails.length > 0 ? tails[tails.length - 1] : null;
+        const contentEnd = document.querySelector<HTMLElement>(
+          "[data-transcript-content-end]"
+        );
         const composer = document.querySelector<HTMLElement>(
           ".prompt-composer.active:not(.centered)[data-testid='prompt-composer']"
         );
         const transcript = document.querySelector<HTMLElement>(".chat-transcript");
-        if (!lastTail || !composer || !transcript) return null;
-        const tailRect = lastTail.getBoundingClientRect();
+        if (!contentEnd || !composer || !transcript) return null;
+        const contentEndRect = contentEnd.getBoundingClientRect();
         const composerRect = composer.getBoundingClientRect();
         const transcriptRect = transcript.getBoundingClientRect();
         const safeBottom = Math.min(transcriptRect.bottom, composerRect.top);
         return {
-          tailBottom: tailRect.bottom,
+          contentEndBottom: contentEndRect.bottom,
           safeBottom,
-          // Positive means tail is visible above safe bottom; negative means hidden
-          margin: safeBottom - tailRect.bottom,
+          // Positive means content end is above safe bottom (visible); negative means hidden
+          margin: safeBottom - contentEndRect.bottom,
         };
       });
 
       expect(visibility).not.toBeNull();
-      // Tail must be AT or above the safe bottom — allow 8 px tolerance for
-      // layout rounding.
-      expect(visibility!.margin).toBeGreaterThanOrEqual(-8);
+      // Content end must be AT or above the safe bottom — allow 20 px tolerance
+      // for layout rounding and the 16 px gap used by scrollRealContentEndIntoSafeView.
+      expect(visibility!.margin).toBeGreaterThanOrEqual(-20);
     } finally {
       const cleanup = await scenario.cleanup();
       expect(cleanup.serviceStopped).toBe(true);
