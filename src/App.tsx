@@ -12127,6 +12127,33 @@ function App() {
     }, behavior === "smooth" ? 260 : 80);
   }
 
+  /**
+   * Returns true only when the streaming response's tail element has grown
+   * past (or within `gap` pixels of) the visible viewport bottom, meaning
+   * auto-follow should kick in.
+   *
+   * During latest-turn anchor mode the viewport is held at the user-turn
+   * position and the response grows downward into the visible empty space
+   * below it.  We must not chase the streaming tail until it actually exits
+   * the viewport — the large generation padding-bottom on the transcript
+   * means scrollHeight-based distance checks are unreliable, so we measure
+   * the real DOM element's bounding rect instead.
+   */
+  function shouldFollowAfterAnchor(
+    transcript: HTMLElement,
+    responseId: string | null | undefined,
+    gap = 24
+  ): boolean {
+    if (!responseId) return true; // No ID to check — default to follow
+    const tailEl = transcript.querySelector<HTMLElement>(
+      `[data-response-id="${CSS.escape(responseId)}"]`
+    );
+    if (!tailEl) return true; // Element not yet in DOM — default to follow
+    const containerRect = transcript.getBoundingClientRect();
+    const tailRect = tailEl.getBoundingClientRect();
+    return tailRect.bottom > containerRect.bottom - gap;
+  }
+
   function handleTranscriptScroll(event: React.UIEvent<HTMLElement>) {
     if (!composerRuntimeState.running || transcriptProgrammaticScrollRef.current) return;
     if (latestUserTurnAnchorRef.current) {
@@ -12165,8 +12192,27 @@ function App() {
       const anchor = latestUserTurnAnchorRef.current;
       if (anchor && !anchor.cancelled) {
         if (!anchor.anchored) {
+          // Anchor not yet applied — scroll user-turn into reading position
+          // and hold here; do NOT call followTranscriptToBottom yet.
           window.requestAnimationFrame(() => {
             scrollLatestUserTurnIntoReadingPosition("auto");
+          });
+          return;
+        }
+        // Anchor is active and the viewport is already at the user-turn
+        // reading position.  Only begin auto-follow once the streaming
+        // response tail has grown past the visible viewport bottom.
+        // While visible empty space remains below the response, hold still.
+        if (!transcriptAutoFollowPausedRef.current) {
+          window.requestAnimationFrame(() => {
+            // Re-check the pause flag inside the frame — a manual scroll
+            // arriving between the scheduling and this callback should
+            // still suppress the follow.
+            if (transcriptAutoFollowPausedRef.current) return;
+            const transcript = transcriptRef.current;
+            if (!transcript) return;
+            if (!shouldFollowAfterAnchor(transcript, generatingResponseId)) return;
+            followTranscriptToBottom("auto");
           });
         }
         return;
@@ -12195,6 +12241,7 @@ function App() {
   }, [
     activeResponseStreamingSignature,
     composerRuntimeState.running,
+    generatingResponseId,
     graphMode,
     isNewConversationDraft,
     showWeftSplit,
