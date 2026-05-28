@@ -57,6 +57,8 @@ interface LoomDesktopBridge {
   runtime?: {
     status: () => Promise<LoomDesktopRuntimeStatus>;
     restart: () => Promise<LoomDesktopRuntimeStatus>;
+    /** Stops the service, physically deletes the DB file, restarts fresh. */
+    dbWipe: () => Promise<{ ok: boolean; error?: string }>;
   };
   runtimeStatus?: () => Promise<unknown>;
   logs?: {

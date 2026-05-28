@@ -174,6 +174,7 @@ import {
   getElectronComposerBridge,
   getElectronLoomServiceUrl,
   getElectronPermissionsBridge,
+  getElectronRuntimeBridge,
   getElectronRuntimeInfo,
   getElectronWindowControls,
 } from "./electronRuntime";
@@ -6294,19 +6295,39 @@ function App() {
   }
 
   async function resetAllData() {
-    // Hard delete: single service call that physically removes every user-data
-    // row in one transaction (looms, responses, bookmarks, history, memories,
-    // attachments, context summaries, search index, …).
-    try {
-      await loomEngineClient.hardReset();
-    } catch (error) {
-      showToast({
-        title: "Reset failed",
-        message: "The service could not complete the reset. Please try again.",
-        color: "red",
-      });
-      console.error("[resetAllData] hardReset failed:", error);
-      return;
+    const electronRuntime = getElectronRuntimeBridge();
+
+    if (electronRuntime?.dbWipe) {
+      // Electron path: physically delete the DB file and restart the service so
+      // data cannot survive a restart.  This handles stale dev services that
+      // may be using a different DB path than what Electron would spawn with.
+      const result = await electronRuntime.dbWipe().catch((err: unknown) => ({
+        ok: false as const,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+      if (!result.ok) {
+        showToast({
+          title: "Reset failed",
+          message: "Could not wipe the database. Please try again.",
+          color: "red",
+        });
+        console.error("[resetAllData] dbWipe failed:", result.error);
+        return;
+      }
+    } else {
+      // Non-Electron path (web / dev server): SQL-level hard reset only.
+      // Removes every user-data row in one transaction.
+      try {
+        await loomEngineClient.hardReset();
+      } catch (error) {
+        showToast({
+          title: "Reset failed",
+          message: "The service could not complete the reset. Please try again.",
+          color: "red",
+        });
+        console.error("[resetAllData] hardReset failed:", error);
+        return;
+      }
     }
 
     // Clear all in-memory client state
