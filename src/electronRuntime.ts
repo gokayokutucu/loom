@@ -20,7 +20,7 @@ export interface LoomDesktopRuntimeStatus {
   binaryPath?: string;
   configPath?: string;
   dbPath?: string;
-  dataMode?: "shared-dev" | "isolated-dev" | "packaged";
+  dataMode?: "dev" | "packaged";
   health?: unknown;
   error?: string;
   startedByElectron?: boolean;
@@ -86,6 +86,9 @@ interface LoomDesktopBridge {
   attachments?: {
     openPath: (tempPath: string) => Promise<{ opened: boolean; error?: string }>;
   };
+  appMenu?: {
+    onOpenSettings: (callback: () => void) => () => void;
+  };
 }
 
 declare global {
@@ -139,6 +142,11 @@ export function getElectronAttachmentsBridge() {
 export function getElectronComposerBridge() {
   if (typeof window === "undefined") return null;
   return window.loomDesktop?.composer ?? null;
+}
+
+export function getElectronAppMenuBridge() {
+  if (typeof window === "undefined") return null;
+  return window.loomDesktop?.appMenu ?? null;
 }
 
 export function logElectronEvent(
