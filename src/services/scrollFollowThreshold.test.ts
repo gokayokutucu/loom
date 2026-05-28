@@ -17,7 +17,7 @@ function shouldFollowAfterAnchor(
   tailEl: { getBoundingClientRect(): DOMRect } | null,
   gap = 24
 ): boolean {
-  if (!tailEl) return true;
+  if (!tailEl) return false; // Hold — element not yet measurable
   const containerRect = container.getBoundingClientRect();
   const tailRect = tailEl.getBoundingClientRect();
   return tailRect.bottom > containerRect.bottom - gap;
@@ -74,9 +74,11 @@ describe("shouldFollowAfterAnchor", () => {
     expect(shouldFollowAfterAnchor(container, tail)).toBe(true);
   });
 
-  it("returns true (fallback) when tailEl is null", () => {
-    // No element found in DOM yet — default to follow so we don't get stuck
-    expect(shouldFollowAfterAnchor(container, null)).toBe(true);
+  it("returns false (hold) when tailEl is null", () => {
+    // No element found in DOM yet — hold (do not follow prematurely).
+    // The caller is responsible for ensuring follow resumes once the element
+    // is measurable.
+    expect(shouldFollowAfterAnchor(container, null)).toBe(false);
   });
 
   it("respects a custom gap parameter", () => {

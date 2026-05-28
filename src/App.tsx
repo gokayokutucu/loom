@@ -2297,6 +2297,10 @@ function App() {
     cancelled: boolean;
   } | null>(null);
   const previousComposerRunningRef = useRef(false);
+  // True during the async gap between setComposerRuntimeState({ running: true })
+  // and queueLatestUserTurnAnchor() in the main send path.  While this is true
+  // the streaming effect must HOLD (not follow) even though there is no anchor yet.
+  const pendingLatestTurnAnchorRef = useRef(false);
   const activeVisitLoomIdRef = useRef<string | null>(null);
   const activeVisitKnownResponseIdsRef = useRef<Set<string>>(new Set());
   const wasWeftSplitVisibleRef = useRef(false);
@@ -7569,6 +7573,9 @@ function App() {
     mainRevealTargetRef.current = null;
     setComposerRuntimeTargetKey(originalDraftKey);
 
+    // Mark that a latest-turn anchor is about to be queued so the streaming
+    // effect holds scroll position during the async gap before the anchor lands.
+    pendingLatestTurnAnchorRef.current = true;
     setComposerRuntimeState({
       running: true,
       message: "Understanding question...",
@@ -9466,6 +9473,9 @@ function App() {
   }
 
   function queueLatestUserTurnAnchor(loomId: string, responseId: string) {
+    // Anchor has arrived — clear the pending flag so the streaming effect
+    // transitions to anchor-geometry mode rather than holding indefinitely.
+    pendingLatestTurnAnchorRef.current = false;
     latestUserTurnAnchorRef.current = {
       loomId,
       responseId,
@@ -12105,6 +12115,7 @@ function App() {
   }
 
   function resumeTranscriptAutoFollow() {
+    pendingLatestTurnAnchorRef.current = false;
     latestUserTurnAnchorRef.current = null;
     transcriptAutoFollowPausedRef.current = false;
     transcriptProgrammaticScrollRef.current = true;
@@ -12144,11 +12155,11 @@ function App() {
     responseId: string | null | undefined,
     gap = 24
   ): boolean {
-    if (!responseId) return true; // No ID to check — default to follow
+    if (!responseId) return false; // No ID available — hold, do not follow prematurely
     const tailEl = transcript.querySelector<HTMLElement>(
       `[data-response-id="${CSS.escape(responseId)}"]`
     );
-    if (!tailEl) return true; // Element not yet in DOM — default to follow
+    if (!tailEl) return false; // Element not yet in DOM — hold until tail is measurable
     const containerRect = transcript.getBoundingClientRect();
     const tailRect = tailEl.getBoundingClientRect();
     return tailRect.bottom > containerRect.bottom - gap;
@@ -12218,12 +12229,17 @@ function App() {
         return;
       }
       if (!transcriptAutoFollowPausedRef.current) {
+        // While a latest-turn anchor is pending (async gap between running=true
+        // and queueLatestUserTurnAnchor), HOLD — do not follow to bottom.
+        if (pendingLatestTurnAnchorRef.current) return;
         window.requestAnimationFrame(() => followTranscriptToBottom("auto"));
       }
       return;
     }
 
     if (wasRunning) {
+      // Generation ended — always clear the pending flag as a safety net.
+      pendingLatestTurnAnchorRef.current = false;
       const anchor = latestUserTurnAnchorRef.current;
       if (anchor && !anchor.cancelled) {
         window.requestAnimationFrame(() => {
