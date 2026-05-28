@@ -127,6 +127,80 @@ test.describe("[pure-ui-rendering] assistant Markdown rendering helpers", () => 
     );
   });
 
+  test("repairs standalone heading markers followed by heading text", () => {
+    const markdown = [
+      "How GPS Determines Your Location",
+      "",
+      "GPS pinpoints your position through timing.",
+      "####",
+      "",
+      "Satellite Signals",
+      "",
+      "Satellites broadcast timestamps.",
+      "####",
+      "Time-of-Flight Calculation",
+    ].join("\n");
+
+    const normalized = normalizeAssistantMarkdownSource(markdown);
+    const blocks = parseAssistantMarkdown(markdown);
+
+    expect(normalized).toContain("#### Satellite Signals");
+    expect(normalized).toContain("#### Time-of-Flight Calculation");
+    expect(normalized).not.toContain("\n####\n");
+    expect(blocks).toEqual(
+      expect.arrayContaining([
+        { kind: "heading", level: 4, text: "Satellite Signals" },
+        { kind: "heading", level: 4, text: "Time-of-Flight Calculation" },
+      ])
+    );
+    expect(assistantMarkdownToSafeHtml(markdown)).toContain("<h4>Satellite Signals</h4>");
+  });
+
+  test("drops standalone heading markers with no heading text", () => {
+    const markdown = ["Intro", "", "####", "", "######"].join("\n");
+
+    const normalized = normalizeAssistantMarkdownSource(markdown);
+
+    expect(normalized).toBe("Intro\n\n");
+    expect(assistantMarkdownToPlainText(markdown)).toBe("Intro");
+  });
+
+  test("repairs orphan heading markers across heading levels", () => {
+    const markdown = [
+      "#",
+      "One",
+      "##",
+      "Two",
+      "###",
+      "Three",
+      "####",
+      "Four",
+      "#####",
+      "Five",
+      "######",
+      "Six",
+    ].join("\n");
+
+    expect(parseAssistantMarkdown(markdown)).toEqual([
+      { kind: "heading", level: 1, text: "One" },
+      { kind: "heading", level: 2, text: "Two" },
+      { kind: "heading", level: 3, text: "Three" },
+      { kind: "heading", level: 4, text: "Four" },
+      { kind: "heading", level: 5, text: "Five" },
+      { kind: "heading", level: 6, text: "Six" },
+    ]);
+  });
+
+  test("does not alter orphan heading markers inside fenced code", () => {
+    const markdown = ["```markdown", "####", "Satellite Signals", "```"].join("\n");
+
+    expect(cleanOrphanMarkdownMarkers(markdown)).toBe(markdown);
+    expect(parseAssistantMarkdown(markdown)[0]).toMatchObject({
+      kind: "code",
+      code: "####\nSatellite Signals",
+    });
+  });
+
   test("normalizes Markdown display text for titles and previews", () => {
     const markdown = [
       "Loom: **AWS üzerinde Event Sourcing implementasyonu** için kullanılan araçlar ###",

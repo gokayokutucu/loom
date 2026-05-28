@@ -89,22 +89,56 @@ export function repairCollapsedMarkdownTables(markdown: string) {
 
 export function cleanOrphanMarkdownMarkers(markdown: string) {
   const lines = markdown.split("\n");
+  const cleanedLines: string[] = [];
   let inCodeBlock = false;
-  return lines
-    .flatMap((line) => {
-      if (line.trimStart().startsWith("```")) {
-        inCodeBlock = !inCodeBlock;
-        return [line];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (line.trimStart().startsWith("```")) {
+      inCodeBlock = !inCodeBlock;
+      cleanedLines.push(line);
+      continue;
+    }
+    if (inCodeBlock) {
+      cleanedLines.push(line);
+      continue;
+    }
+
+    const trimmed = line.trim();
+    const orphanHeadingMatch = trimmed.match(/^(#{1,6})$/);
+    if (orphanHeadingMatch) {
+      const nextTextLineIndex = findNextNonEmptyLineIndex(lines, index + 1);
+      if (nextTextLineIndex !== null && isPlainHeadingTextLine(lines[nextTextLineIndex])) {
+        const nextLine = lines[nextTextLineIndex];
+        cleanedLines.push(`${orphanHeadingMatch[1]} ${nextLine.trim()}`);
+        index = nextTextLineIndex;
       }
-      if (inCodeBlock) return [line];
+      continue;
+    }
+    if (/^(?:-{3,}|_{3,}|\*{3,})\s+#{1,6}$/.test(trimmed)) continue;
 
-      const trimmed = line.trim();
-      if (/^#{1,6}$/.test(trimmed)) return [];
-      if (/^(?:-{3,}|_{3,}|\*{3,})\s+#{1,6}$/.test(trimmed)) return [];
+    cleanedLines.push(line.replace(/\s+#{1,6}\s*$/, ""));
+  }
 
-      return [line.replace(/\s+#{1,6}\s*$/, "")];
-    })
-    .join("\n");
+  return cleanedLines.join("\n");
+}
+
+function findNextNonEmptyLineIndex(lines: string[], startIndex: number) {
+  for (let index = startIndex; index < lines.length; index += 1) {
+    if (lines[index].trim()) return index;
+  }
+  return null;
+}
+
+function isPlainHeadingTextLine(line: string) {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  if (trimmed.startsWith("```")) return false;
+  if (/^#{1,6}\s+/.test(trimmed)) return false;
+  if (/^(?:#{1,6}|-{3,}|_{3,}|\*{3,})$/.test(trimmed)) return false;
+  if (/^[-*]\s+/.test(trimmed) || /^\d+\.\s+/.test(trimmed)) return false;
+  if (isMarkdownTableLine(trimmed)) return false;
+  return true;
 }
 
 function splitCollapsedTableLine(line: string) {
