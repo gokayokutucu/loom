@@ -247,6 +247,8 @@ import {
   responseMarkdownSource,
 } from "./services/assistantMarkdown";
 import {
+  hasRealAssistantAnswerStarted,
+  hasRealContentBelowViewport,
   latestTurnTailScrollDelta,
   shouldFollowLatestTurnTail,
 } from "./services/latestTurnScroll";
@@ -12291,7 +12293,7 @@ function App() {
             const streamingResponse = activeResponses.find(
               (response) => response.id === generatingResponseId
             );
-            if (!streamingResponse || !responseMarkdownSource(streamingResponse).trim()) return;
+            if (!streamingResponse || !hasRealAssistantAnswerStarted(responseMarkdownSource(streamingResponse))) return;
             if (!shouldFollowAfterAnchor(transcript, generatingResponseId)) return;
             followLatestTurnTailToComposerBoundary(transcript, generatingResponseId, "auto");
           });
@@ -15824,8 +15826,25 @@ function useScrollToBottomVisibility(transcriptRef: RefObject<HTMLElement | null
       setVisible(false);
       return;
     }
-    const scrollable = transcript.scrollHeight > transcript.clientHeight + 96;
-    setVisible(scrollable && !isScrollContainerNearBottom(transcript));
+    // Use real DOM geometry — do NOT use scrollHeight, which is inflated by
+    // the CSS padding-bottom on .is-generating-response (320–560 px).
+    // Only show the button when real rendered content actually overflows the
+    // safe viewport boundary (the lesser of transcript bottom and composer top).
+    const realContentEnd = transcript.querySelector<HTMLElement>(
+      "[data-transcript-content-end]"
+    );
+    const composer = document.querySelector<HTMLElement>(
+      ".prompt-composer.active:not(.centered)[data-testid='prompt-composer']"
+    );
+    setVisible(
+      hasRealContentBelowViewport({
+        transcriptRect: transcript.getBoundingClientRect(),
+        composerTop: composer ? composer.getBoundingClientRect().top : null,
+        realContentEndBottom: realContentEnd
+          ? realContentEnd.getBoundingClientRect().bottom
+          : null,
+      })
+    );
   }, [transcriptRef]);
 
   const scheduleVisibilityUpdate = useCallback(() => {
@@ -15840,6 +15859,31 @@ function useScrollToBottomVisibility(transcriptRef: RefObject<HTMLElement | null
     const transcript = transcriptRef.current;
     if (!transcript) return;
     const prefersReducedMotion = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches;
+    // Scroll so the real content end is at the safe viewport bottom, not to
+    // the artificial scrollHeight bottom which includes generation padding.
+    const realContentEnd = transcript.querySelector<HTMLElement>(
+      "[data-transcript-content-end]"
+    );
+    const composer = document.querySelector<HTMLElement>(
+      ".prompt-composer.active:not(.centered)[data-testid='prompt-composer']"
+    );
+    if (realContentEnd && composer) {
+      const delta = latestTurnTailScrollDelta({
+        tailRect: realContentEnd.getBoundingClientRect(),
+        composerRect: composer.getBoundingClientRect(),
+        transcriptRect: transcript.getBoundingClientRect(),
+        gap: 16,
+      });
+      if (delta !== null && delta > 0) {
+        transcript.scrollTo({
+          top: Math.min(transcript.scrollHeight, transcript.scrollTop + delta),
+          behavior: prefersReducedMotion ? "auto" : "smooth",
+        });
+        scheduleVisibilityUpdate();
+        return;
+      }
+    }
+    // Fallback: scroll all the way down (handles case where markers are missing)
     transcript.scrollTo({
       top: transcript.scrollHeight,
       behavior: prefersReducedMotion ? "auto" : "smooth",
@@ -16774,6 +16818,11 @@ function ChatTranscript({
           </Fragment>
         );
       })}
+      {/* Real content end marker — positioned in normal flow, before the
+          CSS padding-bottom on .is-generating-response.  Used by the
+          scroll-to-bottom button to determine whether real content has
+          overflowed the safe viewport, ignoring artificial padding. */}
+      <span aria-hidden="true" data-transcript-content-end="" />
       {sentReferenceHint && (
         <AddressHintPopover
           link={sentReferenceHint.link}

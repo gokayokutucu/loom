@@ -3390,6 +3390,16 @@ kbd {
   pointer-events: none;
 }
 
+/* Real transcript content end marker — sits in normal document flow
+   immediately after the last qa-item, before the CSS padding-bottom.
+   getBoundingClientRect().bottom gives the true content boundary. */
+[data-transcript-content-end] {
+  display: block;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}
+
 .assistant-response-content.is-collapsed {
   max-height: var(--assistant-response-collapse-height, 960px);
   overflow: hidden;

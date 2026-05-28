@@ -269,4 +269,213 @@ test.describe("[product-service-backed] Main composer submit", () => {
       expect(cleanup.tempDirRemoved).toBe(true);
     }
   });
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LOOM-SCROLL-RULES-REBASE-001 tests
+  //
+  // Verify that the scroll-to-bottom button and viewport position are driven
+  // by REAL rendered content, not by scrollHeight / artificial CSS padding.
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  test("Test A — scroll-to-bottom button is hidden while thinking and no real answer yet", async ({ page }) => {
+    // Rule 3: button must NOT appear because of artificial generation padding
+    // or the thinking indicator alone.  It should only appear once real answer
+    // content actually overflows the safe viewport.
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      deterministicThinkingDelayMs: 1_000,
+      startApp: true,
+    });
+
+    try {
+      await page.addInitScript(() => {
+        window.localStorage.setItem(
+          "loom-ai-app-settings-v1",
+          JSON.stringify({ mockDataEnabled: false, modelResponseMode: "thinking" })
+        );
+      });
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      // ── Submit the first prompt ────────────────────────────────────────────
+      await fillPrompt(page, `scroll-rules-a-${Date.now()} event sourcing detay`);
+      await page.getByRole("button", { name: "Send" }).click();
+
+      // ── Wait for thinking to start (no answer text yet) ───────────────────
+      await expect(page.locator(".thinking-panel.is-running").last()).toBeVisible({
+        timeout: 30_000,
+      });
+
+      // ── Assertions during thinking phase ─────────────────────────────────
+      // 1. Loom header (conversation title) must be visible.
+      await expect(page.locator(".conversation-context-title-row h1")).toBeVisible();
+
+      // 2. The submitted user prompt text must be visible.
+      await expect(page.locator(".qa-item").last().locator(".user-message")).toBeVisible();
+
+      // 3. Thinking indicator must be visible.
+      await expect(page.locator(".thinking-panel.is-running").last()).toBeVisible();
+
+      // 4. Scroll-to-bottom button must NOT be visible.
+      //    It would appear falsely if scrollHeight-based logic counted the
+      //    320-560 px CSS padding-bottom as real content overflow.
+      await expect(page.locator(".scroll-to-bottom-button")).not.toBeVisible();
+
+      // 5. scrollTop must not have jumped to the artificial bottom.
+      const scrollTop = await page.locator(".chat-transcript").evaluate(
+        (el) => (el as HTMLElement).scrollTop
+      );
+      // A premature followTranscriptToBottom would send scrollTop to ~scrollHeight.
+      // It should be near 0 (first prompt, nothing above to scroll past).
+      expect(scrollTop).toBeLessThan(200);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+    }
+  });
+
+  test("Test D — final response tail is visible above composer after completion", async ({ page }) => {
+    // Rule 5: when the response completes the final real content end must be
+    // visible (not scrolled below the composer or hidden in artificial padding).
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      deterministicStreamChunkDelayMs: 4,
+      deterministicThinkingDelayMs: 200,
+      startApp: true,
+    });
+
+    try {
+      await page.addInitScript(() => {
+        window.localStorage.setItem(
+          "loom-ai-app-settings-v1",
+          JSON.stringify({ mockDataEnabled: false, modelResponseMode: "thinking" })
+        );
+      });
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await fillPrompt(page, `scroll-rules-d-${Date.now()} event sourcing detay`);
+      await page.getByRole("button", { name: "Send" }).click();
+
+      // Wait for generation to fully complete.
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        "Event Sourcing",
+        { timeout: 30_000 }
+      );
+      await expect(page.locator(".chat-transcript")).not.toHaveClass(
+        /is-generating-response/,
+        { timeout: 15_000 }
+      );
+
+      // After completion, [data-response-tail] of the last response must be
+      // within the safe viewport (above the composer top).
+      const visibility = await page.evaluate(() => {
+        const tails = document.querySelectorAll("[data-response-tail]");
+        const lastTail = tails.length > 0 ? tails[tails.length - 1] : null;
+        const composer = document.querySelector<HTMLElement>(
+          ".prompt-composer.active:not(.centered)[data-testid='prompt-composer']"
+        );
+        const transcript = document.querySelector<HTMLElement>(".chat-transcript");
+        if (!lastTail || !composer || !transcript) return null;
+        const tailRect = lastTail.getBoundingClientRect();
+        const composerRect = composer.getBoundingClientRect();
+        const transcriptRect = transcript.getBoundingClientRect();
+        const safeBottom = Math.min(transcriptRect.bottom, composerRect.top);
+        return {
+          tailBottom: tailRect.bottom,
+          safeBottom,
+          // Positive means tail is visible above safe bottom; negative means hidden
+          margin: safeBottom - tailRect.bottom,
+        };
+      });
+
+      expect(visibility).not.toBeNull();
+      // Tail must be AT or above the safe bottom — allow 8 px tolerance for
+      // layout rounding.
+      expect(visibility!.margin).toBeGreaterThanOrEqual(-8);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+    }
+  });
+
+  test("Test F — scroll-to-bottom button appears only when real content overflows and click reveals content end", async ({ page }) => {
+    // Rule 3 & 6: button visible ↔ real content below safe viewport;
+    // clicking it reveals the real content end (not artificial padding bottom).
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      deterministicStreamChunkDelayMs: 4,
+      startApp: true,
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      // Build two completed responses so the transcript is scrollable.
+      for (const seed of [
+        `scroll-rules-f1-${Date.now()} event sourcing detay`,
+        `scroll-rules-f2-${Date.now()} compaction event sourcing`,
+      ]) {
+        await fillPrompt(page, seed);
+        await page.getByRole("button", { name: "Send" }).click();
+        await expect(page.locator(".assistant-message").last()).toBeVisible({ timeout: 30_000 });
+        await expect(page.locator(".chat-transcript")).not.toHaveClass(
+          /is-generating-response/,
+          { timeout: 15_000 }
+        );
+      }
+
+      // Scroll to the top to put real content below the viewport.
+      await page.locator(".chat-transcript").evaluate((el) => {
+        el.scrollTop = 0;
+      });
+      await page.waitForTimeout(60); // let rAF fire
+
+      // The scroll-to-bottom button should now be visible.
+      await expect(page.locator(".scroll-to-bottom-button")).toBeVisible({ timeout: 5_000 });
+
+      // Click it and verify the real content end is now visible.
+      await page.locator(".scroll-to-bottom-button").click();
+      await page.waitForTimeout(500); // allow smooth scroll to settle
+
+      const afterClick = await page.evaluate(() => {
+        const marker = document.querySelector<HTMLElement>("[data-transcript-content-end]");
+        const composer = document.querySelector<HTMLElement>(
+          ".prompt-composer.active:not(.centered)[data-testid='prompt-composer']"
+        );
+        const transcript = document.querySelector<HTMLElement>(".chat-transcript");
+        if (!marker || !composer || !transcript) return null;
+        const markerRect = marker.getBoundingClientRect();
+        const composerRect = composer.getBoundingClientRect();
+        const transcriptRect = transcript.getBoundingClientRect();
+        const safeBottom = Math.min(transcriptRect.bottom, composerRect.top);
+        return {
+          markerBottom: markerRect.bottom,
+          safeBottom,
+          // Positive = marker is above safe bottom (visible); negative = hidden
+          margin: safeBottom - markerRect.bottom,
+        };
+      });
+
+      expect(afterClick).not.toBeNull();
+      // Content end must be at or above the safe bottom (visible) after clicking.
+      expect(afterClick!.margin).toBeGreaterThanOrEqual(-8);
+
+      // Button should now be hidden (we're at the real content end).
+      await expect(page.locator(".scroll-to-bottom-button")).not.toBeVisible();
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+    }
+  });
 });
