@@ -246,6 +246,10 @@ import {
   normalizeAssistantMarkdownSource,
   responseMarkdownSource,
 } from "./services/assistantMarkdown";
+import {
+  latestTurnTailScrollDelta,
+  shouldFollowLatestTurnTail,
+} from "./services/latestTurnScroll";
 import { codeToClipboardHtml } from "./services/clipboard";
 import { prepareContextArtifactsForGeneration } from "./services/contextReadinessGate";
 import {
@@ -2296,6 +2300,8 @@ function App() {
     anchored: boolean;
     cancelled: boolean;
   } | null>(null);
+  const latestTurnAnchorModeRef = useRef(false);
+  const transcriptUserScrollIntentUntilRef = useRef(0);
   const previousComposerRunningRef = useRef(false);
   // True during the async gap between setComposerRuntimeState({ running: true })
   // and queueLatestUserTurnAnchor() in the main send path.  While this is true
@@ -9476,6 +9482,10 @@ function App() {
     // Anchor has arrived — clear the pending flag so the streaming effect
     // transitions to anchor-geometry mode rather than holding indefinitely.
     pendingLatestTurnAnchorRef.current = false;
+    latestTurnAnchorModeRef.current = true;
+    pendingScrollDestinationRef.current = null;
+    pendingScrollPathRef.current = null;
+    pendingScrollHighlightRef.current = false;
     latestUserTurnAnchorRef.current = {
       loomId,
       responseId,
@@ -9488,6 +9498,13 @@ function App() {
         scrollLatestUserTurnIntoReadingPosition("auto");
       });
     });
+    [120, 320, 640].forEach((delayMs) => {
+      window.setTimeout(() => {
+        const anchor = latestUserTurnAnchorRef.current;
+        if (!anchor || anchor.cancelled || anchor.anchored) return;
+        scrollLatestUserTurnIntoReadingPosition("auto");
+      }, delayMs);
+    });
   }
 
   function updateLatestUserTurnAnchorResponseId(previousResponseId: string, nextResponseId: string) {
@@ -9496,8 +9513,13 @@ function App() {
     latestUserTurnAnchorRef.current = {
       ...anchor,
       responseId: nextResponseId,
-      anchored: false,
+      anchored: anchor.anchored,
     };
+    if (!anchor.anchored) {
+      window.requestAnimationFrame(() => {
+        scrollLatestUserTurnIntoReadingPosition("auto");
+      });
+    }
   }
 
   function scrollLatestUserTurnIntoReadingPosition(behavior: ScrollBehavior = "auto") {
@@ -12117,6 +12139,7 @@ function App() {
   function resumeTranscriptAutoFollow() {
     pendingLatestTurnAnchorRef.current = false;
     latestUserTurnAnchorRef.current = null;
+    latestTurnAnchorModeRef.current = false;
     transcriptAutoFollowPausedRef.current = false;
     transcriptProgrammaticScrollRef.current = true;
     window.setTimeout(() => {
@@ -12138,45 +12161,88 @@ function App() {
     }, behavior === "smooth" ? 260 : 80);
   }
 
-  /**
-   * Returns true only when the streaming response's tail element has grown
-   * past (or within `gap` pixels of) the visible viewport bottom, meaning
-   * auto-follow should kick in.
-   *
-   * During latest-turn anchor mode the viewport is held at the user-turn
-   * position and the response grows downward into the visible empty space
-   * below it.  We must not chase the streaming tail until it actually exits
-   * the viewport — the large generation padding-bottom on the transcript
-   * means scrollHeight-based distance checks are unreliable, so we measure
-   * the real DOM element's bounding rect instead.
-   */
-  function shouldFollowAfterAnchor(
+  function currentPromptComposerElement() {
+    return document.querySelector<HTMLElement>(
+      ".prompt-composer.active:not(.centered)[data-testid='prompt-composer']"
+    );
+  }
+
+  function responseTailElement(transcript: HTMLElement, responseId: string | null | undefined) {
+    if (!responseId) return null;
+    return transcript.querySelector<HTMLElement>(
+      `[data-response-tail="${CSS.escape(responseId)}"]`
+    );
+  }
+
+  function shouldFollowAfterAnchor(transcript: HTMLElement, responseId: string | null | undefined) {
+    const tailEl = responseTailElement(transcript, responseId);
+    const composerEl = currentPromptComposerElement();
+    if (!tailEl || !composerEl) return false;
+    return shouldFollowLatestTurnTail({
+      tailRect: tailEl.getBoundingClientRect(),
+      composerRect: composerEl.getBoundingClientRect(),
+      transcriptRect: transcript.getBoundingClientRect(),
+    });
+  }
+
+  function followLatestTurnTailToComposerBoundary(
     transcript: HTMLElement,
     responseId: string | null | undefined,
-    gap = 24
-  ): boolean {
-    if (!responseId) return false; // No ID available — hold, do not follow prematurely
-    const tailEl = transcript.querySelector<HTMLElement>(
-      `[data-response-id="${CSS.escape(responseId)}"]`
-    );
-    if (!tailEl) return false; // Element not yet in DOM — hold until tail is measurable
-    const containerRect = transcript.getBoundingClientRect();
-    const tailRect = tailEl.getBoundingClientRect();
-    return tailRect.bottom > containerRect.bottom - gap;
+    behavior: ScrollBehavior
+  ) {
+    const tailEl = responseTailElement(transcript, responseId);
+    const composerEl = currentPromptComposerElement();
+    if (!tailEl || !composerEl) return false;
+    const delta = latestTurnTailScrollDelta({
+      tailRect: tailEl.getBoundingClientRect(),
+      composerRect: composerEl.getBoundingClientRect(),
+      transcriptRect: transcript.getBoundingClientRect(),
+    });
+    if (delta === null || delta <= 0) return false;
+    transcriptProgrammaticScrollRef.current = true;
+    transcript.scrollTo({
+      top: Math.min(transcript.scrollHeight, transcript.scrollTop + delta),
+      behavior,
+    });
+    window.setTimeout(() => {
+      transcriptProgrammaticScrollRef.current = false;
+    }, behavior === "smooth" ? 260 : 80);
+    return true;
   }
 
   function handleTranscriptScroll(event: React.UIEvent<HTMLElement>) {
     if (!composerRuntimeState.running || transcriptProgrammaticScrollRef.current) return;
+    const hasUserScrollIntent =
+      typeof performance !== "undefined" &&
+      performance.now() <= transcriptUserScrollIntentUntilRef.current;
+    if (
+      !hasUserScrollIntent &&
+      (latestTurnAnchorModeRef.current ||
+        pendingLatestTurnAnchorRef.current ||
+        latestUserTurnAnchorRef.current)
+    ) {
+      return;
+    }
     if (latestUserTurnAnchorRef.current) {
       latestUserTurnAnchorRef.current = {
         ...latestUserTurnAnchorRef.current,
         cancelled: true,
       };
     }
+    if (latestTurnAnchorModeRef.current || pendingLatestTurnAnchorRef.current) {
+      transcriptAutoFollowPausedRef.current = true;
+      return;
+    }
     const transcript = event.currentTarget;
     if (!isTranscriptNearBottom(transcript)) {
       transcriptAutoFollowPausedRef.current = true;
     }
+  }
+
+  function markTranscriptUserScrollIntent() {
+    if (!composerRuntimeState.running) return;
+    transcriptUserScrollIntentUntilRef.current =
+      (typeof performance !== "undefined" ? performance.now() : Date.now()) + 700;
   }
 
   const activeResponseStreamingSignature = activeResponses
@@ -12222,12 +12288,17 @@ function App() {
             if (transcriptAutoFollowPausedRef.current) return;
             const transcript = transcriptRef.current;
             if (!transcript) return;
+            const streamingResponse = activeResponses.find(
+              (response) => response.id === generatingResponseId
+            );
+            if (!streamingResponse || !responseMarkdownSource(streamingResponse).trim()) return;
             if (!shouldFollowAfterAnchor(transcript, generatingResponseId)) return;
-            followTranscriptToBottom("auto");
+            followLatestTurnTailToComposerBoundary(transcript, generatingResponseId, "auto");
           });
         }
         return;
       }
+      if (latestTurnAnchorModeRef.current) return;
       if (!transcriptAutoFollowPausedRef.current) {
         // While a latest-turn anchor is pending (async gap between running=true
         // and queueLatestUserTurnAnchor), HOLD — do not follow to bottom.
@@ -12241,11 +12312,30 @@ function App() {
       // Generation ended — always clear the pending flag as a safety net.
       pendingLatestTurnAnchorRef.current = false;
       const anchor = latestUserTurnAnchorRef.current;
-      if (anchor && !anchor.cancelled) {
+      if (anchor?.cancelled) {
+        latestUserTurnAnchorRef.current = null;
+        latestTurnAnchorModeRef.current = false;
+        transcriptAutoFollowPausedRef.current = true;
+        return;
+      }
+      if (anchor) {
         window.requestAnimationFrame(() => {
-          scrollLatestUserTurnIntoReadingPosition("auto");
+          if (!anchor.anchored) {
+            scrollLatestUserTurnIntoReadingPosition("auto");
+          } else {
+            const transcript = transcriptRef.current;
+            if (transcript && shouldFollowAfterAnchor(transcript, anchor.responseId)) {
+              followLatestTurnTailToComposerBoundary(transcript, anchor.responseId, "auto");
+            }
+          }
           latestUserTurnAnchorRef.current = null;
+          latestTurnAnchorModeRef.current = false;
         });
+        transcriptAutoFollowPausedRef.current = false;
+        return;
+      }
+      if (latestTurnAnchorModeRef.current) {
+        latestTurnAnchorModeRef.current = false;
         transcriptAutoFollowPausedRef.current = false;
         return;
       }
@@ -12917,6 +13007,7 @@ function App() {
                               markSplitPanelActive("origin");
                               handleTranscriptScroll(event);
                             }}
+                            onTranscriptUserScrollIntent={markTranscriptUserScrollIntent}
                             onScrollToBottom={() => {
                               markSplitPanelActive("origin");
                               resumeTranscriptAutoFollow();
@@ -13012,6 +13103,7 @@ function App() {
                               markSplitPanelActive("weft");
                               handleTranscriptScroll(event);
                             }}
+                            onTranscriptUserScrollIntent={markTranscriptUserScrollIntent}
                             onScrollToBottom={() => {
                               markSplitPanelActive("weft");
                               resumeTranscriptAutoFollow();
@@ -13144,6 +13236,7 @@ function App() {
                     onReturnToOrigin={activeWeftOrigin ? returnToOrigin : undefined}
                     highlightedResponseId={recentResponseFeedbackId}
                     onTranscriptScroll={handleTranscriptScroll}
+                    onTranscriptUserScrollIntent={markTranscriptUserScrollIntent}
                     onScrollToBottom={resumeTranscriptAutoFollow}
                     generatingResponseId={generatingResponseId}
                     completionActionRevealResponseId={completionActionRevealResponseId}
@@ -15818,6 +15911,7 @@ function ChatTranscript({
   onReturnToOrigin,
   highlightedResponseId,
   onTranscriptScroll,
+  onTranscriptUserScrollIntent,
   onScrollToBottom,
   generatingResponseId,
   completionActionRevealResponseId,
@@ -15870,6 +15964,7 @@ function ChatTranscript({
   onReturnToOrigin?: (options?: { keepPromptRevisionSelection?: boolean }) => void;
   highlightedResponseId?: string | null;
   onTranscriptScroll?: (event: React.UIEvent<HTMLElement>) => void;
+  onTranscriptUserScrollIntent?: () => void;
   onScrollToBottom?: () => void;
   generatingResponseId?: string | null;
   completionActionRevealResponseId?: string | null;
@@ -16057,6 +16152,8 @@ function ChatTranscript({
         ref={setTranscriptNode}
         aria-label="Conversation transcript"
         onScroll={handleTranscriptScroll}
+        onWheelCapture={onTranscriptUserScrollIntent}
+        onTouchStartCapture={onTranscriptUserScrollIntent}
       >
       <div className="conversation-context">
         <div className="conversation-address-row">
@@ -16493,6 +16590,11 @@ function ChatTranscript({
                   onOpenReference={onOpenReference}
                   onReferenceHint={showSentReferenceHint}
                   onReferenceHintClose={scheduleSentReferenceHintClose}
+                />
+                <span
+                  aria-hidden="true"
+                  className="assistant-response-tail"
+                  data-response-tail={displayResponse.id}
                 />
                 {displayResponse.answerStale && !isGeneratingResponse && (
                   <div className="stale-answer-notice">

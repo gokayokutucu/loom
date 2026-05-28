@@ -2278,6 +2278,10 @@ kbd {
   scrollbar-width: thin;
 }
 
+.chat-transcript.is-generating-response {
+  padding-bottom: clamp(320px, 52vh, 560px);
+}
+
 .weft-split-view {
   display: grid;
   grid-template-columns: minmax(0, 60%) minmax(0, 40%);
@@ -3377,6 +3381,13 @@ kbd {
 .assistant-response-content {
   position: relative;
   min-width: 0;
+}
+
+.assistant-response-tail {
+  display: block;
+  width: 1px;
+  height: 0;
+  pointer-events: none;
 }
 
 .assistant-response-content.is-collapsed {
