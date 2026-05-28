@@ -208,6 +208,10 @@ import {
 } from "./services/referenceDisplay";
 import { polishDisplayTitle } from "./services/displayTitlePolish";
 import {
+  repairHydratedLoomBookmarkTitle,
+  resolveLoomBookmarkTitle,
+} from "./services/bookmarkTitleRepair";
+import {
   normalizeReferenceAddress,
   normalizeResponseLinkSource,
   referenceIdentityKey,
@@ -2275,6 +2279,7 @@ function App() {
   const workspaceRef = useRef<HTMLElement | null>(null);
   const transcriptRef = useRef<HTMLElement | null>(null);
   const originTranscriptRef = useRef<HTMLElement | null>(null);
+  const conversationsRef = useRef<Conversation[]>([]);
   const conversationResponsesRef = useRef<Record<string, ResponseItem[]>>({});
   const activeConversationIdRef = useRef(EPHEMERAL_DRAFT_ID);
   const activeObjectTitleRef = useRef("New conversation");
@@ -2600,6 +2605,10 @@ function App() {
   }, [activeConversation?.id, activeResponses, draftConversation?.id]);
 
   useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
+  useEffect(() => {
     conversationResponsesRef.current = conversationResponses;
   }, [conversationResponses]);
 
@@ -2908,6 +2917,39 @@ function App() {
     // Fallback: conversation level (same as address bar display)
     return currentShareDestination;
   }, [isNewConversationDraft, navigationStack, navigationIndex, currentShareDestination]);
+
+  const currentTopbarDestination = useMemo<LoomLink>(() => {
+    if (isNewConversationDraft) return currentAddressBarDestination;
+
+    // Topbar authority follows the visible address-bar destination. The scroll-derived
+    // active response can update titles and focus, but it must not change topbar bookmark identity.
+    const visibleDestination = currentShareDestination;
+    if (!isLoomLink(visibleDestination)) return visibleDestination;
+
+    const title = resolveLoomBookmarkTitle({
+      liveConversationTitle:
+        activeConversation?.id === visibleDestination.id
+          ? activeConversation.title
+          : undefined,
+      activeAddressableConversationTitle: activeAddressableConversation?.title,
+      serviceTitle: addressBarObjectTitle,
+      destinationTitle: visibleDestination.title,
+      path: visibleDestination.path,
+      canonicalUri: visibleDestination.canonicalUri,
+      fallbackId: visibleDestination.id,
+    });
+    return title === visibleDestination.title
+      ? visibleDestination
+      : { ...visibleDestination, title };
+  }, [
+    activeAddressableConversation?.title,
+    activeConversation?.id,
+    activeConversation?.title,
+    addressBarObjectTitle,
+    currentAddressBarDestination,
+    currentShareDestination,
+    isNewConversationDraft,
+  ]);
 
   const currentLoomExportTarget = useMemo(() => {
     if (!focusedSplitConversation) return null;
@@ -3452,8 +3494,11 @@ function App() {
     try {
       const result = await loomEngineClientRef.current.listBookmarks();
       const responsesByLoom = conversationResponsesRef.current;
+      const liveConversations = conversationsRef.current;
       const normalizeServiceBookmark = (bookmark: BookmarkItem): BookmarkItem => {
-        if (bookmark.type !== "response") return bookmark;
+        if (bookmark.type !== "response") {
+          return repairHydratedLoomBookmarkTitle(bookmark, liveConversations);
+        }
         // Extract the stable response UUID from the bookmark's URL path as a
         // fallback match key. This handles bookmarks created when a response had
         // no display code yet and the path fell back to "…/r/R-00000?id=<uuid>".
@@ -4990,8 +5035,20 @@ function App() {
     const rawTitle = loom?.title ?? "Loom";
     const title =
       loom?.id === activeAddressableConversation?.id
-        ? addressBarObjectTitle || rawTitle
-        : rawTitle;
+        ? resolveLoomBookmarkTitle({
+            liveConversationTitle: rawTitle,
+            activeAddressableConversationTitle: activeAddressableConversation?.title,
+            serviceTitle: addressBarObjectTitle,
+            path: loom?.path,
+            canonicalUri: loom?.meta?.canonicalUri,
+            fallbackId: loom?.id ?? loomId,
+          })
+        : resolveLoomBookmarkTitle({
+            liveConversationTitle: rawTitle,
+            path: loom?.path,
+            canonicalUri: loom?.meta?.canonicalUri,
+            fallbackId: loom?.id ?? loomId,
+          });
     return {
       id: loom?.id ?? loomId,
       type: getWeftOrigin(loomId) ? "loom" : "conversation",
@@ -6687,7 +6744,7 @@ function App() {
   }
 
   function copyShareItem(kind: "address" | "markdown" | "title-address") {
-    const address = currentShareDestination.canonicalUri ?? currentShareDestination.path;
+    const address = currentTopbarDestination.canonicalUri ?? currentTopbarDestination.path;
     if (kind === "address") {
       void browserHostShell.copyText(address);
       showLinkCopyToast("Loom address is copied");
@@ -6695,12 +6752,12 @@ function App() {
     }
     if (kind === "markdown") {
       void browserHostShell.copyText(
-        toLoomMarkdown({ title: currentShareDestination.title, path: address })
+        toLoomMarkdown({ title: currentTopbarDestination.title, path: address })
       );
       showLinkCopyToast("Markdown link is copied");
       return;
     }
-    void browserHostShell.copyText(`${currentShareDestination.title}\n${address}`);
+    void browserHostShell.copyText(`${currentTopbarDestination.title}\n${address}`);
     showLinkCopyToast("Title and address are copied");
   }
 
@@ -8799,7 +8856,7 @@ function App() {
     if (getConfiguredLoomEngineMode() === "rust-service") {
       try {
         const serviceTargetObjectId =
-          promotedLink.type === "response"
+          promotedLink.type === "response" || isLoomLink(promotedLink)
             ? promotedLink.id
             : promotion.targetObject.objectId;
         const serviceResult = await loomEngineClient.createBookmark(
@@ -12203,7 +12260,7 @@ function App() {
       <TopBrowserBar
         addressBarRef={addressBarRef}
         location={currentLocation}
-        path={currentActiveDestination.path}
+        path={currentTopbarDestination.path}
         addressFocused={addressFocused}
         addressQuery={addressQuery}
         suggestions={filteredSuggestions}
@@ -12217,8 +12274,8 @@ function App() {
         graphMode={graphMode}
         activePanel={activePanel}
         sidebarCollapsed={sidebarCollapsed}
-        currentBookmarked={isDestinationBookmarked(currentAddressBarDestination)}
-        currentDestination={currentActiveDestination}
+        currentBookmarked={isDestinationBookmarked(currentTopbarDestination)}
+        currentDestination={currentTopbarDestination}
         canDragCurrentDestination={!isNewConversationDraft}
         onAddressFocus={focusAddressBar}
         onAddressChange={(value) => {
@@ -12241,26 +12298,11 @@ function App() {
         onForward={() => handleBackForward("forward")}
         onJumpTraversal={jumpNavigationTraversal}
         onBookmarkCurrent={() => {
-          // Bookmark authority = canonical address bar address (navigation stack),
-          // NOT the scroll-position-driven currentActiveDestination.
-          // Title authority = addressBarObjectTitle, which resolves to activeObjectTitle
-          // for the focused loom. activeAddressableConversation.title may still hold the
-          // raw service ID (e.g. "c-1779797425749") before the AI-generated title is
-          // persisted back to the conversations array; addressBarObjectTitle always
-          // reflects the polished title the user actually sees in the address bar.
-          const dest = currentAddressBarDestination;
-          const isLoomDest = isLoomLink(dest);
-          const liveTitle =
-            isLoomDest && currentShareDestination.id === dest.id
-              ? addressBarObjectTitle || currentShareDestination.title || dest.title
-              : dest.title;
-          const enrichedDest: LoomLink =
-            liveTitle !== dest.title ? { ...dest, title: liveTitle } : dest;
-          const existing = findBookmarkForDestination(enrichedDest);
+          const existing = findBookmarkForDestination(currentTopbarDestination);
           if (existing) {
             void removeBookmark(existing);
           } else {
-            void bookmarkLoomLink(enrichedDest);
+            void bookmarkLoomLink(currentTopbarDestination);
           }
         }}
         onCopyShareItem={copyShareItem}

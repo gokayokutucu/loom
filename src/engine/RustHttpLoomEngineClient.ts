@@ -2154,6 +2154,7 @@ function validateServiceBookmark(value: unknown, endpoint: string): BookmarkItem
     path: targetUri ?? targetId ?? bookmarkId,
     badge: "Bookmark",
     targetObjectId: targetId,
+    targetKind: targetKind as BookmarkItem["targetKind"],
     canonicalUri: targetUri,
     selectedAt: createdAt ? Date.parse(createdAt) || Date.now() : Date.now(),
     lastUsed: createdAt ?? "",
