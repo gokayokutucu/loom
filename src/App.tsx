@@ -169,6 +169,7 @@ import {
 } from "./services/codeSnippetDisplay";
 import {
   getElectronAddressBarBridge,
+  getElectronAppMenuBridge,
   getElectronAttachmentsBridge,
   getElectronComposerBridge,
   getElectronLoomServiceUrl,
@@ -199,6 +200,7 @@ import {
 import { createMetadataUuid } from "./services/codeService";
 import {
   referenceCodeForLink,
+  cleanReferenceDisplayLabel,
   referenceDisplayModeForLink,
   referenceLabelForMode,
   referenceMarkdownLink,
@@ -278,6 +280,7 @@ import {
   type RuntimeHealthState,
 } from "./services/modelProviders";
 import { isSimpleAutoAnswerCandidate } from "./services/thinkingGuard";
+import { checkPromptGuard } from "./services/promptGuard";
 import {
   createLoomEngineClient,
   getConfiguredLoomEngineMode,
@@ -879,9 +882,10 @@ function fragmentTextHash(value: string) {
 }
 
 function fragmentReferenceTitle(selectedText: string, fallback: string) {
-  const words = selectedText.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
+  const cleaned = cleanReferenceDisplayLabel(selectedText);
+  const words = cleaned.replace(/\s+/g, " ").trim().split(" ").filter(Boolean);
   const label = words.slice(0, 8).join(" ");
-  return label || fallback;
+  return label || cleanReferenceDisplayLabel(fallback) || fallback;
 }
 
 function isFragmentReference(link: LoomLink) {
@@ -1700,7 +1704,7 @@ function normalizeAddressBarTitle(value?: string) {
 function cleanMarkdownDisplayTitle(value?: string) {
   const normalized = normalizeAddressBarTitle(value);
   if (!normalized) return "";
-  const cleaned = cleanMarkdownDisplayText(normalized);
+  const cleaned = cleanReferenceDisplayLabel(normalized) || cleanMarkdownDisplayText(normalized);
   return cleaned || normalized;
 }
 
@@ -2285,6 +2289,12 @@ function App() {
   const activeObjectTitleRef = useRef("New conversation");
   const transcriptAutoFollowPausedRef = useRef(false);
   const transcriptProgrammaticScrollRef = useRef(false);
+  const latestUserTurnAnchorRef = useRef<{
+    loomId: string;
+    responseId: string;
+    anchored: boolean;
+    cancelled: boolean;
+  } | null>(null);
   const previousComposerRunningRef = useRef(false);
   const activeVisitLoomIdRef = useRef<string | null>(null);
   const activeVisitKnownResponseIdsRef = useRef<Set<string>>(new Set());
@@ -2294,6 +2304,9 @@ function App() {
   const pendingScrollPathRef = useRef<string | null>(null);
   const pendingScrollDestinationRef = useRef<LoomNavigationDestination | null>(null);
   const pendingScrollHighlightRef = useRef(false);
+  const [pendingScrollRequestId, setPendingScrollRequestId] = useState(0);
+  /** Response IDs for user turns sent during this session — get the tighter send-collapse clamp. */
+  const [sentUserTurnIds, setSentUserTurnIds] = useState<ReadonlySet<string>>(() => new Set());
   const linkCopyToastTimerRef = useRef<number | null>(null);
   const starterPromptRequestIdRef = useRef(0);
   const serviceLoomsHydratedRef = useRef(false);
@@ -2895,12 +2908,7 @@ function App() {
     ? ""
     : currentShareDestination.canonicalUri ?? currentShareDestination.path;
 
-  // The canonical bookmark-authority address: what the address bar actually shows.
-  // Derived from the navigation stack entry (what the user actually navigated to),
-  // NOT from activeObjectTitle / viewport scroll state.
-  // This ensures:
-  //   - Viewing loom://my-loom  → bookmarks the Loom, not the visible response
-  //   - Viewing loom://my-loom/r-abc (navigated directly) → bookmarks the Response
+  // Exact navigation-stack destination, kept separate from scroll/title focus.
   const currentAddressBarDestination = useMemo<LoomLink>(() => {
     if (isNewConversationDraft) {
       return {
@@ -4616,7 +4624,7 @@ function App() {
       if (next === sanitized) break;
       sanitized = next.trimStart();
     }
-    return sanitized;
+    return normalizeAssistantMarkdownSource(sanitized);
   }
 
   function completeOpenMarkdownCodeFence(value: string) {
@@ -5387,6 +5395,15 @@ function App() {
     providerSettingsOpen,
   ]);
 
+  useEffect(() => {
+    const appMenuBridge = getElectronAppMenuBridge();
+    if (!appMenuBridge) return undefined;
+    return appMenuBridge.onOpenSettings(() => {
+      setProviderSettingsInitialCategory("runtime");
+      setProviderSettingsOpen(true);
+    });
+  }, []);
+
   function closeUtilityOverlay(overlay: UtilityOverlayId) {
     if (overlay === "graph") {
       setGraphMode(false);
@@ -5757,6 +5774,7 @@ function App() {
       resolvedDestination,
       resolvedNavigationDestination
     );
+    setPendingScrollRequestId((current) => current + 1);
     setAddressFocused(false);
     setAddressQuery("");
     setAddressFeedback(null);
@@ -6111,6 +6129,7 @@ function App() {
     currentNavigationDestination,
     graphMode,
     originConversation?.id,
+    pendingScrollRequestId,
     serviceLoomsLoading,
     showWeftSplit,
     workspaceWidth,
@@ -7500,6 +7519,18 @@ function App() {
     if (!meaningful || composerRuntimeState.running) return false;
     const useRustServiceGeneration = getConfiguredLoomEngineMode() === "rust-service";
 
+    // ── Prompt guard: block implicit/incomplete prompts before model call ──
+    const guardResult = checkPromptGuard({
+      prompt,
+      hasAttachedReferences: draft.links.length > 0,
+      hasAttachments: (draft.attachments?.length ?? 0) > 0,
+    });
+    if (guardResult.action === "clarify") {
+      setComposerRuntimeTargetKey(originalDraftKey);
+      setComposerRuntimeState({ running: false, message: guardResult.message });
+      return false;
+    }
+
     const readinessMessage = modelReadinessMessage("main");
     if (readinessMessage && !useRustServiceGeneration) {
       setComposerRuntimeTargetKey(originalDraftKey);
@@ -7873,6 +7904,12 @@ function App() {
     }));
     setGeneratingResponseId(response.id);
     setCompletionActionRevealResponseId(null);
+    setSentUserTurnIds((current) => {
+      const next = new Set(current);
+      next.add(response.id);
+      return next;
+    });
+    queueLatestUserTurnAnchor(targetConversation.id, response.id);
     options.onResponseCreated?.(targetConversation.id, response);
     mainRevealTargetRef.current = { loomId: targetConversation.id, responseId: response.id };
     setComposerDrafts((current) => {
@@ -7957,6 +7994,7 @@ function App() {
         if (nextResponseId === serviceResponseId) return;
         const previousResponseId = serviceResponseId;
         serviceResponseId = nextResponseId;
+        updateLatestUserTurnAnchorResponseId(previousResponseId, nextResponseId);
         if (mainServiceCancellationRef.current) {
           mainServiceCancellationRef.current = {
             ...mainServiceCancellationRef.current,
@@ -8827,7 +8865,9 @@ function App() {
       targetKind: bookmarkTargetKindForLink(link),
       targetId: targetObjectId ?? link.targetObjectId ?? link.id,
       targetUri: link.canonicalUri ?? link.path,
-      title: (link.referenceCustomLabel ?? link.title).trim() || "Untitled Loom",
+      title:
+        cleanReferenceDisplayLabel(link.referenceCustomLabel ?? link.title) ||
+        "Untitled Loom",
       metadata: link.meta
         ? (JSON.parse(JSON.stringify(link.meta)) as JsonValue)
         : undefined,
@@ -9394,6 +9434,68 @@ function App() {
     );
     if (!target) return false;
     scrollElementIntoViewFromCurrent(transcript, target, "start", true);
+    return true;
+  }
+
+  function transcriptForLoomId(loomId?: string) {
+    if (showWeftSplit && loomId && loomId === originConversation?.id) {
+      return originTranscriptRef.current;
+    }
+    return transcriptRef.current;
+  }
+
+  function queueLatestUserTurnAnchor(loomId: string, responseId: string) {
+    latestUserTurnAnchorRef.current = {
+      loomId,
+      responseId,
+      anchored: false,
+      cancelled: false,
+    };
+    transcriptAutoFollowPausedRef.current = false;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        scrollLatestUserTurnIntoReadingPosition("auto");
+      });
+    });
+  }
+
+  function updateLatestUserTurnAnchorResponseId(previousResponseId: string, nextResponseId: string) {
+    const anchor = latestUserTurnAnchorRef.current;
+    if (!anchor || anchor.responseId !== previousResponseId) return;
+    latestUserTurnAnchorRef.current = {
+      ...anchor,
+      responseId: nextResponseId,
+      anchored: false,
+    };
+  }
+
+  function scrollLatestUserTurnIntoReadingPosition(behavior: ScrollBehavior = "auto") {
+    const anchor = latestUserTurnAnchorRef.current;
+    if (!anchor || anchor.cancelled) return false;
+    const transcript = transcriptForLoomId(anchor.loomId);
+    if (!transcript) return false;
+    const target = transcript.querySelector<HTMLElement>(
+      `[data-prompt-response-id="${CSS.escape(anchor.responseId)}"]`
+    );
+    if (!target) return false;
+
+    const transcriptRect = transcript.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const visualGap = 24;
+    const topOffset = Math.max(visualGap, transcript.clientTop + visualGap);
+    const nextTop = Math.max(
+      0,
+      transcript.scrollTop + targetRect.top - transcriptRect.top - topOffset
+    );
+    transcriptProgrammaticScrollRef.current = true;
+    transcript.scrollTo({ top: nextTop, behavior });
+    latestUserTurnAnchorRef.current = {
+      ...anchor,
+      anchored: true,
+    };
+    window.setTimeout(() => {
+      transcriptProgrammaticScrollRef.current = false;
+    }, behavior === "smooth" ? 260 : 80);
     return true;
   }
 
@@ -11466,6 +11568,16 @@ function App() {
       setAskState({ ...askState, error: "Write a quick question first." });
       return;
     }
+    const initialActiveReferences = quickAskActiveReferencesFromState(askState);
+    const guardResult = checkPromptGuard({
+      prompt,
+      hasAttachedReferences: initialActiveReferences.length > 0,
+      hasAttachments: false,
+    });
+    if (guardResult.action === "clarify") {
+      setAskState({ ...askState, error: guardResult.message });
+      return;
+    }
     const useRustServiceQuickAsk = getConfiguredLoomEngineMode() === "rust-service";
     const readinessMessage = modelReadinessMessage("quick");
     if (readinessMessage && !useRustServiceQuickAsk) {
@@ -11485,7 +11597,7 @@ function App() {
         askState.sourceLoomId ?? activeConversationId,
         askState.sourceSelectedText
       );
-    const activeReferences = quickAskActiveReferencesFromState(askState);
+    const activeReferences = initialActiveReferences;
     const visibleChipLabels = activeReferences
       .map((reference) => reference.label.trim())
       .filter((label) => label.length > 0);
@@ -11972,6 +12084,7 @@ function App() {
   }
 
   function resumeTranscriptAutoFollow() {
+    latestUserTurnAnchorRef.current = null;
     transcriptAutoFollowPausedRef.current = false;
     transcriptProgrammaticScrollRef.current = true;
     window.setTimeout(() => {
@@ -11995,6 +12108,12 @@ function App() {
 
   function handleTranscriptScroll(event: React.UIEvent<HTMLElement>) {
     if (!composerRuntimeState.running || transcriptProgrammaticScrollRef.current) return;
+    if (latestUserTurnAnchorRef.current) {
+      latestUserTurnAnchorRef.current = {
+        ...latestUserTurnAnchorRef.current,
+        cancelled: true,
+      };
+    }
     const transcript = event.currentTarget;
     if (!isTranscriptNearBottom(transcript)) {
       transcriptAutoFollowPausedRef.current = true;
@@ -12022,6 +12141,15 @@ function App() {
     }
 
     if (isRunning) {
+      const anchor = latestUserTurnAnchorRef.current;
+      if (anchor && !anchor.cancelled) {
+        if (!anchor.anchored) {
+          window.requestAnimationFrame(() => {
+            scrollLatestUserTurnIntoReadingPosition("auto");
+          });
+        }
+        return;
+      }
       if (!transcriptAutoFollowPausedRef.current) {
         window.requestAnimationFrame(() => followTranscriptToBottom("auto"));
       }
@@ -12029,6 +12157,15 @@ function App() {
     }
 
     if (wasRunning) {
+      const anchor = latestUserTurnAnchorRef.current;
+      if (anchor && !anchor.cancelled) {
+        window.requestAnimationFrame(() => {
+          scrollLatestUserTurnIntoReadingPosition("auto");
+          latestUserTurnAnchorRef.current = null;
+        });
+        transcriptAutoFollowPausedRef.current = false;
+        return;
+      }
       window.requestAnimationFrame(() => {
         followTranscriptToBottom("smooth");
         transcriptAutoFollowPausedRef.current = false;
@@ -12719,6 +12856,7 @@ function App() {
                             }
                             collapseUserMessages={appSettings.messageCollapse.userMessages}
                             collapseResponses={appSettings.messageCollapse.responses}
+                            sentUserTurnIds={sentUserTurnIds}
                           />
                           {renderPanelComposer(originConversation.id, "origin")}
                         </div>
@@ -12813,6 +12951,7 @@ function App() {
                             }
                             collapseUserMessages={appSettings.messageCollapse.userMessages}
                             collapseResponses={appSettings.messageCollapse.responses}
+                            sentUserTurnIds={sentUserTurnIds}
                           />
                           {renderPanelComposer(activeConversation.id, "weft")}
                         </div>
@@ -12937,6 +13076,7 @@ function App() {
                     uncollapsedResponseIds={currentVisitResponseIds}
                     collapseUserMessages={appSettings.messageCollapse.userMessages}
                     collapseResponses={appSettings.messageCollapse.responses}
+                    sentUserTurnIds={sentUserTurnIds}
                   />
                 )}
 
@@ -15135,6 +15275,8 @@ function ResponseContent({
 }
 
 const USER_PROMPT_COLLAPSE_LINE_COUNT = 40;
+/** Tighter clamp applied to a prompt immediately after it is sent. */
+const USER_PROMPT_SENT_COLLAPSE_LINE_COUNT = 3;
 
 function CollapsibleResponseContent({
   responseId,
@@ -15302,6 +15444,7 @@ function CollapsibleUserPromptContent({
   onReferenceHint,
   onReferenceHintClose,
   collapseEnabled = true,
+  collapsedLineCount = USER_PROMPT_COLLAPSE_LINE_COUNT,
 }: {
   text: string;
   references?: LoomLink[];
@@ -15309,6 +15452,8 @@ function CollapsibleUserPromptContent({
   onReferenceHint: (link: LoomLink, target: HTMLElement) => void;
   onReferenceHintClose: () => void;
   collapseEnabled?: boolean;
+  /** How many lines to show when collapsed. Defaults to USER_PROMPT_COLLAPSE_LINE_COUNT. */
+  collapsedLineCount?: number;
 }) {
   const promptRef = useRef<HTMLParagraphElement | null>(null);
   const [expanded, setExpanded] = useState(false);
@@ -15360,7 +15505,7 @@ function CollapsibleUserPromptContent({
         style={
           collapseEnabled && !expanded
             ? ({
-                "--user-message-collapse-lines": USER_PROMPT_COLLAPSE_LINE_COUNT,
+                "--user-message-collapse-lines": collapsedLineCount,
               } as CSSProperties)
             : undefined
         }
@@ -15603,6 +15748,7 @@ function ChatTranscript({
   uncollapsedResponseIds,
   collapseUserMessages = true,
   collapseResponses = true,
+  sentUserTurnIds,
 }: {
   transcriptRef?: (node: HTMLElement | null) => void;
   conversation?: Conversation;
@@ -15658,6 +15804,8 @@ function ChatTranscript({
   uncollapsedResponseIds?: ReadonlySet<string>;
   collapseUserMessages?: boolean;
   collapseResponses?: boolean;
+  /** Response IDs whose user-turn prompt should use the tighter send-collapse clamp. */
+  sentUserTurnIds?: ReadonlySet<string>;
 }) {
   const [sentReferenceHint, setSentReferenceHint] = useState<{
     link: LoomLink;
@@ -15814,11 +15962,14 @@ function ChatTranscript({
     meta: conversation.meta,
     referenceCode: conversation.meta?.code,
   };
+  const isGeneratingInTranscript = Boolean(
+    generatingResponseId && responses.some((response) => response.id === generatingResponseId)
+  );
 
   return (
     <div className="chat-transcript-shell">
       <section
-        className="chat-transcript"
+        className={isGeneratingInTranscript ? "chat-transcript is-generating-response" : "chat-transcript"}
         ref={setTranscriptNode}
         aria-label="Conversation transcript"
         onScroll={handleTranscriptScroll}
@@ -16110,6 +16261,11 @@ function ChatTranscript({
                     text={displayPromptText}
                     references={inlinePromptReferences}
                     collapseEnabled={collapseUserMessages}
+                    collapsedLineCount={
+                      sentUserTurnIds?.has(displayResponse.id)
+                        ? USER_PROMPT_SENT_COLLAPSE_LINE_COUNT
+                        : undefined
+                    }
                     onOpenReference={onOpenReference}
                     onReferenceHint={showSentReferenceHint}
                     onReferenceHintClose={scheduleSentReferenceHintClose}
