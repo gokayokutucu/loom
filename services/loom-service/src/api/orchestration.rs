@@ -25,8 +25,9 @@ use crate::{
     providers::{
         ollama::OllamaRuntime,
         types::{
-            done_reason_is_length, OllamaChatRequest, OllamaMessage, OllamaOptions,
-            OllamaRuntimeError, OllamaRuntimeErrorKind, OllamaStreamChunk, OllamaWireChunk,
+            done_reason_is_length, sanitize_provider_text, OllamaChatRequest, OllamaMessage,
+            OllamaOptions, OllamaRuntimeError, OllamaRuntimeErrorKind, OllamaStreamChunk,
+            OllamaWireChunk,
         },
     },
     runtime::OperationKind,
@@ -152,9 +153,43 @@ pub async fn cancel(
     State(state): State<crate::api::state::AppState>,
     Path(run_id): Path<String>,
 ) -> Json<OrchestrationCancelResponse> {
+    let cancelled = state.ollama.cancel(&run_id);
+
+    // Persist the cancelled status to the database immediately so that if the
+    // app is closed before the streaming workflow finalises, the response is not
+    // seen as "streaming" on the next app open (which would trigger the reload
+    // recovery path and show the Stop button permanently).
+    let runner = RepositoryWorkflowRunner::new(&state.database);
+    if let Ok(_run) = runner.current_progress(&run_id).await {
+        // Mark the workflow run itself as cancelled so generation_status()
+        // falls back to WorkflowStageStatus::Cancelled → "cancelled".
+        let _ = runner.mark_stage_cancelled(&run_id, "orchestrate").await;
+
+        // Also write "cancelled" into the response metadata so the terminal-
+        // state fast-path in generation_status() fires before the run status.
+        let assistant_id = format!("response-{}-assistant", run_id);
+        let response_repo = ResponseRepository::new(&state.database);
+        // Only update if the response exists and is not already in a terminal state.
+        if let Ok(Some(existing)) = response_repo.get_response(&assistant_id).await {
+            let current_status = response_metadata(&existing)
+                .get("status")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if !matches!(
+                current_status.as_str(),
+                "completed" | "cancelled" | "truncated" | "error"
+            ) {
+                let _ = response_repo
+                    .update_response_status(&assistant_id, "cancelled", None, None, None)
+                    .await;
+            }
+        }
+    }
+
     Json(OrchestrationCancelResponse {
         run_id: run_id.clone(),
-        cancelled: state.ollama.cancel(&run_id),
+        cancelled,
     })
 }
 
@@ -904,15 +939,24 @@ fn parse_ndjson_bytes(
 }
 
 fn parse_ollama_line(line: &str) -> Result<OllamaStreamChunk, OllamaRuntimeError> {
-    serde_json::from_str::<OllamaWireChunk>(line)
-        .map(OllamaStreamChunk::from)
-        .map_err(|_| {
-            OllamaRuntimeError::new(
-                OllamaRuntimeErrorKind::StreamParseError,
-                "Ollama returned malformed NDJSON.",
-                true,
-            )
-        })
+    let wire = serde_json::from_str::<OllamaWireChunk>(line).map_err(|_| {
+        OllamaRuntimeError::new(
+            OllamaRuntimeErrorKind::StreamParseError,
+            "Ollama returned malformed NDJSON.",
+            true,
+        )
+    })?;
+    // Ollama sends {"error":"..."} when generation fails (e.g. context too large,
+    // model error). Surface this as a provider error rather than silently swallowing it.
+    if let Some(ref error_text) = wire.error {
+        let safe_message = sanitize_provider_text(error_text);
+        return Err(OllamaRuntimeError::new(
+            OllamaRuntimeErrorKind::Unknown,
+            format!("Ollama returned an error: {safe_message}"),
+            false,
+        ));
+    }
+    Ok(OllamaStreamChunk::from(wire))
 }
 
 fn to_sse_event(event: LoomServiceEvent) -> Event {
@@ -1604,15 +1648,93 @@ fn compact(value: &str, max_length: usize) -> String {
     }
 }
 
+fn normalize_assistant_markdown_source(source: &str) -> String {
+    let lines: Vec<&str> = source.split('\n').collect();
+    let mut normalized = Vec::new();
+    let mut in_code_block = false;
+    let mut index = 0;
+
+    while index < lines.len() {
+        let line = lines[index];
+        let trimmed = line.trim();
+        if line.trim_start().starts_with("```") {
+            in_code_block = !in_code_block;
+            normalized.push(line.to_string());
+            index += 1;
+            continue;
+        }
+        if in_code_block {
+            normalized.push(line.to_string());
+            index += 1;
+            continue;
+        }
+
+        if is_orphan_heading_marker(trimmed) {
+            if let Some(next_text_index) = next_non_empty_line_index(&lines, index + 1) {
+                if is_plain_heading_text_line(lines[next_text_index]) {
+                    normalized.push(format!("{trimmed} {}", lines[next_text_index].trim()));
+                    index = next_text_index + 1;
+                    continue;
+                }
+            }
+            index += 1;
+            continue;
+        }
+
+        normalized.push(line.to_string());
+        index += 1;
+    }
+
+    normalized.join("\n")
+}
+
+fn next_non_empty_line_index(lines: &[&str], start_index: usize) -> Option<usize> {
+    (start_index..lines.len()).find(|index| !lines[*index].trim().is_empty())
+}
+
+fn is_orphan_heading_marker(value: &str) -> bool {
+    let marker_length = value.chars().count();
+    (1..=6).contains(&marker_length) && value.chars().all(|character| character == '#')
+}
+
+fn is_plain_heading_text_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.starts_with("```") {
+        return false;
+    }
+    if let Some((marker, _)) = trimmed.split_once(' ') {
+        if is_orphan_heading_marker(marker) {
+            return false;
+        }
+    }
+    if is_orphan_heading_marker(trimmed)
+        || matches!(trimmed, "---" | "***" | "___")
+        || trimmed.starts_with("- ")
+        || trimmed.starts_with("* ")
+    {
+        return false;
+    }
+    if trimmed
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_digit())
+        && trimmed.contains(". ")
+    {
+        return false;
+    }
+    if trimmed.starts_with('|') && trimmed.ends_with('|') {
+        return false;
+    }
+    true
+}
+
 async fn update_persisted_assistant_content(
     database: &crate::storage::db::Database,
     lifecycle: &PersistedResponseLifecycle,
 ) -> Result<(), crate::error::ServiceError> {
+    let content = normalize_assistant_markdown_source(&lifecycle.assistant_content);
     ResponseRepository::new(database)
-        .update_response_content(
-            &lifecycle.assistant_response_id,
-            &lifecycle.assistant_content,
-        )
+        .update_response_content(&lifecycle.assistant_response_id, &content)
         .await
 }
 
@@ -2329,6 +2451,12 @@ fn deterministic_e2e_answer(
     let has_event_context = context_text.contains("event sourcing")
         && (context_text.contains("event store") || context_text.contains("cqrs"));
 
+    if deterministic_e2e_response_mode().as_deref() == Some("long-streaming-scroll")
+        || prompt.contains("long streaming scroll fixture")
+    {
+        return Some(long_streaming_scroll_e2e_answer());
+    }
+
     if prompt.contains("blue otter") && prompt.contains("event sourcing") {
         return Some("Blue Otter is the project codename. In the Event Sourcing explanation, Blue Otter uses an Event Store as the source of truth and can replay events to rebuild projections.".to_string());
     }
@@ -2432,20 +2560,97 @@ fn deterministic_e2e_stream_chunk_delay_ms() -> u64 {
         .unwrap_or(0)
 }
 
+fn deterministic_e2e_response_mode() -> Option<String> {
+    std::env::var("LOOM_SERVICE_E2E_RESPONSE_MODE")
+        .ok()
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| !value.is_empty())
+}
+
+fn deterministic_e2e_chunk_mode() -> String {
+    std::env::var("LOOM_SERVICE_E2E_CHUNK_MODE")
+        .ok()
+        .map(|value| value.trim().to_lowercase())
+        .filter(|value| value == "phrase" || value == "word")
+        .unwrap_or_else(|| "word".to_string())
+}
+
 fn deterministic_e2e_answer_chunks(answer: &str, chunk_delay_ms: u64) -> Vec<String> {
     if chunk_delay_ms == 0 {
         return vec![answer.to_string()];
     }
-    let chunks = answer
+
+    let word_chunks = answer
         .split_inclusive(char::is_whitespace)
         .filter(|chunk| !chunk.is_empty())
         .map(str::to_string)
         .collect::<Vec<_>>();
-    if chunks.is_empty() {
+    if word_chunks.is_empty() {
         vec![answer.to_string()]
+    } else if deterministic_e2e_chunk_mode() == "phrase" {
+        word_chunks
+            .chunks(8)
+            .map(|chunk| chunk.concat())
+            .collect::<Vec<_>>()
     } else {
-        chunks
+        word_chunks
     }
+}
+
+fn long_streaming_scroll_e2e_answer() -> String {
+    [
+        "# Long Streaming Scroll Fixture",
+        "",
+        "This deterministic response is intentionally long enough to exercise Loom transcript scrolling while the service streams content in small chunks. It gives scroll tests real rendered content instead of relying on one-line answers or artificial bottom padding.",
+        "",
+        "## Fixture setup",
+        "",
+        "The first section appears after the configured thinking delay, then the remaining words arrive progressively. The response includes several paragraphs, headings, and bullets so the transcript crosses the composer-safe boundary in a predictable way.",
+        "",
+        "## Anchor behavior",
+        "",
+        "When the user submits a prompt, the latest user turn should stay near the top of the visible Loom surface. Early assistant text should grow underneath that prompt without forcing the viewport down while there is still empty space above the composer.",
+        "",
+        "## Composer boundary",
+        "",
+        "The follow threshold should be based on real assistant content reaching the composer boundary. This fixture contains enough body text to move from the anchored hold state into the follow state without counting spacer elements, bottom padding, or scrollHeight distance.",
+        "",
+        "- The stream starts with a visible title.",
+        "- The content grows over multiple chunks.",
+        "- The answer becomes taller than a compact browser viewport.",
+        "- The final marker is unique and stable for assertions.",
+        "",
+        "## Manual scroll readiness",
+        "",
+        "A small user wheel gesture during generation should pause live auto-follow. The stream then continues long enough for tests to verify that the viewport is not pulled down immediately while new words are still arriving.",
+        "",
+        "## Long body",
+        "",
+        "The fixture keeps adding ordinary readable text after the early sections so geometry assertions can observe real overflow. Each paragraph is plain Markdown content that belongs to the assistant answer, which means the transcript height changes because rendered response text grows, not because a spacer or CSS padding expanded below it.",
+        "",
+        "Loom scroll behavior is sensitive to the difference between content and chrome. This paragraph gives the viewport more real words to lay out, making it easier to check that the latest user prompt remains useful context while the answer grows beneath it.",
+        "",
+        "When the viewport is compact, these paragraphs should push the response tail toward the composer boundary. Tests can then verify that auto-follow starts for the right reason: the actual response tail is about to be hidden, not because scrollHeight includes empty generation space.",
+        "",
+        "## Boundary proof",
+        "",
+        "The following lines are intentionally repetitive in structure but not in content. They keep the fixture deterministic while still looking like a normal generated answer with sections, prose, and a stable ending marker.",
+        "",
+        "- Real response text should be measured with DOM geometry.",
+        "- Composer-safe visibility should use the composer top boundary.",
+        "- Manual scroll should pause live follow during streaming.",
+        "- Completion should still reveal the final real content end.",
+        "- The final marker should be visible after the response completes.",
+        "",
+        "A final descriptive paragraph gives the scroll system one more block of real content. It is long enough to wrap across several lines at narrow desktop widths and short enough that the product-mode tests still complete quickly with word or phrase chunking.",
+        "",
+        "## Completion snap",
+        "",
+        "After completion, Loom should make the real response end visible above the composer. The final line below is deliberately short and unique so product-mode E2E tests can assert that completion reached the actual response tail.",
+        "",
+        "END_OF_LONG_STREAMING_FIXTURE",
+    ]
+    .join("\n")
 }
 
 fn event_sourcing_detailed_e2e_answer() -> String {
@@ -3196,6 +3401,8 @@ fn execute_stream(
                 Err(error) => {
                     let runtime_error = if error.is_connect() {
                         OllamaRuntimeError::new(OllamaRuntimeErrorKind::RuntimeUnavailable, "Ollama is not reachable.", true)
+                    } else if error.is_timeout() {
+                        OllamaRuntimeError::new(OllamaRuntimeErrorKind::TimeoutDuringStream, "The model stopped responding before the answer finished.", true)
                     } else {
                         OllamaRuntimeError::new(OllamaRuntimeErrorKind::UnexpectedResponse, "Ollama returned an unexpected stream response.", true)
                     };
@@ -3920,6 +4127,12 @@ async fn collect_ollama_text(
                 OllamaRuntimeError::new(
                     OllamaRuntimeErrorKind::RuntimeUnavailable,
                     "Ollama is not reachable.",
+                    true,
+                )
+            } else if error.is_timeout() {
+                OllamaRuntimeError::new(
+                    OllamaRuntimeErrorKind::TimeoutDuringStream,
+                    "The model stopped responding before the answer finished.",
                     true,
                 )
             } else {
@@ -4786,6 +4999,53 @@ mod tests {
                 .expect("metadata json");
         assert_eq!(metadata["status"], "completed");
         assert_eq!(metadata["doneReason"], "stop");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_normalizes_orphan_heading_markers_before_persistence() {
+        let database = test_database().await;
+        insert_test_loom(&database).await;
+        let input = execute_input(Some("loom-1"));
+        let answer_plan = DeterministicPlanner::plan(PlannerInput {
+            clean_user_prompt: input.prompt.clone(),
+            selected_response_mode: input.response_mode.clone(),
+            ..PlannerInput::default()
+        });
+        let mut lifecycle = create_persisted_response_lifecycle(
+            &database,
+            &input,
+            "workflow-heading-markers",
+            &answer_plan,
+            &ResponseModeResolution::passthrough(input.response_mode.clone()),
+        )
+        .await
+        .expect("lifecycle persists")
+        .expect("lifecycle exists");
+
+        lifecycle.assistant_content.push_str(
+            "Intro\n\n####\n\nSatellite Requirements\n\n```markdown\n####\nCode stays raw\n```\n\n######\n",
+        );
+        update_persisted_assistant_content(&database, &lifecycle)
+            .await
+            .expect("content updates");
+
+        let response = ResponseRepository::new(&database)
+            .get_response(&lifecycle.assistant_response_id)
+            .await
+            .expect("get response")
+            .expect("response exists");
+
+        assert!(response.content.contains("#### Satellite Requirements"));
+        assert!(!response
+            .content
+            .split("```markdown")
+            .next()
+            .unwrap_or_default()
+            .contains("\n####\n"));
+        assert!(response
+            .content
+            .contains("```markdown\n####\nCode stays raw\n```"));
+        assert!(!response.content.ends_with("######\n"));
     }
 
     #[tokio::test]
@@ -6144,5 +6404,102 @@ mod tests {
             warnings: Vec::new(),
             created_at: "1".to_string(),
         }
+    }
+
+    // ------------------------------------------------------------------
+    // Ollama stream parser — contract coverage (orchestration path)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn orchestration_parser_handles_generate_format() {
+        let mut buffer = String::new();
+        let chunks =
+            parse_ndjson_bytes(&mut buffer, b"{\"response\":\"Hello\",\"done\":false}\n")
+                .expect("parse generate chunk");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].content.as_deref(), Some("Hello"));
+        assert!(!chunks[0].done);
+    }
+
+    #[test]
+    fn orchestration_parser_handles_chat_format() {
+        let mut buffer = String::new();
+        let chunks = parse_ndjson_bytes(
+            &mut buffer,
+            b"{\"message\":{\"content\":\"World\"},\"done\":false}\n",
+        )
+        .expect("parse chat chunk");
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].content.as_deref(), Some("World"));
+    }
+
+    #[test]
+    fn orchestration_parser_handles_final_done_chunk() {
+        let mut buffer = String::new();
+        let chunks =
+            parse_ndjson_bytes(&mut buffer, b"{\"done\":true,\"total_duration\":999}\n")
+                .expect("parse final done chunk");
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].done);
+        assert!(chunks[0].content.is_none());
+    }
+
+    #[test]
+    fn orchestration_parser_ignores_empty_lines() {
+        let mut buffer = String::new();
+        let chunks = parse_ndjson_bytes(
+            &mut buffer,
+            b"\n\n{\"message\":{\"content\":\"Hi\"},\"done\":false}\n",
+        )
+        .expect("parse with empty lines");
+        assert_eq!(chunks.len(), 1);
+    }
+
+    #[test]
+    fn orchestration_parser_surfaces_ollama_error_chunk() {
+        let mut buffer = String::new();
+        let result = parse_ndjson_bytes(&mut buffer, b"{\"error\":\"context window exceeded\"}\n");
+        assert!(result.is_err(), "error chunk must not be silently swallowed");
+        let err = result.unwrap_err();
+        assert!(err.message.contains("Ollama returned an error"));
+        assert!(err.message.contains("context window exceeded"));
+    }
+
+    #[test]
+    fn orchestration_parser_error_chunk_sanitizes_sensitive_content() {
+        // An error chunk containing a forbidden key should be sanitized, not exposed raw
+        let mut buffer = String::new();
+        let result =
+            parse_ndjson_bytes(&mut buffer, b"{\"error\":\"api_key is invalid\"}\n");
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        // "api_key" is a forbidden term — sanitize_provider_text replaces the whole message
+        assert!(!err.message.contains("api_key is invalid"));
+    }
+
+    #[test]
+    fn orchestration_parser_malformed_line_yields_stream_parse_error() {
+        use crate::providers::types::OllamaRuntimeErrorKind;
+        let mut buffer = String::new();
+        let result = parse_ndjson_bytes(&mut buffer, b"not_json\n");
+        assert!(result.is_err());
+        assert_eq!(
+            result.unwrap_err().kind,
+            OllamaRuntimeErrorKind::StreamParseError
+        );
+    }
+
+    #[test]
+    fn orchestration_parser_accumulates_partial_lines() {
+        let mut buffer = String::new();
+        let first =
+            parse_ndjson_bytes(&mut buffer, b"{\"message\":{\"content\":\"par")
+                .expect("first partial");
+        assert!(first.is_empty());
+        let second =
+            parse_ndjson_bytes(&mut buffer, b"tial\"},\"done\":false}\n")
+                .expect("completing chunk");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].content.as_deref(), Some("partial"));
     }
 }
