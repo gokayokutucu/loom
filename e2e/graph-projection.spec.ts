@@ -560,9 +560,20 @@ test.describe("[product-service-backed] Graph projection product proof", () => {
       await ancestryButton.dispatchEvent("click");
       await expect(graphShell.locator(".loom-graph-node--loom").filter({ hasText: rootLoom!.title }))
         .toBeVisible();
-      await expect(
-        graphShell.locator(".loom-graph-node--response").filter({ hasText: rootOriginResponse!.question })
-      ).toBeVisible();
+      const parentOriginResponseNode = graphShell
+        .locator(".loom-graph-node--response")
+        .filter({ hasText: rootOriginResponse!.question });
+      const existingChildWeftNode = graphShell
+        .locator(".loom-graph-node--weft")
+        .filter({ hasText: weftBDetail.title });
+      await expect(parentOriginResponseNode).toBeVisible();
+      const parentOriginResponseBox = await parentOriginResponseNode.boundingBox();
+      const existingChildWeftBox = await existingChildWeftNode.boundingBox();
+      expect(parentOriginResponseBox).toBeTruthy();
+      expect(existingChildWeftBox).toBeTruthy();
+      expect(parentOriginResponseBox!.x).not.toBe(existingChildWeftBox!.x);
+      expect(parentOriginResponseBox!.y).toBeLessThan(existingChildWeftBox!.y);
+      await expect(graphShell.locator(".react-flow__edge-path.loom-graph-edge--weft")).not.toHaveCount(0);
       await expect(
         graphShell.locator(".loom-graph-node--response").filter({ hasText: unrelatedRootResponse!.question })
       ).toHaveCount(0);

@@ -106,11 +106,38 @@ export interface LoomGraphAncestryStep {
   warnings?: string[];
 }
 
-const ANCESTRY_LANE = 0;
+const ANCESTRY_LANE_WIDTH = 360;
 const ANCESTRY_ROW_GAP = 300;
 
 function ancestryResponseNodeId(response: LoomGraphAncestryStep["parentOriginResponse"]) {
   return response ? responseGraphNodeId(response.loomId, response.responseId) : undefined;
+}
+
+function ancestryLaneFromPositionX(positionX: number) {
+  return Math.round(positionX / ANCESTRY_LANE_WIDTH);
+}
+
+function ancestryPositionXForLane(lane: number) {
+  return lane * ANCESTRY_LANE_WIDTH;
+}
+
+function chooseAncestryParentLane(
+  projection: LoomGraphProjection,
+  anchorNode: LoomGraphProjectionNode | undefined,
+  loomDepth: number,
+  responseDepth: number
+) {
+  const anchorLane = anchorNode ? ancestryLaneFromPositionX(anchorNode.position.x) : 0;
+  const occupied = new Set(
+    projection.nodes
+      .filter((node) => node.depth === loomDepth || node.depth === responseDepth)
+      .map((node) => ancestryLaneFromPositionX(node.position.x))
+  );
+  const candidates = [anchorLane - 1, anchorLane + 1];
+  for (let offset = 2; offset < 24; offset += 1) {
+    candidates.push(anchorLane - offset, anchorLane + offset);
+  }
+  return candidates.find((lane) => lane !== anchorLane && !occupied.has(lane)) ?? anchorLane - 1;
 }
 
 export function mergeLoomGraphAncestryStep(
@@ -139,6 +166,8 @@ export function mergeLoomGraphAncestryStep(
   const anchorDepth = anchorNode?.depth ?? 0;
   const responseDepth = anchorDepth - 1;
   const loomDepth = anchorDepth - 2;
+  const parentLane = chooseAncestryParentLane(projection, anchorNode, loomDepth, responseDepth);
+  const parentX = ancestryPositionXForLane(parentLane);
 
   const parentLoomNode: LoomGraphProjectionNode = {
     id: parentLoomNodeId,
@@ -156,7 +185,7 @@ export function mergeLoomGraphAncestryStep(
     hasParentAncestry: Boolean(step.parentLoom.hasParentAncestry),
     depth: loomDepth,
     position: {
-      x: ANCESTRY_LANE,
+      x: parentX,
       y: loomDepth * ANCESTRY_ROW_GAP,
     },
   };
@@ -177,7 +206,7 @@ export function mergeLoomGraphAncestryStep(
     graphRole: "ancestor-response",
     depth: responseDepth,
     position: {
-      x: ANCESTRY_LANE,
+      x: parentX,
       y: responseDepth * ANCESTRY_ROW_GAP,
     },
   };
