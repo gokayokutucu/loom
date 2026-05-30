@@ -1,4 +1,5 @@
 import type { LoomLink, ReferenceDisplayMode } from "../types";
+import { cleanMarkdownDisplayText } from "./assistantMarkdown";
 
 export function referenceCodeForLink(link: Pick<LoomLink, "referenceCode" | "meta">) {
   return link.referenceCode ?? link.meta?.code;
@@ -36,6 +37,23 @@ export function referenceDisplayModeForLink(
   return link.referenceDisplayMode ?? fallback;
 }
 
+export function cleanReferenceDisplayLabel(value?: string) {
+  const stripped = (value ?? "")
+    .replace(/\[\[|\]\]/g, " ")
+    .replace(/```[a-z0-9_+#.-]*\s*/gi, " ")
+    .replace(/`{1,3}/g, " ")
+    .replace(/(^|\s)#{1,6}\s+/g, " ")
+    .replace(/\s+#{1,6}(?=\s|$)/g, " ")
+    .replace(/<\/?[^>]+>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+  return cleanMarkdownDisplayText(stripped)
+    .replace(/(^|\s)#{1,6}\s+/g, " ")
+    .replace(/\s+#{1,6}(?=\s|$)/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
 export function referenceLabelForMode(
   link: Pick<
     LoomLink,
@@ -43,12 +61,13 @@ export function referenceLabelForMode(
   >,
   displayMode: ReferenceDisplayMode
 ) {
-  const customLabel = link.referenceCustomLabel?.trim();
+  const customLabel = cleanReferenceDisplayLabel(link.referenceCustomLabel);
   if (customLabel) return customLabel;
   const code = referenceCodeForLink(link);
   const address = canonicalReferenceAddress(link);
-  if (displayMode === "code") return code ?? link.title ?? address;
-  return link.title ?? code ?? address;
+  const title = cleanReferenceDisplayLabel(link.title);
+  if (displayMode === "code") return code ?? (title || address);
+  return title || code || address;
 }
 
 export function referenceTokenText(
@@ -143,8 +162,9 @@ export function withReferenceDisplayDefaults(
 ): LoomLink {
   return {
     ...link,
+    title: cleanReferenceDisplayLabel(link.title) || link.title,
     referenceCode: referenceCodeForLink(link),
     referenceDisplayMode: referenceDisplayModeForLink(link, fallbackDisplayMode),
-    referenceCustomLabel: link.referenceCustomLabel?.trim() || undefined,
+    referenceCustomLabel: cleanReferenceDisplayLabel(link.referenceCustomLabel) || undefined,
   };
 }

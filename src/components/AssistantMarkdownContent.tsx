@@ -324,6 +324,7 @@ export function AssistantMarkdownContent({
   onReferenceHintClose?: () => void;
 }) {
   let renderedCodeBlockIndex = -1;
+  const normalizedMarkdown = normalizeAssistantMarkdownSource(markdown);
   const referenceHandlers = {
     onOpenReference,
     onReferenceHint,
@@ -331,7 +332,7 @@ export function AssistantMarkdownContent({
   };
   return (
     <>
-      {parseAssistantMarkdown(normalizeAssistantMarkdownSource(markdown)).map((block, index) => {
+      {parseAssistantMarkdown(normalizedMarkdown).map((block, index) => {
         if (block.kind === "paragraph") {
           return (
             <p key={`paragraph-${index}`}>

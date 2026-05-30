@@ -43,7 +43,7 @@ export function sanitizeAssistantMarkdownForRenderedCopy(markdown: string) {
 export function buildAssistantCopyPayload(markdown: string) {
   const renderedMarkdown = sanitizeAssistantMarkdownForRenderedCopy(markdown);
   return {
-    markdown: sanitizeAssistantMarkdownSource(markdown),
+    markdown: renderedMarkdown,
     html: assistantMarkdownToSafeHtml(renderedMarkdown),
     plainText: assistantMarkdownToPlainText(renderedMarkdown),
   };
