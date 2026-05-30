@@ -96,6 +96,43 @@ pub struct GraphApiError {
     pub message: String,
 }
 
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LoomAncestryStepResult {
+    pub loom_id: String,
+    pub has_parent_ancestry: bool,
+    pub parent_loom: Option<LoomAncestryLoomSummary>,
+    pub parent_origin_response: Option<LoomAncestryResponseSummary>,
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LoomAncestryLoomSummary {
+    pub loom_id: String,
+    pub title: String,
+    pub summary: Option<String>,
+    pub canonical_uri: Option<String>,
+    pub code: Option<String>,
+    pub display_code: String,
+    pub kind: String,
+    pub origin_loom_id: Option<String>,
+    pub origin_response_id: Option<String>,
+    pub has_parent_ancestry: bool,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LoomAncestryResponseSummary {
+    pub response_id: String,
+    pub loom_id: String,
+    pub title: String,
+    pub preview: Option<String>,
+    pub canonical_uri: Option<String>,
+    pub code: Option<String>,
+    pub display_code: String,
+}
+
 #[derive(Debug)]
 pub(crate) enum GraphProjectionError {
     NotFound,
@@ -118,6 +155,112 @@ pub async fn get_graph(
         .await
         .map(Json)
         .map_err(graph_error)
+}
+
+pub async fn get_ancestry_step(
+    State(state): State<AppState>,
+    Path(loom_id): Path<String>,
+) -> Result<Json<LoomAncestryStepResult>, (StatusCode, Json<GraphApiError>)> {
+    build_ancestry_step(&state.database, &loom_id)
+        .await
+        .map(Json)
+        .map_err(graph_error)
+}
+
+pub(crate) async fn build_ancestry_step(
+    database: &Database,
+    loom_id: &str,
+) -> Result<LoomAncestryStepResult, GraphProjectionError> {
+    let loom_repository = LoomRepository::new(database);
+    let response_repository = ResponseRepository::new(database);
+    let Some(loom) = loom_repository
+        .get_loom(loom_id)
+        .await
+        .map_err(GraphProjectionError::Storage)?
+    else {
+        return Err(GraphProjectionError::NotFound);
+    };
+
+    if loom.archived_at.is_some() || loom.is_deleted {
+        return Err(GraphProjectionError::Archived);
+    }
+
+    let mut warnings = Vec::new();
+    let has_parent_ancestry = loom.origin_loom_id.is_some() && loom.origin_response_id.is_some();
+    let (Some(parent_loom_id), Some(parent_origin_response_id)) = (
+        loom.origin_loom_id.as_deref(),
+        loom.origin_response_id.as_deref(),
+    ) else {
+        return Ok(LoomAncestryStepResult {
+            loom_id: loom.loom_id,
+            has_parent_ancestry: false,
+            parent_loom: None,
+            parent_origin_response: None,
+            warnings,
+        });
+    };
+
+    let parent_loom = loom_repository
+        .get_loom(parent_loom_id)
+        .await
+        .map_err(GraphProjectionError::Storage)?;
+    let parent_origin_response = response_repository
+        .get_response(parent_origin_response_id)
+        .await
+        .map_err(GraphProjectionError::Storage)?;
+
+    match (parent_loom, parent_origin_response) {
+        (Some(parent_loom), Some(parent_origin_response))
+            if parent_origin_response.loom_id == parent_loom.loom_id =>
+        {
+            Ok(LoomAncestryStepResult {
+                loom_id: loom.loom_id,
+                has_parent_ancestry,
+                parent_loom: Some(loom_ancestry_summary(&parent_loom)),
+                parent_origin_response: Some(response_ancestry_summary(&parent_origin_response)),
+                warnings,
+            })
+        }
+        (Some(_), Some(parent_origin_response)) => {
+            warnings.push(format!(
+                "Skipped ancestry step for {} because origin Response {} belongs to another Loom.",
+                loom.loom_id, parent_origin_response.response_id
+            ));
+            Ok(LoomAncestryStepResult {
+                loom_id: loom.loom_id,
+                has_parent_ancestry,
+                parent_loom: None,
+                parent_origin_response: None,
+                warnings,
+            })
+        }
+        (None, _) => {
+            warnings.push(format!(
+                "Skipped ancestry step for {} because parent Loom is missing.",
+                loom.loom_id
+            ));
+            Ok(LoomAncestryStepResult {
+                loom_id: loom.loom_id,
+                has_parent_ancestry,
+                parent_loom: None,
+                parent_origin_response: None,
+                warnings,
+            })
+        }
+        (_, None) => {
+            warnings.push(format!(
+                "Skipped ancestry step for {} because parent origin Response is missing.",
+                loom.loom_id
+            ));
+            Ok(LoomAncestryStepResult {
+                loom_id: loom.loom_id,
+                has_parent_ancestry,
+                parent_loom: None,
+                parent_origin_response: None,
+                warnings,
+            })
+        }
+    }
 }
 
 pub(crate) async fn build_graph_projection(
@@ -191,10 +334,17 @@ pub(crate) async fn build_graph_projection(
                             origin_response_node_id.clone(),
                         );
 
-                        nodes.push(with_graph_role(
+                        let mut origin_node = with_graph_role(
                             loom_node(&origin_loom, &origin_loom_node_id, 0, 0),
                             "origin-context",
-                        ));
+                        );
+                        set_metadata_bool(
+                            &mut origin_node,
+                            "hasParentAncestry",
+                            origin_loom.origin_loom_id.is_some()
+                                && origin_loom.origin_response_id.is_some(),
+                        );
+                        nodes.push(origin_node);
                         nodes.push(with_graph_role(
                             response_node(&origin_response, None, &origin_response_node_id, 1, 0),
                             "origin-response",
@@ -845,6 +995,49 @@ fn loom_node(loom: &LoomRecord, id: &str, depth: i64, lane: i64) -> GraphNode {
     }
 }
 
+fn loom_ancestry_summary(loom: &LoomRecord) -> LoomAncestryLoomSummary {
+    LoomAncestryLoomSummary {
+        loom_id: loom.loom_id.clone(),
+        title: sanitize_graph_text(&loom.title).unwrap_or_else(|| "Untitled Loom".to_string()),
+        summary: loom.summary.as_deref().and_then(sanitize_graph_text),
+        canonical_uri: loom.canonical_uri.clone(),
+        code: loom.code.clone(),
+        display_code: display_code(
+            if loom.kind == "weft" {
+                DisplayCodeKind::Weft
+            } else {
+                DisplayCodeKind::Loom
+            },
+            &loom.loom_id,
+        ),
+        kind: if loom.kind == "weft" {
+            "weft".to_string()
+        } else {
+            "loom".to_string()
+        },
+        origin_loom_id: loom.origin_loom_id.clone(),
+        origin_response_id: loom.origin_response_id.clone(),
+        has_parent_ancestry: loom.origin_loom_id.is_some() && loom.origin_response_id.is_some(),
+    }
+}
+
+fn response_ancestry_summary(response: &ResponseRecord) -> LoomAncestryResponseSummary {
+    LoomAncestryResponseSummary {
+        response_id: response.response_id.clone(),
+        loom_id: response.loom_id.clone(),
+        title: response
+            .title
+            .as_deref()
+            .and_then(sanitize_graph_text)
+            .or_else(|| first_meaningful_phrase(&response.content))
+            .unwrap_or_else(|| format!("{} Response", title_case(&response.role))),
+        preview: first_meaningful_phrase(&response.content),
+        canonical_uri: response.canonical_uri.clone(),
+        code: response.code.clone(),
+        display_code: display_code(DisplayCodeKind::Response, &response.response_id),
+    }
+}
+
 fn response_node(
     response: &ResponseRecord,
     prompt: Option<&ResponseRecord>,
@@ -887,6 +1080,16 @@ fn with_graph_role(mut node: GraphNode, graph_role: &str) -> GraphNode {
     );
     node.metadata = Some(serde_json::Value::Object(metadata));
     node
+}
+
+fn set_metadata_bool(node: &mut GraphNode, key: &str, value: bool) {
+    let mut metadata = node
+        .metadata
+        .as_ref()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    metadata.insert(key.to_string(), serde_json::json!(value));
+    node.metadata = Some(serde_json::Value::Object(metadata));
 }
 
 fn position(depth: i64, lane: i64) -> GraphPosition {
@@ -991,7 +1194,10 @@ fn graph_error(error: GraphProjectionError) -> (StatusCode, Json<GraphApiError>)
 
 #[cfg(test)]
 mod tests {
-    use super::{build_graph_projection, GraphProjectionError, GraphQuery, GRAPH_ROW_GAP};
+    use super::{
+        build_ancestry_step, build_graph_projection, GraphProjectionError, GraphQuery,
+        GRAPH_ROW_GAP,
+    };
     use crate::storage::{
         db::test_database,
         repositories::{
@@ -1043,6 +1249,143 @@ mod tests {
             Some("Visit Athens and Santorini.")
         );
         assert!(response.display_code.starts_with("R-"));
+    }
+
+    #[tokio::test]
+    async fn ancestry_step_returns_false_for_root_loom() {
+        let database = test_database().await;
+        insert_loom(&database, "loom-root", "Root Loom", "loom", None, None).await;
+
+        let step = build_ancestry_step(&database, "loom-root")
+            .await
+            .expect("ancestry step");
+
+        assert_eq!(step.loom_id, "loom-root");
+        assert!(!step.has_parent_ancestry);
+        assert!(step.parent_loom.is_none());
+        assert!(step.parent_origin_response.is_none());
+        assert!(step.warnings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ancestry_step_returns_exact_one_parent_step_without_unrelated_responses() {
+        let database = test_database().await;
+        insert_loom(&database, "loom-a", "Ancestor Loom A", "loom", None, None).await;
+        insert_response(
+            &database,
+            "loom-a",
+            "response-a-origin",
+            "assistant",
+            "A origin answer",
+            0,
+        )
+        .await;
+        insert_response(
+            &database,
+            "loom-a",
+            "response-a-other",
+            "assistant",
+            "A unrelated answer",
+            1,
+        )
+        .await;
+        insert_loom(
+            &database,
+            "weft-b",
+            "Weft B",
+            "weft",
+            Some("loom-a"),
+            Some("response-a-origin"),
+        )
+        .await;
+        insert_response(
+            &database,
+            "weft-b",
+            "response-b-origin",
+            "assistant",
+            "B origin answer",
+            0,
+        )
+        .await;
+        insert_loom(
+            &database,
+            "weft-c",
+            "Weft C",
+            "weft",
+            Some("weft-b"),
+            Some("response-b-origin"),
+        )
+        .await;
+
+        let step = build_ancestry_step(&database, "weft-b")
+            .await
+            .expect("ancestry step");
+
+        assert!(step.has_parent_ancestry);
+        assert_eq!(
+            step.parent_loom.as_ref().map(|loom| loom.loom_id.as_str()),
+            Some("loom-a")
+        );
+        assert_eq!(
+            step.parent_origin_response
+                .as_ref()
+                .map(|response| response.response_id.as_str()),
+            Some("response-a-origin")
+        );
+        assert_eq!(
+            step.parent_origin_response
+                .as_ref()
+                .map(|response| response.preview.as_deref()),
+            Some(Some("A origin answer"))
+        );
+        assert!(!serde_json::to_string(&step)
+            .expect("serialize step")
+            .contains("response-a-other"));
+
+        let c_step = build_ancestry_step(&database, "weft-c")
+            .await
+            .expect("ancestry step");
+        assert_eq!(
+            c_step
+                .parent_loom
+                .as_ref()
+                .map(|loom| loom.loom_id.as_str()),
+            Some("weft-b")
+        );
+        assert_eq!(
+            c_step
+                .parent_loom
+                .as_ref()
+                .map(|loom| loom.has_parent_ancestry),
+            Some(true)
+        );
+    }
+
+    #[tokio::test]
+    async fn ancestry_step_warns_for_missing_parent_origin_response() {
+        let database = test_database().await;
+        insert_loom(&database, "loom-a", "Ancestor Loom A", "loom", None, None).await;
+        insert_loom(
+            &database,
+            "weft-b",
+            "Weft B",
+            "weft",
+            Some("loom-a"),
+            Some("missing-response"),
+        )
+        .await;
+
+        let step = build_ancestry_step(&database, "weft-b")
+            .await
+            .expect("ancestry step");
+
+        assert!(step.has_parent_ancestry);
+        assert!(step.parent_loom.is_none());
+        assert!(step.parent_origin_response.is_none());
+        assert!(step
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("parent origin Response is missing")));
     }
 
     #[tokio::test]
@@ -1685,9 +2028,9 @@ mod tests {
         .expect("graph projection");
 
         assert!(graph.edges.iter().all(|edge| edge.kind != "reference"));
-        assert!(graph.warnings.iter().any(
-            |warning| warning.contains("reference_external_target_skipped:reference-external")
-        ));
+        assert!(graph.warnings.iter().any(|warning| {
+            warning.contains("reference_external_target_skipped:reference-external")
+        }));
     }
 
     #[tokio::test]

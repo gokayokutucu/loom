@@ -37,6 +37,23 @@ interface ServiceGraphProjection {
   warnings: string[];
 }
 
+interface ServiceAncestryStep {
+  loomId: string;
+  hasParentAncestry: boolean;
+  parentLoom?: {
+    loomId: string;
+    title: string;
+    kind: string;
+    hasParentAncestry: boolean;
+  };
+  parentOriginResponse?: {
+    loomId: string;
+    responseId: string;
+    title: string;
+  };
+  warnings: string[];
+}
+
 function loom(id: string, title: string): Conversation {
   return {
     id,
@@ -413,6 +430,139 @@ test.describe("[product-service-backed] Graph projection product proof", () => {
       await expect(
         page.locator(".loom-graph-node--response").filter({ hasText: latestResponse.question })
       ).toHaveCount(0);
+
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] expands Weft ancestry exactly one parent step at a time", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(page, "Event Sourcing ancestry root nedir? Detaylı anlat.");
+      await expect(page.getByText("Event Store").first()).toBeVisible({ timeout: 30_000 });
+
+      const looms = await scenario.client.listLooms();
+      const rootLoom = looms.find((item) => item.title.includes("Event Sourcing"));
+      expect(rootLoom).toBeTruthy();
+      const loomAId = rootLoom!.loomId;
+
+      const secondTurn = await scenario.sendPrompt(
+        loomAId,
+        "Bu cevap Weft ancestry testinde kaynak Response olsun."
+      );
+      expect(secondTurn.assistantResponseId).toBeTruthy();
+      const loomADetail = await scenario.client.getLoom(loomAId);
+      const rootOriginResponse = loomADetail.responses.find(
+        (response) => response.id === secondTurn.assistantResponseId
+      );
+      expect(rootOriginResponse).toBeTruthy();
+      const unrelatedRootResponse = loomADetail.responses.find(
+        (response) => response.id !== rootOriginResponse!.id
+      );
+      expect(unrelatedRootResponse).toBeTruthy();
+
+      const weftB = await scenario.client.createOrOpenWeft({
+        originLoomId: loomAId,
+        originResponseId: rootOriginResponse!.id,
+        title: "Ancestry Weft B",
+        summary: "Middle Weft for ancestry expansion",
+        source: "graph_node",
+        seedMode: "none",
+        createOriginContextSnapshot: true,
+      });
+      const weftBTurn = await scenario.sendPrompt(
+        weftB.loomId,
+        "Weft B icinde parent ancestry icin kaynak cevap uret."
+      );
+      expect(weftBTurn.assistantResponseId).toBeTruthy();
+      const weftBDetail = await scenario.client.getLoom(weftB.loomId);
+      const weftBOriginResponse = weftBDetail.responses.find(
+        (response) => response.id === weftBTurn.assistantResponseId
+      );
+      expect(weftBOriginResponse).toBeTruthy();
+
+      const weftC = await scenario.client.createOrOpenWeft({
+        originLoomId: weftB.loomId,
+        originResponseId: weftBOriginResponse!.id,
+        title: "Ancestry Weft C",
+        summary: "Current Weft for ancestry expansion",
+        source: "graph_node",
+        seedMode: "none",
+        createOriginContextSnapshot: true,
+      });
+      const weftCTurn = await scenario.sendPrompt(
+        weftC.loomId,
+        "Weft C icinde current response olustur."
+      );
+      expect(weftCTurn.assistantResponseId).toBeTruthy();
+      const weftCDetail = await scenario.client.getLoom(weftC.loomId);
+
+      const initialGraph = await scenario.fetchJson<ServiceGraphProjection>(
+        `/looms/${encodeURIComponent(weftC.loomId)}/graph?includeBookmarks=true`
+      );
+      expect(initialGraph.nodes.some((node) => node.id === `loom:${weftB.loomId}`)).toBe(true);
+      expect(initialGraph.nodes.some((node) => node.id === `response:${weftBOriginResponse!.id}`))
+        .toBe(true);
+      expect(initialGraph.nodes.some((node) => node.id === `loom:${loomAId}`)).toBe(false);
+      expect(initialGraph.nodes.some((node) => node.id === `response:${rootOriginResponse!.id}`))
+        .toBe(false);
+      expect(
+        JSON.stringify(initialGraph.nodes.find((node) => node.id === `loom:${weftB.loomId}`)?.metadata)
+      ).toContain("\"hasParentAncestry\":true");
+
+      const ancestryStep = await scenario.fetchJson<ServiceAncestryStep>(
+        `/looms/${encodeURIComponent(weftB.loomId)}/ancestry-step`
+      );
+      expect(ancestryStep.parentLoom?.loomId).toBe(loomAId);
+      expect(ancestryStep.parentOriginResponse?.responseId).toBe(rootOriginResponse!.id);
+      expect(JSON.stringify(ancestryStep)).not.toContain(unrelatedRootResponse!.id);
+
+      await page.reload();
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+      await expect(page.getByTestId(`sidebar-loom-${weftC.loomId}`)).toBeVisible();
+      await page.getByTestId(`sidebar-loom-${weftC.loomId}`).click();
+      if ((await page.locator(".loom-graph-shell").count()) === 0) {
+        await page.getByRole("button", { name: "Toggle Graph View" }).click();
+      }
+
+      const graphShell = page.locator(".loom-graph-shell");
+      await expect(graphShell).toBeVisible();
+      await expect(graphShell.locator(".loom-graph-node--weft").filter({ hasText: weftBDetail.title }))
+        .toBeVisible();
+      await expect(graphShell.locator(".loom-graph-node--weft").filter({ hasText: weftCDetail.title }))
+        .toBeVisible();
+      await expect(graphShell.locator(".loom-graph-node--loom").filter({ hasText: rootLoom!.title }))
+        .toHaveCount(0);
+
+      const ancestryButton = graphShell.getByRole("button", { name: "Show parent ancestry" });
+      await expect(ancestryButton).toBeVisible();
+      await expect(ancestryButton).toBeEnabled();
+      await ancestryButton.dispatchEvent("click");
+      await expect(graphShell.locator(".loom-graph-node--loom").filter({ hasText: rootLoom!.title }))
+        .toBeVisible();
+      await expect(
+        graphShell.locator(".loom-graph-node--response").filter({ hasText: rootOriginResponse!.question })
+      ).toBeVisible();
+      await expect(
+        graphShell.locator(".loom-graph-node--response").filter({ hasText: unrelatedRootResponse!.question })
+      ).toHaveCount(0);
+      await expect(graphShell.getByRole("button", { name: "Show parent ancestry" })).toHaveCount(0);
 
       expect(scenario.dbPath).toContain(scenario.tempDir);
     } finally {

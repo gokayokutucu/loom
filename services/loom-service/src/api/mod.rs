@@ -186,6 +186,10 @@ pub fn router(
             post(wefts::persist_weft_responses),
         )
         .route("/looms/:loom_id/graph", get(graph::get_graph))
+        .route(
+            "/looms/:loom_id/ancestry-step",
+            get(graph::get_ancestry_step),
+        )
         .route("/exports/loom", post(exports::export_loom))
         .route("/exports/response", post(exports::export_response))
         .route(

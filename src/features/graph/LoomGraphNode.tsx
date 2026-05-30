@@ -1,6 +1,7 @@
 import {
   Bookmark,
   Bot,
+  ChevronsUp,
   ExternalLink,
   GitFork,
   Link2,
@@ -30,6 +31,7 @@ export interface LoomGraphNodeData extends Record<string, unknown> {
   onWeft: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
   onOpenWeftRecord?: (record: LoomForkRecord) => void;
   onContinue: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
+  onExpandAncestry?: (node: LoomGraphProjectionNode) => void;
   hasExistingWeft?: boolean;
   hasRevisionWeft?: boolean;
   weftCount?: number;
@@ -40,6 +42,8 @@ export interface LoomGraphNodeData extends Record<string, unknown> {
   isTerminalResponse?: boolean;
   isResponsePending?: boolean;
   continuationOpen?: boolean;
+  ancestryLoading?: boolean;
+  ancestryError?: string;
   viewportZoom?: number;
 }
 
@@ -85,6 +89,7 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
     onWeft,
     onOpenWeftRecord,
     onContinue,
+    onExpandAncestry,
     hasExistingWeft,
     hasRevisionWeft,
     weftCount = 0,
@@ -95,6 +100,8 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
     isTerminalResponse,
     isResponsePending,
     continuationOpen,
+    ancestryLoading,
+    ancestryError,
     viewportZoom = 1,
   } = data;
   const [weftPickerOpen, setWeftPickerOpen] = useState(false);
@@ -163,6 +170,22 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
             onClick={() => onOpen(projectionNode, response)}
           >
             <ExternalLink size={13} />
+          </button>
+        )}
+        {projectionNode.hasParentAncestry && onExpandAncestry && (
+          <button
+            type="button"
+            className="loom-graph-node-ancestry"
+            title={ancestryError ? `Retry parent ancestry: ${ancestryError}` : "Show parent ancestry"}
+            aria-label="Show parent ancestry"
+            disabled={ancestryLoading}
+            aria-busy={ancestryLoading || undefined}
+            onClick={(event) => {
+              event.stopPropagation();
+              onExpandAncestry(projectionNode);
+            }}
+          >
+            <ChevronsUp size={13} />
           </button>
         )}
       </div>

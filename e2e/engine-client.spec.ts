@@ -360,6 +360,56 @@ test.describe("[engine-contract] Loom engine client selection", () => {
     expect(projection.edges[1]).toMatchObject({ kind: "weft" });
   });
 
+  test("Rust HTTP client maps one-step Loom ancestry without collapsing categories", async () => {
+    const client = new RustHttpLoomEngineClient({
+      serviceUrl: "http://127.0.0.1:17633",
+      fetch: async (input, init) => {
+        expect(String(input)).toBe(
+          "http://127.0.0.1:17633/looms/W-2/ancestry-step"
+        );
+        expect(init?.method).toBe("GET");
+        return new Response(
+          JSON.stringify({
+            loomId: "W-2",
+            hasParentAncestry: true,
+            parentLoom: {
+              loomId: "L-1",
+              title: "Parent Loom",
+              summary: "Parent summary",
+              canonicalUri: "loom://parent",
+              displayCode: "L-PARENT",
+              kind: "loom",
+              hasParentAncestry: false,
+            },
+            parentOriginResponse: {
+              responseId: "R-1",
+              loomId: "L-1",
+              title: "Parent Response",
+              preview: "Parent answer",
+              canonicalUri: "loom://parent/r/R-1",
+              displayCode: "R-PARENT",
+            },
+            warnings: [],
+          }),
+          { status: 200 }
+        );
+      },
+    });
+
+    const step = await client.getLoomAncestryStep({ loomId: "W-2" });
+
+    expect(step.parentLoom).toMatchObject({
+      loomId: "L-1",
+      kind: "loom",
+      hasParentAncestry: false,
+    });
+    expect(step.parentOriginResponse).toMatchObject({
+      loomId: "L-1",
+      responseId: "R-1",
+      title: "Parent Response",
+    });
+  });
+
   test("Rust HTTP client parses health responses", async () => {
     const client = new RustHttpLoomEngineClient({
       serviceUrl: "http://127.0.0.1:17633",

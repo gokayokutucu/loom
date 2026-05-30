@@ -3,6 +3,10 @@ import {
   graphNodeLineageRole,
   isLoomGraphDestinationNode,
   isWeftGraphNode,
+  loomGraphRootNodeId,
+  mergeLoomGraphAncestryStep,
+  responseGraphNodeId,
+  type LoomGraphProjection,
   type LoomGraphProjectionNode,
 } from "./loomGraphProjection";
 
@@ -104,5 +108,131 @@ describe("isWeftGraphNode", () => {
 
   it("returns false for reference nodes", () => {
     expect(isWeftGraphNode(makeNode("reference"))).toBe(false);
+  });
+});
+
+describe("mergeLoomGraphAncestryStep", () => {
+  function baseProjection(): LoomGraphProjection {
+    const originId = loomGraphRootNodeId("weft-b");
+    const originResponseId = responseGraphNodeId("weft-b", "response-b");
+    const currentWeftId = loomGraphRootNodeId("weft-c");
+    return {
+      nodes: [
+        makeNode("loom", {
+          id: originId,
+          loomId: "weft-b",
+          title: "Weft B",
+          graphRole: "origin-context",
+          hasParentAncestry: true,
+          depth: 0,
+          position: { x: 0, y: 0 },
+        }),
+        makeNode("response", {
+          id: originResponseId,
+          loomId: "weft-b",
+          responseId: "response-b",
+          title: "Origin response from B",
+          graphRole: "origin-response",
+          depth: 1,
+          position: { x: 0, y: 300 },
+        }),
+        makeNode("weft", {
+          id: currentWeftId,
+          loomId: "weft-c",
+          title: "Weft C",
+          graphRole: "current-root",
+          depth: 2,
+          position: { x: 0, y: 600 },
+        }),
+      ],
+      edges: [
+        {
+          id: `${originId}->${originResponseId}`,
+          source: originId,
+          target: originResponseId,
+          kind: "question",
+        },
+        {
+          id: `${originResponseId}->${currentWeftId}`,
+          source: originResponseId,
+          target: currentWeftId,
+          kind: "weft",
+        },
+      ],
+    };
+  }
+
+  it("inserts one ancestry step above the current top Loom", () => {
+    const originId = loomGraphRootNodeId("weft-b");
+    const projection = mergeLoomGraphAncestryStep(baseProjection(), originId, {
+      loomId: "weft-b",
+      hasParentAncestry: true,
+      parentLoom: {
+        loomId: "loom-a",
+        title: "Loom A",
+        kind: "loom",
+        hasParentAncestry: false,
+      },
+      parentOriginResponse: {
+        loomId: "loom-a",
+        responseId: "response-a",
+        title: "Response A",
+      },
+    });
+
+    expect(projection.nodes.find((node) => node.loomId === "loom-a")).toMatchObject({
+      kind: "loom",
+      graphRole: "ancestor-context",
+    });
+    expect(projection.nodes.find((node) => node.responseId === "response-a")).toMatchObject({
+      kind: "response",
+      graphRole: "ancestor-response",
+    });
+    expect(projection.nodes.find((node) => node.id === originId)).toMatchObject({
+      hasParentAncestry: false,
+      ancestryExpanded: true,
+    });
+    expect(projection.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: loomGraphRootNodeId("loom-a"),
+          target: responseGraphNodeId("loom-a", "response-a"),
+          kind: "question",
+        }),
+        expect.objectContaining({
+          source: responseGraphNodeId("loom-a", "response-a"),
+          target: originId,
+          kind: "weft",
+        }),
+      ])
+    );
+  });
+
+  it("does not duplicate nodes or edges on repeated expansion", () => {
+    const originId = loomGraphRootNodeId("weft-b");
+    const step = {
+      loomId: "weft-b",
+      hasParentAncestry: true,
+      parentLoom: {
+        loomId: "loom-a",
+        title: "Loom A",
+        kind: "loom" as const,
+        hasParentAncestry: false,
+      },
+      parentOriginResponse: {
+        loomId: "loom-a",
+        responseId: "response-a",
+        title: "Response A",
+      },
+    };
+    const once = mergeLoomGraphAncestryStep(baseProjection(), originId, step);
+    const twice = mergeLoomGraphAncestryStep(once, originId, step);
+
+    expect(twice.nodes.filter((node) => node.loomId === "loom-a" && !node.responseId))
+      .toHaveLength(1);
+    expect(twice.nodes.filter((node) => node.responseId === "response-a")).toHaveLength(1);
+    expect(
+      twice.edges.filter((edge) => edge.source === responseGraphNodeId("loom-a", "response-a"))
+    ).toHaveLength(1);
   });
 });

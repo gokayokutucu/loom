@@ -27,6 +27,8 @@ import type {
   GetBookmarkForTargetInput,
   GetBookmarkInput,
   GetReferenceInput,
+  LoomAncestryStepInput,
+  LoomAncestryStepResult,
   GetUiStateInput,
   GetUiStateResult,
   GraphProjectionInput,
@@ -137,6 +139,7 @@ export interface LoomEngineClient {
   bookmarkResponse(input: BookmarkResponseInput): Promise<BookmarkResult>;
   resolveAddress(input: ResolveAddressInput): Promise<ResolveAddressResult>;
   getGraphProjection(input: GraphProjectionInput): Promise<GraphProjectionResult>;
+  getLoomAncestryStep(input: LoomAncestryStepInput): Promise<LoomAncestryStepResult>;
   exportLoom(input: ExportLoomInput): Promise<ExportLoomResult>;
   exportResponse(input: ExportResponseInput): Promise<ExportLoomResult>;
 }

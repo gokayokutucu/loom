@@ -43,7 +43,13 @@ export interface LoomGraphProjectionNode {
     | "origin-context"
     | "origin-response"
     | "child-response"
-    | "child-weft";
+    | "child-weft"
+    | "ancestor-context"
+    | "ancestor-response";
+  hasParentAncestry?: boolean;
+  ancestryExpanded?: boolean;
+  ancestryLoading?: boolean;
+  ancestryError?: string;
   depth: number;
   position: {
     x: number;
@@ -73,6 +79,153 @@ export interface LoomGraphProjection {
   serviceGraphStatus?: "resolved" | "not_found" | "empty" | "unavailable";
   serviceGraphStoreAuthoritative?: boolean;
   warnings?: string[];
+}
+
+export interface LoomGraphAncestryStep {
+  loomId: string;
+  hasParentAncestry: boolean;
+  parentLoom?: {
+    loomId: string;
+    title: string;
+    summary?: string;
+    canonicalUri?: string;
+    code?: string;
+    displayCode?: string;
+    kind?: "loom" | "weft";
+    hasParentAncestry?: boolean;
+  };
+  parentOriginResponse?: {
+    responseId: string;
+    loomId: string;
+    title: string;
+    preview?: string;
+    canonicalUri?: string;
+    code?: string;
+    displayCode?: string;
+  };
+  warnings?: string[];
+}
+
+const ANCESTRY_LANE = 0;
+const ANCESTRY_ROW_GAP = 300;
+
+function ancestryResponseNodeId(response: LoomGraphAncestryStep["parentOriginResponse"]) {
+  return response ? responseGraphNodeId(response.loomId, response.responseId) : undefined;
+}
+
+export function mergeLoomGraphAncestryStep(
+  projection: LoomGraphProjection,
+  anchorLoomNodeId: string,
+  step: LoomGraphAncestryStep
+): LoomGraphProjection {
+  if (!step.parentLoom || !step.parentOriginResponse) {
+    return {
+      ...projection,
+      nodes: projection.nodes.map((node) =>
+        node.id === anchorLoomNodeId
+          ? { ...node, hasParentAncestry: false, ancestryExpanded: true }
+          : node
+      ),
+      warnings: [...(projection.warnings ?? []), ...(step.warnings ?? [])],
+    };
+  }
+
+  const parentLoomNodeId = loomGraphRootNodeId(step.parentLoom.loomId);
+  const parentResponseNodeId = ancestryResponseNodeId(step.parentOriginResponse);
+  if (!parentResponseNodeId) return projection;
+
+  const existingIds = new Set(projection.nodes.map((node) => node.id));
+  const anchorNode = projection.nodes.find((node) => node.id === anchorLoomNodeId);
+  const anchorDepth = anchorNode?.depth ?? 0;
+  const responseDepth = anchorDepth - 1;
+  const loomDepth = anchorDepth - 2;
+
+  const parentLoomNode: LoomGraphProjectionNode = {
+    id: parentLoomNodeId,
+    kind: step.parentLoom.kind === "weft" ? "weft" : "loom",
+    loomId: step.parentLoom.loomId,
+    title: step.parentLoom.title,
+    code: step.parentLoom.code,
+    displayCode: step.parentLoom.displayCode,
+    summary: step.parentLoom.summary,
+    contentPreview: step.parentLoom.summary,
+    fullContent: step.parentLoom.summary,
+    canonicalUri: step.parentLoom.canonicalUri,
+    isAddressable: Boolean(step.parentLoom.canonicalUri),
+    graphRole: "ancestor-context",
+    hasParentAncestry: Boolean(step.parentLoom.hasParentAncestry),
+    depth: loomDepth,
+    position: {
+      x: ANCESTRY_LANE,
+      y: loomDepth * ANCESTRY_ROW_GAP,
+    },
+  };
+
+  const parentResponseNode: LoomGraphProjectionNode = {
+    id: parentResponseNodeId,
+    kind: "response",
+    loomId: step.parentOriginResponse.loomId,
+    responseId: step.parentOriginResponse.responseId,
+    title: step.parentOriginResponse.title,
+    code: step.parentOriginResponse.code,
+    displayCode: step.parentOriginResponse.displayCode,
+    summary: step.parentOriginResponse.preview,
+    contentPreview: step.parentOriginResponse.preview,
+    fullContent: step.parentOriginResponse.preview,
+    canonicalUri: step.parentOriginResponse.canonicalUri,
+    isAddressable: Boolean(step.parentOriginResponse.canonicalUri),
+    graphRole: "ancestor-response",
+    depth: responseDepth,
+    position: {
+      x: ANCESTRY_LANE,
+      y: responseDepth * ANCESTRY_ROW_GAP,
+    },
+  };
+
+  const nextNodes = projection.nodes.map((node) =>
+    node.id === anchorLoomNodeId
+      ? { ...node, hasParentAncestry: false, ancestryExpanded: true, ancestryLoading: false }
+      : node
+  );
+  if (!existingIds.has(parentLoomNodeId)) nextNodes.unshift(parentLoomNode);
+  if (!existingIds.has(parentResponseNodeId)) {
+    const insertIndex = nextNodes.findIndex((node) => node.id === anchorLoomNodeId);
+    nextNodes.splice(Math.max(0, insertIndex), 0, parentResponseNode);
+  }
+
+  const nextEdges = [...projection.edges];
+  const containmentEdgeId = `${parentLoomNodeId}->${parentResponseNodeId}`;
+  if (!nextEdges.some((edge) => edge.id === containmentEdgeId)) {
+    nextEdges.push({
+      id: containmentEdgeId,
+      source: parentLoomNodeId,
+      target: parentResponseNodeId,
+      kind: "question",
+      label: "Origin response",
+      isActivePath: true,
+      isWeftPath: true,
+    });
+  }
+  const originEdgeId = `${parentResponseNodeId}->${anchorLoomNodeId}`;
+  if (!nextEdges.some((edge) => edge.id === originEdgeId)) {
+    nextEdges.push({
+      id: originEdgeId,
+      source: parentResponseNodeId,
+      target: anchorLoomNodeId,
+      kind: "weft",
+      label: "Weft origin",
+      isActivePath: true,
+      isWeftPath: true,
+    });
+  }
+
+  return {
+    ...projection,
+    nodes: nextNodes,
+    edges: nextEdges,
+    firstNodeId: projection.firstNodeId ?? parentResponseNodeId,
+    warnings: [...(projection.warnings ?? []), ...(step.warnings ?? [])],
+  };
 }
 
 export interface BuildLoomGraphProjectionInput {
