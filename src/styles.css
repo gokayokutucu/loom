@@ -8670,6 +8670,24 @@ kbd {
   margin-bottom: 0;
 }
 
+.graph-response-preview-answer h1.assistant-markdown-heading,
+.graph-response-preview-answer h2.assistant-markdown-heading {
+  font-size: calc(var(--font-body-size) + 4px);
+  line-height: calc(var(--font-body-line) + 4px);
+}
+
+.graph-response-preview-answer h3.assistant-markdown-heading {
+  font-size: calc(var(--font-body-size) + 2px);
+  line-height: calc(var(--font-body-line) + 3px);
+}
+
+.graph-response-preview-answer h4.assistant-markdown-heading,
+.graph-response-preview-answer h5.assistant-markdown-heading,
+.graph-response-preview-answer h6.assistant-markdown-heading {
+  font-size: var(--font-body-size);
+  line-height: var(--font-body-line);
+}
+
 .loom-graph-node {
   position: relative;
   display: grid;
@@ -8709,7 +8727,8 @@ kbd {
 .loom-graph-node-kind,
 .loom-graph-node-flags,
 .loom-graph-node-actions,
-.loom-graph-node-open {
+.loom-graph-node-open,
+.loom-graph-node-ancestry {
   display: flex;
   align-items: center;
 }
@@ -8742,7 +8761,8 @@ kbd {
   white-space: nowrap;
 }
 
-.loom-graph-node-open {
+.loom-graph-node-open,
+.loom-graph-node-ancestry {
   justify-content: center;
   width: 24px;
   height: 24px;
@@ -8750,6 +8770,10 @@ kbd {
   border-radius: 7px;
   background: transparent;
   color: var(--text-secondary);
+}
+
+.loom-graph-node-ancestry[aria-busy="true"] {
+  opacity: 0.62;
 }
 
 .loom-graph-node h3 {
@@ -8910,6 +8934,7 @@ kbd {
 
 .loom-graph-node-actions button,
 .loom-graph-node-open,
+.loom-graph-node-ancestry,
 .loom-graph-controls button {
   border: 0;
   border-radius: 7px;
@@ -8947,6 +8972,8 @@ kbd {
 .loom-graph-node-actions button:focus-visible,
 .loom-graph-node-open:hover,
 .loom-graph-node-open:focus-visible,
+.loom-graph-node-ancestry:hover,
+.loom-graph-node-ancestry:focus-visible,
 .loom-graph-controls button:hover,
 .loom-graph-controls button:focus-visible {
   background: var(--loom-bg-hover, rgba(229, 225, 190, 0.05));
