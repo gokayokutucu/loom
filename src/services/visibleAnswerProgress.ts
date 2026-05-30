@@ -23,6 +23,11 @@ import type {
 } from "../types";
 
 type VisibleAnswerTaskTemplate = Omit<VisibleAnswerTask, "status">;
+export type VisibleProgressMilestone =
+  | "context_ready"
+  | "answer_plan_ready"
+  | "thinking_status"
+  | "content_delta";
 
 export interface CreateVisibleTaskProgressInput {
   promptText: string;
@@ -68,6 +73,11 @@ const tasks = {
     id: "preparing-answer-plan",
     title: "Preparing answer plan",
     stage: "orchestration",
+  },
+  generatingAnswer: {
+    id: "generating-answer",
+    title: "Generating answer",
+    stage: "generation",
   },
   readingReferences: {
     id: "reading-references",
@@ -595,12 +605,153 @@ export function createInitialVisibleAnswerProgress(): VisibleAnswerProgress {
 export function createOrchestrationVisibleProgress(): VisibleAnswerProgress {
   return {
     tasks: [
-      { ...tasks.understandingQuestion, status: "done" },
-      { ...tasks.preparingPlan, status: "running" },
+      { ...tasks.understandingQuestion, status: "running" },
+      { ...tasks.preparingPlan, status: "pending" },
     ],
-    activeTaskId: tasks.preparingPlan.id,
-    statusText: "Preparing answer plan...",
+    activeTaskId: tasks.understandingQuestion.id,
+    statusText: "Understanding the question...",
     debug: createVisibleAnswerDebugState(),
+  };
+}
+
+function completeTask(task: VisibleAnswerTask, now: number): VisibleAnswerTask {
+  if (task.status === "done") return task;
+  const startedAt = task.startedAt ?? now;
+  return {
+    ...task,
+    status: "done",
+    startedAt,
+    completedAt: now,
+    durationMs: Math.max(0, now - startedAt),
+  };
+}
+
+function runTask(task: VisibleAnswerTask, now: number): VisibleAnswerTask {
+  if (task.status === "done") return task;
+  return {
+    ...task,
+    status: "running",
+    startedAt: task.startedAt ?? now,
+    completedAt: undefined,
+    durationMs: undefined,
+  };
+}
+
+function pendingTask(task: VisibleAnswerTask): VisibleAnswerTask {
+  if (task.status === "done") return task;
+  return {
+    ...task,
+    status: "pending",
+  };
+}
+
+function ensureOrchestrationTasks(progress: VisibleAnswerProgress): VisibleAnswerProgress {
+  const existingIds = new Set(progress.tasks.map((task) => task.id));
+  const requiredTasks: VisibleAnswerTask[] = [];
+  if (!existingIds.has(tasks.understandingQuestion.id)) {
+    requiredTasks.push({ ...tasks.understandingQuestion, status: "pending" });
+  }
+  if (!existingIds.has(tasks.preparingPlan.id)) {
+    requiredTasks.push({ ...tasks.preparingPlan, status: "pending" });
+  }
+  if (requiredTasks.length === 0) return progress;
+  return {
+    ...progress,
+    tasks: [...requiredTasks, ...progress.tasks],
+  };
+}
+
+function ensureTask(
+  progress: VisibleAnswerProgress,
+  template: VisibleAnswerTaskTemplate
+): VisibleAnswerProgress {
+  if (progress.tasks.some((task) => task.id === template.id)) return progress;
+  return {
+    ...progress,
+    tasks: [...progress.tasks, { ...template, status: "pending" }],
+  };
+}
+
+export function advanceVisibleProgress(
+  progress: VisibleAnswerProgress | undefined,
+  milestone: VisibleProgressMilestone
+): VisibleAnswerProgress | undefined {
+  if (!progress) return undefined;
+
+  const now = Date.now();
+  const normalized = ensureOrchestrationTasks(progress);
+  const understandingId = tasks.understandingQuestion.id;
+  const preparingId = tasks.preparingPlan.id;
+  const generatingId = tasks.generatingAnswer.id;
+  let activeTaskId: string | undefined;
+  let statusText = "";
+  const progressWithLifecycle =
+    milestone === "thinking_status" || milestone === "content_delta"
+      ? ensureTask(normalized, tasks.generatingAnswer)
+      : normalized;
+
+  const nextTasks = progressWithLifecycle.tasks.map((task) => {
+    if (milestone === "thinking_status") {
+      if (task.id === understandingId || task.id === preparingId) return completeTask(task, now);
+      if (task.id === generatingId) {
+        activeTaskId = task.id;
+        statusText = statusTextForTitle(task.title);
+        return runTask(task, now);
+      }
+      return task;
+    }
+    if (milestone === "answer_plan_ready") {
+      if (task.id === understandingId) return completeTask(task, now);
+      if (task.id === preparingId) {
+        if (task.status === "done") return task;
+        activeTaskId = task.id;
+        statusText = statusTextForTitle(task.title);
+        return runTask(task, now);
+      }
+      return task;
+    }
+    if (milestone === "content_delta") {
+      if (task.id === understandingId || task.id === preparingId) return completeTask(task, now);
+      if (task.id === generatingId) {
+        activeTaskId = task.id;
+        statusText = statusTextForTitle(task.title);
+        return runTask(task, now);
+      }
+      return task;
+    }
+    if (milestone === "context_ready") {
+      if (task.id === understandingId) return completeTask(task, now);
+      if (task.id === preparingId) {
+        if (task.status === "done") return task;
+        activeTaskId = task.id;
+        statusText = statusTextForTitle(task.title);
+        return runTask(task, now);
+      }
+      return pendingTask(task);
+    }
+    return task;
+  });
+
+  if (milestone === "context_ready") {
+    const preparingTask = nextTasks.find((task) => task.id === preparingId);
+    if (preparingTask?.status === "done") {
+      activeTaskId = undefined;
+      statusText = "";
+    }
+  }
+  if (!activeTaskId) {
+    const runningTask = nextTasks.find((task) => task.status === "running");
+    if (runningTask) {
+      activeTaskId = runningTask.id;
+      statusText = statusTextForTitle(runningTask.title);
+    }
+  }
+
+  return {
+    ...progressWithLifecycle,
+    tasks: nextTasks,
+    activeTaskId,
+    statusText,
   };
 }
 
@@ -697,6 +848,7 @@ export function finishVisibleAnswerProgress(
   return {
     ...progress,
     tasks: progress.tasks.map((task) => ({ ...task, status: "done" })),
+    activeTaskId: undefined,
     contentOutline: progress.contentOutline,
     statusText: "",
   };

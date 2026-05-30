@@ -256,6 +256,7 @@ import { codeToClipboardHtml } from "./services/clipboard";
 import { prepareContextArtifactsForGeneration } from "./services/contextReadinessGate";
 import {
   activateVisibleAnswerStage,
+  advanceVisibleProgress,
   appendVisibleProgressEvent,
   createInitialVisibleAnswerProgress,
   createOrchestrationVisibleProgress,
@@ -2500,6 +2501,15 @@ function App() {
   const mainGenerationRef = useRef(0);
   const mainComposerSubmissionInFlightRef = useRef(false);
   const mainAbortRef = useRef<AbortController | null>(null);
+  /**
+   * Tracks reload-recovery poll attempts per workflowRunId.
+   * Key: workflowRunId. Value: { lastContent, sameCount }.
+   * When `sameCount` exceeds RELOAD_RECOVERY_STALE_POLLS the workflow is
+   * considered abandoned and the response is force-completed on the client.
+   */
+  const reloadRecoveryPollsRef = useRef(
+    new globalThis.Map<string, { lastContent: string; sameCount: number }>()
+  );
   const mainRevealTargetRef = useRef<{ loomId: string; responseId: string } | null>(null);
   const mainServiceCancellationRef = useRef<{
     loomId: string;
@@ -3953,17 +3963,84 @@ function App() {
     return status === "streaming" || status === "pending" || status === "running";
   }
 
+  // After this many consecutive polls returning the same content while still
+  // "streaming" (with no active controller), the workflow is considered a zombie
+  // and is force-completed on the client side to stop the poll loop.
+  // 6 polls × 500 ms = 3 seconds grace period.
+  const RELOAD_RECOVERY_STALE_POLLS = 6;
+
   function applyGenerationResponseState(state: GenerationResponseStateResult) {
     const assistant = state.assistantResponse;
     if (!assistant) return;
     const sanitized = sanitizeModelAnswer(assistant.content);
     const serviceGenerationStatus = assistant.status ?? state.status;
+    const isLive = isLiveServiceGenerationStatus(serviceGenerationStatus);
+
+    // --- Zombie detection (reload-recovery path only) ----------------------
+    // When the app was reloaded mid-stream the service may keep reporting
+    // "streaming" indefinitely for an abandoned workflow.  Track how many
+    // consecutive polls return the same content.  Once the threshold is
+    // exceeded, treat the response as force-completed on the client so the
+    // poll loop terminates and the Stop button clears.
+    const wfId = state.workflowRunId ?? "";
+    if (isLive && !mainAbortRef.current && wfId) {
+      const prev = reloadRecoveryPollsRef.current.get(wfId);
+      const sameCount = prev?.lastContent === sanitized ? prev.sameCount + 1 : 1;
+      reloadRecoveryPollsRef.current.set(wfId, { lastContent: sanitized, sameCount });
+      if (sameCount > RELOAD_RECOVERY_STALE_POLLS) {
+        // Abandon: force-complete the response on the client so the polling
+        // effect drops this workflowRunId from liveServiceGenerationRunIds.
+        reloadRecoveryPollsRef.current.delete(wfId);
+        setConversationResponses((current) => {
+          const responses = current[assistant.loomId] ?? [];
+          const changed = responses.some((r) => r.id === assistant.responseId);
+          if (!changed) return current;
+          return {
+            ...current,
+            [assistant.loomId]: responses.map((r) =>
+              r.id === assistant.responseId
+                ? {
+                    ...r,
+                    serviceGenerationStatus: "completed" as const,
+                    doneReason: r.doneReason ?? "stop",
+                    visibleProgress: undefined,
+                  }
+                : r
+            ),
+          };
+        });
+        setGeneratingResponseId((current) =>
+          current === assistant.responseId ? null : current
+        );
+        if (!mainAbortRef.current) {
+          setComposerRuntimeTargetKey((current) =>
+            current === assistant.loomId ? null : current
+          );
+          setComposerRuntimeState((current) =>
+            current.running ? { running: false, message: "Responded." } : current
+          );
+        }
+        return;
+      }
+    } else if (!isLive) {
+      reloadRecoveryPollsRef.current.delete(wfId);
+    }
+    // -----------------------------------------------------------------------
+
     setConversationResponses((current) => {
       const existingResponses = current[assistant.loomId] ?? [];
-      let updated = false;
+      let changed = false;
       const nextResponses = existingResponses.map((response) => {
         if (response.id !== assistant.responseId) return response;
-        updated = true;
+        // Skip update if status and content are unchanged — avoids spurious
+        // re-renders on every poll tick during reload recovery.
+        if (
+          response.serviceGenerationStatus === serviceGenerationStatus &&
+          response.finalContent === sanitized
+        ) {
+          return response;
+        }
+        changed = true;
         return {
           ...response,
           answer: answerParagraphs(sanitized),
@@ -3972,9 +4049,7 @@ function App() {
           serviceGenerationStatus,
           serviceUserResponseId:
             response.serviceUserResponseId ?? state.userResponse?.responseId,
-          visibleProgress: isLiveServiceGenerationStatus(serviceGenerationStatus)
-            ? response.visibleProgress
-            : undefined,
+          visibleProgress: isLive ? response.visibleProgress : undefined,
           doneReason:
             state.status === "completed" || state.status === "truncated"
               ? response.doneReason ?? "stop"
@@ -3982,13 +4057,13 @@ function App() {
           truncated: state.status === "truncated" ? true : response.truncated,
         };
       });
-      if (!updated) return current;
+      if (!changed) return current;
       return {
         ...current,
         [assistant.loomId]: nextResponses,
       };
     });
-    if (isLiveServiceGenerationStatus(serviceGenerationStatus)) {
+    if (isLive) {
       // Reload recovery: if there is no active generation controller the app
       // was reloaded while the service was still streaming.  Sync the composer
       // runtime state so scroll-follow and the Stop button work correctly.
@@ -4215,11 +4290,19 @@ function App() {
     mainAbortRef.current?.abort();
     mainAbortRef.current = null;
     const revealTarget = mainRevealTargetRef.current;
-    if (revealTarget) {
+    // Optimistically mark the response as cancelled so that if the app is
+    // closed before the service confirms cancellation, the response will not
+    // be picked up as "streaming" on the next app open and trigger the reload
+    // recovery path.  The service confirmation (response_cancelled event) will
+    // overwrite this if it arrives while the app is still running.
+    const cancelTarget = revealTarget ?? (serviceCancellation
+      ? { loomId: serviceCancellation.loomId, responseId: serviceCancellation.responseId }
+      : null);
+    if (cancelTarget) {
       setConversationResponses((current) => ({
         ...current,
-        [revealTarget.loomId]: (current[revealTarget.loomId] ?? []).map((response) =>
-          response.id === revealTarget.responseId
+        [cancelTarget.loomId]: (current[cancelTarget.loomId] ?? []).map((response) =>
+          response.id === cancelTarget.responseId
             ? {
                 ...response,
                 answer: answerParagraphs(
@@ -4231,6 +4314,14 @@ function App() {
                     : response.thinkingEndedAt,
                 visiblePlan: undefined,
                 visibleProgress: undefined,
+                // Optimistic cancel: clear live status so the response is not
+                // treated as streaming on the next app open.
+                serviceGenerationStatus:
+                  response.serviceGenerationStatus === "streaming" ||
+                  response.serviceGenerationStatus === "pending" ||
+                  response.serviceGenerationStatus === "running"
+                    ? ("cancelled" as const)
+                    : response.serviceGenerationStatus,
               }
             : response
         ),
@@ -8026,6 +8117,19 @@ function App() {
       let serviceResponseId = response.id;
       let serviceFinalContent = "";
       let persistedUserResponseId: string | undefined;
+      const advanceResponseProgress = (
+        milestone: Parameters<typeof advanceVisibleProgress>[1],
+        visible: boolean
+      ) => {
+        const nextProgress = advanceVisibleProgress(visibleProgress, milestone);
+        if (nextProgress) visibleProgress = nextProgress;
+        updateResponseVisibleProgress(
+          targetConversation.id,
+          serviceResponseId,
+          visible ? nextProgress : undefined
+        );
+        return nextProgress;
+      };
       const mainModel = getProfileModel(providerSettings, "main");
       const mainModelName = mainModel.name;
       const retainServiceWorkflowRunId = (workflowRunId?: string) => {
@@ -8050,6 +8154,13 @@ function App() {
         const previousResponseId = serviceResponseId;
         serviceResponseId = nextResponseId;
         updateLatestUserTurnAnchorResponseId(previousResponseId, nextResponseId);
+        setSentUserTurnIds((current) => {
+          if (!current.has(previousResponseId)) return current;
+          const next = new Set(current);
+          next.delete(previousResponseId);
+          next.add(nextResponseId);
+          return next;
+        });
         if (mainServiceCancellationRef.current) {
           mainServiceCancellationRef.current = {
             ...mainServiceCancellationRef.current,
@@ -8199,17 +8310,12 @@ function App() {
             continue;
           }
           if (event.type === "answer_plan_ready") {
+            advanceResponseProgress("answer_plan_ready", true);
             markDebugEvent("Service AnswerPlan ready");
             continue;
           }
           if (event.type === "context_ready") {
-            setResponseProgress(
-              activateVisibleAnswerStage(
-                visibleProgress,
-                "context",
-                "Building Loom context..."
-              )
-            );
+            advanceResponseProgress("context_ready", true);
             markDebugEvent(
               "Service context ready",
               `${event.payload.contextBlockCount} artifacts`
@@ -8225,6 +8331,7 @@ function App() {
                   : undefined,
               thinkingTokenCount: event.payload.tokenEstimate,
             });
+            advanceResponseProgress("thinking_status", true);
             continue;
           }
           if (event.type === "content_delta") {
@@ -8236,7 +8343,7 @@ function App() {
               finalStartedAt: firstFinalStartedAt,
               thinkingEndedAt: firstFinalStartedAt,
             });
-            setResponseProgress(undefined);
+            advanceResponseProgress("content_delta", true);
             updateResponseMarkdown(targetConversation.id, serviceResponseId, serviceFinalContent);
             continue;
           }
@@ -9585,13 +9692,31 @@ function App() {
     if (!target) return false;
 
     const transcriptRect = transcript.getBoundingClientRect();
-    const targetRect = target.getBoundingClientRect();
     const visualGap = 24;
     const topOffset = Math.max(visualGap, transcript.clientTop + visualGap);
-    const nextTop = Math.max(
-      0,
-      transcript.scrollTop + targetRect.top - transcriptRect.top - topOffset
+
+    // If the prompt is collapsed (long message), scroll so the last 3 lines of
+    // the clamped text appear just below the topbar. For shorter messages, align
+    // the top of the user turn to the topbar as usual.
+    const clampedPromptEl = target.querySelector<HTMLElement>(
+      ".user-message-prompt-text.is-clamped"
     );
+    let nextTop: number;
+    if (clampedPromptEl) {
+      const clampedRect = clampedPromptEl.getBoundingClientRect();
+      const lineHeight = clampedRect.height / USER_PROMPT_SENT_COLLAPSE_LINE_COUNT;
+      const threeLineOffset = lineHeight * 3;
+      nextTop = Math.max(
+        0,
+        transcript.scrollTop + clampedRect.bottom - threeLineOffset - transcriptRect.top - topOffset
+      );
+    } else {
+      const targetRect = target.getBoundingClientRect();
+      nextTop = Math.max(
+        0,
+        transcript.scrollTop + targetRect.top - transcriptRect.top - topOffset
+      );
+    }
     transcriptProgrammaticScrollRef.current = true;
     transcript.scrollTo({ top: nextTop, behavior });
     latestUserTurnAnchorRef.current = {
@@ -10531,17 +10656,9 @@ function App() {
     const sourceResponses = conversationResponses[loomId] ?? [];
     const sourceIndex = sourceResponses.findIndex((response) => response.id === responseId);
     const sourceResponse = sourceResponses[sourceIndex];
-    const anchorResponse = sourceIndex > 0 ? sourceResponses[sourceIndex - 1] : undefined;
     if (!sourceConversation || !sourceResponse) return false;
-    if (!anchorResponse) {
-      showToast({
-        title: "Revision unavailable",
-        message: "Editing the root prompt needs the root-origin strategy before it can branch safely.",
-        color: "sunset",
-        icon: "weft",
-      });
-      return false;
-    }
+    const anchorResponse = sourceIndex > 0 ? sourceResponses[sourceIndex - 1] : sourceResponse;
+    const isRootPromptRevision = sourceIndex === 0;
     const revisionWeftTitle = compactLoomTitle(`Revision: ${normalizedPrompt}`);
     const revisionResponseTitle = compactLoomTitle(normalizedPrompt);
 
@@ -10563,6 +10680,7 @@ function App() {
           editedUserResponseId: sourceResponse.serviceUserResponseId,
           originalPrompt: sourceResponse.question,
           revisionPrompt: normalizedPrompt,
+          rootPromptRevision: isRootPromptRevision,
         }),
       });
     } catch (error) {
@@ -10848,6 +10966,16 @@ function App() {
     const localResponseId = `regenerated-${sourceResponse.id}-${Date.now()}`;
     let activeResponseId = localResponseId;
     let finalContent = "";
+    let regeneratedVisibleProgress = createOrchestrationVisibleProgress();
+    const advanceRegeneratedProgress = (
+      milestone: Parameters<typeof advanceVisibleProgress>[1],
+      visible: boolean
+    ) => {
+      const nextProgress = advanceVisibleProgress(regeneratedVisibleProgress, milestone);
+      if (nextProgress) regeneratedVisibleProgress = nextProgress;
+      updateResponseVisibleProgress(loomId, activeResponseId, visible ? nextProgress : undefined);
+      return nextProgress;
+    };
     const mainModel = getProfileModel(providerSettings, "main");
     const mainModelName = mainModel.name;
     const regeneratedResponse: ResponseItem = {
@@ -10935,16 +11063,12 @@ function App() {
           replaceActiveResponseId(event.payload.responseId);
           continue;
         }
+        if (event.type === "answer_plan_ready") {
+          advanceRegeneratedProgress("answer_plan_ready", true);
+          continue;
+        }
         if (event.type === "context_ready") {
-          updateResponseVisibleProgress(
-            loomId,
-            activeResponseId,
-            activateVisibleAnswerStage(
-              regeneratedResponse.visibleProgress ?? createOrchestrationVisibleProgress(),
-              "context",
-              "Building Loom context..."
-            )
-          );
+          advanceRegeneratedProgress("context_ready", true);
           continue;
         }
         if (event.type === "thinking_status") {
@@ -10955,6 +11079,7 @@ function App() {
                 ? Math.round(event.payload.durationMs / 1000)
                 : undefined,
           });
+          advanceRegeneratedProgress("thinking_status", true);
           continue;
         }
         if (event.type === "content_delta") {
@@ -10965,7 +11090,7 @@ function App() {
             finalStartedAt: firstFinalStartedAt,
             thinkingEndedAt: firstFinalStartedAt,
           });
-          updateResponseVisiblePlanAndProgress(loomId, activeResponseId, undefined, undefined);
+          advanceRegeneratedProgress("content_delta", true);
           updateResponseMarkdown(loomId, activeResponseId, finalContent);
           continue;
         }
@@ -11118,6 +11243,16 @@ function App() {
     const localResponseId = `retry-${sourceResponse.id}-${Date.now()}`;
     let activeResponseId = localResponseId;
     let finalContent = "";
+    let retryVisibleProgress = createOrchestrationVisibleProgress();
+    const advanceRetryProgress = (
+      milestone: Parameters<typeof advanceVisibleProgress>[1],
+      visible: boolean
+    ) => {
+      const nextProgress = advanceVisibleProgress(retryVisibleProgress, milestone);
+      if (nextProgress) retryVisibleProgress = nextProgress;
+      updateResponseVisibleProgress(loomId, activeResponseId, visible ? nextProgress : undefined);
+      return nextProgress;
+    };
     const mainModel = getProfileModel(providerSettings, "main");
     const mainModelName = mainModel.name;
     const retryResponse: ResponseItem = {
@@ -11217,16 +11352,12 @@ function App() {
           replaceActiveResponseId(event.payload.responseId);
           continue;
         }
+        if (event.type === "answer_plan_ready") {
+          advanceRetryProgress("answer_plan_ready", true);
+          continue;
+        }
         if (event.type === "context_ready") {
-          updateResponseVisibleProgress(
-            loomId,
-            activeResponseId,
-            activateVisibleAnswerStage(
-              retryResponse.visibleProgress ?? createOrchestrationVisibleProgress(),
-              "context",
-              "Building Loom context..."
-            )
-          );
+          advanceRetryProgress("context_ready", true);
           continue;
         }
         if (event.type === "thinking_status") {
@@ -11237,6 +11368,7 @@ function App() {
                 ? Math.round(event.payload.durationMs / 1000)
                 : undefined,
           });
+          advanceRetryProgress("thinking_status", true);
           continue;
         }
         if (event.type === "content_delta") {
@@ -11247,7 +11379,7 @@ function App() {
             finalStartedAt: firstFinalStartedAt,
             thinkingEndedAt: firstFinalStartedAt,
           });
-          updateResponseVisiblePlanAndProgress(loomId, activeResponseId, undefined, undefined);
+          advanceRetryProgress("content_delta", true);
           updateResponseMarkdown(loomId, activeResponseId, finalContent);
           continue;
         }
@@ -12404,17 +12536,12 @@ function App() {
       // Generation ended — always clear the pending flag as a safety net.
       pendingLatestTurnAnchorRef.current = false;
       const anchor = latestUserTurnAnchorRef.current;
-      if (anchor?.cancelled) {
-        latestUserTurnAnchorRef.current = null;
-        latestTurnAnchorModeRef.current = false;
-        transcriptAutoFollowPausedRef.current = true;
-        return;
-      }
       if (anchor) {
         window.requestAnimationFrame(() => {
-          if (!anchor.anchored) {
-            scrollLatestUserTurnIntoReadingPosition("auto");
-          } else {
+          window.requestAnimationFrame(() => {
+            if (!anchor.cancelled && !anchor.anchored) {
+              scrollLatestUserTurnIntoReadingPosition("auto");
+            }
             // Rule D completion snap: scroll so the real content end
             // (data-transcript-content-end, which now includes the reference-strip
             // that just appeared at completion) is visible above the composer.
@@ -12423,11 +12550,11 @@ function App() {
             if (transcript) {
               scrollRealContentEndIntoSafeView(transcript);
             }
-          }
-          latestUserTurnAnchorRef.current = null;
-          latestTurnAnchorModeRef.current = false;
+            latestUserTurnAnchorRef.current = null;
+            latestTurnAnchorModeRef.current = false;
+            transcriptAutoFollowPausedRef.current = false;
+          });
         });
-        transcriptAutoFollowPausedRef.current = false;
         return;
       }
       if (latestTurnAnchorModeRef.current) {
@@ -15301,7 +15428,7 @@ function ResponseProgressChecklist({
               <span className="assistant-progress-task-title">
                 {running ? <AnimatedProgressText text={statusText} /> : task.title}
               </span>
-              {duration !== undefined && (
+              {duration !== undefined && (running || duration >= 250) && (
                 <span className="assistant-progress-task-duration">
                   {formatVisibleDuration(duration)}
                 </span>
@@ -15469,10 +15596,7 @@ function ThinkingPanel({
               compact
             />
           ) : (
-            <span>
-              Thinking is active. Raw model thinking is private, so Loom only shows safe timing
-              status here.
-            </span>
+            <span>{secondaryLabel ?? primaryLabel}</span>
           )}
         </div>
       )}
@@ -15554,7 +15678,7 @@ function ResponseContent({
 
 const USER_PROMPT_COLLAPSE_LINE_COUNT = 40;
 /** Tighter clamp applied to a prompt immediately after it is sent. */
-const USER_PROMPT_SENT_COLLAPSE_LINE_COUNT = 3;
+const USER_PROMPT_SENT_COLLAPSE_LINE_COUNT = 10;
 
 function CollapsibleResponseContent({
   responseId,
@@ -15737,6 +15861,28 @@ function CollapsibleUserPromptContent({
   const [expanded, setExpanded] = useState(false);
   const [collapsible, setCollapsible] = useState(false);
 
+  function preservePromptTopAfterExpansion(previousTop: number, transcript: HTMLElement | null) {
+    if (!transcript) return;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const nextTop = promptRef.current?.getBoundingClientRect().top;
+        if (nextTop === undefined) return;
+        transcript.scrollTop += nextTop - previousTop;
+      });
+    });
+  }
+
+  function toggleExpanded() {
+    const expanding = !expanded;
+    const element = promptRef.current;
+    const transcript = element?.closest<HTMLElement>(".chat-transcript") ?? null;
+    const previousTop = element?.getBoundingClientRect().top;
+    setExpanded((current) => !current);
+    if (expanding && previousTop !== undefined) {
+      preservePromptTopAfterExpansion(previousTop, transcript);
+    }
+  }
+
   useEffect(() => {
     setExpanded(false);
   }, [text]);
@@ -15801,7 +15947,7 @@ function CollapsibleUserPromptContent({
           type="button"
           className="user-message-collapse-toggle"
           aria-expanded={expanded}
-          onClick={() => setExpanded((current) => !current)}
+          onClick={toggleExpanded}
         >
           {expanded ? "Show less" : "Show full message"}
         </button>
@@ -16585,11 +16731,7 @@ function ChatTranscript({
                     text={displayPromptText}
                     references={inlinePromptReferences}
                     collapseEnabled={collapseUserMessages}
-                    collapsedLineCount={
-                      sentUserTurnIds?.has(displayResponse.id)
-                        ? USER_PROMPT_SENT_COLLAPSE_LINE_COUNT
-                        : undefined
-                    }
+                    collapsedLineCount={USER_PROMPT_SENT_COLLAPSE_LINE_COUNT}
                     onOpenReference={onOpenReference}
                     onReferenceHint={showSentReferenceHint}
                     onReferenceHintClose={scheduleSentReferenceHintClose}
