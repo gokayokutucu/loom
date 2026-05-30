@@ -553,6 +553,10 @@ test.describe("[product-service-backed] Graph projection product proof", () => {
       const ancestryButton = graphShell.getByRole("button", { name: "Show parent ancestry" });
       await expect(ancestryButton).toBeVisible();
       await expect(ancestryButton).toBeEnabled();
+      await expect(ancestryButton).toHaveClass(/loom-graph-node-ancestry-handle-button/);
+      await expect(ancestryButton).toHaveClass(/nodrag/);
+      await expect(ancestryButton).toHaveClass(/nopan/);
+      await expect(graphShell.locator(".loom-graph-node-header .loom-graph-node-ancestry")).toHaveCount(0);
       await ancestryButton.dispatchEvent("click");
       await expect(graphShell.locator(".loom-graph-node--loom").filter({ hasText: rootLoom!.title }))
         .toBeVisible();
@@ -563,6 +567,7 @@ test.describe("[product-service-backed] Graph projection product proof", () => {
         graphShell.locator(".loom-graph-node--response").filter({ hasText: unrelatedRootResponse!.question })
       ).toHaveCount(0);
       await expect(graphShell.getByRole("button", { name: "Show parent ancestry" })).toHaveCount(0);
+      await expect(graphShell.getByRole("button", { name: "Parent ancestry loaded" })).toHaveClass(/is-muted/);
 
       expect(scenario.dbPath).toContain(scenario.tempDir);
     } finally {

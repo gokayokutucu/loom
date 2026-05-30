@@ -8727,8 +8727,7 @@ kbd {
 .loom-graph-node-kind,
 .loom-graph-node-flags,
 .loom-graph-node-actions,
-.loom-graph-node-open,
-.loom-graph-node-ancestry {
+.loom-graph-node-open {
   display: flex;
   align-items: center;
 }
@@ -8761,8 +8760,7 @@ kbd {
   white-space: nowrap;
 }
 
-.loom-graph-node-open,
-.loom-graph-node-ancestry {
+.loom-graph-node-open {
   justify-content: center;
   width: 24px;
   height: 24px;
@@ -8770,10 +8768,6 @@ kbd {
   border-radius: 7px;
   background: transparent;
   color: var(--text-secondary);
-}
-
-.loom-graph-node-ancestry[aria-busy="true"] {
-  opacity: 0.62;
 }
 
 .loom-graph-node h3 {
@@ -8934,7 +8928,6 @@ kbd {
 
 .loom-graph-node-actions button,
 .loom-graph-node-open,
-.loom-graph-node-ancestry,
 .loom-graph-controls button {
   border: 0;
   border-radius: 7px;
@@ -8972,8 +8965,6 @@ kbd {
 .loom-graph-node-actions button:focus-visible,
 .loom-graph-node-open:hover,
 .loom-graph-node-open:focus-visible,
-.loom-graph-node-ancestry:hover,
-.loom-graph-node-ancestry:focus-visible,
 .loom-graph-controls button:hover,
 .loom-graph-controls button:focus-visible {
   background: var(--loom-bg-hover, rgba(229, 225, 190, 0.05));
@@ -9035,6 +9026,78 @@ kbd {
   border-color: var(--loom-border-strong);
   background: color-mix(in srgb, var(--accent-fallback) 75%, transparent);
   pointer-events: none;
+}
+
+.loom-graph-node-ancestry-handle-button {
+  position: absolute;
+  top: -10px;
+  left: 50%;
+  z-index: 5;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--accent-fallback) 70%, var(--loom-border-strong));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-fallback) 84%, #120b08);
+  color: #120b08;
+  box-shadow:
+    0 0 0 2px var(--loom-graph-node-bg),
+    0 8px 18px rgba(0, 0, 0, 0.24);
+  cursor: pointer;
+  transform: translateX(-50%);
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease,
+    box-shadow 140ms ease;
+  place-items: center;
+}
+
+.loom-graph-node-ancestry-handle-button:hover,
+.loom-graph-node-ancestry-handle-button:focus-visible {
+  border-color: color-mix(in srgb, var(--accent-fallback) 88%, white);
+  background: color-mix(in srgb, var(--accent-fallback) 92%, white);
+  box-shadow:
+    0 0 0 2px var(--loom-graph-node-bg),
+    0 0 0 4px color-mix(in srgb, var(--accent-fallback) 20%, transparent),
+    0 10px 22px rgba(0, 0, 0, 0.26);
+  outline: 0;
+}
+
+.loom-graph-node-ancestry-handle-button.is-loading {
+  cursor: wait;
+  opacity: 0.68;
+  animation: graph-ancestry-handle-pulse 1.2s ease-in-out infinite;
+}
+
+.loom-graph-node-ancestry-handle-button.is-muted,
+.loom-graph-node-ancestry-handle-button:disabled {
+  border-color: color-mix(in srgb, var(--accent-fallback) 34%, var(--loom-border-subtle));
+  background: color-mix(in srgb, var(--accent-fallback) 22%, var(--loom-graph-node-bg));
+  color: color-mix(in srgb, var(--text-muted) 70%, transparent);
+  box-shadow:
+    0 0 0 2px var(--loom-graph-node-bg),
+    0 5px 14px rgba(0, 0, 0, 0.16);
+  cursor: default;
+  opacity: 0.62;
+}
+
+.loom-graph-node-ancestry-handle-button.has-error {
+  border-color: rgba(255, 107, 107, 0.64);
+  background: color-mix(in srgb, #ff6b6b 62%, var(--accent-fallback));
+  color: #160807;
+}
+
+@keyframes graph-ancestry-handle-pulse {
+  0%,
+  100% {
+    transform: translateX(-50%) scale(1);
+  }
+  50% {
+    transform: translateX(-50%) scale(0.92);
+  }
 }
 
 .loom-graph-handle--hidden {

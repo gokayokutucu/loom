@@ -1,7 +1,7 @@
 import {
   Bookmark,
   Bot,
-  ChevronsUp,
+  ChevronsUpDown,
   ExternalLink,
   GitFork,
   Link2,
@@ -130,6 +130,20 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
       ? revisionVariantIndex + 1
       : undefined;
   const canOpenWeftPicker = weftRecords.length > 0 && Boolean(onOpenWeftRecord);
+  const showAncestryHandleControl =
+    Boolean(onExpandAncestry) &&
+    Boolean(
+      projectionNode.hasParentAncestry ||
+        projectionNode.ancestryExpanded ||
+        ancestryLoading ||
+        ancestryError
+    );
+  const ancestryControlDisabled = !projectionNode.hasParentAncestry || Boolean(ancestryLoading);
+  const ancestryControlTitle = ancestryError
+    ? `Retry parent ancestry: ${ancestryError}`
+    : projectionNode.ancestryExpanded && !projectionNode.hasParentAncestry
+      ? "Parent ancestry loaded"
+      : "Show parent ancestry";
 
   useEffect(() => {
     if (!weftPickerOpen) return undefined;
@@ -155,6 +169,33 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
         }
         isConnectable={false}
       />
+      {showAncestryHandleControl && (
+        <button
+          type="button"
+          className={[
+            "loom-graph-node-ancestry-handle-button",
+            "nodrag",
+            "nopan",
+            projectionNode.hasParentAncestry ? "is-actionable" : "is-muted",
+            ancestryLoading ? "is-loading" : "",
+            projectionNode.ancestryExpanded && !projectionNode.hasParentAncestry ? "is-expanded" : "",
+            ancestryError ? "has-error" : "",
+          ].filter(Boolean).join(" ")}
+          title={ancestryControlTitle}
+          aria-label={
+            projectionNode.hasParentAncestry ? "Show parent ancestry" : "Parent ancestry loaded"
+          }
+          disabled={ancestryControlDisabled}
+          aria-busy={ancestryLoading || undefined}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (ancestryControlDisabled) return;
+            onExpandAncestry?.(projectionNode);
+          }}
+        >
+          <ChevronsUpDown size={11} strokeWidth={2.4} />
+        </button>
+      )}
       <div className="loom-graph-node-header">
         <span className="loom-graph-node-kind">
           {/* Icon deliberately differs between root ("Loom") and weft ("Weft") for visual distinction. */}
@@ -170,22 +211,6 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
             onClick={() => onOpen(projectionNode, response)}
           >
             <ExternalLink size={13} />
-          </button>
-        )}
-        {projectionNode.hasParentAncestry && onExpandAncestry && (
-          <button
-            type="button"
-            className="loom-graph-node-ancestry"
-            title={ancestryError ? `Retry parent ancestry: ${ancestryError}` : "Show parent ancestry"}
-            aria-label="Show parent ancestry"
-            disabled={ancestryLoading}
-            aria-busy={ancestryLoading || undefined}
-            onClick={(event) => {
-              event.stopPropagation();
-              onExpandAncestry(projectionNode);
-            }}
-          >
-            <ChevronsUp size={13} />
           </button>
         )}
       </div>
