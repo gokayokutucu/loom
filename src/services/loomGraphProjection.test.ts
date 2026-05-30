@@ -30,6 +30,10 @@ describe("isLoomGraphDestinationNode", () => {
     expect(isLoomGraphDestinationNode(makeNode("weft"))).toBe(true);
   });
 
+  it("returns true for Loom context nodes", () => {
+    expect(isLoomGraphDestinationNode(makeNode("loom"))).toBe(true);
+  });
+
   it("returns false for response nodes", () => {
     expect(isLoomGraphDestinationNode(makeNode("response"))).toBe(false);
   });
@@ -56,6 +60,10 @@ describe("graphNodeLineageRole", () => {
     expect(graphNodeLineageRole(makeNode("weft"))).toBe("weft");
   });
 
+  it("returns undefined for Loom context nodes", () => {
+    expect(graphNodeLineageRole(makeNode("loom"))).toBeUndefined();
+  });
+
   it("returns undefined for response nodes", () => {
     expect(graphNodeLineageRole(makeNode("response"))).toBeUndefined();
   });
@@ -80,6 +88,10 @@ describe("isWeftGraphNode", () => {
 
   it("returns true for weft nodes (branched Loom)", () => {
     expect(isWeftGraphNode(makeNode("weft"))).toBe(true);
+  });
+
+  it("returns false for Loom context nodes", () => {
+    expect(isWeftGraphNode(makeNode("loom"))).toBe(false);
   });
 
   it("returns false for response nodes", () => {

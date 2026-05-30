@@ -46,7 +46,7 @@ export interface LoomGraphNodeData extends Record<string, unknown> {
 export type LoomGraphFlowNode = Node<LoomGraphNodeData, "loomGraphNode">;
 
 // Visual rendering intentionally checks `node.kind` directly in this file.
-// "root" and "weft" are both Loom destination nodes — the distinction is topology/lineage,
+// "root", "loom", and "weft" are Loom destination nodes — the distinction is topology/lineage,
 // not ontology. For semantic (non-visual) checks use isLoomGraphDestinationNode,
 // isWeftGraphNode, or graphNodeLineageRole from loomGraphProjection.
 
@@ -63,11 +63,12 @@ function nodeClassName(node: LoomGraphProjectionNode) {
 
 function nodeKindLabel(node: LoomGraphProjectionNode) {
   // Display labels intentionally distinguish "root" (active Loom) from "weft" (branched Loom).
-  if (node.kind === "root") return "Loom";
-  if (node.kind === "weft") return "Weft";
-  if (node.kind === "response") return "Response";
-  if (node.kind === "bookmark") return "Bookmark";
-  return "Reference";
+  if (node.kind === "root") return "LOOM";
+  if (node.kind === "loom") return "LOOM";
+  if (node.kind === "weft") return "WEFT";
+  if (node.kind === "response") return "RESPONSE";
+  if (node.kind === "bookmark") return "BOOKMARK";
+  return "REFERENCE";
 }
 
 function normalizePreviewText(value?: string) {

@@ -268,6 +268,11 @@ test.describe("[product-service-backed] Graph projection product proof", () => {
         seedMode: "none",
         createOriginContextSnapshot: true,
       });
+      const weftTurn = await scenario.sendPrompt(
+        weft.loomId,
+        "Bu Weft icinde Event Sourcing implementation detaylarini daralt."
+      );
+      expect(weftTurn.assistantResponseId).toBeTruthy();
 
       const reference: LoomLink = {
         id: originResponse!.id,
@@ -324,6 +329,59 @@ test.describe("[product-service-backed] Graph projection product proof", () => {
       expectCleanGraphLabels(graph);
       expectNoForbiddenGraphPayload(graph);
 
+      const weftGraph = await scenario.fetchJson<ServiceGraphProjection>(
+        `/looms/${encodeURIComponent(weft.loomId)}/graph?includeBookmarks=true`
+      );
+      expect(weftGraph.nodes.some((node) => node.id === `loom:${loomId}` && node.kind === "loom"))
+        .toBe(true);
+      expect(
+        weftGraph.nodes.some(
+          (node) => node.id === `response:${originResponse!.id}` && node.kind === "response"
+        )
+      ).toBe(true);
+      expect(
+        weftGraph.nodes.some((node) => node.id === `response:${latestResponse.id}`)
+      ).toBe(false);
+      expect(
+        weftGraph.nodes.some((node) => node.id === `loom:${weft.loomId}` && node.kind === "weft")
+      ).toBe(true);
+      expect(
+        weftGraph.nodes.some(
+          (node) =>
+            node.id === `response:${weftTurn.assistantResponseId}` &&
+            node.kind === "response"
+        )
+      ).toBe(true);
+      expect(JSON.stringify(weftGraph.nodes.find((node) => node.id === `loom:${loomId}`)?.metadata))
+        .toContain("\"graphRole\":\"origin-context\"");
+      expect(
+        JSON.stringify(
+          weftGraph.nodes.find((node) => node.id === `response:${originResponse!.id}`)?.metadata
+        )
+      ).toContain("\"graphRole\":\"origin-response\"");
+      expect(
+        JSON.stringify(
+          weftGraph.nodes.find((node) => node.id === `loom:${weft.loomId}`)?.metadata
+        )
+      ).toContain("\"graphRole\":\"current-root\"");
+      expect(
+        weftGraph.edges.some(
+          (edge) =>
+            edge.kind === "loom_response_origin" &&
+            edge.source === `loom:${loomId}` &&
+            edge.target === `response:${originResponse!.id}`
+        )
+      ).toBe(true);
+      expect(
+        weftGraph.edges.some(
+          (edge) =>
+            edge.kind === "weft_origin" &&
+            edge.source === `response:${originResponse!.id}` &&
+            edge.target === `loom:${weft.loomId}`
+        )
+      ).toBe(true);
+      expectNoForbiddenGraphPayload(weftGraph);
+
       await page.getByRole("button", { name: "Toggle Graph View" }).click();
       await expect(page.getByRole("heading", { name: "Weft-aware Loom graph" })).toBeVisible();
       await expect(page.locator(".loom-graph-shell")).toBeVisible();
@@ -336,6 +394,25 @@ test.describe("[product-service-backed] Graph projection product proof", () => {
       await expect(page.locator(".loom-graph-shell")).not.toContainText("[[");
       await expect(page.locator(".loom-graph-shell")).not.toContainText("Group 1");
       await expect(page.locator(".loom-graph-shell")).not.toContainText("raw_thinking");
+
+      await page.reload();
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+      await expect(page.getByTestId(`sidebar-loom-${weft.loomId}`)).toBeVisible();
+      await page.getByTestId(`sidebar-loom-${weft.loomId}`).click();
+      if ((await page.locator(".loom-graph-shell").count()) === 0) {
+        await page.getByRole("button", { name: "Toggle Graph View" }).click();
+      }
+      await expect(page.locator(".loom-graph-shell")).toBeVisible();
+      await expect(page.locator(".loom-graph-node--loom").filter({ hasText: rootLoom!.title }))
+        .toBeVisible();
+      await expect(page.locator(".loom-graph-node--weft").filter({ hasText: weft.title }))
+        .toBeVisible();
+      await expect(
+        page.locator(".loom-graph-node--response").filter({ hasText: originResponse!.question })
+      ).toBeVisible();
+      await expect(
+        page.locator(".loom-graph-node--response").filter({ hasText: latestResponse.question })
+      ).toHaveCount(0);
 
       expect(scenario.dbPath).toContain(scenario.tempDir);
     } finally {

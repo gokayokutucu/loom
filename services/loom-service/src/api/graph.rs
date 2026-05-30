@@ -153,16 +153,111 @@ pub(crate) async fn build_graph_projection(
     let mut warnings = Vec::new();
 
     let root_node_id = loom_node_id(&root.loom_id);
-    let mut nodes = vec![loom_node(&root, &root_node_id, 0, 0)];
+    let is_weft_root = root.kind == "weft";
+    let mut nodes = Vec::new();
     let mut edges = Vec::new();
     let mut response_depths = HashMap::new();
     let mut response_node_ids = HashMap::new();
-    let mut loom_node_ids = HashMap::from([(root.loom_id.clone(), root_node_id.clone())]);
+    let mut loom_node_ids = HashMap::new();
+    let mut root_depth = 0_i64;
+
+    if is_weft_root {
+        match (
+            root.origin_loom_id.as_deref(),
+            root.origin_response_id.as_deref(),
+        ) {
+            (Some(origin_loom_id), Some(origin_response_id)) => {
+                let origin_loom = loom_repository
+                    .get_loom(origin_loom_id)
+                    .await
+                    .map_err(GraphProjectionError::Storage)?;
+                let origin_response = response_repository
+                    .get_response(origin_response_id)
+                    .await
+                    .map_err(GraphProjectionError::Storage)?;
+
+                match (origin_loom, origin_response) {
+                    (Some(origin_loom), Some(origin_response))
+                        if origin_response.loom_id == origin_loom.loom_id =>
+                    {
+                        let origin_loom_node_id = loom_node_id(&origin_loom.loom_id);
+                        let origin_response_node_id =
+                            response_node_id(&origin_response.response_id);
+                        loom_node_ids
+                            .insert(origin_loom.loom_id.clone(), origin_loom_node_id.clone());
+                        response_depths.insert(origin_response.response_id.clone(), 1);
+                        response_node_ids.insert(
+                            origin_response.response_id.clone(),
+                            origin_response_node_id.clone(),
+                        );
+
+                        nodes.push(with_graph_role(
+                            loom_node(&origin_loom, &origin_loom_node_id, 0, 0),
+                            "origin-context",
+                        ));
+                        nodes.push(with_graph_role(
+                            response_node(&origin_response, None, &origin_response_node_id, 1, 0),
+                            "origin-response",
+                        ));
+                        edges.push(GraphEdge {
+                            id: format!("edge:{}:{}", origin_loom_node_id, origin_response_node_id),
+                            kind: "loom_response_origin".to_string(),
+                            source: origin_loom_node_id,
+                            target: origin_response_node_id.clone(),
+                            label: Some("Origin response".to_string()),
+                            prompt_text: None,
+                            metadata: Some(serde_json::json!({
+                                "originLoomId": origin_loom_id,
+                                "originResponseId": origin_response_id
+                            })),
+                        });
+                        edges.push(GraphEdge {
+                            id: format!("edge:{}:{}", origin_response_node_id, root_node_id),
+                            kind: "weft_origin".to_string(),
+                            source: origin_response_node_id,
+                            target: root_node_id.clone(),
+                            label: Some("Weft origin".to_string()),
+                            prompt_text: None,
+                            metadata: Some(serde_json::json!({
+                                "originLoomId": origin_loom_id,
+                                "originResponseId": origin_response_id
+                            })),
+                        });
+                        root_depth = 2;
+                    }
+                    (Some(_), Some(origin_response)) => {
+                        warnings.push(format!(
+                            "Skipped Weft origin context for {} because origin Response {} belongs to another Loom.",
+                            root.loom_id, origin_response.response_id
+                        ));
+                    }
+                    (None, _) => warnings.push(format!(
+                        "Skipped Weft origin context for {} because origin Loom is missing.",
+                        root.loom_id
+                    )),
+                    (_, None) => warnings.push(format!(
+                        "Skipped Weft origin context for {} because origin Response is missing.",
+                        root.loom_id
+                    )),
+                }
+            }
+            _ => warnings.push(format!(
+                "Skipped Weft origin context for {} because origin metadata is incomplete.",
+                root.loom_id
+            )),
+        }
+    }
+
+    loom_node_ids.insert(root.loom_id.clone(), root_node_id.clone());
+    nodes.push(with_graph_role(
+        loom_node(&root, &root_node_id, root_depth, 0),
+        "current-root",
+    ));
 
     let projected_responses = project_response_nodes(&responses);
     for (index, projected_response) in projected_responses.iter().enumerate() {
         let response = projected_response.response;
-        let depth = (index as i64) + 1;
+        let depth = root_depth + (index as i64) + 1;
         let node_id = response_node_id(&response.response_id);
         response_depths.insert(response.response_id.clone(), depth);
         response_node_ids.insert(response.response_id.clone(), node_id.clone());
@@ -170,12 +265,9 @@ pub(crate) async fn build_graph_projection(
             response_depths.insert(prompt.response_id.clone(), depth);
             response_node_ids.insert(prompt.response_id.clone(), node_id.clone());
         }
-        nodes.push(response_node(
-            response,
-            projected_response.prompt,
-            &node_id,
-            depth,
-            0,
+        nodes.push(with_graph_role(
+            response_node(response, projected_response.prompt, &node_id, depth, 0),
+            "child-response",
         ));
 
         if index == 0 {
@@ -210,10 +302,13 @@ pub(crate) async fn build_graph_projection(
             .as_ref()
             .and_then(|response_id| response_depths.get(response_id))
             .map(|depth| depth + 1)
-            .unwrap_or((projected_responses.len() as i64) + 1);
+            .unwrap_or(root_depth + (projected_responses.len() as i64) + 1);
         let weft_node_id = loom_node_id(&weft.loom_id);
         loom_node_ids.insert(weft.loom_id.clone(), weft_node_id.clone());
-        nodes.push(loom_node(weft, &weft_node_id, depth, lane));
+        nodes.push(with_graph_role(
+            loom_node(weft, &weft_node_id, depth, lane),
+            "child-weft",
+        ));
 
         if let Some(source_response_id) = source_response_id {
             if let Some(source) = response_node_ids.get(&source_response_id) {
@@ -257,12 +352,15 @@ pub(crate) async fn build_graph_projection(
                 response_depths.insert(prompt.response_id.clone(), response_depth);
                 response_node_ids.insert(prompt.response_id.clone(), weft_response_node_id.clone());
             }
-            nodes.push(response_node(
-                response,
-                projected_response.prompt,
-                &weft_response_node_id,
-                response_depth,
-                lane,
+            nodes.push(with_graph_role(
+                response_node(
+                    response,
+                    projected_response.prompt,
+                    &weft_response_node_id,
+                    response_depth,
+                    lane,
+                ),
+                "child-response",
             ));
 
             if response_index == 0 {
@@ -777,6 +875,20 @@ fn response_node(
     }
 }
 
+fn with_graph_role(mut node: GraphNode, graph_role: &str) -> GraphNode {
+    let mut metadata = node
+        .metadata
+        .as_ref()
+        .and_then(|value| value.as_object().cloned())
+        .unwrap_or_default();
+    metadata.insert(
+        "graphRole".to_string(),
+        serde_json::Value::String(graph_role.to_string()),
+    );
+    node.metadata = Some(serde_json::Value::Object(metadata));
+    node
+}
+
 fn position(depth: i64, lane: i64) -> GraphPosition {
     GraphPosition {
         x: (lane as f64) * GRAPH_LANE_WIDTH,
@@ -1198,6 +1310,106 @@ mod tests {
             edge.kind == "response_sequence"
                 && edge.source == "response:weft-response-1"
                 && edge.target == "response:weft-response-2"
+        }));
+    }
+
+    #[tokio::test]
+    async fn active_weft_graph_includes_immediate_origin_context_only() {
+        let database = test_database().await;
+        insert_loom(&database, "origin-loom", "Origin Loom", "loom", None, None).await;
+        insert_response(
+            &database,
+            "origin-loom",
+            "origin-response",
+            "assistant",
+            "Exact source answer",
+            0,
+        )
+        .await;
+        insert_response(
+            &database,
+            "origin-loom",
+            "unrelated-origin-response",
+            "assistant",
+            "Do not include this answer",
+            1,
+        )
+        .await;
+        insert_loom(
+            &database,
+            "weft-1",
+            "Current Weft",
+            "weft",
+            Some("origin-loom"),
+            Some("origin-response"),
+        )
+        .await;
+        insert_response(
+            &database,
+            "weft-1",
+            "weft-response",
+            "assistant",
+            "Current Weft answer",
+            0,
+        )
+        .await;
+
+        let graph = build_graph_projection(&database, "weft-1", GraphQuery::default())
+            .await
+            .expect("graph projection");
+
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.id == "loom:origin-loom" && node.kind == "loom"));
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.id == "response:origin-response" && node.kind == "response"));
+        assert!(!graph
+            .nodes
+            .iter()
+            .any(|node| node.id == "response:unrelated-origin-response"));
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.id == "loom:weft-1" && node.kind == "weft"));
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.id == "response:weft-response" && node.kind == "response"));
+
+        assert_eq!(
+            graph_role(&graph, "loom:origin-loom").as_deref(),
+            Some("origin-context")
+        );
+        assert_eq!(
+            graph_role(&graph, "response:origin-response").as_deref(),
+            Some("origin-response")
+        );
+        assert_eq!(
+            graph_role(&graph, "loom:weft-1").as_deref(),
+            Some("current-root")
+        );
+        assert_eq!(
+            graph_role(&graph, "response:weft-response").as_deref(),
+            Some("child-response")
+        );
+
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == "loom_response_origin"
+                && edge.source == "loom:origin-loom"
+                && edge.target == "response:origin-response"
+        }));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == "weft_origin"
+                && edge.source == "response:origin-response"
+                && edge.target == "loom:weft-1"
+        }));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == "loom_response"
+                && edge.source == "loom:weft-1"
+                && edge.target == "response:weft-response"
         }));
     }
 
@@ -1646,7 +1858,11 @@ mod tests {
             .find(|node| node.id == "response:response-1")
             .expect("response node");
 
-        assert!(response.metadata.is_none());
+        assert!(response
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.get("bookmark"))
+            .is_none());
         assert!(graph
             .warnings
             .iter()
@@ -2091,5 +2307,16 @@ mod tests {
             .as_ref()
             .and_then(|metadata| metadata.get("bookmark"))
             .expect("bookmark metadata")
+    }
+
+    fn graph_role(graph: &super::GraphProjectionResult, node_id: &str) -> Option<String> {
+        graph
+            .nodes
+            .iter()
+            .find(|node| node.id == node_id)
+            .and_then(|node| node.metadata.as_ref())
+            .and_then(|metadata| metadata.get("graphRole"))
+            .and_then(|value| value.as_str())
+            .map(str::to_string)
     }
 }

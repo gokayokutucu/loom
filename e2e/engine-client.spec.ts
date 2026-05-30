@@ -275,6 +275,91 @@ test.describe("[engine-contract] Loom engine client selection", () => {
     expect(JSON.stringify(projection)).not.toContain("raw_thinking");
   });
 
+  test("Rust HTTP client preserves Loom and Weft graph node categories with graph roles", async () => {
+    const client = new RustHttpLoomEngineClient({
+      serviceUrl: "http://127.0.0.1:17633",
+      fetch: async (input, init) => {
+        expect(String(input)).toBe(
+          "http://127.0.0.1:17633/looms/W-1/graph?includeBookmarks=true"
+        );
+        expect(init?.method).toBe("GET");
+        return new Response(
+          JSON.stringify({
+            loomId: "W-1",
+            nodes: [
+              {
+                id: "loom:origin",
+                kind: "loom",
+                loomId: "origin",
+                title: "Origin Loom",
+                displayCode: "L-ORIGIN",
+                metadata: { graphRole: "origin-context" },
+                depth: 0,
+                lane: 0,
+                position: { x: 0, y: 0 },
+              },
+              {
+                id: "response:R-origin",
+                kind: "response",
+                loomId: "origin",
+                responseId: "R-origin",
+                title: "Origin Response",
+                displayCode: "R-ORIGIN",
+                metadata: { graphRole: "origin-response" },
+                depth: 1,
+                lane: 0,
+                position: { x: 0, y: 180 },
+              },
+              {
+                id: "loom:W-1",
+                kind: "weft",
+                loomId: "W-1",
+                title: "Current Weft",
+                displayCode: "W-CURRENT",
+                metadata: { graphRole: "current-root" },
+                depth: 2,
+                lane: 0,
+                position: { x: 0, y: 360 },
+              },
+            ],
+            edges: [
+              {
+                id: "edge:loom:origin:response:R-origin",
+                kind: "loom_response_origin",
+                source: "loom:origin",
+                target: "response:R-origin",
+              },
+              {
+                id: "edge:response:R-origin:loom:W-1",
+                kind: "weft_origin",
+                source: "response:R-origin",
+                target: "loom:W-1",
+              },
+            ],
+            warnings: [],
+          }),
+          { status: 200 }
+        );
+      },
+    });
+
+    const projection = await client.getGraphProjection({
+      ...graphProjectionInput(),
+      activeLoomId: "W-1",
+      focusedResponseId: undefined,
+    });
+
+    const originLoom = projection.nodes.find((node) => node.loomId === "origin" && !node.responseId);
+    const originResponse = projection.nodes.find((node) => node.responseId === "R-origin");
+    const currentWeft = projection.nodes.find((node) => node.loomId === "W-1" && !node.responseId);
+
+    expect(originLoom).toMatchObject({ kind: "loom", graphRole: "origin-context" });
+    expect(originResponse).toMatchObject({ kind: "response", graphRole: "origin-response" });
+    expect(currentWeft).toMatchObject({ kind: "weft", graphRole: "current-root" });
+    expect(projection.edges[0]).toMatchObject({ kind: "question" });
+    expect(projection.edges[1]).toMatchObject({ kind: "weft" });
+  });
+
   test("Rust HTTP client parses health responses", async () => {
     const client = new RustHttpLoomEngineClient({
       serviceUrl: "http://127.0.0.1:17633",

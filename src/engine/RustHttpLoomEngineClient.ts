@@ -360,12 +360,14 @@ function serviceNodeKind(value: unknown): "loom" | "response" | "weft" | undefin
 
 function serviceEdgeKind(value: unknown):
   | "loom_response"
+  | "loom_response_origin"
   | "response_sequence"
   | "weft_origin"
   | "reference"
   | "bookmark"
   | undefined {
   return value === "loom_response" ||
+    value === "loom_response_origin" ||
     value === "response_sequence" ||
     value === "weft_origin" ||
     value === "reference" ||
@@ -381,13 +383,19 @@ function mapServiceNodeKind(
 ): LoomGraphProjectionNodeKind {
   if (kind === "response") return "response";
   if (kind === "weft") return "weft";
-  return loomId === activeLoomId ? "root" : "weft";
+  return loomId === activeLoomId ? "root" : "loom";
 }
 
 function mapServiceEdgeKind(
-  kind: "loom_response" | "response_sequence" | "weft_origin" | "reference" | "bookmark"
+  kind:
+    | "loom_response"
+    | "loom_response_origin"
+    | "response_sequence"
+    | "weft_origin"
+    | "reference"
+    | "bookmark"
 ): LoomGraphProjectionEdgeKind {
-  if (kind === "loom_response") return "question";
+  if (kind === "loom_response" || kind === "loom_response_origin") return "question";
   if (kind === "response_sequence") return "derived";
   if (kind === "weft_origin") return "weft";
   return kind;
@@ -470,6 +478,18 @@ function mapServiceGraphProjection(
       depth,
       position,
     };
+    if (isRecord(rawNode.metadata)) {
+      const graphRole = graphString(rawNode.metadata.graphRole);
+      if (
+        graphRole === "current-root" ||
+        graphRole === "origin-context" ||
+        graphRole === "origin-response" ||
+        graphRole === "child-response" ||
+        graphRole === "child-weft"
+      ) {
+        node.graphRole = graphRole;
+      }
+    }
     nodes.push(node);
     if (mappedKind === "response") {
       if (!firstNodeId) firstNodeId = nodeId;

@@ -9,6 +9,7 @@ import { polishDisplayTitle } from "./displayTitlePolish";
 
 export type LoomGraphProjectionNodeKind =
   | "root"
+  | "loom"
   | "response"
   | "weft"
   | "bookmark"
@@ -37,6 +38,12 @@ export interface LoomGraphProjectionNode {
   isBookmarked?: boolean;
   isFocused?: boolean;
   isExpanded?: boolean;
+  graphRole?:
+    | "current-root"
+    | "origin-context"
+    | "origin-response"
+    | "child-response"
+    | "child-weft";
   depth: number;
   position: {
     x: number;
@@ -97,7 +104,7 @@ const WEFT_EDGE_LABEL = "Weft from here";
  * Loom, …), update only this predicate.
  */
 export function isLoomGraphDestinationNode(node: LoomGraphProjectionNode): boolean {
-  return node.kind === "root" || node.kind === "weft";
+  return node.kind === "root" || node.kind === "loom" || node.kind === "weft";
 }
 
 /**
@@ -106,6 +113,7 @@ export function isLoomGraphDestinationNode(node: LoomGraphProjectionNode): boole
  *
  * - `"weft"` for branched Loom nodes (kind === "weft")
  * - `undefined` for the active/primary Loom (kind === "root")
+ * - `undefined` for Loom context nodes (kind === "loom")
  * - `undefined` for non-Loom nodes (response, bookmark, reference)
  *
  * Use this when code needs to distinguish a weft from a root Loom for
