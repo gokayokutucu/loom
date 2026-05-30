@@ -2,8 +2,8 @@ use crate::{
     api::state::AppState,
     events::types::service_event,
     providers::types::{
-        done_reason_is_length, LoomServiceErrorPayload, OllamaChatRequest, OllamaRuntimeError,
-        OllamaRuntimeErrorKind, OllamaStreamChunk, OllamaWireChunk,
+        done_reason_is_length, sanitize_provider_text, LoomServiceErrorPayload, OllamaChatRequest,
+        OllamaRuntimeError, OllamaRuntimeErrorKind, OllamaStreamChunk, OllamaWireChunk,
     },
     runtime::OperationKind,
 };
@@ -162,6 +162,12 @@ fn chat_event_stream(
                             "Ollama is not reachable.",
                             true,
                         )
+                    } else if error.is_timeout() {
+                        OllamaRuntimeError::new(
+                            OllamaRuntimeErrorKind::TimeoutDuringStream,
+                            "The model stopped responding before the answer finished.",
+                            true,
+                        )
                     } else {
                         OllamaRuntimeError::new(
                             OllamaRuntimeErrorKind::UnexpectedResponse,
@@ -260,15 +266,24 @@ fn parse_ndjson_bytes(
 }
 
 fn parse_ollama_line(line: &str) -> Result<OllamaStreamChunk, OllamaRuntimeError> {
-    serde_json::from_str::<OllamaWireChunk>(line)
-        .map(OllamaStreamChunk::from)
-        .map_err(|_| {
-            OllamaRuntimeError::new(
-                OllamaRuntimeErrorKind::StreamParseError,
-                "Ollama returned malformed NDJSON.",
-                true,
-            )
-        })
+    let wire = serde_json::from_str::<OllamaWireChunk>(line).map_err(|_| {
+        OllamaRuntimeError::new(
+            OllamaRuntimeErrorKind::StreamParseError,
+            "Ollama returned malformed NDJSON.",
+            true,
+        )
+    })?;
+    // Ollama sends {"error":"..."} when generation fails (e.g. context too large,
+    // model error). Surface this as a provider error rather than silently swallowing it.
+    if let Some(ref error_text) = wire.error {
+        let safe_message = sanitize_provider_text(error_text);
+        return Err(OllamaRuntimeError::new(
+            OllamaRuntimeErrorKind::Unknown,
+            format!("Ollama returned an error: {safe_message}"),
+            false,
+        ));
+    }
+    Ok(OllamaStreamChunk::from(wire))
 }
 
 fn parse_remaining_buffer(
@@ -424,5 +439,117 @@ mod tests {
         assert!(!serialized.contains("thinkingText"));
         assert!(!serialized.contains("rawThinking"));
         let _ = to_sse_event(event);
+    }
+
+    // ------------------------------------------------------------------
+    // Stream parser — Ollama contract coverage
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn parser_handles_generate_format_chunk() {
+        // /api/generate stream: {"response":"...","done":false}
+        let mut buffer = String::new();
+        let chunks = parse_ndjson_bytes(
+            &mut buffer,
+            b"{\"response\":\"Hello\",\"done\":false}\n",
+        )
+        .expect("parse generate chunk");
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].content.as_deref(), Some("Hello"));
+        assert!(!chunks[0].done);
+    }
+
+    #[test]
+    fn parser_handles_final_done_true_chunk_with_no_content() {
+        // Final done=true chunk carries stats, no content — must not error
+        let mut buffer = String::new();
+        let chunks = parse_ndjson_bytes(
+            &mut buffer,
+            b"{\"done\":true,\"total_duration\":123456789}\n",
+        )
+        .expect("parse final done chunk");
+
+        assert_eq!(chunks.len(), 1);
+        assert!(chunks[0].done);
+        assert!(chunks[0].content.is_none());
+    }
+
+    #[test]
+    fn parser_handles_chat_format_chunk() {
+        // /api/chat stream: {"message":{"content":"..."},"done":false}
+        let mut buffer = String::new();
+        let chunks = parse_ndjson_bytes(
+            &mut buffer,
+            b"{\"message\":{\"content\":\"World\"},\"done\":false}\n",
+        )
+        .expect("parse chat chunk");
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].content.as_deref(), Some("World"));
+    }
+
+    #[test]
+    fn parser_ignores_empty_lines() {
+        let mut buffer = String::new();
+        // Two empty lines then a real chunk — should yield exactly one chunk
+        let chunks = parse_ndjson_bytes(
+            &mut buffer,
+            b"\n\n{\"message\":{\"content\":\"Hi\"},\"done\":false}\n",
+        )
+        .expect("parse with empty lines");
+
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].content.as_deref(), Some("Hi"));
+    }
+
+    #[test]
+    fn parser_surfaces_ollama_error_chunk_as_error() {
+        // Ollama sends {"error":"..."} when generation fails
+        let mut buffer = String::new();
+        let result = parse_ndjson_bytes(
+            &mut buffer,
+            b"{\"error\":\"model not found\"}\n",
+        );
+
+        assert!(result.is_err(), "error chunk must not be silently swallowed");
+        let err = result.unwrap_err();
+        assert!(
+            err.message.contains("Ollama returned an error"),
+            "error message should describe Ollama error, got: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn parser_surfaces_malformed_line_as_stream_parse_error() {
+        use crate::providers::types::OllamaRuntimeErrorKind;
+
+        let mut buffer = String::new();
+        let result = parse_ndjson_bytes(&mut buffer, b"not_valid_json\n");
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.kind, OllamaRuntimeErrorKind::StreamParseError);
+    }
+
+    #[test]
+    fn parser_accumulates_partial_lines_across_chunks() {
+        // Partial NDJSON split across two byte chunks — should combine correctly
+        let mut buffer = String::new();
+        let first = parse_ndjson_bytes(
+            &mut buffer,
+            b"{\"message\":{\"content\":\"par",
+        )
+        .expect("first partial chunk");
+        assert!(first.is_empty(), "no complete lines yet");
+
+        let second = parse_ndjson_bytes(
+            &mut buffer,
+            b"tial\"},\"done\":false}\n",
+        )
+        .expect("completing chunk");
+        assert_eq!(second.len(), 1);
+        assert_eq!(second[0].content.as_deref(), Some("partial"));
     }
 }

@@ -108,6 +108,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "response_attachment_references",
         sql: include_str!("../../migrations/0020_response_attachment_references.sql"),
     },
+    Migration {
+        version: 21,
+        name: "cleanup_orphaned_code_language_tags",
+        sql: include_str!("../../migrations/0021_cleanup_orphaned_code_language_tags.sql"),
+    },
 ];
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
@@ -257,6 +262,102 @@ mod tests {
         assert_eq!(
             count, 0,
             "response_attachment_references table must not exist after migration 0020"
+        );
+    }
+
+    /// Migration 0021 cleans up stale response_tags with tag_kind='code' that
+    /// have no matching code block.  After all migrations run on a fresh DB
+    /// (which has no data at all), the migration is a no-op and must not error.
+    #[tokio::test]
+    async fn migration_0021_cleanup_orphaned_code_language_tags_runs_on_empty_database() {
+        let database = test_database().await;
+        // If migration 0021 errored, test_database() would have panicked.
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 21",
+        )
+        .fetch_one(database.pool())
+        .await
+        .expect("schema_migrations query should work");
+        assert_eq!(count, 1, "migration 0021 must be recorded as applied");
+    }
+
+    /// After migration 0021 runs, orphaned 'code' kind tags (no backing code
+    /// block) are removed; valid tags backed by real code blocks are preserved.
+    #[tokio::test]
+    async fn migration_0021_removes_orphaned_code_language_tags_preserves_valid() {
+        let database = test_database().await;
+
+        // Seed a loom and response.
+        sqlx::query(
+            "INSERT INTO looms (loom_id, title, summary, code, canonical_uri, kind, created_at, updated_at)
+             VALUES ('loom-mig21', 'Mig 21 Test', NULL, NULL, '/loom/mig21', 'loom', '1', '1')",
+        )
+        .execute(database.pool())
+        .await
+        .expect("insert loom");
+
+        sqlx::query(
+            "INSERT INTO responses (response_id, loom_id, role, content, title, code, canonical_uri,
+             sequence_index, metadata_json, created_at, updated_at)
+             VALUES ('resp-mig21', 'loom-mig21', 'assistant', 'answer', NULL, NULL, NULL, 0, NULL, '1', '1')",
+        )
+        .execute(database.pool())
+        .await
+        .expect("insert response");
+
+        // Insert a real code block for 'ts'.
+        sqlx::query(
+            "INSERT INTO response_code_blocks (
+                code_block_id, response_id, loom_id, block_index, language, code,
+                exact_hash, fence, metadata_json, created_at, updated_at
+            ) VALUES ('cb-ts-mig21', 'resp-mig21', 'loom-mig21', 0, 'ts',
+                      'const value = 1;\n', 'fnv1a64:ts_test', '```', NULL, '1', '1')",
+        )
+        .execute(database.pool())
+        .await
+        .expect("insert real code block");
+
+        // Plant a stale 'text' code tag (no matching code block with language='text').
+        sqlx::query(
+            "INSERT INTO response_tags (
+                tag_id, response_id, loom_id, tag, normalized_tag, tag_kind,
+                confidence, source, metadata_json, created_at
+            ) VALUES ('stale-mig21', 'resp-mig21', 'loom-mig21', 'text', 'text', 'code',
+                      0.94, 'heuristic', NULL, '1')",
+        )
+        .execute(database.pool())
+        .await
+        .expect("insert stale code tag");
+
+        // Plant a valid 'ts' code tag (backed by the real code block above).
+        sqlx::query(
+            "INSERT INTO response_tags (
+                tag_id, response_id, loom_id, tag, normalized_tag, tag_kind,
+                confidence, source, metadata_json, created_at
+            ) VALUES ('valid-mig21', 'resp-mig21', 'loom-mig21', 'ts', 'ts', 'code',
+                      0.94, 'heuristic', NULL, '1')",
+        )
+        .execute(database.pool())
+        .await
+        .expect("insert valid code tag");
+
+        // Running migration 0021 again is a no-op (already applied), but we can
+        // test the same SQL predicate by calling cleanup_orphaned_code_language_tags.
+        use crate::storage::repositories::tags_graph::cleanup_orphaned_code_language_tags;
+        let removed = cleanup_orphaned_code_language_tags(database.pool())
+            .await
+            .expect("cleanup");
+        assert_eq!(removed, 1, "stale 'text' tag should be removed");
+
+        let ts_tag_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM response_tags WHERE tag_id = 'valid-mig21'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .expect("count valid tag");
+        assert_eq!(
+            ts_tag_count, 1,
+            "valid 'ts' tag backed by code block must survive"
         );
     }
 

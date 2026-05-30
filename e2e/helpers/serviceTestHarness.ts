@@ -7,9 +7,13 @@ import { RustHttpLoomEngineClient } from "../../src/engine";
 import type { EngineResponseEvent } from "../../src/engine/LoomEngineTypes";
 
 export type DeterministicProviderMode = "event-sourcing";
+export type DeterministicResponseMode = "long-streaming-scroll";
+export type DeterministicChunkMode = "word" | "phrase";
 
 export interface ServiceTestHarnessOptions {
   deterministicProvider?: DeterministicProviderMode;
+  deterministicResponseMode?: DeterministicResponseMode;
+  deterministicChunkMode?: DeterministicChunkMode;
   deterministicFailInitialPrompt?: string;
   forceGenericQuickAskFirstAttempt?: boolean;
   deterministicThinkingDelayMs?: number;
@@ -102,6 +106,12 @@ export async function createServiceTestHarness(
       LOOM_OLLAMA_BASE_URL: "http://127.0.0.1:9",
       ...(options.deterministicProvider
         ? { LOOM_SERVICE_E2E_PROVIDER: options.deterministicProvider }
+        : {}),
+      ...(options.deterministicResponseMode
+        ? { LOOM_SERVICE_E2E_RESPONSE_MODE: options.deterministicResponseMode }
+        : {}),
+      ...(options.deterministicChunkMode
+        ? { LOOM_SERVICE_E2E_CHUNK_MODE: options.deterministicChunkMode }
         : {}),
       ...(options.forceGenericQuickAskFirstAttempt
         ? { LOOM_SERVICE_E2E_QUICK_GENERIC_FIRST: "true" }
@@ -275,17 +285,20 @@ async function waitForHttp(
 
 async function stopProcess(process: ChildProcessWithoutNullStreams) {
   if (process.exitCode !== null) return true;
+  const exited = new Promise<boolean>((resolve) => process.once("exit", () => resolve(true)));
   process.kill("SIGINT");
   const stopped = await Promise.race([
-    new Promise<boolean>((resolve) => process.once("exit", () => resolve(true))),
-    delay(3_000).then(() => false),
+    exited,
+    delay(8_000).then(() => false),
   ]);
+  if (process.exitCode !== null) return true;
   if (!stopped && process.exitCode === null) {
+    const killed = new Promise<void>((resolve) => process.once("exit", () => resolve()));
     process.kill("SIGKILL");
-    await new Promise<void>((resolve) => process.once("exit", () => resolve()));
-    return false;
+    await killed;
+    return true;
   }
-  return true;
+  return stopped || process.exitCode !== null;
 }
 
 async function findFreePort() {

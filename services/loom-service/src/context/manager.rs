@@ -116,9 +116,31 @@ impl ContextManager {
             .iter()
             .filter_map(|message| message.source_id.clone())
             .collect::<Vec<_>>();
+        let has_selected_fragment = input
+            .attached_references
+            .iter()
+            .any(|attached| attached.reference.selected_text.is_some());
+        let fragment_focus_clause = if has_selected_fragment {
+            " A selected fragment is attached as a reference. \
+             Treat the selected fragment as the primary subject of the answer. \
+             Use the source response only as supporting background. \
+             For short prompts such as explain, why, what does this mean, or give an example, \
+             answer about the selected fragment. \
+             Do not restate or summarize the full source response unless the user explicitly asks for that."
+        } else {
+            ""
+        };
+        let system_content = format!(
+            "Use the provided Loom context, explicit references, and recent conversation to answer \
+             the current user question. If the current question omits the topic, infer it from the \
+             recent conversation when available. Write valid Markdown only: headings must include \
+             heading text, and never emit orphan separators or markers such as `--- ###` or \
+             trailing `###`. Never include raw model thinking/internal monologue in context or \
+             output.{fragment_focus_clause}"
+        );
         let mut messages = vec![ContextMessage::new(
             ContextMessageRole::System,
-            "Use the provided Loom context, explicit references, and recent conversation to answer the current user question. If the current question omits the topic, infer it from the recent conversation when available. Write valid Markdown only: headings must include heading text, and never emit orphan separators or markers such as `--- ###` or trailing `###`. Never include raw model thinking/internal monologue in context or output.",
+            system_content,
             Some(ContextSourceKind::SystemPolicy),
             None,
         )];
@@ -1586,6 +1608,69 @@ pub(crate) mod tests {
             })
             .await
             .expect("insert capsule");
+    }
+
+    #[test]
+    fn selected_fragment_reference_adds_fragment_focus_clause_to_system_prompt() {
+        let manager = ContextManager::default();
+        let built = manager.build_context(BuildContextInput {
+            attached_references: vec![sample_reference("ref-1", "The Process of Trilateration")],
+            ..minimal_input("explain")
+        });
+
+        let system_message = built
+            .messages
+            .iter()
+            .find(|m| {
+                m.role == ContextMessageRole::System
+                    && m.source_kind == Some(ContextSourceKind::SystemPolicy)
+            })
+            .expect("system policy message");
+
+        assert!(
+            system_message
+                .content
+                .contains("A selected fragment is attached as a reference."),
+            "system prompt should mention selected fragment"
+        );
+        assert!(
+            system_message
+                .content
+                .contains("Treat the selected fragment as the primary subject"),
+            "system prompt should instruct to treat fragment as primary subject"
+        );
+        assert!(
+            system_message
+                .content
+                .contains("Use the source response only as supporting background."),
+            "system prompt should demote source response to background"
+        );
+        assert!(
+            system_message
+                .content
+                .contains("Do not restate or summarize the full source response"),
+            "system prompt should forbid restating full source response"
+        );
+    }
+
+    #[test]
+    fn no_selected_fragment_reference_omits_fragment_focus_clause() {
+        let manager = ContextManager::default();
+        let built = manager.build_context(minimal_input("Explain event sourcing."));
+
+        let system_message = built
+            .messages
+            .iter()
+            .find(|m| {
+                m.role == ContextMessageRole::System
+                    && m.source_kind == Some(ContextSourceKind::SystemPolicy)
+            })
+            .expect("system policy message");
+
+        assert!(
+            !system_message.content.contains("selected fragment"),
+            "system prompt should not mention selected fragment when none is attached"
+        );
     }
 
     async fn insert_checkpoint(

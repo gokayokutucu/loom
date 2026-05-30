@@ -14,7 +14,10 @@ import { formatBadgeCode } from "../../services/displayCode";
 import { cleanMarkdownDisplayText } from "../../services/assistantMarkdown";
 import { polishDisplayTitle } from "../../services/displayTitlePolish";
 import { formatRelativeTimestamp } from "../../services/timeLabels";
-import type { LoomGraphProjectionNode } from "../../services/loomGraphProjection";
+import {
+  isLoomGraphDestinationNode,
+  type LoomGraphProjectionNode,
+} from "../../services/loomGraphProjection";
 import type { LoomForkRecord, ResponseItem } from "../../types";
 import { graphNodePreviewText } from "./graphNodePreview";
 
@@ -42,10 +45,15 @@ export interface LoomGraphNodeData extends Record<string, unknown> {
 
 export type LoomGraphFlowNode = Node<LoomGraphNodeData, "loomGraphNode">;
 
+// Visual rendering intentionally checks `node.kind` directly in this file.
+// "root" and "weft" are both Loom destination nodes — the distinction is topology/lineage,
+// not ontology. For semantic (non-visual) checks use isLoomGraphDestinationNode,
+// isWeftGraphNode, or graphNodeLineageRole from loomGraphProjection.
+
 function nodeClassName(node: LoomGraphProjectionNode) {
   return [
     "loom-graph-node",
-    `loom-graph-node--${node.kind}`,
+    `loom-graph-node--${node.kind}`,  // CSS variant intentionally encodes kind
     node.isFocused ? "is-focused" : "",
     node.isExpanded ? "is-expanded" : "",
   ]
@@ -54,6 +62,7 @@ function nodeClassName(node: LoomGraphProjectionNode) {
 }
 
 function nodeKindLabel(node: LoomGraphProjectionNode) {
+  // Display labels intentionally distinguish "root" (active Loom) from "weft" (branched Loom).
   if (node.kind === "root") return "Loom";
   if (node.kind === "weft") return "Weft";
   if (node.kind === "response") return "Response";
@@ -90,7 +99,7 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
   const [weftPickerOpen, setWeftPickerOpen] = useState(false);
   const weftClusterRef = useRef<HTMLSpanElement | null>(null);
   const canActOnResponse = projectionNode.kind === "response" && Boolean(response);
-  const canActOnLoom = projectionNode.kind === "root" || projectionNode.kind === "weft";
+  const canActOnLoom = isLoomGraphDestinationNode(projectionNode);
   const canOpenNode = projectionNode.kind === "response" ? Boolean(response) : true;
   const showContinuationButton =
     canActOnResponse && isTerminalResponse && !continuationOpen;
@@ -127,6 +136,7 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
 
   return (
     <article className={nodeClassName(projectionNode)}>
+      {/* Root has no inbound edge, so the target handle is hidden for visual cleanliness. */}
       <Handle
         type="target"
         position={Position.Top}
@@ -139,6 +149,7 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
       />
       <div className="loom-graph-node-header">
         <span className="loom-graph-node-kind">
+          {/* Icon deliberately differs between root ("Loom") and weft ("Weft") for visual distinction. */}
           {projectionNode.kind === "weft" ? <Workflow size={13} /> : <MessageSquare size={13} />}
           {nodeKindLabel(projectionNode)}
         </span>

@@ -87,6 +87,31 @@ function isFragmentReference(link: LoomLink) {
   return link.type === "fragment" || Boolean(link.selectedText && link.sourceResponseId);
 }
 
+/**
+ * Returns true when the prompt is an explicit request to summarize/explain the
+ * *entire* source response — in which case short-prompt fragment anchoring must
+ * not apply.
+ */
+function asksForFullSourceSummary(prompt: string): boolean {
+  const lower = prompt.toLowerCase();
+  return (
+    /\b(whole|entire)\b/.test(lower) ||
+    /(full\s+(response|answer|text|explanation))/i.test(lower) ||
+    /\ball of (this|the|it)\b/i.test(lower)
+  );
+}
+
+/**
+ * Anchors a short prompt to a selected fragment so the model understands the
+ * fragment is the primary subject.
+ * e.g. "explain" + "The Process of Trilateration" → `explain: "The Process of Trilateration"`
+ */
+export function anchorShortPromptToFragment(prompt: string, fragmentText: string): string {
+  const cleaned = compact(prompt).replace(/[?!]+$/, "").trim();
+  const fragment = compact(fragmentText).slice(0, 200);
+  return `${cleaned}: "${fragment}"`;
+}
+
 function tokenCandidatesForReference(link: LoomLink) {
   return Array.from(
     new Set(
@@ -208,6 +233,31 @@ function resolveThinking(
   return false;
 }
 
+/**
+ * When a single fragment reference is attached and the prompt is short, returns
+ * a rewritten prompt that anchors the user's intent to the selected fragment
+ * text. Returns undefined when the prompt already contains the fragment text,
+ * when the prompt explicitly requests a full-source summary, or when it is long
+ * (i.e. the user provided enough specificity themselves).
+ */
+function fragmentAnchoredRewrite(
+  prompt: string,
+  references: LoomLink[],
+  shortPrompt: boolean
+): string | undefined {
+  if (!shortPrompt) return undefined;
+  if (asksForFullSourceSummary(prompt)) return undefined;
+  const primaryFragment = references.find(
+    (ref) => isFragmentReference(ref) && ref.selectedText
+  );
+  if (!primaryFragment?.selectedText) return undefined;
+  // Don't rewrite if the user already explicitly named the fragment.
+  if (prompt.toLowerCase().includes(compact(primaryFragment.selectedText).toLowerCase().slice(0, 40))) {
+    return undefined;
+  }
+  return anchorShortPromptToFragment(prompt, primaryFragment.selectedText);
+}
+
 export function planAnswerDeterministically(input: PlanAnswerInput): AnswerPlan {
   const prompt = input.cleanUserPrompt.trim();
   const lines = splitPromptLines(prompt);
@@ -222,6 +272,10 @@ export function planAnswerDeterministically(input: PlanAnswerInput): AnswerPlan 
   const shortPrompt = compact(prompt).length < 300 && lines.length <= 1;
   const simpleFactual = noReferences && shortPrompt;
   const complexity = complexityFor(prompt, references, lines);
+
+  // Anchor short prompts to the selected fragment so the model treats it as
+  // the primary subject rather than summarizing the full source response.
+  const rewrittenPrompt = fragmentAnchoredRewrite(prompt, references, shortPrompt);
 
   if (simpleFactual) {
     return {
@@ -245,6 +299,7 @@ export function planAnswerDeterministically(input: PlanAnswerInput): AnswerPlan 
       answerStyle: "separate_sections",
       questionUnits,
       complexity,
+      rewrittenPrompt,
     };
   }
 
@@ -258,6 +313,7 @@ export function planAnswerDeterministically(input: PlanAnswerInput): AnswerPlan 
       answerStyle: "synthesis",
       questionUnits,
       complexity,
+      rewrittenPrompt,
     };
   }
 
@@ -269,6 +325,7 @@ export function planAnswerDeterministically(input: PlanAnswerInput): AnswerPlan 
     answerStyle: references.length === 1 ? "separate_sections" : "balanced",
     questionUnits,
     complexity,
+    rewrittenPrompt,
   };
 }
 
@@ -299,6 +356,7 @@ function orchestratorPrompt(input: PlanAnswerInput) {
         "If multiple References are in the same sentence or paragraph, use multi_reference_synthesis and synthesis.",
         "Instant forces useThinking false.",
         "Thinking is allowed only for medium or high complexity, never for short simple factual prompts.",
+        "If any reference has selectedTextPreview and the prompt is short (under 120 characters), set rewrittenPrompt to anchor the prompt to the selected fragment. Example: prompt 'explain', fragment 'The Process of Trilateration' → rewrittenPrompt 'explain: \"The Process of Trilateration\"'. Exception: if the prompt explicitly asks about the whole/entire/full response, do not anchor.",
       ],
       allowed: {
         intent: [

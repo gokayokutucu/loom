@@ -191,8 +191,14 @@ impl OllamaRuntime {
             body["think"] = serde_json::json!(think);
         }
 
+        // For streaming chat the client-level request_timeout is the wrong guard: it caps
+        // the *total* response duration, which silently kills legitimate long generations.
+        // Per-chunk idle timeouts (first_chunk_timeout / stream_idle_timeout) in the
+        // streaming loop are the correct health guards, so we disable the per-request cap
+        // here by setting it to a value far beyond any realistic generation time.
         let response = client
             .post(self.chat_url())
+            .timeout(Duration::from_secs(86400))
             .json(&body)
             .send()
             .await

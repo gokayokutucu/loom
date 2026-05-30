@@ -110,6 +110,96 @@ function expectNoForbiddenPayload(value: unknown) {
 }
 
 test.describe("[product-service-backed] prompt edit product proof", () => {
+  test("[product-service-backed] editing the root prompt creates a Revision Weft", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+    const forbiddenMutationUrls: string[] = [];
+
+    try {
+      await page.route(/\/responses\/[^/]+(?:\/regenerate)?$/, async (route) => {
+        forbiddenMutationUrls.push(route.request().url());
+        await route.continue();
+      });
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      const originalPrompt = "Event Sourcing root prompt edit için başlangıç anlat.";
+      const editedPrompt = "Event Sourcing root prompt edit için revize edilmiş başlangıç anlat.";
+      await sendMainPrompt(page, originalPrompt);
+      await expect(page.getByText("Deterministic E2E provider").first()).toBeVisible({
+        timeout: 30_000,
+      });
+
+      const rootLoom = (await scenario.client.listLooms()).find((item) =>
+        item.title.includes("Event Sourcing")
+      );
+      expect(rootLoom).toBeTruthy();
+      const beforeResponses = await waitForPersistedResponses(scenario, rootLoom!.loomId, 2);
+      const userRoot = beforeResponses.find(
+        (response) => response.role === "user" && response.sequenceIndex === 0
+      );
+      const assistantRoot = beforeResponses.find(
+        (response) => response.role === "assistant" && response.sequenceIndex === 1
+      );
+      expect(userRoot).toBeTruthy();
+      expect(assistantRoot).toBeTruthy();
+      expect(userRoot!.content).toBe(originalPrompt);
+
+      await editPrompt(page, assistantRoot!.responseId, editedPrompt);
+      await expect(page.getByText("Revision:").first()).toBeVisible({ timeout: 30_000 });
+      await expect(page.getByText("revize edilmiş").first()).toBeVisible({ timeout: 30_000 });
+
+      expect(forbiddenMutationUrls).toEqual([]);
+
+      const originAfter = await exportedLoomResponses(scenario, rootLoom!.loomId);
+      expect(originAfter.map((response) => response.content)).toEqual(
+        beforeResponses.map((response) => response.content)
+      );
+      expect(originAfter.map((response) => response.responseId)).toEqual(
+        beforeResponses.map((response) => response.responseId)
+      );
+
+      const revisionWeft = (await scenario.client.listLooms()).find(
+        (loom) =>
+          loom.kind === "weft" &&
+          loom.originLoomId === rootLoom!.loomId &&
+          loom.originResponseId === assistantRoot!.responseId &&
+          loom.weftKind === "revision"
+      );
+      expect(revisionWeft).toBeTruthy();
+      const revisionResponses = await waitForPersistedResponses(scenario, revisionWeft!.loomId, 2);
+      expect(revisionResponses[0]).toMatchObject({
+        role: "user",
+        content: editedPrompt,
+      });
+      expect(revisionResponses[1]?.role).toBe("assistant");
+      expect(
+        revisionResponses.some((response) => response.content.includes(originalPrompt))
+      ).toBe(false);
+      await expect(page.locator(".weft-split-view")).toBeVisible();
+      await expect(page.locator(".origin-split-panel")).toContainText(editedPrompt);
+      await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
+        "2/2"
+      );
+      await expect(page.locator(".origin-split-panel .response-weft-chip.is-revision-wefted")).toHaveCount(1);
+
+      expectNoForbiddenPayload(originAfter);
+      expectNoForbiddenPayload(revisionResponses);
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
   test("[product-service-backed] permanent delete removes Revision Weft counters from surface and graph", async ({
     page,
   }) => {
@@ -158,6 +248,8 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
       );
       expect(revisionWeft).toBeTruthy();
 
+      await page.getByTestId(`sidebar-loom-${rootLoom!.loomId}`).click();
+      await expect(page.locator(`[data-prompt-response-id="${assistantB!.responseId}"]`)).toBeVisible();
       await page.getByRole("button", { name: "Toggle Graph View" }).click();
       const revisionGraphNode = page
         .locator(".loom-graph-node--response", { hasText: promptB })

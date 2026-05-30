@@ -56,7 +56,8 @@ async function assertFilesEqual(left, right, label) {
 
 async function writePackageManifest() {
   const manifest = {
-    name: "loom-ai",
+    name: "loom",
+    productName: "Loom",
     version: "0.1.0",
     private: true,
     type: "module",
@@ -69,6 +70,7 @@ async function copyElectronEntrypoints() {
   await fs.mkdir(path.join(appResourcesPath, "electron"), { recursive: true });
   for (const file of [
     "main.mjs",
+    "app-menu.mjs",
     "app-logger.mjs",
     "preload.cjs",
     "sidecar-manager.mjs",

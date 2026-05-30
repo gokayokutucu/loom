@@ -100,6 +100,7 @@ import type {
   ResponseCodeBlock,
   ResponseItem,
 } from "../types";
+import { isLoomLink } from "../types";
 import { parseLoomAddress } from "../services/loomProtocol";
 import {
   loomGraphRootNodeId,
@@ -814,6 +815,19 @@ function referenceDisplayModeValue(value: unknown): LoomLink["referenceDisplayMo
   return value === "code" || value === "title" ? value : undefined;
 }
 
+function presentationModeValue(value: unknown): LoomLink["presentationMode"] | undefined {
+  return value === "attached-card" || value === "inline-chip" ? value : undefined;
+}
+
+function linkTypeFromReferenceTargetKind(targetKind: LoomLink["targetKind"] | undefined): LoomLink["type"] | undefined {
+  if (targetKind === "attachment") return "attachment";
+  if (targetKind === "code_block" || targetKind === "fragment") return "fragment";
+  if (targetKind === "response") return "response";
+  if (targetKind === "weft") return "loom";
+  if (targetKind === "loom") return "conversation";
+  return undefined;
+}
+
 function loomLinkFromQuestionReference(value: unknown): LoomLink | null {
   const sanitized = sanitizeEnginePayload(value);
   if (!isRecord(sanitized)) return null;
@@ -821,11 +835,8 @@ function loomLinkFromQuestionReference(value: unknown): LoomLink | null {
   const targetKind = referenceTargetKindValue(sanitized.targetKind);
   const type =
     loomObjectTypeValue(sanitized.type) ??
-    (targetKind === "code_block" || targetKind === "fragment"
-      ? "fragment"
-      : targetKind === "response"
-      ? "response"
-      : "conversation");
+    linkTypeFromReferenceTargetKind(targetKind) ??
+    "conversation";
   const id =
     stringValue(sanitized, "id") ??
     stringValue(sanitized, "targetObjectId") ??
@@ -867,6 +878,7 @@ function loomLinkFromQuestionReference(value: unknown): LoomLink | null {
     sourceCanonicalUri: stringValue(sanitized, "sourceCanonicalUri"),
     fragmentHash: stringValue(sanitized, "fragmentHash"),
     createdAt: numberValue(sanitized, "createdAt"),
+    presentationMode: presentationModeValue(stringValue(sanitized, "presentationMode")),
   };
 }
 
@@ -884,18 +896,19 @@ function loomLinkFromPlannerReference(value: unknown): LoomLink | null {
   const title = label ?? selectedText ?? sourceTitle ?? id;
   if (!referenceId || !id || !title) return null;
 
+  const presentationMode = presentationModeValue(stringValue(sanitized, "presentationMode"));
   return {
     id,
-    type:
-      targetKind === "code_block" || targetKind === "fragment"
-        ? "fragment"
-        : targetKind === "response"
-        ? "response"
-        : "conversation",
+    type: linkTypeFromReferenceTargetKind(targetKind) ?? "conversation",
     title,
     path: id,
+    // Restore badge from presentationMode when available so the renderer can
+    // distinguish attached-card (Selection) from inline-chip (Fragment) without
+    // requiring the full questionReferences metadata to be present.
     badge:
-      targetKind === "code_block"
+      presentationMode === "attached-card"
+        ? "Selection"
+        : targetKind === "code_block"
         ? "Code"
         : targetKind === "fragment"
         ? "Fragment"
@@ -911,6 +924,7 @@ function loomLinkFromPlannerReference(value: unknown): LoomLink | null {
     selectedText,
     sourceResponseCode: stringValue(sanitized, "sourceResponseCode"),
     sourceResponseTitle: sourceTitle,
+    presentationMode,
   };
 }
 
@@ -1408,7 +1422,7 @@ function capabilityUnavailable(error: unknown): CapabilitySummary {
 }
 
 function mapReferenceForService(reference: LoomLink) {
-  const targetKind = reference.targetKind ?? reference.type;
+  const targetKind = referenceTargetKind(reference);
   return {
     referenceId: reference.referenceMentionId ?? reference.id,
     label: reference.referenceCustomLabel ?? reference.title,
@@ -1417,6 +1431,9 @@ function mapReferenceForService(reference: LoomLink) {
     targetId: reference.targetObjectId ?? reference.id,
     sourceResponseCode: reference.sourceResponseCode,
     sourceTitle: reference.title,
+    // Carry presentation mode so the service can persist it in planner-reference
+    // metadata and we can restore it on reload without full questionReferences.
+    presentationMode: reference.presentationMode,
   };
 }
 
@@ -1635,6 +1652,7 @@ function attachmentReferencesForService(
       targetId: id,
       sourceResponseCode: undefined,
       sourceTitle: name,
+      presentationMode: undefined,
     });
   }
   return result;
@@ -1652,6 +1670,11 @@ function executePayload(input: SendMessageInput) {
       ...input.references.map(mapReferenceForService),
       ...attachmentRefs,
     ],
+    // Full LoomLink array preserved so the service can store badge and
+    // presentationMode in metadata.questionReferences. On reload,
+    // questionReferencesFromRow reads this path first and the renderer
+    // correctly distinguishes attached-card from inline-chip references.
+    questionReferences: input.questionReferences ?? input.references,
     responseMode: serviceResponseMode(input.responseMode),
     model: input.model ?? "qwen3:latest",
     options: input.options
@@ -1963,23 +1986,23 @@ function quickAskTransportDiagnostics(
   }) as JsonValue;
 }
 
-function referenceTargetKind(link: LoomLink): "loom" | "response" | "weft" | "fragment" | "attachment" | "external" {
-  if (link.targetKind === "attachment" || link.type === "attachment") return "attachment";
+function referenceTargetKind(
+  link: LoomLink
+): "loom" | "response" | "weft" | "fragment" | "code_block" | "attachment" | "external" {
+  if (link.targetKind) return link.targetKind;
+  if (link.type === "attachment") return "attachment";
   if (link.type === "fragment") return "fragment";
   if (link.type === "response") return "response";
-  if (link.type === "conversation" || link.type === "loom") return "loom";
+  if (isLoomLink(link)) return "loom";
   return "external";
 }
 
 function createReferencePayload(input: AddReferenceInput) {
   const reference = input.reference;
   const inputMetadata = isRecord(input.metadata) ? input.metadata : {};
-  const metadataTargetKind = stringValue(inputMetadata, "targetKind");
+  const metadataTargetKind = referenceTargetKindValue(stringValue(inputMetadata, "targetKind"));
   const codeBlockId = stringValue(inputMetadata, "codeBlockId");
-  const targetKind =
-    metadataTargetKind === "code_block" || reference.targetKind === "code_block"
-      ? "code_block"
-      : referenceTargetKind(reference);
+  const targetKind = reference.targetKind ?? metadataTargetKind ?? referenceTargetKind(reference);
   return {
     sourceLoomId: reference.sourceLoomId ?? input.loomId,
     sourceResponseId: input.sourceResponseId ?? reference.sourceResponseId,
@@ -2002,6 +2025,7 @@ function createReferencePayload(input: AddReferenceInput) {
       sourceResponseTitle: reference.sourceResponseTitle,
       sourceCanonicalUri: reference.sourceCanonicalUri,
       badge: reference.badge,
+      presentationMode: reference.presentationMode,
     }),
   };
 }
@@ -2033,14 +2057,18 @@ function validateServiceReference(value: unknown, endpoint: string): LoomLink {
   const referenceCode = metadata ? stringValue(metadata, "referenceCode") : undefined;
   const referenceDisplayMode =
     metadata && stringValue(metadata, "referenceDisplayMode") === "code" ? "code" : "title";
-  const type = targetKind === "fragment" || targetKind === "code_block" ? "fragment" : targetKind === "response" ? "response" : "conversation";
+  const normalizedTargetKind = referenceTargetKindValue(targetKind);
+  const type = linkTypeFromReferenceTargetKind(normalizedTargetKind) ?? "conversation";
+  const presentationMode = metadata
+    ? presentationModeValue(stringValue(metadata, "presentationMode"))
+    : undefined;
   return {
     id: targetId ?? referenceId,
     type,
     title: label ?? selectedText ?? targetUri ?? targetId ?? referenceId,
     path: targetUri ?? targetId ?? referenceId,
     badge: targetKind === "code_block" ? "Code" : targetKind === "fragment" ? "Fragment" : targetKind === "response" ? "Response" : "Reference",
-    targetKind: targetKind === "code_block" ? "code_block" : undefined,
+    targetKind: normalizedTargetKind,
     targetObjectId: targetId,
     canonicalUri: targetUri,
     referenceCode,
@@ -2055,6 +2083,7 @@ function validateServiceReference(value: unknown, endpoint: string): LoomLink {
     sourceResponseTitle,
     sourceCanonicalUri,
     fragmentHash,
+    presentationMode,
   };
 }
 
@@ -2132,6 +2161,7 @@ function validateServiceBookmark(value: unknown, endpoint: string): BookmarkItem
     path: targetUri ?? targetId ?? bookmarkId,
     badge: "Bookmark",
     targetObjectId: targetId,
+    targetKind: targetKind as BookmarkItem["targetKind"],
     canonicalUri: targetUri,
     selectedAt: createdAt ? Date.parse(createdAt) || Date.now() : Date.now(),
     lastUsed: createdAt ?? "",
@@ -3568,3 +3598,12 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     return validateExportResult(response, "/exports/response");
   }
 }
+
+export const __rustHttpLoomEngineClientTest = {
+  createReferencePayload,
+  loomLinkFromPlannerReference,
+  loomLinkFromQuestionReference,
+  mapReferenceForService,
+  referenceTargetKind,
+  validateServiceReference,
+};

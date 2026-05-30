@@ -45,7 +45,8 @@ async function assertExists(target, label) {
 
 async function writePackageManifest() {
   const manifest = {
-    name: "loom-ai",
+    name: "loom",
+    productName: "Loom",
     version: "0.1.0",
     private: true,
     type: "module",
@@ -61,7 +62,6 @@ async function writeDevRuntimeMetadata() {
   const metadata = {
     kind: "loom-electron-dev-runtime",
     repoRoot,
-    dataMode: process.env.LOOM_ELECTRON_DATA_MODE === "isolated-dev" ? "isolated-dev" : "shared-dev",
   };
   await fs.writeFile(
     path.join(appResourcesPath, "electron-dev-runtime.json"),
@@ -185,6 +185,10 @@ async function packageDevApp() {
   await fs.copyFile(
     path.join(repoRoot, "electron", "main.mjs"),
     path.join(appResourcesPath, "electron", "main.mjs")
+  );
+  await fs.copyFile(
+    path.join(repoRoot, "electron", "app-menu.mjs"),
+    path.join(appResourcesPath, "electron", "app-menu.mjs")
   );
   await fs.copyFile(
     path.join(repoRoot, "electron", "app-logger.mjs"),

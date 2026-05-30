@@ -1,3 +1,12 @@
+/**
+ * Quick Ask is an ephemeral interaction surface.
+ * When the user promotes a Quick Ask exchange (converts it to a Weft), the service
+ * creates a persisted Weft Loom destination — NOT a separate QuickAsk entity type.
+ *
+ * States before `"persisted"` represent transient UI state only.
+ * The transition to `"persisted"` (via PROMOTION_SUCCEEDED) is the only point at which
+ * a real `Conversation` with `lineageRole: "weft"` enters the app's Loom destination set.
+ */
 export type TemporaryWeftLifecycleStatus =
   | "absent"
   | "temporary"

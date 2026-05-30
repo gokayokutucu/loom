@@ -123,10 +123,7 @@ function readDevRuntimeMetadata(repoRoot) {
     const metadata = JSON.parse(fs.readFileSync(metadataPath, "utf8"));
     if (metadata?.kind !== "loom-electron-dev-runtime") return null;
     if (typeof metadata.repoRoot !== "string" || metadata.repoRoot.length === 0) return null;
-    return {
-      repoRoot: metadata.repoRoot,
-      dataMode: metadata.dataMode === "isolated-dev" ? "isolated-dev" : "shared-dev",
-    };
+    return { repoRoot: metadata.repoRoot };
   } catch {
     return null;
   }
@@ -140,6 +137,8 @@ function resolveBinaryPath(repoRoot, app) {
 }
 
 function resolveElectronDataPaths(repoRoot, app) {
+  // Production (packaged build): use Electron's userData directory.
+  // On macOS this is ~/Library/Application Support/<AppName>/loom-service/
   if (app?.isPackaged || isPackagedRuntime()) {
     const dataDir = path.join(app.getPath("userData"), "loom-service");
     return {
@@ -150,36 +149,16 @@ function resolveElectronDataPaths(repoRoot, app) {
     };
   }
 
+  // Development: always use services/loom-service/.data/dev/
+  // electron-dev-runtime.json can override the repo root (used by packaged dev builds).
   const devRuntime = readDevRuntimeMetadata(repoRoot);
-  if (devRuntime) {
-    const serviceDataDir = path.join(devRuntime.repoRoot, "services", "loom-service", ".data");
-    const electronConfigDir = path.join(serviceDataDir, "electron-dev");
-    return {
-      dataMode: devRuntime.dataMode,
-      dataDir: electronConfigDir,
-      configPath: path.join(electronConfigDir, "loom-service.toml"),
-      dbPath:
-        devRuntime.dataMode === "shared-dev"
-          ? path.join(serviceDataDir, "loom.db")
-          : path.join(electronConfigDir, "loom.db"),
-    };
-  }
-
-  const serviceDataDir = path.join(repoRoot, "services", "loom-service", ".data");
-  const electronConfigDir = path.join(serviceDataDir, "electron-dev");
-  const dataMode =
-    process.env.LOOM_ELECTRON_DATA_MODE === "isolated-dev"
-      ? "isolated-dev"
-      : "shared-dev";
-
+  const actualRepoRoot = devRuntime?.repoRoot ?? repoRoot;
+  const devDir = path.join(actualRepoRoot, "services", "loom-service", ".data", "dev");
   return {
-    dataMode,
-    dataDir: electronConfigDir,
-    configPath: path.join(electronConfigDir, "loom-service.toml"),
-    dbPath:
-      dataMode === "shared-dev"
-        ? path.join(serviceDataDir, "loom.db")
-        : path.join(electronConfigDir, "loom.db"),
+    dataMode: "dev",
+    dataDir: devDir,
+    configPath: path.join(devDir, "loom-service.toml"),
+    dbPath: path.join(devDir, "loom.db"),
   };
 }
 
