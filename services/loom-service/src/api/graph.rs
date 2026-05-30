@@ -24,6 +24,7 @@ use std::collections::{HashMap, HashSet};
 const REFERENCE_EDGE_CAP: usize = 50;
 const GRAPH_LANE_WIDTH: f64 = 360.0;
 const GRAPH_ROW_GAP: f64 = 300.0;
+const GRAPH_DERIVED_LOOM_DEPTH_LIMIT: usize = 8;
 
 const FORBIDDEN_THINKING_KEYS: [&str; 4] = [
     "raw_thinking",
@@ -144,6 +145,12 @@ pub(crate) enum GraphProjectionError {
 struct ProjectedResponseNode<'a> {
     response: &'a ResponseRecord,
     prompt: Option<&'a ResponseRecord>,
+}
+
+struct DerivedLoomFrame {
+    loom_id: String,
+    depth: i64,
+    ancestry_depth: usize,
 }
 
 pub async fn get_graph(
@@ -288,11 +295,6 @@ pub(crate) async fn build_graph_projection(
         .list_responses_for_loom(loom_id)
         .await
         .map_err(GraphProjectionError::Storage)?;
-    let child_wefts = loom_repository
-        .list_child_wefts_by_origin_loom(loom_id)
-        .await
-        .map_err(GraphProjectionError::Storage)?;
-
     let mut warnings = Vec::new();
 
     let root_node_id = loom_node_id(&root.loom_id);
@@ -445,99 +447,20 @@ pub(crate) async fn build_graph_projection(
         }
     }
 
-    for (index, weft) in child_wefts.iter().enumerate() {
-        let lane = (index as i64) + 1;
-        let source_response_id = weft.origin_response_id.clone();
-        let depth = source_response_id
-            .as_ref()
-            .and_then(|response_id| response_depths.get(response_id))
-            .map(|depth| depth + 1)
-            .unwrap_or(root_depth + (projected_responses.len() as i64) + 1);
-        let weft_node_id = loom_node_id(&weft.loom_id);
-        loom_node_ids.insert(weft.loom_id.clone(), weft_node_id.clone());
-        nodes.push(with_graph_role(
-            loom_node(weft, &weft_node_id, depth, lane),
-            "child-weft",
-        ));
-
-        if let Some(source_response_id) = source_response_id {
-            if let Some(source) = response_node_ids.get(&source_response_id) {
-                edges.push(GraphEdge {
-                    id: format!("edge:{}:{}", source, weft_node_id),
-                    kind: "weft_origin".to_string(),
-                    source: source.clone(),
-                    target: weft_node_id.clone(),
-                    label: Some("Weft origin".to_string()),
-                    prompt_text: None,
-                    metadata: Some(serde_json::json!({
-                        "originLoomId": loom_id,
-                        "originResponseId": source_response_id
-                    })),
-                });
-            } else {
-                warnings.push(format!(
-                    "Skipped Weft origin edge for {} because origin Response is missing.",
-                    weft.loom_id
-                ));
-            }
-        } else {
-            warnings.push(format!(
-                "Skipped Weft origin edge for {} because origin Response metadata is missing.",
-                weft.loom_id
-            ));
-        }
-
-        let weft_responses = response_repository
-            .list_responses_for_loom(&weft.loom_id)
-            .await
-            .map_err(GraphProjectionError::Storage)?;
-        let projected_weft_responses = project_response_nodes(&weft_responses);
-        for (response_index, projected_response) in projected_weft_responses.iter().enumerate() {
-            let response = projected_response.response;
-            let response_depth = depth + (response_index as i64) + 1;
-            let weft_response_node_id = response_node_id(&response.response_id);
-            response_depths.insert(response.response_id.clone(), response_depth);
-            response_node_ids.insert(response.response_id.clone(), weft_response_node_id.clone());
-            if let Some(prompt) = projected_response.prompt {
-                response_depths.insert(prompt.response_id.clone(), response_depth);
-                response_node_ids.insert(prompt.response_id.clone(), weft_response_node_id.clone());
-            }
-            nodes.push(with_graph_role(
-                response_node(
-                    response,
-                    projected_response.prompt,
-                    &weft_response_node_id,
-                    response_depth,
-                    lane,
-                ),
-                "child-response",
-            ));
-
-            if response_index == 0 {
-                edges.push(GraphEdge {
-                    id: format!("edge:{}:{}", weft_node_id, weft_response_node_id),
-                    kind: "loom_response".to_string(),
-                    source: weft_node_id.clone(),
-                    target: weft_response_node_id,
-                    label: None,
-                    prompt_text: None,
-                    metadata: None,
-                });
-            } else {
-                let previous = projected_weft_responses[response_index - 1].response;
-                let source = response_node_id(&previous.response_id);
-                edges.push(GraphEdge {
-                    id: format!("edge:{}:{}", source, weft_response_node_id),
-                    kind: "response_sequence".to_string(),
-                    source,
-                    target: weft_response_node_id,
-                    label: None,
-                    prompt_text: None,
-                    metadata: None,
-                });
-            }
-        }
-    }
+    append_derived_loom_branches(
+        &loom_repository,
+        &response_repository,
+        loom_id,
+        root_depth,
+        &mut nodes,
+        &mut edges,
+        &mut response_depths,
+        &mut response_node_ids,
+        &mut loom_node_ids,
+        &mut warnings,
+    )
+    .await
+    .map_err(GraphProjectionError::Storage)?;
 
     if query.include_references {
         let references = reference_repository
@@ -581,6 +504,153 @@ pub(crate) async fn build_graph_projection(
         focused_node_id,
         warnings,
     })
+}
+
+async fn append_derived_loom_branches(
+    loom_repository: &LoomRepository,
+    response_repository: &ResponseRepository,
+    origin_loom_id: &str,
+    root_depth: i64,
+    nodes: &mut Vec<GraphNode>,
+    edges: &mut Vec<GraphEdge>,
+    response_depths: &mut HashMap<String, i64>,
+    response_node_ids: &mut HashMap<String, String>,
+    loom_node_ids: &mut HashMap<String, String>,
+    warnings: &mut Vec<String>,
+) -> Result<(), ServiceError> {
+    let mut visited_loom_ids: HashSet<String> = HashSet::from([origin_loom_id.to_string()]);
+    let mut stack = vec![DerivedLoomFrame {
+        loom_id: origin_loom_id.to_string(),
+        depth: root_depth,
+        ancestry_depth: 0,
+    }];
+    let mut next_lane = 1_i64;
+
+    while let Some(frame) = stack.pop() {
+        if frame.ancestry_depth >= GRAPH_DERIVED_LOOM_DEPTH_LIMIT {
+            warnings.push(format!(
+                "Skipped deeper derived Loom branches for {} because the graph depth limit was reached.",
+                frame.loom_id
+            ));
+            continue;
+        }
+
+        let child_wefts = loom_repository
+            .list_child_wefts_by_origin_loom(&frame.loom_id)
+            .await?;
+        for weft in child_wefts {
+            if !visited_loom_ids.insert(weft.loom_id.clone()) {
+                warnings.push(format!(
+                    "Skipped derived Loom {} because it was already projected.",
+                    weft.loom_id
+                ));
+                continue;
+            }
+
+            let source_response_id = weft.origin_response_id.clone();
+            let depth = source_response_id
+                .as_ref()
+                .and_then(|response_id| response_depths.get(response_id))
+                .map(|depth| depth + 1)
+                .unwrap_or(frame.depth + 1);
+            let lane = next_lane;
+            next_lane += 1;
+            let weft_node_id = loom_node_id(&weft.loom_id);
+            loom_node_ids.insert(weft.loom_id.clone(), weft_node_id.clone());
+            nodes.push(with_graph_role(
+                loom_node(&weft, &weft_node_id, depth, lane),
+                "child-weft",
+            ));
+
+            if let Some(source_response_id) = source_response_id {
+                if let Some(source) = response_node_ids.get(&source_response_id) {
+                    edges.push(GraphEdge {
+                        id: format!("edge:{}:{}", source, weft_node_id),
+                        kind: "weft_origin".to_string(),
+                        source: source.clone(),
+                        target: weft_node_id.clone(),
+                        label: Some("Weft origin".to_string()),
+                        prompt_text: None,
+                        metadata: Some(serde_json::json!({
+                            "originLoomId": frame.loom_id,
+                            "originResponseId": source_response_id
+                        })),
+                    });
+                } else {
+                    warnings.push(format!(
+                        "Skipped Weft origin edge for {} because origin Response is missing.",
+                        weft.loom_id
+                    ));
+                }
+            } else {
+                warnings.push(format!(
+                    "Skipped Weft origin edge for {} because origin Response metadata is missing.",
+                    weft.loom_id
+                ));
+            }
+
+            let weft_responses = response_repository
+                .list_responses_for_loom(&weft.loom_id)
+                .await?;
+            let projected_weft_responses = project_response_nodes(&weft_responses);
+            for (response_index, projected_response) in projected_weft_responses.iter().enumerate()
+            {
+                let response = projected_response.response;
+                let response_depth = depth + (response_index as i64) + 1;
+                let weft_response_node_id = response_node_id(&response.response_id);
+                response_depths.insert(response.response_id.clone(), response_depth);
+                response_node_ids
+                    .insert(response.response_id.clone(), weft_response_node_id.clone());
+                if let Some(prompt) = projected_response.prompt {
+                    response_depths.insert(prompt.response_id.clone(), response_depth);
+                    response_node_ids
+                        .insert(prompt.response_id.clone(), weft_response_node_id.clone());
+                }
+                nodes.push(with_graph_role(
+                    response_node(
+                        response,
+                        projected_response.prompt,
+                        &weft_response_node_id,
+                        response_depth,
+                        lane,
+                    ),
+                    "child-response",
+                ));
+
+                if response_index == 0 {
+                    edges.push(GraphEdge {
+                        id: format!("edge:{}:{}", weft_node_id, weft_response_node_id),
+                        kind: "loom_response".to_string(),
+                        source: weft_node_id.clone(),
+                        target: weft_response_node_id,
+                        label: None,
+                        prompt_text: None,
+                        metadata: None,
+                    });
+                } else {
+                    let previous = projected_weft_responses[response_index - 1].response;
+                    let source = response_node_id(&previous.response_id);
+                    edges.push(GraphEdge {
+                        id: format!("edge:{}:{}", source, weft_response_node_id),
+                        kind: "response_sequence".to_string(),
+                        source,
+                        target: weft_response_node_id,
+                        label: None,
+                        prompt_text: None,
+                        metadata: None,
+                    });
+                }
+            }
+
+            stack.push(DerivedLoomFrame {
+                loom_id: weft.loom_id,
+                depth,
+                ancestry_depth: frame.ancestry_depth + 1,
+            });
+        }
+    }
+
+    Ok(())
 }
 
 fn project_response_nodes(responses: &[ResponseRecord]) -> Vec<ProjectedResponseNode<'_>> {
@@ -991,8 +1061,27 @@ fn loom_node(loom: &LoomRecord, id: &str, depth: i64, lane: i64) -> GraphNode {
         depth,
         lane,
         position: Some(position(depth, lane)),
-        metadata: None,
+        metadata: loom_node_metadata(loom),
     }
+}
+
+fn loom_node_metadata(loom: &LoomRecord) -> Option<serde_json::Value> {
+    let weft_kind = loom
+        .metadata_json
+        .as_deref()
+        .and_then(|metadata| serde_json::from_str::<serde_json::Value>(metadata).ok())
+        .and_then(|metadata| {
+            metadata
+                .get("weftKind")
+                .and_then(|value| value.as_str())
+                .filter(|value| *value == "exploration" || *value == "revision")
+                .map(str::to_string)
+        });
+    weft_kind.map(|weft_kind| {
+        serde_json::json!({
+            "weftKind": weft_kind
+        })
+    })
 }
 
 fn loom_ancestry_summary(loom: &LoomRecord) -> LoomAncestryLoomSummary {
@@ -1654,6 +1743,133 @@ mod tests {
                 && edge.source == "response:weft-response-1"
                 && edge.target == "response:weft-response-2"
         }));
+    }
+
+    #[tokio::test]
+    async fn descendant_weft_branch_attaches_to_exact_weft_response() {
+        let database = test_database().await;
+        insert_loom(&database, "loom-1", "Root Loom", "loom", None, None).await;
+        insert_response(
+            &database,
+            "loom-1",
+            "root-response",
+            "assistant",
+            "Root answer",
+            0,
+        )
+        .await;
+        insert_loom(
+            &database,
+            "weft-a",
+            "Weft A",
+            "weft",
+            Some("loom-1"),
+            Some("root-response"),
+        )
+        .await;
+        insert_response(
+            &database,
+            "weft-a",
+            "weft-a-response",
+            "assistant",
+            "Weft A answer",
+            0,
+        )
+        .await;
+        insert_response(
+            &database,
+            "weft-a",
+            "weft-a-unrelated-response",
+            "assistant",
+            "Unrelated Weft A answer",
+            1,
+        )
+        .await;
+        insert_loom(
+            &database,
+            "weft-b",
+            "Weft B",
+            "weft",
+            Some("weft-a"),
+            Some("weft-a-response"),
+        )
+        .await;
+        insert_response(
+            &database,
+            "weft-b",
+            "weft-b-response",
+            "assistant",
+            "Weft B answer",
+            0,
+        )
+        .await;
+
+        let graph = build_graph_projection(&database, "loom-1", GraphQuery::default())
+            .await
+            .expect("graph projection");
+
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.id == "loom:weft-b" && node.kind == "weft"));
+        assert!(graph
+            .nodes
+            .iter()
+            .any(|node| node.id == "response:weft-b-response" && node.kind == "response"));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == "weft_origin"
+                && edge.source == "response:weft-a-response"
+                && edge.target == "loom:weft-b"
+        }));
+        assert!(!graph.edges.iter().any(|edge| {
+            edge.kind == "weft_origin"
+                && edge.source == "response:weft-a-unrelated-response"
+                && edge.target == "loom:weft-b"
+        }));
+    }
+
+    #[tokio::test]
+    async fn revision_weft_keeps_revision_metadata_in_graph_node() {
+        let database = test_database().await;
+        insert_loom(&database, "loom-1", "Root Loom", "loom", None, None).await;
+        insert_response(
+            &database,
+            "loom-1",
+            "response-origin",
+            "assistant",
+            "Source answer",
+            0,
+        )
+        .await;
+        insert_loom_with_metadata(
+            &database,
+            "revision-1",
+            "Revision Loom",
+            "weft",
+            Some("loom-1"),
+            Some("response-origin"),
+            Some(r#"{"weftKind":"revision"}"#),
+        )
+        .await;
+
+        let graph = build_graph_projection(&database, "loom-1", GraphQuery::default())
+            .await
+            .expect("graph projection");
+        let revision = graph
+            .nodes
+            .iter()
+            .find(|node| node.id == "loom:revision-1")
+            .expect("revision node");
+
+        assert_eq!(revision.kind, "weft");
+        assert_eq!(
+            revision
+                .metadata
+                .as_ref()
+                .and_then(|metadata| metadata.get("weftKind"))
+                .and_then(|value| value.as_str()),
+            Some("revision")
+        );
     }
 
     #[tokio::test]
@@ -2519,6 +2735,27 @@ mod tests {
         origin_loom_id: Option<&str>,
         origin_response_id: Option<&str>,
     ) {
+        insert_loom_with_metadata(
+            database,
+            loom_id,
+            title,
+            kind,
+            origin_loom_id,
+            origin_response_id,
+            None,
+        )
+        .await;
+    }
+
+    async fn insert_loom_with_metadata(
+        database: &crate::storage::db::Database,
+        loom_id: &str,
+        title: &str,
+        kind: &str,
+        origin_loom_id: Option<&str>,
+        origin_response_id: Option<&str>,
+        metadata_json: Option<&str>,
+    ) {
         LoomRepository::new(database)
             .insert_loom(&NewLoom {
                 loom_id: loom_id.to_string(),
@@ -2531,7 +2768,7 @@ mod tests {
                 origin_response_id: origin_response_id.map(str::to_string),
                 created_at: "2026-05-10T00:00:00Z".to_string(),
                 updated_at: "2026-05-10T00:00:00Z".to_string(),
-                metadata_json: None,
+                metadata_json: metadata_json.map(str::to_string),
             })
             .await
             .expect("insert Loom");

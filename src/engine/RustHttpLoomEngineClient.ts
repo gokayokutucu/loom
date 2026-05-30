@@ -496,6 +496,11 @@ function mapServiceGraphProjection(
       if (typeof rawNode.metadata.hasParentAncestry === "boolean") {
         node.hasParentAncestry = rawNode.metadata.hasParentAncestry;
       }
+      if (rawNode.metadata.weftKind === "revision") {
+        node.lineageRole = "revision";
+      } else if (rawNode.metadata.weftKind === "exploration" && mappedKind === "weft") {
+        node.lineageRole = "weft";
+      }
     }
     nodes.push(node);
     if (mappedKind === "response") {

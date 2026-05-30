@@ -513,6 +513,23 @@ test.describe("[product-service-backed] Graph projection product proof", () => {
       expect(weftCTurn.assistantResponseId).toBeTruthy();
       const weftCDetail = await scenario.client.getLoom(weftC.loomId);
 
+      const rootGraph = await scenario.fetchJson<ServiceGraphProjection>(
+        `/looms/${encodeURIComponent(loomAId)}/graph?includeBookmarks=true`
+      );
+      expect(rootGraph.nodes.some((node) => node.id === `loom:${weftB.loomId}`)).toBe(true);
+      expect(rootGraph.nodes.some((node) => node.id === `loom:${weftC.loomId}`)).toBe(true);
+      expect(rootGraph.nodes.some((node) => node.id === `response:${weftBOriginResponse!.id}`))
+        .toBe(true);
+      expect(rootGraph.edges).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "weft_origin",
+            source: `response:${weftBOriginResponse!.id}`,
+            target: `loom:${weftC.loomId}`,
+          }),
+        ])
+      );
+
       const initialGraph = await scenario.fetchJson<ServiceGraphProjection>(
         `/looms/${encodeURIComponent(weftC.loomId)}/graph?includeBookmarks=true`
       );

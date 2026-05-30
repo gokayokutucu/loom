@@ -16,6 +16,7 @@ import { cleanMarkdownDisplayText } from "../../services/assistantMarkdown";
 import { polishDisplayTitle } from "../../services/displayTitlePolish";
 import { formatRelativeTimestamp } from "../../services/timeLabels";
 import {
+  graphNodeLineageRole,
   isLoomGraphDestinationNode,
   type LoomGraphProjectionNode,
 } from "../../services/loomGraphProjection";
@@ -69,6 +70,7 @@ function nodeKindLabel(node: LoomGraphProjectionNode) {
   // Display labels intentionally distinguish "root" (active Loom) from "weft" (branched Loom).
   if (node.kind === "root") return "LOOM";
   if (node.kind === "loom") return "LOOM";
+  if (graphNodeLineageRole(node) === "revision") return "REVISION";
   if (node.kind === "weft") return "WEFT";
   if (node.kind === "response") return "RESPONSE";
   if (node.kind === "bookmark") return "BOOKMARK";

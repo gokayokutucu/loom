@@ -64,6 +64,12 @@ describe("graphNodeLineageRole", () => {
     expect(graphNodeLineageRole(makeNode("weft"))).toBe("weft");
   });
 
+  it("returns explicit revision lineage for revision Weft nodes", () => {
+    expect(graphNodeLineageRole(makeNode("weft", { lineageRole: "revision" }))).toBe(
+      "revision"
+    );
+  });
+
   it("returns undefined for Loom context nodes", () => {
     expect(graphNodeLineageRole(makeNode("loom"))).toBeUndefined();
   });

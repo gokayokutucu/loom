@@ -45,7 +45,8 @@ export interface LoomGraphProjectionNode {
     | "child-response"
     | "child-weft"
     | "ancestor-context"
-    | "ancestor-response";
+      | "ancestor-response";
+  lineageRole?: LoomLineageRole;
   hasParentAncestry?: boolean;
   ancestryExpanded?: boolean;
   ancestryLoading?: boolean;
@@ -305,6 +306,7 @@ export function isLoomGraphDestinationNode(node: LoomGraphProjectionNode): boole
 export function graphNodeLineageRole(
   node: LoomGraphProjectionNode
 ): LoomLineageRole | undefined {
+  if (node.lineageRole) return node.lineageRole;
   if (node.kind === "weft") return "weft";
   return undefined;
 }
