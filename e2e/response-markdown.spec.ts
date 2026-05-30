@@ -156,6 +156,65 @@ test.describe("[pure-ui-rendering] assistant Markdown rendering helpers", () => 
     expect(assistantMarkdownToSafeHtml(markdown)).toContain("<h4>Satellite Signals</h4>");
   });
 
+  test("keeps streaming orphan heading markers hidden until heading text arrives", () => {
+    const partialMarkdown = ["How to Calculate Exact GPS Coordinates", "", "####"].join("\n");
+    const completeMarkdown = [
+      "How to Calculate Exact GPS Coordinates",
+      "",
+      "####",
+      "",
+      "Distance Calculation",
+    ].join("\n");
+
+    expect(normalizeAssistantMarkdownSource(partialMarkdown)).toBe(
+      "How to Calculate Exact GPS Coordinates\n"
+    );
+    expect(assistantMarkdownToSafeHtml(partialMarkdown)).not.toContain("####");
+    expect(assistantMarkdownToSafeHtml(completeMarkdown)).toContain(
+      "<h4>Distance Calculation</h4>"
+    );
+    expect(assistantMarkdownToPlainText(completeMarkdown)).toBe(
+      "How to Calculate Exact GPS Coordinates\n\nDistance Calculation"
+    );
+  });
+
+  test("repairs multiple streamed orphan heading sections without exposing markers", () => {
+    const markdown = [
+      "How to Calculate Exact GPS Coordinates",
+      "",
+      "####",
+      "Distance Calculation",
+      "",
+      "Measure signal travel time.",
+      "",
+      "####",
+      "Trilateration",
+      "",
+      "Intersect satellite distance spheres.",
+    ].join("\n");
+
+    const normalized = normalizeAssistantMarkdownSource(markdown);
+    const html = assistantMarkdownToSafeHtml(markdown);
+
+    expect(normalized).toContain("#### Distance Calculation");
+    expect(normalized).toContain("#### Trilateration");
+    expect(normalized).not.toContain("\n####\n");
+    expect(html).toContain("<h4>Distance Calculation</h4>");
+    expect(html).toContain("<h4>Trilateration</h4>");
+    expect(assistantMarkdownToPlainText(markdown)).not.toContain("####");
+  });
+
+  test("normal copy normalizes orphan heading markers", () => {
+    const markdown = ["Intro", "", "####", "", "Distance Calculation"].join("\n");
+    const payload = buildAssistantCopyPayload(markdown);
+
+    expect(payload.markdown).toBe("Intro\n\n#### Distance Calculation");
+    expect(payload.html).toContain("<h4>Distance Calculation</h4>");
+    expect(payload.plainText).toBe("Intro\n\nDistance Calculation");
+    expect(payload.markdown).not.toContain("\n####\n");
+    expect(payload.plainText).not.toContain("####");
+  });
+
   test("drops standalone heading markers with no heading text", () => {
     const markdown = ["Intro", "", "####", "", "######"].join("\n");
 
@@ -199,6 +258,29 @@ test.describe("[pure-ui-rendering] assistant Markdown rendering helpers", () => 
       kind: "code",
       code: "####\nSatellite Signals",
     });
+  });
+
+  test("orphan heading marker normalization is idempotent", () => {
+    const markdown = [
+      "Intro",
+      "",
+      "####",
+      "",
+      "Satellite Requirements",
+      "",
+      "#### Valid Heading",
+      "",
+      "```markdown",
+      "####",
+      "Code stays raw",
+      "```",
+    ].join("\n");
+    const normalized = normalizeAssistantMarkdownSource(markdown);
+
+    expect(normalizeAssistantMarkdownSource(normalized)).toBe(normalized);
+    expect(normalized).toContain("#### Satellite Requirements");
+    expect(normalized).toContain("#### Valid Heading");
+    expect(normalized).toContain("```markdown\n####\nCode stays raw\n```");
   });
 
   test("normalizes Markdown display text for titles and previews", () => {
@@ -309,7 +391,7 @@ test.describe("[pure-ui-rendering] assistant Markdown rendering helpers", () => 
     expect(payload.plainText).toBe("Use Address Bar as local AI web navigator as context.");
   });
 
-  test("explicit Markdown copy payload keeps raw Markdown source", () => {
+  test("explicit Markdown copy payload keeps normalized Markdown source", () => {
     const markdown = [
       "# Başlık",
       "",

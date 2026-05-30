@@ -4,6 +4,14 @@
 import { expect, type Page, test } from "@playwright/test";
 import { createServiceTestHarness } from "./helpers/serviceTestHarness";
 
+const LONG_STREAMING_FIXTURE_MARKER = "END_OF_LONG_STREAMING_FIXTURE";
+const LONG_STREAMING_FIXTURE_PROMPT = "long streaming scroll fixture";
+const LONG_USER_PROMPT = [
+  "Lorem ipsum dolor sit amet, consectetur adipiscing elit. Sed nulla risus, porttitor at dignissim nec, posuere vel justo. Quisque augue felis, elementum vehicula blandit vel, porta vel enim. Nulla at libero tempor, laoreet risus sed, porta nisi. Fusce ultrices laoreet tempus. Duis euismod dui eu nunc aliquam suscipit. Nullam hendrerit pellentesque ex. In lobortis neque justo, eget convallis ante sollicitudin id. In placerat sit amet leo sed porttitor. Maecenas et libero id neque elementum ultrices et sit amet eros.",
+  "Vivamus diam arcu, commodo imperdiet congue vitae, imperdiet in eros. Duis vitae dui luctus, fermentum enim eu, auctor libero. Nulla ipsum lorem, dapibus ut ultricies at, auctor id mi. Ut imperdiet metus eu sem posuere, ac varius ante vestibulum. Pellentesque quis velit a felis pellentesque ultricies pulvinar eget felis. Nam varius leo a risus consequat pellentesque. Ut consectetur nisi dui, quis eleifend tellus mollis tristique. Proin non cursus ante. Integer vitae vestibulum diam.",
+  'Aenean consectetur tellus tempor tincidunt imperdiet. Nam rutrum tortor id maximus varius. Nullam lorem velit, placerat quis pulvinar hendrerit, bibendum eget magna. Please ignore the lorem ipsum passage. I would like to know more about prefrontal cortex.',
+].join("\n\n");
+
 async function fillPrompt(page: Page, prompt: string) {
   const editor = page.getByRole("textbox", { name: "Prompt" }).first();
   await expect(editor).toBeVisible();
@@ -66,11 +74,210 @@ test.describe("[product-service-backed] Main composer submit", () => {
     }
   });
 
+  test("long streaming fixture produces progressive overflow and final marker", async ({ page }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      deterministicResponseMode: "long-streaming-scroll",
+      deterministicChunkMode: "word",
+      deterministicThinkingDelayMs: 300,
+      deterministicStreamChunkDelayMs: 10,
+      startApp: true,
+    });
+
+    try {
+      await page.addInitScript(() => {
+        window.localStorage.setItem(
+          "loom-ai-app-settings-v1",
+          JSON.stringify({ mockDataEnabled: false, modelResponseMode: "thinking" })
+        );
+      });
+      await page.setViewportSize({ width: 500, height: 784 });
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await fillPrompt(page, `${LONG_STREAMING_FIXTURE_PROMPT} progressive ${Date.now()}`);
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        "Long Streaming Scroll Fixture",
+        { timeout: 30_000 }
+      );
+
+      const firstLength = await page
+        .locator(".assistant-message")
+        .last()
+        .innerText()
+        .then((text) => text.length);
+      await expect
+        .poll(
+          async () => {
+            const text = await page.locator(".assistant-message").last().innerText();
+            return text.length;
+          },
+          { timeout: 10_000 }
+        )
+        .toBeGreaterThan(firstLength + 200);
+
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        LONG_STREAMING_FIXTURE_MARKER,
+        { timeout: 30_000 }
+      );
+
+      const overflowState = await page.evaluate(() => {
+        const assistant = document.querySelector<HTMLElement>(".assistant-message");
+        const transcript = document.querySelector<HTMLElement>(".chat-transcript");
+        const composer = document.querySelector<HTMLElement>(
+          ".prompt-composer.active:not(.centered)[data-testid='prompt-composer']"
+        );
+        if (!assistant || !transcript || !composer) return null;
+        const assistantRect = assistant.getBoundingClientRect();
+        const transcriptRect = transcript.getBoundingClientRect();
+        const composerRect = composer.getBoundingClientRect();
+        const safeHeight = Math.min(transcriptRect.bottom, composerRect.top) - transcriptRect.top;
+        return {
+          assistantHeight: assistantRect.height,
+          safeHeight,
+          scrollable: transcript.scrollHeight > transcript.clientHeight + 40,
+        };
+      });
+      expect(overflowState).not.toBeNull();
+      expect(overflowState!.assistantHeight).toBeGreaterThan(overflowState!.safeHeight * 0.6);
+      expect(overflowState!.scrollable).toBe(true);
+
+      await expect(page.locator(".chat-transcript")).not.toHaveClass(/is-generating-response/, {
+        timeout: 15_000,
+      });
+      await page.waitForTimeout(1_000);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+    }
+  });
+
+  test("long submitted prompt stays collapsed while service streaming starts", async ({ page }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      deterministicResponseMode: "long-streaming-scroll",
+      deterministicChunkMode: "word",
+      deterministicThinkingDelayMs: 300,
+      deterministicStreamChunkDelayMs: 10,
+      startApp: true,
+    });
+
+    const readPromptMetrics = () =>
+      page.locator(".qa-item").last().evaluate((item) => {
+        const transcript = item.closest<HTMLElement>(".chat-transcript");
+        const promptText = item.querySelector<HTMLElement>(".user-message-prompt-text");
+        const collapsible = item.querySelector<HTMLElement>(".user-message-collapsible");
+        const assistant = item.querySelector<HTMLElement>(".assistant-message");
+        if (!transcript || !promptText || !collapsible || !assistant) return null;
+        const transcriptRect = transcript.getBoundingClientRect();
+        const promptRect = promptText.getBoundingClientRect();
+        const assistantRect = assistant.getBoundingClientRect();
+        const style = getComputedStyle(promptText);
+        const lineHeight = Number.parseFloat(style.lineHeight);
+        return {
+          expanded: collapsible.dataset.expanded,
+          isClamped: promptText.classList.contains("is-clamped"),
+          collapseLines: style.getPropertyValue("--user-message-collapse-lines").trim(),
+          promptHeight: promptRect.height,
+          maxCollapsedHeight: lineHeight * 10 + 8,
+          promptTop: promptRect.top - transcriptRect.top,
+          promptBottom: promptRect.bottom - transcriptRect.top,
+          assistantTop: assistantRect.top - transcriptRect.top,
+          transcriptHeight: transcriptRect.height,
+        };
+      });
+
+    try {
+      await page.addInitScript(() => {
+        window.localStorage.setItem(
+          "loom-ai-app-settings-v1",
+          JSON.stringify({ mockDataEnabled: false, modelResponseMode: "thinking" })
+        );
+      });
+      await page.setViewportSize({ width: 500, height: 784 });
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await fillPrompt(page, `${LONG_USER_PROMPT}\n\n${LONG_STREAMING_FIXTURE_PROMPT}`);
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(page.locator(".qa-item")).toHaveCount(1, { timeout: 30_000 });
+
+      await expect
+        .poll(
+          async () => {
+            const metrics = await readPromptMetrics();
+            return Boolean(
+              metrics &&
+                metrics.expanded === "false" &&
+                metrics.isClamped &&
+                metrics.collapseLines === "10" &&
+                metrics.promptHeight <= metrics.maxCollapsedHeight &&
+                metrics.promptTop >= -16 &&
+                metrics.promptBottom < 360 &&
+                metrics.assistantTop > metrics.promptBottom &&
+                metrics.assistantTop < metrics.transcriptHeight
+            );
+          },
+          { timeout: 10_000 }
+        )
+        .toBe(true);
+
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        "Long Streaming Scroll Fixture",
+        { timeout: 30_000 }
+      );
+
+      const streamingMetrics = await readPromptMetrics();
+      expect(streamingMetrics).not.toBeNull();
+      expect(streamingMetrics!.expanded).toBe("false");
+      expect(streamingMetrics!.isClamped).toBe(true);
+      expect(streamingMetrics!.collapseLines).toBe("10");
+      expect(streamingMetrics!.promptHeight).toBeLessThanOrEqual(
+        streamingMetrics!.maxCollapsedHeight
+      );
+
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        LONG_STREAMING_FIXTURE_MARKER,
+        { timeout: 30_000 }
+      );
+      await expect(page.locator(".chat-transcript")).not.toHaveClass(/is-generating-response/, {
+        timeout: 15_000,
+      });
+      await page.reload();
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+      const persistedLoomTab = page.locator('[data-testid^="sidebar-loom-"]').first();
+      await expect(persistedLoomTab).toBeVisible({ timeout: 30_000 });
+      await persistedLoomTab.click();
+      await expect(page.locator(".qa-item")).toHaveCount(1, { timeout: 30_000 });
+      const reloadedMetrics = await readPromptMetrics();
+      expect(reloadedMetrics).not.toBeNull();
+      expect(reloadedMetrics!.expanded).toBe("false");
+      expect(reloadedMetrics!.isClamped).toBe(true);
+      expect(reloadedMetrics!.collapseLines).toBe("10");
+      expect(reloadedMetrics!.promptHeight).toBeLessThanOrEqual(
+        reloadedMetrics!.maxCollapsedHeight
+      );
+      await page.waitForTimeout(500);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+    }
+  });
+
   test("holds anchored viewport until the real response tail reaches the composer", async ({ page }) => {
     test.setTimeout(120_000);
     const scenario = await createServiceTestHarness({
       deterministicProvider: "event-sourcing",
-      deterministicStreamChunkDelayMs: 60,
+      deterministicResponseMode: "long-streaming-scroll",
+      deterministicChunkMode: "word",
+      deterministicStreamChunkDelayMs: 10,
       deterministicThinkingDelayMs: 1_500,
       startApp: true,
     });
@@ -80,13 +287,15 @@ test.describe("[product-service-backed] Main composer submit", () => {
         const transcript = item.closest(".chat-transcript");
         const userTurn = item.querySelector<HTMLElement>("[data-prompt-response-id]");
         const tail = item.querySelector<HTMLElement>("[data-response-tail]");
+        const contentEnd = document.querySelector<HTMLElement>("[data-transcript-content-end]");
         const composer = document.querySelector<HTMLElement>(
           ".prompt-composer.active:not(.centered)[data-testid='prompt-composer']"
         );
-        if (!transcript || !userTurn || !tail || !composer) return null;
+        if (!transcript || !userTurn || !tail || !contentEnd || !composer) return null;
         const transcriptRect = transcript.getBoundingClientRect();
         const userTurnRect = userTurn.getBoundingClientRect();
         const tailRect = tail.getBoundingClientRect();
+        const contentEndRect = contentEnd.getBoundingClientRect();
         const composerRect = composer.getBoundingClientRect();
         const safeBottom = Math.min(transcriptRect.bottom, composerRect.top);
         return {
@@ -95,6 +304,7 @@ test.describe("[product-service-backed] Main composer submit", () => {
           composerTop: composerRect.top,
           safeBottom,
           visibleGap: safeBottom - tailRect.bottom,
+          contentEndVisibleGap: safeBottom - contentEndRect.bottom,
           transcriptHeight: transcriptRect.height,
           scrollTop: (transcript as HTMLElement).scrollTop,
           scrollHeight: (transcript as HTMLElement).scrollHeight,
@@ -116,18 +326,18 @@ test.describe("[product-service-backed] Main composer submit", () => {
       await page.goto(scenario.appUrl!);
       await expect(page.getByTestId("loom-sidebar")).toBeVisible();
 
-      await fillPrompt(page, `hold-overflow-seed-${Date.now()} event sourcing detay`);
+      await fillPrompt(page, `${LONG_STREAMING_FIXTURE_PROMPT} seed ${Date.now()}`);
       await page.getByRole("button", { name: "Send" }).click();
       await expect(page.locator(".assistant-message").last()).toBeVisible({ timeout: 30_000 });
       await expect(page.locator(".chat-transcript")).not.toHaveClass(/is-generating-response/, {
-        timeout: 15_000,
+        timeout: 30_000,
       });
 
       await page.locator(".chat-transcript").evaluate((el) => {
         el.scrollTop = el.scrollHeight;
       });
 
-      await fillPrompt(page, `hold-overflow-anchor-${Date.now()} event sourcing detay`);
+      await fillPrompt(page, `${LONG_STREAMING_FIXTURE_PROMPT} anchor ${Date.now()}`);
       await page.getByRole("button", { name: "Send" }).click();
       await expect(page.locator(".qa-item")).toHaveCount(2, { timeout: 30_000 });
 
@@ -168,13 +378,114 @@ test.describe("[product-service-backed] Main composer submit", () => {
         expect(heldAgainMetrics!.scrollTop).toBeCloseTo(heldScrollTop, 1);
       }
 
-      await expect(page.locator(".assistant-message").last()).toContainText("const state = replay", {
-        timeout: 15_000,
-      });
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        LONG_STREAMING_FIXTURE_MARKER,
+        { timeout: 30_000 }
+      );
       const finalMetrics = await readLatestTurnMetrics();
       expect(finalMetrics).not.toBeNull();
-      expect(finalMetrics!.visibleGap).toBeLessThanOrEqual(28);
+      expect(finalMetrics!.contentEndVisibleGap).toBeGreaterThanOrEqual(-20);
+      expect(finalMetrics!.contentEndVisibleGap).toBeLessThanOrEqual(80);
       expect(finalMetrics!.scrollTop).toBeGreaterThan(heldScrollTop);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+    }
+  });
+
+  test("tiny manual scroll pauses streaming follow but completion snaps real content end into view", async ({ page }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      deterministicResponseMode: "long-streaming-scroll",
+      deterministicChunkMode: "word",
+      deterministicStreamChunkDelayMs: 10,
+      deterministicThinkingDelayMs: 200,
+      startApp: true,
+    });
+
+    const readEndMetrics = () =>
+      page.evaluate(() => {
+        const transcript = document.querySelector<HTMLElement>(".chat-transcript");
+        const marker = document.querySelector<HTMLElement>("[data-transcript-content-end]");
+        const composer = document.querySelector<HTMLElement>(
+          ".prompt-composer.active:not(.centered)[data-testid='prompt-composer']"
+        );
+        if (!transcript || !marker || !composer) return null;
+        const transcriptRect = transcript.getBoundingClientRect();
+        const markerRect = marker.getBoundingClientRect();
+        const composerRect = composer.getBoundingClientRect();
+        const safeBottom = Math.min(transcriptRect.bottom, composerRect.top);
+        return {
+          isGenerating: transcript.classList.contains("is-generating-response"),
+          markerBottom: markerRect.bottom,
+          safeBottom,
+          visibleGap: safeBottom - markerRect.bottom,
+          scrollTop: transcript.scrollTop,
+        };
+      });
+
+    try {
+      await page.addInitScript(() => {
+        window.localStorage.setItem(
+          "loom-ai-app-settings-v1",
+          JSON.stringify({
+            mockDataEnabled: false,
+            modelResponseMode: "thinking",
+          })
+        );
+      });
+      await page.setViewportSize({ width: 500, height: 784 });
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await fillPrompt(page, `${LONG_STREAMING_FIXTURE_PROMPT} manual-scroll ${Date.now()}`);
+      await page.getByRole("button", { name: "Send" }).click();
+
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        "Fixture setup",
+        { timeout: 30_000 }
+      );
+
+      await expect
+        .poll(
+          async () => {
+            const metrics = await readEndMetrics();
+            return metrics?.scrollTop ?? 0;
+          },
+          { timeout: 10_000 }
+        )
+        .toBeGreaterThan(20);
+
+      const beforeManual = await readEndMetrics();
+      expect(beforeManual).not.toBeNull();
+      await page.locator(".chat-transcript").hover();
+      await page.mouse.wheel(0, -32);
+      await page.waitForTimeout(120);
+      const afterManual = await readEndMetrics();
+      expect(afterManual).not.toBeNull();
+      expect(afterManual!.scrollTop).toBeLessThanOrEqual(beforeManual!.scrollTop);
+
+      await page.waitForTimeout(700);
+      const duringStream = await readEndMetrics();
+      expect(duringStream).not.toBeNull();
+      if (duringStream!.isGenerating) {
+        expect(duringStream!.scrollTop).toBeLessThanOrEqual(afterManual!.scrollTop + 24);
+      }
+
+      await expect(page.locator(".chat-transcript")).not.toHaveClass(/is-generating-response/, {
+        timeout: 30_000,
+      });
+      await page.waitForTimeout(700);
+
+      const completed = await readEndMetrics();
+      expect(completed).not.toBeNull();
+      expect(completed!.visibleGap).toBeGreaterThanOrEqual(-20);
+      expect(completed!.visibleGap).toBeLessThanOrEqual(80);
+      expect(completed!.scrollTop).toBeGreaterThan(afterManual!.scrollTop);
+      await page.waitForTimeout(1_000);
     } finally {
       const cleanup = await scenario.cleanup();
       expect(cleanup.serviceStopped).toBe(true);
@@ -187,6 +498,8 @@ test.describe("[product-service-backed] Main composer submit", () => {
     test.setTimeout(120_000);
     const scenario = await createServiceTestHarness({
       deterministicProvider: "event-sourcing",
+      deterministicResponseMode: "long-streaming-scroll",
+      deterministicChunkMode: "phrase",
       deterministicStreamChunkDelayMs: 8,
       deterministicThinkingDelayMs: 2_000,
       startApp: true,
@@ -206,17 +519,18 @@ test.describe("[product-service-backed] Main composer submit", () => {
       await page.goto(scenario.appUrl!);
       await expect(page.getByTestId("loom-sidebar")).toBeVisible();
 
-      await fillPrompt(page, `Initial scroll anchor setup ${Date.now()} explain Event Sourcing with details`);
+      await fillPrompt(page, `${LONG_STREAMING_FIXTURE_PROMPT} initial ${Date.now()}`);
       await page.getByRole("button", { name: "Send" }).click();
-      await expect(page.locator(".assistant-message").last()).toContainText("Event Sourcing", {
-        timeout: 30_000,
-      });
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        LONG_STREAMING_FIXTURE_MARKER,
+        { timeout: 30_000 }
+      );
 
       await page.locator(".chat-transcript").evaluate((element) => {
         element.scrollTop = element.scrollHeight;
       });
 
-      await fillPrompt(page, "Second prompt should anchor near top while the Event Sourcing answer starts");
+      await fillPrompt(page, `${LONG_STREAMING_FIXTURE_PROMPT} second anchor ${Date.now()}`);
       await page.getByRole("button", { name: "Send" }).click();
       await expect(page.locator(".qa-item")).toHaveCount(2, { timeout: 30_000 });
       await expect(page.locator(".thinking-panel.is-running").last()).toBeVisible({
@@ -262,6 +576,10 @@ test.describe("[product-service-backed] Main composer submit", () => {
       expect(latestTurnMetrics!.promptTop).toBeLessThanOrEqual(300);
       expect(latestTurnMetrics!.assistantTop).toBeGreaterThan(latestTurnMetrics!.promptBottom);
       expect(latestTurnMetrics!.assistantTop).toBeLessThan(latestTurnMetrics!.transcriptHeight);
+      await expect(page.locator(".chat-transcript")).not.toHaveClass(/is-generating-response/, {
+        timeout: 30_000,
+      });
+      await page.waitForTimeout(1_000);
     } finally {
       const cleanup = await scenario.cleanup();
       expect(cleanup.serviceStopped).toBe(true);
@@ -407,6 +725,8 @@ test.describe("[product-service-backed] Main composer submit", () => {
     test.setTimeout(120_000);
     const scenario = await createServiceTestHarness({
       deterministicProvider: "event-sourcing",
+      deterministicResponseMode: "long-streaming-scroll",
+      deterministicChunkMode: "phrase",
       deterministicStreamChunkDelayMs: 4,
       deterministicThinkingDelayMs: 200,
       startApp: true,
@@ -422,14 +742,17 @@ test.describe("[product-service-backed] Main composer submit", () => {
       await page.goto(scenario.appUrl!);
       await expect(page.getByTestId("loom-sidebar")).toBeVisible();
 
-      await fillPrompt(page, `scroll-rules-d-${Date.now()} event sourcing detay`);
+      await fillPrompt(page, `${LONG_STREAMING_FIXTURE_PROMPT} final-tail ${Date.now()}`);
       await page.getByRole("button", { name: "Send" }).click();
 
       // Wait for generation to fully complete.
       await expect(page.locator(".assistant-message").last()).toContainText(
-        "Event Sourcing",
+        LONG_STREAMING_FIXTURE_MARKER,
         { timeout: 30_000 }
       );
+      await expect(page.getByText(LONG_STREAMING_FIXTURE_MARKER).last()).toBeVisible({
+        timeout: 10_000,
+      });
       await expect(page.locator(".chat-transcript")).not.toHaveClass(
         /is-generating-response/,
         { timeout: 15_000 }
@@ -439,31 +762,36 @@ test.describe("[product-service-backed] Main composer submit", () => {
       // must be within the safe viewport.  This marker sits after the
       // reference-strip (copy / bookmark) that appears only at completion, so
       // checking it is stricter than checking [data-response-tail] alone.
-      const visibility = await page.evaluate(() => {
-        const contentEnd = document.querySelector<HTMLElement>(
-          "[data-transcript-content-end]"
-        );
-        const composer = document.querySelector<HTMLElement>(
-          ".prompt-composer.active:not(.centered)[data-testid='prompt-composer']"
-        );
-        const transcript = document.querySelector<HTMLElement>(".chat-transcript");
-        if (!contentEnd || !composer || !transcript) return null;
-        const contentEndRect = contentEnd.getBoundingClientRect();
-        const composerRect = composer.getBoundingClientRect();
-        const transcriptRect = transcript.getBoundingClientRect();
-        const safeBottom = Math.min(transcriptRect.bottom, composerRect.top);
-        return {
-          contentEndBottom: contentEndRect.bottom,
-          safeBottom,
-          // Positive means content end is above safe bottom (visible); negative means hidden
-          margin: safeBottom - contentEndRect.bottom,
-        };
-      });
-
-      expect(visibility).not.toBeNull();
       // Content end must be AT or above the safe bottom — allow 20 px tolerance
       // for layout rounding and the 16 px gap used by scrollRealContentEndIntoSafeView.
-      expect(visibility!.margin).toBeGreaterThanOrEqual(-20);
+      await expect
+        .poll(
+          async () => {
+            const visibility = await page.evaluate(() => {
+              const contentEnd = document.querySelector<HTMLElement>(
+                "[data-transcript-content-end]"
+              );
+              const composer = document.querySelector<HTMLElement>(
+                ".prompt-composer.active:not(.centered)[data-testid='prompt-composer']"
+              );
+              const transcript = document.querySelector<HTMLElement>(".chat-transcript");
+              if (!contentEnd || !composer || !transcript) return null;
+              const contentEndRect = contentEnd.getBoundingClientRect();
+              const composerRect = composer.getBoundingClientRect();
+              const transcriptRect = transcript.getBoundingClientRect();
+              const safeBottom = Math.min(transcriptRect.bottom, composerRect.top);
+              return {
+                contentEndBottom: contentEndRect.bottom,
+                safeBottom,
+                // Positive means content end is above safe bottom (visible); negative means hidden
+                margin: safeBottom - contentEndRect.bottom,
+              };
+            });
+            return visibility?.margin ?? -999;
+          },
+          { timeout: 5_000 }
+        )
+        .toBeGreaterThanOrEqual(-20);
     } finally {
       const cleanup = await scenario.cleanup();
       expect(cleanup.serviceStopped).toBe(true);
@@ -478,7 +806,8 @@ test.describe("[product-service-backed] Main composer submit", () => {
     test.setTimeout(120_000);
     const scenario = await createServiceTestHarness({
       deterministicProvider: "event-sourcing",
-      deterministicStreamChunkDelayMs: 4,
+      deterministicResponseMode: "long-streaming-scroll",
+      deterministicStreamChunkDelayMs: 0,
       startApp: true,
     });
 
@@ -488,8 +817,8 @@ test.describe("[product-service-backed] Main composer submit", () => {
 
       // Build two completed responses so the transcript is scrollable.
       for (const seed of [
-        `scroll-rules-f1-${Date.now()} event sourcing detay`,
-        `scroll-rules-f2-${Date.now()} compaction event sourcing`,
+        `${LONG_STREAMING_FIXTURE_PROMPT} scroll-button-one ${Date.now()}`,
+        `${LONG_STREAMING_FIXTURE_PROMPT} scroll-button-two ${Date.now()}`,
       ]) {
         await fillPrompt(page, seed);
         await page.getByRole("button", { name: "Send" }).click();
@@ -511,30 +840,34 @@ test.describe("[product-service-backed] Main composer submit", () => {
 
       // Click it and verify the real content end is now visible.
       await page.locator(".scroll-to-bottom-button").click();
-      await page.waitForTimeout(500); // allow smooth scroll to settle
 
-      const afterClick = await page.evaluate(() => {
-        const marker = document.querySelector<HTMLElement>("[data-transcript-content-end]");
-        const composer = document.querySelector<HTMLElement>(
-          ".prompt-composer.active:not(.centered)[data-testid='prompt-composer']"
-        );
-        const transcript = document.querySelector<HTMLElement>(".chat-transcript");
-        if (!marker || !composer || !transcript) return null;
-        const markerRect = marker.getBoundingClientRect();
-        const composerRect = composer.getBoundingClientRect();
-        const transcriptRect = transcript.getBoundingClientRect();
-        const safeBottom = Math.min(transcriptRect.bottom, composerRect.top);
-        return {
-          markerBottom: markerRect.bottom,
-          safeBottom,
-          // Positive = marker is above safe bottom (visible); negative = hidden
-          margin: safeBottom - markerRect.bottom,
-        };
-      });
-
-      expect(afterClick).not.toBeNull();
       // Content end must be at or above the safe bottom (visible) after clicking.
-      expect(afterClick!.margin).toBeGreaterThanOrEqual(-8);
+      await expect
+        .poll(
+          async () => {
+            const afterClick = await page.evaluate(() => {
+              const marker = document.querySelector<HTMLElement>("[data-transcript-content-end]");
+              const composer = document.querySelector<HTMLElement>(
+                ".prompt-composer.active:not(.centered)[data-testid='prompt-composer']"
+              );
+              const transcript = document.querySelector<HTMLElement>(".chat-transcript");
+              if (!marker || !composer || !transcript) return null;
+              const markerRect = marker.getBoundingClientRect();
+              const composerRect = composer.getBoundingClientRect();
+              const transcriptRect = transcript.getBoundingClientRect();
+              const safeBottom = Math.min(transcriptRect.bottom, composerRect.top);
+              return {
+                markerBottom: markerRect.bottom,
+                safeBottom,
+                // Positive = marker is above safe bottom (visible); negative = hidden
+                margin: safeBottom - markerRect.bottom,
+              };
+            });
+            return afterClick?.margin ?? -999;
+          },
+          { timeout: 5_000 }
+        )
+        .toBeGreaterThanOrEqual(-8);
 
       // Button should now be hidden (we're at the real content end).
       await expect(page.locator(".scroll-to-bottom-button")).not.toBeVisible();
