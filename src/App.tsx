@@ -16979,7 +16979,7 @@ function ChatTranscript({
                           : undefined
                       }
                     >
-                      <GitFork size={13} />
+                      <WeftIcon size={13} />
                     </button>
                   </Tooltip>
                   {explorationWeftCount > 0 && (
@@ -17033,7 +17033,7 @@ function ChatTranscript({
                           }
                           onClick={() => openExplorationWeft(record)}
                         >
-                          <GitFork size={13} />
+                          <WeftIcon size={13} />
                           <span>
                             <strong>
                               {conversationTitlesById[record.childConversationId] ??
