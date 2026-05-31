@@ -20,7 +20,7 @@ const appResourcesPath = path.join(resourcesPath, "app");
 const sidecarResourcesPath = path.join(resourcesPath, "loom-service");
 const bundledWhisperSourcePath = path.join(repoRoot, "resources", "bin", "whisper");
 const bundledWhisperResourcesPath = path.join(resourcesPath, "bin", "whisper");
-const iconSourcePath = path.join(repoRoot, "public", "loom_logo.icns");
+const iconSourcePath = path.join(repoRoot, "build-assets", "loom_logo.icns");
 const bundleIconFile = "loom_logo.icns";
 const bundleIconPath = path.join(resourcesPath, bundleIconFile);
 const macEntitlementsPath = path.join(repoRoot, "electron", "entitlements.mac.plist");
@@ -31,7 +31,7 @@ const serviceBinaryPath = path.join(
   "services",
   "loom-service",
   "target",
-  "debug",
+  "release",
   "loom-service"
 );
 
@@ -167,7 +167,7 @@ async function copyBundledWhisperRuntimeIfPresent() {
 async function packageDevApp() {
   await assertExists(electronTemplateApp, "Electron app template");
   await assertExists(path.join(repoRoot, "dist", "index.html"), "React build");
-  await assertExists(serviceBinaryPath, "loom-service debug binary");
+  await assertExists(serviceBinaryPath, "loom-service release binary");
 
   await fs.rm(packageRoot, { recursive: true, force: true });
   await fs.mkdir(packageRoot, { recursive: true });
