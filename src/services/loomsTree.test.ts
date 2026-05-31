@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
+  collectCollapsibleIds,
+  collapseAllLineageIds,
   collectIds,
+  expandAllLineageIds,
   flattenLineageTree,
   focusActiveLineageIds,
   type LineageNode,
@@ -232,6 +235,163 @@ describe("focusActiveLineageIds", () => {
     const ids = visible.map((v) => v.node.id);
     expect(ids).toContain("weft-a");
     expect(ids).toContain("response-ra1");
+    expect(ids).toContain("weft-b");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collectCollapsibleIds — prerequisite for Collapse all / Focus current
+// ---------------------------------------------------------------------------
+
+describe("collectCollapsibleIds", () => {
+  it("includes Response nodes that have derived Loom children", () => {
+    const tree = mainLoomTree();
+    const ids = collectCollapsibleIds(tree);
+    expect(ids).toContain("response-r1");
+    expect(ids).toContain("response-ra1");
+  });
+
+  it("includes Weft/Loom nodes that have response children", () => {
+    const tree = mainLoomTree();
+    const ids = collectCollapsibleIds(tree);
+    expect(ids).toContain("weft-a");
+    expect(ids).toContain("root");
+  });
+
+  it("excludes leaf nodes with no children", () => {
+    const tree = mainLoomTree();
+    const ids = collectCollapsibleIds(tree);
+    expect(ids).not.toContain("weft-b");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// collapseAllLineageIds — "Collapse all" button
+// ---------------------------------------------------------------------------
+
+describe("collapseAllLineageIds", () => {
+  it("collapses all nodes with children except the root", () => {
+    const tree = mainLoomTree();
+    const collapsed = collapseAllLineageIds(tree);
+
+    expect(collapsed.has("root")).toBe(false);
+    expect(collapsed.has("response-r1")).toBe(true);
+    expect(collapsed.has("weft-a")).toBe(true);
+    expect(collapsed.has("response-ra1")).toBe(true);
+    expect(collapsed.has("weft-b")).toBe(false);
+  });
+
+  it("hides all descendants below root after Collapse all", () => {
+    const tree = mainLoomTree();
+    const collapsed = collapseAllLineageIds(tree);
+    const visible = flattenLineageTree(tree, collapsed, ACTIVE_PATH);
+    const ids = visible.map((v) => v.node.id);
+
+    expect(ids).toContain("root");
+    expect(ids).toContain("response-r1");
+    expect(ids).not.toContain("weft-a");
+    expect(ids).not.toContain("response-ra1");
+    expect(ids).not.toContain("weft-b");
+  });
+
+  it("Expand all after Collapse all restores the full tree", () => {
+    const tree = mainLoomTree();
+    const collapsedAll = collapseAllLineageIds(tree);
+    const expandedAll = expandAllLineageIds();
+
+    const afterExpand = flattenLineageTree(tree, expandedAll, ACTIVE_PATH);
+    const ids = afterExpand.map((v) => v.node.id);
+
+    expect(ids).toContain("root");
+    expect(ids).toContain("response-r1");
+    expect(ids).toContain("weft-a");
+    expect(ids).toContain("response-ra1");
+    expect(ids).toContain("weft-b");
+    expect(new Set(ids).size).toBe(ids.length);
+    expect(collapsedAll.size).toBeGreaterThan(0);
+    expect(expandedAll.size).toBe(0);
+  });
+
+  it("Collapse all after Expand all hides all branches again", () => {
+    const tree = mainLoomTree();
+    const collapsed = collapseAllLineageIds(tree);
+    const visible = flattenLineageTree(tree, collapsed, ACTIVE_PATH);
+    expect(visible.map((v) => v.node.id)).not.toContain("weft-b");
+  });
+
+  it("no duplicate rows after repeated Collapse/Expand cycles", () => {
+    const tree = mainLoomTree();
+    for (let i = 0; i < 3; i++) {
+      const c = flattenLineageTree(tree, collapseAllLineageIds(tree), ACTIVE_PATH).map((v) => v.node.id);
+      const e = flattenLineageTree(tree, expandAllLineageIds(), ACTIVE_PATH).map((v) => v.node.id);
+      expect(new Set(c).size).toBe(c.length);
+      expect(new Set(e).size).toBe(e.length);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// expandAllLineageIds — "Expand all" button
+// ---------------------------------------------------------------------------
+
+describe("expandAllLineageIds", () => {
+  it("returns an empty set", () => {
+    expect(expandAllLineageIds().size).toBe(0);
+  });
+
+  it("makes the full recursive tree visible regardless of prior collapse state", () => {
+    const tree = mainLoomTree();
+    const heavyCollapse = focusActiveLineageIds(tree, "loom://root");
+    expect(heavyCollapse.size).toBeGreaterThan(0);
+
+    const visible = flattenLineageTree(tree, expandAllLineageIds(), ACTIVE_PATH);
+    const ids = visible.map((v) => v.node.id);
+    expect(ids).toContain("weft-a");
+    expect(ids).toContain("response-ra1");
+    expect(ids).toContain("weft-b");
+  });
+});
+
+// ---------------------------------------------------------------------------
+// focusActiveLineageIds — "Focus current" bulk action edge cases
+// ---------------------------------------------------------------------------
+
+describe("focusActiveLineageIds — bulk action edge cases", () => {
+  it("works when active node is inside a grandchild Weft", () => {
+    const tree = mainLoomTree();
+    const collapsed = focusActiveLineageIds(tree, "loom://wefts/weft-b");
+
+    expect(collapsed.has("root")).toBe(false);
+    expect(collapsed.has("response-r1")).toBe(false);
+    expect(collapsed.has("weft-a")).toBe(false);
+    expect(collapsed.has("response-ra1")).toBe(false);
+    expect(collapsed.has("weft-b")).toBe(false);
+  });
+
+  it("collapses sibling branches when active node is nested", () => {
+    const siblingWeft = makeNode("weft-sibling", "loom", "loom://wefts/sibling");
+    const siblingResp = makeNode("response-r2", "response", "loom://r/r2", [siblingWeft]);
+    const weftB = makeNode("weft-b", "loom", "loom://wefts/weft-b");
+    const responseRA1 = makeNode("response-ra1", "response", "loom://r/ra1", [weftB]);
+    const weftA = makeNode("weft-a", "loom", "loom://wefts/weft-a", [responseRA1]);
+    const responseR1 = makeNode("response-r1", "response", "loom://r/r1", [weftA]);
+    const root = makeNode("root", "conversation", "loom://root", [responseR1, siblingResp]);
+
+    const collapsed = focusActiveLineageIds(root, "loom://wefts/weft-b");
+
+    expect(collapsed.has("response-r2")).toBe(true);
+    expect(collapsed.has("response-r1")).toBe(false);
+    expect(collapsed.has("weft-a")).toBe(false);
+  });
+
+  it("Expand all after Focus current restores all branches", () => {
+    const tree = mainLoomTree();
+    const afterFocus = focusActiveLineageIds(tree, ACTIVE_PATH);
+    expect(afterFocus.size).toBeGreaterThan(0);
+
+    const visible = flattenLineageTree(tree, expandAllLineageIds(), ACTIVE_PATH);
+    const ids = visible.map((v) => v.node.id);
+    expect(ids).toContain("weft-a");
     expect(ids).toContain("weft-b");
   });
 });

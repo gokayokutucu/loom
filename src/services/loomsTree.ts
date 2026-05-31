@@ -102,3 +102,24 @@ function findNodeById(root: LineageNode, id: string): LineageNode | null {
   }
   return null;
 }
+
+/**
+ * Returns the collapsed-IDs Set for "Collapse all".
+ *
+ * Collapses every node that has children, except the root itself so the
+ * panel never becomes completely blank. Response nodes with derived Loom
+ * children (wefts/revisions) and Weft/Revision nodes with child responses
+ * are all included because `collectCollapsibleIds` is fully recursive.
+ */
+export function collapseAllLineageIds(root: LineageNode): Set<string> {
+  const all = collectCollapsibleIds(root);
+  return new Set(all.filter((id) => id !== root.id));
+}
+
+/**
+ * Returns an empty Set — convenience alias for "Expand all".
+ * Clearing collapsedIds restores the full recursive tree.
+ */
+export function expandAllLineageIds(): Set<string> {
+  return new Set();
+}

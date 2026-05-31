@@ -24,6 +24,8 @@ import {
   Brain,
   Check,
   ChevronDown,
+  ChevronsDown,
+  ChevronsUp,
   ChevronsUpDown,
   Clock3,
   Compass,
@@ -45,6 +47,7 @@ import {
   Info,
   Layers,
   Lightbulb,
+  LocateFixed,
   Link2,
   LoaderCircle,
   Lock,
@@ -317,6 +320,11 @@ import { AddressHintPopover } from "./components/AddressHintPopover";
 import { AskPopup, type AskPopupState } from "./components/AskPopup";
 import { AssistantMarkdownContent } from "./components/AssistantMarkdownContent";
 import { WeftIcon } from "./components/WeftIcon";
+import {
+  collapseAllLineageIds,
+  expandAllLineageIds,
+  focusActiveLineageIds,
+} from "./services/loomsTree";
 import { BookmarkView } from "./components/BookmarkView";
 import { ChangeIconPopover } from "./components/ChangeIconPopover";
 import { ContextMenu, type ContextMenuState } from "./components/ContextMenu";
@@ -21652,18 +21660,7 @@ function LoomsPanel({
 
   function focusActiveLineage() {
     if (!root) return;
-    function findNode(node: LineageNode, id: string): LineageNode | null {
-      if (node.id === id) return node;
-      for (const child of node.children) {
-        const match = findNode(child, id);
-        if (match) return match;
-      }
-      return null;
-    }
-    setCollapsedIds(new Set(collectCollapsibleIds(root).filter((id) => {
-      const node = findNode(root, id);
-      return node ? !containsActive(node) : false;
-    })));
+    setCollapsedIds(focusActiveLineageIds(root, activePath));
   }
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
@@ -21728,8 +21725,27 @@ function LoomsPanel({
   return (
     <div className="looms-panel" onKeyDown={handleKeyDown} tabIndex={0}>
       <div className="looms-toolbar">
-        <button onClick={focusActiveLineage}>Focus current</button>
-        <button onClick={() => setCollapsedIds(new Set())}>Expand all</button>
+        <button
+          onClick={focusActiveLineage}
+          title="Focus current — show only the active Loom path and collapse other branches"
+          aria-label="Focus current"
+        >
+          <LocateFixed size={13} />
+        </button>
+        <button
+          onClick={() => root && setCollapsedIds(collapseAllLineageIds(root))}
+          title="Collapse all — collapse all branches except the root"
+          aria-label="Collapse all"
+        >
+          <ChevronsUp size={13} />
+        </button>
+        <button
+          onClick={() => setCollapsedIds(expandAllLineageIds())}
+          title="Expand all — expand every branch in the Flow tree"
+          aria-label="Expand all"
+        >
+          <ChevronsDown size={13} />
+        </button>
         <span className="looms-depth-indicator">
           Lane {laneWindowStart + 1}-{Math.min(laneWindowEnd + 1, maxLane + 1)} / {maxLane + 1}
         </span>
