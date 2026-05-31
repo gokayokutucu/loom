@@ -316,6 +316,7 @@ import {
 import { AddressHintPopover } from "./components/AddressHintPopover";
 import { AskPopup, type AskPopupState } from "./components/AskPopup";
 import { AssistantMarkdownContent } from "./components/AssistantMarkdownContent";
+import { WeftIcon } from "./components/WeftIcon";
 import { BookmarkView } from "./components/BookmarkView";
 import { ChangeIconPopover } from "./components/ChangeIconPopover";
 import { ContextMenu, type ContextMenuState } from "./components/ContextMenu";
@@ -21449,6 +21450,12 @@ function LoomsPanel({
     hideStillHint();
     setSelectedId(node.id);
     if (shouldScrollActiveLoomResponse(node)) {
+      // If this response is currently collapsed (hiding its derived Loom branches),
+      // clicking the disclosure arrow should expand it, not scroll to it.
+      if (collapsedIds.has(node.id) && node.children.length > 0) {
+        toggleNode(node);
+        return;
+      }
       onVisit(nodeToLink(node));
       return;
     }
@@ -21743,7 +21750,7 @@ function LoomsPanel({
             node.type === "conversation"
               ? Globe2
               : node.type === "loom"
-                ? GitFork
+                ? WeftIcon
                 : node.type === "quick"
                   ? MessageSquare
                   : FileText;
