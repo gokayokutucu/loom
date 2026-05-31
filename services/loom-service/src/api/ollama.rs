@@ -449,11 +449,8 @@ mod tests {
     fn parser_handles_generate_format_chunk() {
         // /api/generate stream: {"response":"...","done":false}
         let mut buffer = String::new();
-        let chunks = parse_ndjson_bytes(
-            &mut buffer,
-            b"{\"response\":\"Hello\",\"done\":false}\n",
-        )
-        .expect("parse generate chunk");
+        let chunks = parse_ndjson_bytes(&mut buffer, b"{\"response\":\"Hello\",\"done\":false}\n")
+            .expect("parse generate chunk");
 
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].content.as_deref(), Some("Hello"));
@@ -507,12 +504,12 @@ mod tests {
     fn parser_surfaces_ollama_error_chunk_as_error() {
         // Ollama sends {"error":"..."} when generation fails
         let mut buffer = String::new();
-        let result = parse_ndjson_bytes(
-            &mut buffer,
-            b"{\"error\":\"model not found\"}\n",
-        );
+        let result = parse_ndjson_bytes(&mut buffer, b"{\"error\":\"model not found\"}\n");
 
-        assert!(result.is_err(), "error chunk must not be silently swallowed");
+        assert!(
+            result.is_err(),
+            "error chunk must not be silently swallowed"
+        );
         let err = result.unwrap_err();
         assert!(
             err.message.contains("Ollama returned an error"),
@@ -537,18 +534,12 @@ mod tests {
     fn parser_accumulates_partial_lines_across_chunks() {
         // Partial NDJSON split across two byte chunks — should combine correctly
         let mut buffer = String::new();
-        let first = parse_ndjson_bytes(
-            &mut buffer,
-            b"{\"message\":{\"content\":\"par",
-        )
-        .expect("first partial chunk");
+        let first = parse_ndjson_bytes(&mut buffer, b"{\"message\":{\"content\":\"par")
+            .expect("first partial chunk");
         assert!(first.is_empty(), "no complete lines yet");
 
-        let second = parse_ndjson_bytes(
-            &mut buffer,
-            b"tial\"},\"done\":false}\n",
-        )
-        .expect("completing chunk");
+        let second = parse_ndjson_bytes(&mut buffer, b"tial\"},\"done\":false}\n")
+            .expect("completing chunk");
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].content.as_deref(), Some("partial"));
     }

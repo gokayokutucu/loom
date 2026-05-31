@@ -2003,13 +2003,35 @@ mod tests {
         // Current weft response aligns with current weft
         assert_eq!(current_weft_node.lane, weft_response_node.lane);
         // Position x differs between origin response and current weft
-        let origin_x = origin_response_node.position.as_ref().expect("origin-response position").x;
-        let weft_x = current_weft_node.position.as_ref().expect("current-weft position").x;
-        assert_ne!(origin_x, weft_x, "Origin Response x must differ from Current Weft x for fork edge");
+        let origin_x = origin_response_node
+            .position
+            .as_ref()
+            .expect("origin-response position")
+            .x;
+        let weft_x = current_weft_node
+            .position
+            .as_ref()
+            .expect("current-weft position")
+            .x;
+        assert_ne!(
+            origin_x, weft_x,
+            "Origin Response x must differ from Current Weft x for fork edge"
+        );
         // Origin response is above current weft (lower depth = smaller y)
-        let origin_y = origin_response_node.position.as_ref().expect("origin-response position").y;
-        let weft_y = current_weft_node.position.as_ref().expect("current-weft position").y;
-        assert!(origin_y < weft_y, "Origin Response must be above Current Weft");
+        let origin_y = origin_response_node
+            .position
+            .as_ref()
+            .expect("origin-response position")
+            .y;
+        let weft_y = current_weft_node
+            .position
+            .as_ref()
+            .expect("current-weft position")
+            .y;
+        assert!(
+            origin_y < weft_y,
+            "Origin Response must be above Current Weft"
+        );
     }
 
     #[tokio::test]
@@ -2092,10 +2114,22 @@ mod tests {
             .expect("current Weft B response node");
 
         // Roles
-        assert_eq!(graph_role(&graph, "loom:weft-a").as_deref(), Some("origin-context"));
-        assert_eq!(graph_role(&graph, "response:weft-a-r1").as_deref(), Some("origin-response"));
-        assert_eq!(graph_role(&graph, "loom:weft-b").as_deref(), Some("current-root"));
-        assert_eq!(graph_role(&graph, "response:weft-b-r1").as_deref(), Some("child-response"));
+        assert_eq!(
+            graph_role(&graph, "loom:weft-a").as_deref(),
+            Some("origin-context")
+        );
+        assert_eq!(
+            graph_role(&graph, "response:weft-a-r1").as_deref(),
+            Some("origin-response")
+        );
+        assert_eq!(
+            graph_role(&graph, "loom:weft-b").as_deref(),
+            Some("current-root")
+        );
+        assert_eq!(
+            graph_role(&graph, "response:weft-b-r1").as_deref(),
+            Some("child-response")
+        );
 
         // Fork layout: origin context lane != current weft lane
         assert_eq!(
@@ -2112,18 +2146,38 @@ mod tests {
         );
 
         // Position geometry confirms fork
-        let origin_x = origin_response_node.position.as_ref().expect("origin response position").x;
-        let weft_x = current_weft_node.position.as_ref().expect("current weft position").x;
-        assert_ne!(origin_x, weft_x, "Origin Response x and Current Weft x must differ (fork geometry)");
-        let origin_y = origin_response_node.position.as_ref().expect("origin response position").y;
-        let weft_y = current_weft_node.position.as_ref().expect("current weft position").y;
-        assert!(origin_y < weft_y, "Origin Response must sit above Current Weft");
+        let origin_x = origin_response_node
+            .position
+            .as_ref()
+            .expect("origin response position")
+            .x;
+        let weft_x = current_weft_node
+            .position
+            .as_ref()
+            .expect("current weft position")
+            .x;
+        assert_ne!(
+            origin_x, weft_x,
+            "Origin Response x and Current Weft x must differ (fork geometry)"
+        );
+        let origin_y = origin_response_node
+            .position
+            .as_ref()
+            .expect("origin response position")
+            .y;
+        let weft_y = current_weft_node
+            .position
+            .as_ref()
+            .expect("current weft position")
+            .y;
+        assert!(
+            origin_y < weft_y,
+            "Origin Response must sit above Current Weft"
+        );
 
         // Edges
         assert!(graph.edges.iter().any(|e| {
-            e.kind == "weft_origin"
-                && e.source == "response:weft-a-r1"
-                && e.target == "loom:weft-b"
+            e.kind == "weft_origin" && e.source == "response:weft-a-r1" && e.target == "loom:weft-b"
         }));
         assert!(graph.edges.iter().any(|e| {
             e.kind == "loom_response"
