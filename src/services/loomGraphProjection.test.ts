@@ -131,7 +131,9 @@ describe("mergeLoomGraphAncestryStep", () => {
           graphRole: "origin-context",
           hasParentAncestry: true,
           depth: 0,
-          position: { x: 0, y: 0 },
+          // Service places origin context at lane -1 (x=-360) so the
+          // weft_origin edge to the current Weft renders as a diagonal fork.
+          position: { x: -360, y: 0 },
         }),
         makeNode("response", {
           id: originResponseId,
@@ -140,7 +142,7 @@ describe("mergeLoomGraphAncestryStep", () => {
           title: "Origin response from B",
           graphRole: "origin-response",
           depth: 1,
-          position: { x: 0, y: 300 },
+          position: { x: -360, y: 300 },
         }),
         makeNode("weft", {
           id: currentWeftId,
@@ -295,6 +297,44 @@ describe("mergeLoomGraphAncestryStep", () => {
     expect(secondParent?.position.x).not.toBe(firstParent?.position.x);
     expect(occupiedPositions.size).toBe(second.nodes.length);
     expect(second.nodes.some((node) => node.responseId === "unrelated-response")).toBe(false);
+  });
+
+  it("places expanded ancestor in a lane distinct from origin-context and current-weft", () => {
+    // The origin-context node is now at x=-360 (lane -1) and the current-weft is at
+    // x=0 (lane 0).  Expanding the ancestor should not collide with either.
+    const originId = loomGraphRootNodeId("weft-b");
+    const projection = mergeLoomGraphAncestryStep(baseProjection(), originId, {
+      loomId: "weft-b",
+      hasParentAncestry: false,
+      parentLoom: {
+        loomId: "loom-a",
+        title: "Loom A",
+        kind: "loom",
+        hasParentAncestry: false,
+      },
+      parentOriginResponse: {
+        loomId: "loom-a",
+        responseId: "response-a",
+        title: "Response A",
+      },
+    });
+
+    const originContextNode = projection.nodes.find((node) => node.id === originId);
+    const currentWeft = projection.nodes.find((node) => node.loomId === "weft-c" && !node.responseId);
+    const expandedParent = projection.nodes.find((node) => node.loomId === "loom-a" && !node.responseId);
+    const expandedResponse = projection.nodes.find((node) => node.responseId === "response-a");
+
+    expect(expandedParent).toBeDefined();
+    expect(expandedResponse).toBeDefined();
+    // Ancestor is in a different lane from origin-context
+    expect(expandedParent?.position.x).not.toBe(originContextNode?.position.x);
+    // Ancestor is in a different lane from current-weft
+    expect(expandedParent?.position.x).not.toBe(currentWeft?.position.x);
+    // Ancestor response shares lane with ancestor loom
+    expect(expandedResponse?.position.x).toBe(expandedParent?.position.x);
+    // All node positions are unique
+    const occupied = new Set(projection.nodes.map((n) => `${n.position.x}:${n.position.y}`));
+    expect(occupied.size).toBe(projection.nodes.length);
   });
 
   it("does not duplicate nodes or edges on repeated expansion", () => {

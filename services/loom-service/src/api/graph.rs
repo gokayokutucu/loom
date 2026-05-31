@@ -337,7 +337,7 @@ pub(crate) async fn build_graph_projection(
                         );
 
                         let mut origin_node = with_graph_role(
-                            loom_node(&origin_loom, &origin_loom_node_id, 0, 0),
+                            loom_node(&origin_loom, &origin_loom_node_id, 0, -1),
                             "origin-context",
                         );
                         set_metadata_bool(
@@ -348,7 +348,7 @@ pub(crate) async fn build_graph_projection(
                         );
                         nodes.push(origin_node);
                         nodes.push(with_graph_role(
-                            response_node(&origin_response, None, &origin_response_node_id, 1, 0),
+                            response_node(&origin_response, None, &origin_response_node_id, 1, -1),
                             "origin-response",
                         ));
                         edges.push(GraphEdge {
@@ -1969,6 +1969,166 @@ mod tests {
             edge.kind == "loom_response"
                 && edge.source == "loom:weft-1"
                 && edge.target == "response:weft-response"
+        }));
+
+        // Fork layout: origin context must be in a different lane from current-root
+        let origin_loom_node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "loom:origin-loom")
+            .expect("origin-loom node");
+        let origin_response_node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "response:origin-response")
+            .expect("origin-response node");
+        let current_weft_node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "loom:weft-1")
+            .expect("current-weft node");
+        let weft_response_node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "response:weft-response")
+            .expect("weft-response node");
+
+        // Origin loom and origin response share the same lane (parent branch)
+        assert_eq!(origin_loom_node.lane, origin_response_node.lane);
+        // Current weft is in a different lane from origin context
+        assert_ne!(
+            origin_response_node.lane, current_weft_node.lane,
+            "Origin Response and Current Weft must be in different lanes for fork layout"
+        );
+        // Current weft response aligns with current weft
+        assert_eq!(current_weft_node.lane, weft_response_node.lane);
+        // Position x differs between origin response and current weft
+        let origin_x = origin_response_node.position.as_ref().expect("origin-response position").x;
+        let weft_x = current_weft_node.position.as_ref().expect("current-weft position").x;
+        assert_ne!(origin_x, weft_x, "Origin Response x must differ from Current Weft x for fork edge");
+        // Origin response is above current weft (lower depth = smaller y)
+        let origin_y = origin_response_node.position.as_ref().expect("origin-response position").y;
+        let weft_y = current_weft_node.position.as_ref().expect("current-weft position").y;
+        assert!(origin_y < weft_y, "Origin Response must be above Current Weft");
+    }
+
+    #[tokio::test]
+    async fn immediate_origin_context_fork_layout_for_nested_weft() {
+        // Weft-of-Weft: current weft was derived from another weft's response.
+        // The immediate origin context must render as a fork, not a vertical continuation.
+        let database = test_database().await;
+        insert_loom(&database, "loom-root", "Root Loom", "loom", None, None).await;
+        insert_response(
+            &database,
+            "loom-root",
+            "root-r1",
+            "assistant",
+            "Root answer",
+            0,
+        )
+        .await;
+        insert_loom(
+            &database,
+            "weft-a",
+            "Weft A",
+            "weft",
+            Some("loom-root"),
+            Some("root-r1"),
+        )
+        .await;
+        insert_response(
+            &database,
+            "weft-a",
+            "weft-a-r1",
+            "assistant",
+            "Weft A answer",
+            0,
+        )
+        .await;
+        // Weft B is derived from Weft A's response — this is the "nested Weft" case
+        insert_loom(
+            &database,
+            "weft-b",
+            "Weft B",
+            "weft",
+            Some("weft-a"),
+            Some("weft-a-r1"),
+        )
+        .await;
+        insert_response(
+            &database,
+            "weft-b",
+            "weft-b-r1",
+            "assistant",
+            "Weft B answer",
+            0,
+        )
+        .await;
+
+        let graph = build_graph_projection(&database, "weft-b", GraphQuery::default())
+            .await
+            .expect("nested weft graph projection");
+
+        // All expected nodes present
+        let origin_weft_node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "loom:weft-a")
+            .expect("origin Weft A node");
+        let origin_response_node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "response:weft-a-r1")
+            .expect("origin response node");
+        let current_weft_node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "loom:weft-b")
+            .expect("current Weft B node");
+        let current_response_node = graph
+            .nodes
+            .iter()
+            .find(|n| n.id == "response:weft-b-r1")
+            .expect("current Weft B response node");
+
+        // Roles
+        assert_eq!(graph_role(&graph, "loom:weft-a").as_deref(), Some("origin-context"));
+        assert_eq!(graph_role(&graph, "response:weft-a-r1").as_deref(), Some("origin-response"));
+        assert_eq!(graph_role(&graph, "loom:weft-b").as_deref(), Some("current-root"));
+        assert_eq!(graph_role(&graph, "response:weft-b-r1").as_deref(), Some("child-response"));
+
+        // Fork layout: origin context lane != current weft lane
+        assert_eq!(
+            origin_weft_node.lane, origin_response_node.lane,
+            "Origin Weft and Origin Response must share the same lane"
+        );
+        assert_ne!(
+            origin_response_node.lane, current_weft_node.lane,
+            "Origin Response lane must differ from Current Weft lane for fork layout"
+        );
+        assert_eq!(
+            current_weft_node.lane, current_response_node.lane,
+            "Current Weft response must align with Current Weft"
+        );
+
+        // Position geometry confirms fork
+        let origin_x = origin_response_node.position.as_ref().expect("origin response position").x;
+        let weft_x = current_weft_node.position.as_ref().expect("current weft position").x;
+        assert_ne!(origin_x, weft_x, "Origin Response x and Current Weft x must differ (fork geometry)");
+        let origin_y = origin_response_node.position.as_ref().expect("origin response position").y;
+        let weft_y = current_weft_node.position.as_ref().expect("current weft position").y;
+        assert!(origin_y < weft_y, "Origin Response must sit above Current Weft");
+
+        // Edges
+        assert!(graph.edges.iter().any(|e| {
+            e.kind == "weft_origin"
+                && e.source == "response:weft-a-r1"
+                && e.target == "loom:weft-b"
+        }));
+        assert!(graph.edges.iter().any(|e| {
+            e.kind == "loom_response"
+                && e.source == "loom:weft-b"
+                && e.target == "response:weft-b-r1"
         }));
     }
 

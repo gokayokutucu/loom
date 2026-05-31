@@ -567,6 +567,24 @@ test.describe("[product-service-backed] Graph projection product proof", () => {
       await expect(graphShell.locator(".loom-graph-node--loom").filter({ hasText: rootLoom!.title }))
         .toHaveCount(0);
 
+      // Immediate origin context fork layout: origin response must be in a different
+      // horizontal lane from the current Weft C so the weft_origin edge renders as a
+      // diagonal fork rather than a straight vertical continuation.
+      const immediateOriginResponseNode = graphShell
+        .locator(".loom-graph-node--response")
+        .filter({ hasText: weftBOriginResponse!.question });
+      const currentWeftCNode = graphShell
+        .locator(".loom-graph-node--weft")
+        .filter({ hasText: weftCDetail.title });
+      await expect(immediateOriginResponseNode).toBeVisible();
+      await expect(currentWeftCNode).toBeVisible();
+      const immediateOriginResponseBox = await immediateOriginResponseNode.boundingBox();
+      const currentWeftCBox = await currentWeftCNode.boundingBox();
+      expect(immediateOriginResponseBox).toBeTruthy();
+      expect(currentWeftCBox).toBeTruthy();
+      expect(immediateOriginResponseBox!.x).not.toBe(currentWeftCBox!.x);
+      expect(immediateOriginResponseBox!.y).toBeLessThan(currentWeftCBox!.y);
+
       const ancestryButton = graphShell.getByRole("button", { name: "Show parent ancestry" });
       await expect(ancestryButton).toBeVisible();
       await expect(ancestryButton).toBeEnabled();
