@@ -1,6 +1,6 @@
 # Product Positioning + V1 Scope
 
-**Product Name**: Loom AI\
+**Product Name**: Loom\
 **Document Type**: Product Positioning & Scope Definition\
 **Version**: Draft 1.0\
 **Date**: 2026/04/27
@@ -9,11 +9,11 @@
 
 ## 1. Product Thesis
 
-Loom AI starts as an **AI Loom Browser**.
+Loom starts as an **AI Loom Browser**.
 
 It is not positioned first as a chatbot, not first as a generic AI workspace, and not first as an AI operating system. Its initial purpose is more precise:
 
-> **Loom AI turns linear AI chats into a navigable personal web.**
+> **Loom turns linear AI chats into a navigable personal web.**
 
 ### 1.1 Document Boundary
 
@@ -37,9 +37,9 @@ Users already generate a large amount of knowledge through AI Looms, but current
 - how two different Looms relate to each other
 - how to revisit or compare prior reasoning without copying and pasting fragments manually
 
-Loom AI treats AI outputs as **addressable knowledge objects** rather than disposable text blocks.
+Loom treats AI outputs as **addressable knowledge objects** rather than disposable text blocks.
 
-In Loom AI:
+In Loom:
 
 - a **Loom** behaves like a site
 - a **Response / Q+A item** behaves like a page
@@ -58,7 +58,7 @@ This is why the correct primary mental model is not “wefted chat app,” but:
 
 ### 2.1 Primary Positioning
 
-**Loom AI is a browser for AI Looms.**
+**Loom is a browser for AI Looms.**
 
 It allows users to:
 
@@ -69,9 +69,9 @@ It allows users to:
 - revisit prior reasoning through **History** and deep links
 - optionally switch to a **Graph View** to inspect relationships visually
 
-### 2.2 What Loom AI is not in V1
+### 2.2 What Loom is not in V1
 
-Loom AI V1 is **not** positioned as:
+Loom V1 is **not** positioned as:
 
 - a foundational model product
 - a ChatGPT replacement based on model quality
@@ -111,9 +111,9 @@ Most AI chat interfaces are still fundamentally linear:
 
 This structure works for short exchanges but breaks down for deeper usage.
 
-### 3.2 Pain Points Loom AI Solves
+### 3.2 Pain Points Loom Solves
 
-Loom AI exists to solve the following concrete problems:
+Loom exists to solve the following concrete problems:
 
 1. **Navigation problem**
 
@@ -148,7 +148,7 @@ Loom AI exists to solve the following concrete problems:
 
 ## 4. Target Users
 
-Loom AI should initially focus on users who do substantial thinking with AI, not casual one-off users.
+Loom should initially focus on users who do substantial thinking with AI, not casual one-off users.
 
 ### 4.1 Primary Users
 
@@ -186,7 +186,7 @@ These users:
 
 ### 5.1 The Local Web Model
 
-Loom AI is built on the idea that a user’s AI activity forms a **local internet**.
+Loom is built on the idea that a user’s AI activity forms a **local internet**.
 
 As the user talks to AI:
 
@@ -197,11 +197,11 @@ As the user talks to AI:
 - titles create recognizable destinations
 - history becomes meaningful
 
-Instead of leaving this information trapped in a transcript, Loom AI exposes it as a navigable system.
+Instead of leaving this information trapped in a transcript, Loom exposes it as a navigable system.
 
 ### 5.2 Mapping to Browser Concepts
 
-| Browser Concept    | Loom AI Equivalent                                              |
+| Browser Concept    | Loom Equivalent                                              |
 | ------------------ | --------------------------------------------------------------- |
 | Website            | Loom                                                    |
 | Web page           | Response / Q+A item                                             |
@@ -223,7 +223,7 @@ This metaphor is not cosmetic. It is the functional core of the UX.
 
 ### 6.1 Product Name
 
-**Loom AI**
+**Loom**
 
 ### 6.2 Approved Interaction Terms
 
@@ -316,7 +316,7 @@ This keeps the system trustworthy.
 
 ### 7.4 Weft Model
 
-Loom AI supports Wefts as anchored exploration paths.
+Loom supports Wefts as anchored exploration paths.
 
 Key ideas:
 
@@ -703,7 +703,7 @@ So Markdown link usage is **approved conceptually**, but should not be the only 
 
 ### 13.1 AI Suggestions Are Not Automatically Truth
 
-Loom AI must not blindly accept AI-generated references.
+Loom must not blindly accept AI-generated references.
 
 Rules:
 
@@ -816,7 +816,7 @@ But V1 should not try to ship all of that at once.
 
 ### 17.1 Final Positioning
 
-**Loom AI is an AI Loom Browser.**
+**Loom is an AI Loom Browser.**
 
 It turns Looms, Wefts, and responses into addressable, navigable objects that users can:
 
@@ -852,10 +852,10 @@ V1 is successful if users feel:
 
 ## 18. Final Strategic Note
 
-Loom AI should begin with one sharp promise:
+Loom should begin with one sharp promise:
 
 > **AI Looms should be navigable like the web.**
 
 This document should remain the **north-star positioning and V1 scope document**. Detailed object semantics, Weft behavior, navigation rules, and interaction contracts should be split into dedicated companion documents instead of being continuously appended here.
 
-If this is executed cleanly, Loom AI can later grow into something much larger. But that larger vision must be earned through a strong V1, not assumed before it exists.
+If this is executed cleanly, Loom can later grow into something much larger. But that larger vision must be earned through a strong V1, not assumed before it exists.

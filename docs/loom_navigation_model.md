@@ -7,7 +7,7 @@
 
 ## 1. Purpose
 
-This document defines how Loom AI navigates Looms, Responses, Bookmarks, Wefts, and graph projections.
+This document defines how Loom navigates Looms, Responses, Bookmarks, Wefts, and graph projections.
 
 It answers:
 
@@ -21,7 +21,7 @@ It answers:
 
 ## 2. Core Thesis
 
-Loom AI navigation is browser-like and session-based.
+Loom navigation is browser-like and session-based.
 
 The graph model records object identity, origin linkage, and relationships.
 The navigation model records what the user visited in the current session.
@@ -195,7 +195,7 @@ They do not automatically walk origin metadata.
 
 ## 5. Window Definitions
 
-In Loom AI, a **Window** is a bounded projection over the graph.
+In Loom, a **Window** is a bounded projection over the graph.
 It is not an owner.
 
 ### 5.1 LoomWindow

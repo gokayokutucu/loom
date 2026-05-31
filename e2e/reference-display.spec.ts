@@ -772,7 +772,7 @@ test.describe("[legacy-typescript-local] Reference display tokens", () => {
     await page.getByRole("button", { name: "Back" }).click();
     await expect(page.locator(".address-shell input")).toHaveAttribute(
       "placeholder",
-      /Loom AI navigation architecture/
+      /Loom navigation architecture/
     );
   });
 

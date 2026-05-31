@@ -109,7 +109,7 @@ test.describe("[pure-ui-rendering] Assistant response collapse", () => {
     await article.locator(".prompt-copy-trigger").click({ force: true });
     await expect
       .poll(() => page.evaluate(() => window.localStorage.getItem("loom-test-clipboard")))
-      .toContain("How should the address bar work if Loom AI is a browser for conversations?");
+      .toContain("How should the address bar work if Loom is a browser for conversations?");
 
     await article.evaluate((node) => node.scrollIntoView({ block: "start" }));
     await page.locator(".chat-transcript").evaluate((node) => {
@@ -127,7 +127,7 @@ test.describe("[pure-ui-rendering] Assistant response collapse", () => {
       )
       .toBe(topBeforeExpand);
     await expect(userMessage).toContainText(
-      "How should the address bar work if Loom AI is a browser for conversations?"
+      "How should the address bar work if Loom is a browser for conversations?"
     );
 
     await toggle.click();

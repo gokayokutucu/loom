@@ -1,4 +1,4 @@
-# Loom AI Companion Documents Order
+# Loom Companion Documents Order
 
 ## Purpose
 

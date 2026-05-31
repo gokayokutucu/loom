@@ -13,7 +13,7 @@ async function openApp(page: Page) {
 async function openArchitectureLoom(page: Page) {
   await page.getByTestId("sidebar-pinned-loom-c-architecture").click();
   await expect(page.locator(".conversation-context h1").first()).toHaveText(
-    "Loom AI navigation architecture"
+    "Loom navigation architecture"
   );
 }
 
