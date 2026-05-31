@@ -28,7 +28,7 @@ const serviceBinaryPath = path.join(
   "loom-service"
 );
 const microphoneUsageDescription =
-  "Loom AI needs microphone access for speech-to-text and voice AI interactions.";
+  "Loom needs microphone access for speech-to-text and voice AI interactions.";
 
 async function assertExists(target, label) {
   try {

@@ -16,7 +16,7 @@ function mockTimestamp(daysAgo: number, hour: number, minute: number) {
 export const conversations: Conversation[] = [
   {
     id: "c-architecture",
-    title: "Loom AI navigation architecture",
+    title: "Loom navigation architecture",
     path: "loom://loom-ai/navigation-architecture",
     folder: "Product systems",
     summary: "Browser-first navigation model, addresses, and lifecycle rules.",
@@ -186,7 +186,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
       title: "Address Bar as local AI web navigator",
       address: "loom://loom-ai/navigation-architecture/loom/browser/r-address-bar",
       question:
-        "How should the address bar work if Loom AI is a browser for conversations?",
+        "How should the address bar work if Loom is a browser for conversations?",
       answer: [
         "Treat the Address Bar as the user's primary orientation device. It should accept a Loom address, a natural-language query, or the title of a remembered answer without forcing the user to choose a search mode first.",
         "The result list should feel closer to browser autocomplete than a database search table. Each row needs a destination type, a readable title, a path, and a confidence cue such as Recent, Semantic, or Bookmark.",
@@ -339,7 +339,7 @@ export const responsesByConversation: Record<string, ResponseItem[]> = {
       id: "r-bookmark-panel",
       title: "Bookmark panel as saved destinations",
       address: "loom://product/bookmark-interaction-polish/loom/panel/r-bookmark-panel",
-      question: "How should bookmarks feel in Loom AI?",
+      question: "How should bookmarks feel in Loom?",
       answer: [
         "Bookmarks should behave like browser destinations with stable titles, readable paths, right-click menus, and drag-to-reference behavior.",
       ],
@@ -905,7 +905,7 @@ export const addressSuggestions: AddressSuggestion[] = [
   {
     id: "a-1",
     type: "conversation",
-    title: "Loom AI navigation architecture",
+    title: "Loom navigation architecture",
     subtitle: "Loom",
     path: "loom://loom-ai/navigation-architecture",
     badge: "Recent",

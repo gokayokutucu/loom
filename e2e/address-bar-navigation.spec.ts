@@ -199,11 +199,11 @@ test.describe("[legacy-typescript-local][pure-ui-rendering] Address Bar navigati
     );
 
     await expect(page.locator(".conversation-context h1").first()).toHaveText(
-      "Loom AI navigation architecture"
+      "Loom navigation architecture"
     );
     await expect(page.getByLabel("Loom Address Bar")).toHaveAttribute(
       "placeholder",
-      /Loom AI navigation architecture \/ Address Bar as local AI web navigator/
+      /Loom navigation architecture \/ Address Bar as local AI web navigator/
     );
     await expect(page.locator('[data-response-id="r-address-bar"]')).toBeVisible();
   });
@@ -219,11 +219,11 @@ test.describe("[legacy-typescript-local][pure-ui-rendering] Address Bar navigati
 
     const response = page.locator('[data-response-id="r-address-bar"]');
     await expect(page.locator(".conversation-context h1").first()).toHaveText(
-      "Loom AI navigation architecture"
+      "Loom navigation architecture"
     );
     await expect(page.getByLabel("Loom Address Bar")).toHaveAttribute(
       "placeholder",
-      /Loom AI navigation architecture \/ Address Bar as local AI web navigator/
+      /Loom navigation architecture \/ Address Bar as local AI web navigator/
     );
     await expect(response).toBeVisible();
     await expect(response).toHaveAttribute("data-response-address", promotedAddressBarUri);
@@ -242,10 +242,10 @@ test.describe("[legacy-typescript-local][pure-ui-rendering] Address Bar navigati
 
     await expect(page.getByLabel("Loom Address Bar")).toHaveAttribute(
       "placeholder",
-      /Loom AI navigation architecture \/ Address Bar as local AI web navigator/
+      /Loom navigation architecture \/ Address Bar as local AI web navigator/
     );
 
-    const expectedLoomTitle = "Loom AI navigation architecture";
+    const expectedLoomTitle = "Loom navigation architecture";
 
     await page.getByRole("button", { name: "Share" }).click();
     const shareMenu = page.getByRole("menu", { name: "Share current Loom" });

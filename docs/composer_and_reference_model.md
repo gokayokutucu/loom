@@ -7,7 +7,7 @@
 
 ## 1. Purpose
 
-This document defines how the Loom AI composer works.
+This document defines how the Loom composer works.
 
 It covers:
 
@@ -243,7 +243,7 @@ Controls should remain compact and consistent with a chat-first experience.
 
 ## 17. Summary
 
-The Loom AI composer should behave like:
+The Loom composer should behave like:
 
 - a text-first editor
 - with inline semantic references

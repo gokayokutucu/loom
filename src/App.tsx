@@ -4607,7 +4607,7 @@ function App() {
       prompt: match.response.question,
       context: [],
       system:
-        "You are Loom AI. Continue the previous answer without restarting. Do not include raw thinking.",
+        "You are Loom. Continue the previous answer without restarting. Do not include raw thinking.",
       effort: "Medium",
       mode: "auto",
       think: false,
@@ -4660,7 +4660,7 @@ function App() {
         messageCount: 2,
         signal: controller.signal,
         system:
-          "You are Loom AI. Continue the previous answer without restarting. Do not include raw thinking.",
+          "You are Loom. Continue the previous answer without restarting. Do not include raw thinking.",
         prompt: continuationPrompt,
         onProgress: (progress) => {
           if (mainGenerationRef.current !== generationId) return;
@@ -13990,7 +13990,7 @@ function Sidebar({
       <div className="brand-row">
         <div className="brand-mark">L</div>
         <div>
-          <div className="brand-name">Loom AI</div>
+          <div className="brand-name">Loom</div>
           <div className="brand-caption">Your Personal AI Web</div>
         </div>
       </div>
@@ -14260,7 +14260,7 @@ function ProfileInfoDialog({
         <div className="profile-info-header">
           <div>
             <span>{isHelp ? "Help" : "About"}</span>
-            <h2>{isHelp ? "Using Loom" : "Loom AI"}</h2>
+            <h2>{isHelp ? "Using Loom" : "Loom"}</h2>
           </div>
           <button type="button" className="icon-button subtle" onClick={onClose} aria-label="Close">
             <X size={14} />

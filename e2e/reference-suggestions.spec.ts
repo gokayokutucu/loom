@@ -66,7 +66,7 @@ test.describe("[legacy-typescript-local] # Reference suggestions", () => {
     const dropdown = await visibleSuggestionDropdown(page);
 
     await expect(dropdown).toContainText(/L-[0-9A-HJKMNP-TV-Z]{5}/);
-    await expect(dropdown).toContainText("Loom AI navigation architecture");
+    await expect(dropdown).toContainText("Loom navigation architecture");
     await expect(dropdown).not.toContainText("code:");
     await expect(dropdown.getByTestId("mention-code-match").first()).toHaveText("L-");
   });
@@ -90,7 +90,7 @@ test.describe("[legacy-typescript-local] # Reference suggestions", () => {
     await replaceComposerText(page, "#lifecycle");
     const dropdown = await visibleSuggestionDropdown(page);
 
-    await expect(dropdown).toContainText("Loom AI navigation architecture");
+    await expect(dropdown).toContainText("Loom navigation architecture");
   });
 
   test("Arrow keys move the selected Reference suggestion", async ({ page }) => {

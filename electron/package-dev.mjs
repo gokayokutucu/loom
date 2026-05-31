@@ -25,7 +25,7 @@ const bundleIconFile = "loom_logo.icns";
 const bundleIconPath = path.join(resourcesPath, bundleIconFile);
 const macEntitlementsPath = path.join(repoRoot, "electron", "entitlements.mac.plist");
 const microphoneUsageDescription =
-  "Loom AI needs microphone access for speech-to-text and voice AI interactions.";
+  "Loom needs microphone access for speech-to-text and voice AI interactions.";
 const serviceBinaryPath = path.join(
   repoRoot,
   "services",

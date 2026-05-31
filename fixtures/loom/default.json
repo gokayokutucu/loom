@@ -4,7 +4,7 @@
   "looms": [
     {
       "loomId": "c-architecture",
-      "title": "Loom AI navigation architecture",
+      "title": "Loom navigation architecture",
       "summary": "Browser-first navigation model, addresses, and lifecycle rules.",
       "code": "L-TEST",
       "canonicalUri": "loom://loom-ai/navigation-architecture",
@@ -202,7 +202,7 @@
       "title": "Address Bar as local AI web navigator",
       "code": "R-ADDR",
       "canonicalUri": "loom://loom-ai-navigation-architecture/L-TEST/r/R-ADDR?id=meta-response-address",
-      "content": "Question: How should the address bar work if Loom AI is a browser for conversations?\n\nTreat the Address Bar as the user's primary orientation device. It should accept a Loom address, a natural-language query, or the title of a remembered answer without forcing the user to choose a search mode first.\n\nThe result list should feel closer to browser autocomplete than a database search table. Each row needs a destination type, a readable title, a path, and a confidence cue such as Recent, Semantic, or Bookmark.\n\nThe important design constraint is that search and navigation are not separate products. Typing is already the act of asking where to go next inside the user's personal AI web.",
+      "content": "Question: How should the address bar work if Loom is a browser for conversations?\n\nTreat the Address Bar as the user's primary orientation device. It should accept a Loom address, a natural-language query, or the title of a remembered answer without forcing the user to choose a search mode first.\n\nThe result list should feel closer to browser autocomplete than a database search table. Each row needs a destination type, a readable title, a path, and a confidence cue such as Recent, Semantic, or Bookmark.\n\nThe important design constraint is that search and navigation are not separate products. Typing is already the act of asking where to go next inside the user's personal AI web.",
       "sequenceIndex": 0,
       "metadataJson": "{\"fixture\":\"default\",\"source\":\"src/mockData.ts\",\"thinkingDurationMs\":0}",
       "createdAt": "2026-05-10T00:01:00Z",

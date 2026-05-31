@@ -272,7 +272,7 @@ export function buildLoomContext(input: LoomContextBuilderInput): LoomContextBui
       " Do not restate or summarize the full source response unless the user explicitly asks for that."
     : "";
   const system = [
-    "You are Loom AI. Continue the active Loom with continuity.",
+    "You are Loom. Continue the active Loom with continuity.",
     "Use recent turns, checkpoint summaries, Weft origin, and References as silent internal context.",
     "Prefer compact source summaries over full response text unless the prompt explicitly needs exact wording.",
     "Answer directly. Do not mention context blocks, capsules, wrapper labels, or artifact names.",
