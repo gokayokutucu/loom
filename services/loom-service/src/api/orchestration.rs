@@ -6413,9 +6413,8 @@ mod tests {
     #[test]
     fn orchestration_parser_handles_generate_format() {
         let mut buffer = String::new();
-        let chunks =
-            parse_ndjson_bytes(&mut buffer, b"{\"response\":\"Hello\",\"done\":false}\n")
-                .expect("parse generate chunk");
+        let chunks = parse_ndjson_bytes(&mut buffer, b"{\"response\":\"Hello\",\"done\":false}\n")
+            .expect("parse generate chunk");
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].content.as_deref(), Some("Hello"));
         assert!(!chunks[0].done);
@@ -6436,9 +6435,8 @@ mod tests {
     #[test]
     fn orchestration_parser_handles_final_done_chunk() {
         let mut buffer = String::new();
-        let chunks =
-            parse_ndjson_bytes(&mut buffer, b"{\"done\":true,\"total_duration\":999}\n")
-                .expect("parse final done chunk");
+        let chunks = parse_ndjson_bytes(&mut buffer, b"{\"done\":true,\"total_duration\":999}\n")
+            .expect("parse final done chunk");
         assert_eq!(chunks.len(), 1);
         assert!(chunks[0].done);
         assert!(chunks[0].content.is_none());
@@ -6459,7 +6457,10 @@ mod tests {
     fn orchestration_parser_surfaces_ollama_error_chunk() {
         let mut buffer = String::new();
         let result = parse_ndjson_bytes(&mut buffer, b"{\"error\":\"context window exceeded\"}\n");
-        assert!(result.is_err(), "error chunk must not be silently swallowed");
+        assert!(
+            result.is_err(),
+            "error chunk must not be silently swallowed"
+        );
         let err = result.unwrap_err();
         assert!(err.message.contains("Ollama returned an error"));
         assert!(err.message.contains("context window exceeded"));
@@ -6469,8 +6470,7 @@ mod tests {
     fn orchestration_parser_error_chunk_sanitizes_sensitive_content() {
         // An error chunk containing a forbidden key should be sanitized, not exposed raw
         let mut buffer = String::new();
-        let result =
-            parse_ndjson_bytes(&mut buffer, b"{\"error\":\"api_key is invalid\"}\n");
+        let result = parse_ndjson_bytes(&mut buffer, b"{\"error\":\"api_key is invalid\"}\n");
         assert!(result.is_err());
         let err = result.unwrap_err();
         // "api_key" is a forbidden term — sanitize_provider_text replaces the whole message
@@ -6492,13 +6492,11 @@ mod tests {
     #[test]
     fn orchestration_parser_accumulates_partial_lines() {
         let mut buffer = String::new();
-        let first =
-            parse_ndjson_bytes(&mut buffer, b"{\"message\":{\"content\":\"par")
-                .expect("first partial");
+        let first = parse_ndjson_bytes(&mut buffer, b"{\"message\":{\"content\":\"par")
+            .expect("first partial");
         assert!(first.is_empty());
-        let second =
-            parse_ndjson_bytes(&mut buffer, b"tial\"},\"done\":false}\n")
-                .expect("completing chunk");
+        let second = parse_ndjson_bytes(&mut buffer, b"tial\"},\"done\":false}\n")
+            .expect("completing chunk");
         assert_eq!(second.len(), 1);
         assert_eq!(second[0].content.as_deref(), Some("partial"));
     }
