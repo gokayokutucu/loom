@@ -38,6 +38,8 @@ import type {
   GetBookmarkInput,
   GraphProjectionInput,
   GraphProjectionResult,
+  LoomAncestryStepInput,
+  LoomAncestryStepResult,
   ListReferencesInput,
   ListReferencesResult,
   ListAttachmentsInput,
@@ -495,6 +497,14 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
       expandedNodeIds: new Set(input.expandedNodeIds ?? []),
       bookmarkedResponseAddresses: new Set(input.bookmarkedResponseAddresses ?? []),
     });
+  }
+
+  async getLoomAncestryStep(input: LoomAncestryStepInput): Promise<LoomAncestryStepResult> {
+    return {
+      loomId: input.loomId,
+      hasParentAncestry: false,
+      warnings: ["typescript_local_ancestry_step_unavailable"],
+    };
   }
 
   async exportLoom(input: ExportLoomInput): Promise<ExportLoomResult> {

@@ -35,6 +35,8 @@ import type {
   GetUiStateResult,
   GraphProjectionInput,
   GraphProjectionResult,
+  LoomAncestryStepInput,
+  LoomAncestryStepResult,
   JsonValue,
   CodeSnippetReferenceItem,
   ListCodeSnippetsInput,
@@ -360,12 +362,14 @@ function serviceNodeKind(value: unknown): "loom" | "response" | "weft" | undefin
 
 function serviceEdgeKind(value: unknown):
   | "loom_response"
+  | "loom_response_origin"
   | "response_sequence"
   | "weft_origin"
   | "reference"
   | "bookmark"
   | undefined {
   return value === "loom_response" ||
+    value === "loom_response_origin" ||
     value === "response_sequence" ||
     value === "weft_origin" ||
     value === "reference" ||
@@ -381,13 +385,19 @@ function mapServiceNodeKind(
 ): LoomGraphProjectionNodeKind {
   if (kind === "response") return "response";
   if (kind === "weft") return "weft";
-  return loomId === activeLoomId ? "root" : "weft";
+  return loomId === activeLoomId ? "root" : "loom";
 }
 
 function mapServiceEdgeKind(
-  kind: "loom_response" | "response_sequence" | "weft_origin" | "reference" | "bookmark"
+  kind:
+    | "loom_response"
+    | "loom_response_origin"
+    | "response_sequence"
+    | "weft_origin"
+    | "reference"
+    | "bookmark"
 ): LoomGraphProjectionEdgeKind {
-  if (kind === "loom_response") return "question";
+  if (kind === "loom_response" || kind === "loom_response_origin") return "question";
   if (kind === "response_sequence") return "derived";
   if (kind === "weft_origin") return "weft";
   return kind;
@@ -470,6 +480,28 @@ function mapServiceGraphProjection(
       depth,
       position,
     };
+    if (isRecord(rawNode.metadata)) {
+      const graphRole = graphString(rawNode.metadata.graphRole);
+      if (
+        graphRole === "current-root" ||
+        graphRole === "origin-context" ||
+        graphRole === "origin-response" ||
+        graphRole === "child-response" ||
+        graphRole === "child-weft" ||
+        graphRole === "ancestor-context" ||
+        graphRole === "ancestor-response"
+      ) {
+        node.graphRole = graphRole;
+      }
+      if (typeof rawNode.metadata.hasParentAncestry === "boolean") {
+        node.hasParentAncestry = rawNode.metadata.hasParentAncestry;
+      }
+      if (rawNode.metadata.weftKind === "revision") {
+        node.lineageRole = "revision";
+      } else if (rawNode.metadata.weftKind === "exploration" && mappedKind === "weft") {
+        node.lineageRole = "weft";
+      }
+    }
     nodes.push(node);
     if (mappedKind === "response") {
       if (!firstNodeId) firstNodeId = nodeId;
@@ -514,6 +546,73 @@ function mapServiceGraphProjection(
     focusedNodeId,
     serviceGraphStatus: nodes.length > 0 ? "resolved" : "empty",
     warnings,
+  };
+}
+
+function validateAncestryResponseSummary(
+  value: unknown,
+  endpoint: string
+): NonNullable<LoomAncestryStepResult["parentOriginResponse"]> {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid ancestry Response.", {
+      endpoint,
+    });
+  }
+  const responseId = stringValue(value, "responseId");
+  const loomId = stringValue(value, "loomId");
+  const title = graphString(value.title);
+  if (!responseId || !loomId || !title) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid ancestry Response.", {
+      endpoint,
+    });
+  }
+  return {
+    responseId,
+    loomId,
+    title,
+    preview: graphString(value.preview),
+    canonicalUri: graphString(value.canonicalUri),
+    code: graphString(value.code),
+    displayCode: graphString(value.displayCode),
+  };
+}
+
+function validateLoomAncestryStep(value: unknown, endpoint: string): LoomAncestryStepResult {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid ancestry step.", {
+      endpoint,
+    });
+  }
+  const loomId = stringValue(value, "loomId");
+  if (!loomId || typeof value.hasParentAncestry !== "boolean") {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned an invalid ancestry step.", {
+      endpoint,
+    });
+  }
+  const parentLoom = value.parentLoom
+    ? validateLoomSummary(value.parentLoom, endpoint)
+    : undefined;
+  return {
+    loomId,
+    hasParentAncestry: value.hasParentAncestry,
+    parentLoom: parentLoom
+      ? {
+          loomId: parentLoom.loomId,
+          title: parentLoom.title,
+          summary: parentLoom.summary,
+          canonicalUri: parentLoom.canonicalUri,
+          code: parentLoom.code,
+          displayCode: parentLoom.displayCode,
+          kind: parentLoom.kind,
+          hasParentAncestry: isRecord(value.parentLoom)
+            ? value.parentLoom.hasParentAncestry === true
+            : false,
+        }
+      : undefined,
+    parentOriginResponse: value.parentOriginResponse
+      ? validateAncestryResponseSummary(value.parentOriginResponse, endpoint)
+      : undefined,
+    warnings: arrayOfStrings(value.warnings),
   };
 }
 
@@ -3580,6 +3679,12 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
       }
       throw error;
     }
+  }
+
+  async getLoomAncestryStep(input: LoomAncestryStepInput): Promise<LoomAncestryStepResult> {
+    const endpoint = `/looms/${encodeURIComponent(input.loomId)}/ancestry-step`;
+    const response = await this.requestJson<unknown>(endpoint, { method: "GET" });
+    return validateLoomAncestryStep(response, endpoint);
   }
 
   async exportLoom(input: ExportLoomInput): Promise<ExportLoomResult> {

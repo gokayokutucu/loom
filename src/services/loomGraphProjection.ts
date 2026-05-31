@@ -9,6 +9,7 @@ import { polishDisplayTitle } from "./displayTitlePolish";
 
 export type LoomGraphProjectionNodeKind =
   | "root"
+  | "loom"
   | "response"
   | "weft"
   | "bookmark"
@@ -37,6 +38,19 @@ export interface LoomGraphProjectionNode {
   isBookmarked?: boolean;
   isFocused?: boolean;
   isExpanded?: boolean;
+  graphRole?:
+    | "current-root"
+    | "origin-context"
+    | "origin-response"
+    | "child-response"
+    | "child-weft"
+    | "ancestor-context"
+      | "ancestor-response";
+  lineageRole?: LoomLineageRole;
+  hasParentAncestry?: boolean;
+  ancestryExpanded?: boolean;
+  ancestryLoading?: boolean;
+  ancestryError?: string;
   depth: number;
   position: {
     x: number;
@@ -68,6 +82,182 @@ export interface LoomGraphProjection {
   warnings?: string[];
 }
 
+export interface LoomGraphAncestryStep {
+  loomId: string;
+  hasParentAncestry: boolean;
+  parentLoom?: {
+    loomId: string;
+    title: string;
+    summary?: string;
+    canonicalUri?: string;
+    code?: string;
+    displayCode?: string;
+    kind?: "loom" | "weft";
+    hasParentAncestry?: boolean;
+  };
+  parentOriginResponse?: {
+    responseId: string;
+    loomId: string;
+    title: string;
+    preview?: string;
+    canonicalUri?: string;
+    code?: string;
+    displayCode?: string;
+  };
+  warnings?: string[];
+}
+
+const ANCESTRY_LANE_WIDTH = 360;
+const ANCESTRY_ROW_GAP = 300;
+
+function ancestryResponseNodeId(response: LoomGraphAncestryStep["parentOriginResponse"]) {
+  return response ? responseGraphNodeId(response.loomId, response.responseId) : undefined;
+}
+
+function ancestryLaneFromPositionX(positionX: number) {
+  return Math.round(positionX / ANCESTRY_LANE_WIDTH);
+}
+
+function ancestryPositionXForLane(lane: number) {
+  return lane * ANCESTRY_LANE_WIDTH;
+}
+
+function chooseAncestryParentLane(
+  projection: LoomGraphProjection,
+  anchorNode: LoomGraphProjectionNode | undefined,
+  loomDepth: number,
+  responseDepth: number
+) {
+  const anchorLane = anchorNode ? ancestryLaneFromPositionX(anchorNode.position.x) : 0;
+  const occupied = new Set(
+    projection.nodes
+      .filter((node) => node.depth === loomDepth || node.depth === responseDepth)
+      .map((node) => ancestryLaneFromPositionX(node.position.x))
+  );
+  const candidates = [anchorLane - 1, anchorLane + 1];
+  for (let offset = 2; offset < 24; offset += 1) {
+    candidates.push(anchorLane - offset, anchorLane + offset);
+  }
+  return candidates.find((lane) => lane !== anchorLane && !occupied.has(lane)) ?? anchorLane - 1;
+}
+
+export function mergeLoomGraphAncestryStep(
+  projection: LoomGraphProjection,
+  anchorLoomNodeId: string,
+  step: LoomGraphAncestryStep
+): LoomGraphProjection {
+  if (!step.parentLoom || !step.parentOriginResponse) {
+    return {
+      ...projection,
+      nodes: projection.nodes.map((node) =>
+        node.id === anchorLoomNodeId
+          ? { ...node, hasParentAncestry: false, ancestryExpanded: true }
+          : node
+      ),
+      warnings: [...(projection.warnings ?? []), ...(step.warnings ?? [])],
+    };
+  }
+
+  const parentLoomNodeId = loomGraphRootNodeId(step.parentLoom.loomId);
+  const parentResponseNodeId = ancestryResponseNodeId(step.parentOriginResponse);
+  if (!parentResponseNodeId) return projection;
+
+  const existingIds = new Set(projection.nodes.map((node) => node.id));
+  const anchorNode = projection.nodes.find((node) => node.id === anchorLoomNodeId);
+  const anchorDepth = anchorNode?.depth ?? 0;
+  const responseDepth = anchorDepth - 1;
+  const loomDepth = anchorDepth - 2;
+  const parentLane = chooseAncestryParentLane(projection, anchorNode, loomDepth, responseDepth);
+  const parentX = ancestryPositionXForLane(parentLane);
+
+  const parentLoomNode: LoomGraphProjectionNode = {
+    id: parentLoomNodeId,
+    kind: step.parentLoom.kind === "weft" ? "weft" : "loom",
+    loomId: step.parentLoom.loomId,
+    title: step.parentLoom.title,
+    code: step.parentLoom.code,
+    displayCode: step.parentLoom.displayCode,
+    summary: step.parentLoom.summary,
+    contentPreview: step.parentLoom.summary,
+    fullContent: step.parentLoom.summary,
+    canonicalUri: step.parentLoom.canonicalUri,
+    isAddressable: Boolean(step.parentLoom.canonicalUri),
+    graphRole: "ancestor-context",
+    hasParentAncestry: Boolean(step.parentLoom.hasParentAncestry),
+    depth: loomDepth,
+    position: {
+      x: parentX,
+      y: loomDepth * ANCESTRY_ROW_GAP,
+    },
+  };
+
+  const parentResponseNode: LoomGraphProjectionNode = {
+    id: parentResponseNodeId,
+    kind: "response",
+    loomId: step.parentOriginResponse.loomId,
+    responseId: step.parentOriginResponse.responseId,
+    title: step.parentOriginResponse.title,
+    code: step.parentOriginResponse.code,
+    displayCode: step.parentOriginResponse.displayCode,
+    summary: step.parentOriginResponse.preview,
+    contentPreview: step.parentOriginResponse.preview,
+    fullContent: step.parentOriginResponse.preview,
+    canonicalUri: step.parentOriginResponse.canonicalUri,
+    isAddressable: Boolean(step.parentOriginResponse.canonicalUri),
+    graphRole: "ancestor-response",
+    depth: responseDepth,
+    position: {
+      x: parentX,
+      y: responseDepth * ANCESTRY_ROW_GAP,
+    },
+  };
+
+  const nextNodes = projection.nodes.map((node) =>
+    node.id === anchorLoomNodeId
+      ? { ...node, hasParentAncestry: false, ancestryExpanded: true, ancestryLoading: false }
+      : node
+  );
+  if (!existingIds.has(parentLoomNodeId)) nextNodes.unshift(parentLoomNode);
+  if (!existingIds.has(parentResponseNodeId)) {
+    const insertIndex = nextNodes.findIndex((node) => node.id === anchorLoomNodeId);
+    nextNodes.splice(Math.max(0, insertIndex), 0, parentResponseNode);
+  }
+
+  const nextEdges = [...projection.edges];
+  const containmentEdgeId = `${parentLoomNodeId}->${parentResponseNodeId}`;
+  if (!nextEdges.some((edge) => edge.id === containmentEdgeId)) {
+    nextEdges.push({
+      id: containmentEdgeId,
+      source: parentLoomNodeId,
+      target: parentResponseNodeId,
+      kind: "question",
+      label: "Origin response",
+      isActivePath: true,
+      isWeftPath: true,
+    });
+  }
+  const originEdgeId = `${parentResponseNodeId}->${anchorLoomNodeId}`;
+  if (!nextEdges.some((edge) => edge.id === originEdgeId)) {
+    nextEdges.push({
+      id: originEdgeId,
+      source: parentResponseNodeId,
+      target: anchorLoomNodeId,
+      kind: "weft",
+      label: "Weft origin",
+      isActivePath: true,
+      isWeftPath: true,
+    });
+  }
+
+  return {
+    ...projection,
+    nodes: nextNodes,
+    edges: nextEdges,
+    firstNodeId: projection.firstNodeId ?? parentResponseNodeId,
+    warnings: [...(projection.warnings ?? []), ...(step.warnings ?? [])],
+  };
+}
+
 export interface BuildLoomGraphProjectionInput {
   conversations: Conversation[];
   responsesByConversation: Record<string, ResponseItem[]>;
@@ -97,7 +287,7 @@ const WEFT_EDGE_LABEL = "Weft from here";
  * Loom, …), update only this predicate.
  */
 export function isLoomGraphDestinationNode(node: LoomGraphProjectionNode): boolean {
-  return node.kind === "root" || node.kind === "weft";
+  return node.kind === "root" || node.kind === "loom" || node.kind === "weft";
 }
 
 /**
@@ -106,6 +296,7 @@ export function isLoomGraphDestinationNode(node: LoomGraphProjectionNode): boole
  *
  * - `"weft"` for branched Loom nodes (kind === "weft")
  * - `undefined` for the active/primary Loom (kind === "root")
+ * - `undefined` for Loom context nodes (kind === "loom")
  * - `undefined` for non-Loom nodes (response, bookmark, reference)
  *
  * Use this when code needs to distinguish a weft from a root Loom for
@@ -115,6 +306,7 @@ export function isLoomGraphDestinationNode(node: LoomGraphProjectionNode): boole
 export function graphNodeLineageRole(
   node: LoomGraphProjectionNode
 ): LoomLineageRole | undefined {
+  if (node.lineageRole) return node.lineageRole;
   if (node.kind === "weft") return "weft";
   return undefined;
 }

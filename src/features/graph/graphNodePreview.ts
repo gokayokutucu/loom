@@ -1,9 +1,10 @@
 import type { LoomGraphProjectionNode } from "../../services/loomGraphProjection";
 import { cleanMarkdownDisplayText } from "../../services/assistantMarkdown";
-import type { ResponseItem } from "../../types";
+import type { LoomLink, ResponseItem } from "../../types";
 
 export interface GraphResponsePreviewContent {
   question: string;
+  references?: LoomLink[];
   answerMarkdown: string;
 }
 
@@ -60,6 +61,7 @@ export function graphResponsePreviewForNode(
   if (response) {
     return {
       question: response.question,
+      references: response.questionReferences,
       answerMarkdown:
         response.finalContent !== undefined
           ? response.finalContent

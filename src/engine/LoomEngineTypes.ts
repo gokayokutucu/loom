@@ -11,7 +11,7 @@ import type {
 } from "../types";
 import type { LoomEngineClient } from "./LoomEngineClient";
 import type { ModelResponseMode } from "../services/appSettings";
-import type { LoomGraphProjection } from "../services/loomGraphProjection";
+import type { LoomGraphAncestryStep, LoomGraphProjection } from "../services/loomGraphProjection";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -929,6 +929,12 @@ export interface GraphProjectionInput {
 }
 
 export type GraphProjectionResult = LoomGraphProjection;
+
+export interface LoomAncestryStepInput {
+  loomId: string;
+}
+
+export type LoomAncestryStepResult = LoomGraphAncestryStep;
 
 export interface ExportLoomInput {
   loomId: string;

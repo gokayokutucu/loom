@@ -3,6 +3,10 @@ import {
   graphNodeLineageRole,
   isLoomGraphDestinationNode,
   isWeftGraphNode,
+  loomGraphRootNodeId,
+  mergeLoomGraphAncestryStep,
+  responseGraphNodeId,
+  type LoomGraphProjection,
   type LoomGraphProjectionNode,
 } from "./loomGraphProjection";
 
@@ -28,6 +32,10 @@ describe("isLoomGraphDestinationNode", () => {
 
   it("returns true for weft nodes (branched Loom)", () => {
     expect(isLoomGraphDestinationNode(makeNode("weft"))).toBe(true);
+  });
+
+  it("returns true for Loom context nodes", () => {
+    expect(isLoomGraphDestinationNode(makeNode("loom"))).toBe(true);
   });
 
   it("returns false for response nodes", () => {
@@ -56,6 +64,16 @@ describe("graphNodeLineageRole", () => {
     expect(graphNodeLineageRole(makeNode("weft"))).toBe("weft");
   });
 
+  it("returns explicit revision lineage for revision Weft nodes", () => {
+    expect(graphNodeLineageRole(makeNode("weft", { lineageRole: "revision" }))).toBe(
+      "revision"
+    );
+  });
+
+  it("returns undefined for Loom context nodes", () => {
+    expect(graphNodeLineageRole(makeNode("loom"))).toBeUndefined();
+  });
+
   it("returns undefined for response nodes", () => {
     expect(graphNodeLineageRole(makeNode("response"))).toBeUndefined();
   });
@@ -82,6 +100,10 @@ describe("isWeftGraphNode", () => {
     expect(isWeftGraphNode(makeNode("weft"))).toBe(true);
   });
 
+  it("returns false for Loom context nodes", () => {
+    expect(isWeftGraphNode(makeNode("loom"))).toBe(false);
+  });
+
   it("returns false for response nodes", () => {
     expect(isWeftGraphNode(makeNode("response"))).toBe(false);
   });
@@ -92,5 +114,254 @@ describe("isWeftGraphNode", () => {
 
   it("returns false for reference nodes", () => {
     expect(isWeftGraphNode(makeNode("reference"))).toBe(false);
+  });
+});
+
+describe("mergeLoomGraphAncestryStep", () => {
+  function baseProjection(): LoomGraphProjection {
+    const originId = loomGraphRootNodeId("weft-b");
+    const originResponseId = responseGraphNodeId("weft-b", "response-b");
+    const currentWeftId = loomGraphRootNodeId("weft-c");
+    return {
+      nodes: [
+        makeNode("loom", {
+          id: originId,
+          loomId: "weft-b",
+          title: "Weft B",
+          graphRole: "origin-context",
+          hasParentAncestry: true,
+          depth: 0,
+          // Service places origin context at lane -1 (x=-360) so the
+          // weft_origin edge to the current Weft renders as a diagonal fork.
+          position: { x: -360, y: 0 },
+        }),
+        makeNode("response", {
+          id: originResponseId,
+          loomId: "weft-b",
+          responseId: "response-b",
+          title: "Origin response from B",
+          graphRole: "origin-response",
+          depth: 1,
+          position: { x: -360, y: 300 },
+        }),
+        makeNode("weft", {
+          id: currentWeftId,
+          loomId: "weft-c",
+          title: "Weft C",
+          graphRole: "current-root",
+          depth: 2,
+          position: { x: 0, y: 600 },
+        }),
+      ],
+      edges: [
+        {
+          id: `${originId}->${originResponseId}`,
+          source: originId,
+          target: originResponseId,
+          kind: "question",
+        },
+        {
+          id: `${originResponseId}->${currentWeftId}`,
+          source: originResponseId,
+          target: currentWeftId,
+          kind: "weft",
+        },
+      ],
+    };
+  }
+
+  it("inserts one ancestry step above the current top Loom", () => {
+    const originId = loomGraphRootNodeId("weft-b");
+    const projection = mergeLoomGraphAncestryStep(baseProjection(), originId, {
+      loomId: "weft-b",
+      hasParentAncestry: true,
+      parentLoom: {
+        loomId: "loom-a",
+        title: "Loom A",
+        kind: "loom",
+        hasParentAncestry: false,
+      },
+      parentOriginResponse: {
+        loomId: "loom-a",
+        responseId: "response-a",
+        title: "Response A",
+      },
+    });
+
+    expect(projection.nodes.find((node) => node.loomId === "loom-a")).toMatchObject({
+      kind: "loom",
+      graphRole: "ancestor-context",
+    });
+    expect(projection.nodes.find((node) => node.responseId === "response-a")).toMatchObject({
+      kind: "response",
+      graphRole: "ancestor-response",
+    });
+    expect(projection.nodes.find((node) => node.id === originId)).toMatchObject({
+      hasParentAncestry: false,
+      ancestryExpanded: true,
+    });
+    expect(projection.edges).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          source: loomGraphRootNodeId("loom-a"),
+          target: responseGraphNodeId("loom-a", "response-a"),
+          kind: "question",
+        }),
+        expect.objectContaining({
+          source: responseGraphNodeId("loom-a", "response-a"),
+          target: originId,
+          kind: "weft",
+        }),
+      ])
+    );
+  });
+
+  it("places expanded ancestry in a fork lane instead of the child lane", () => {
+    const originId = loomGraphRootNodeId("weft-b");
+    const projection = mergeLoomGraphAncestryStep(baseProjection(), originId, {
+      loomId: "weft-b",
+      hasParentAncestry: true,
+      parentLoom: {
+        loomId: "loom-a",
+        title: "Loom A",
+        kind: "loom",
+        hasParentAncestry: false,
+      },
+      parentOriginResponse: {
+        loomId: "loom-a",
+        responseId: "response-a",
+        title: "Response A",
+      },
+    });
+
+    const parentLoom = projection.nodes.find((node) => node.loomId === "loom-a" && !node.responseId);
+    const parentResponse = projection.nodes.find((node) => node.responseId === "response-a");
+    const anchor = projection.nodes.find((node) => node.id === originId);
+    const currentWeft = projection.nodes.find((node) => node.loomId === "weft-c" && !node.responseId);
+
+    expect(parentLoom?.position.x).toBe(parentResponse?.position.x);
+    expect(parentLoom?.position.x).not.toBe(anchor?.position.x);
+    expect(parentResponse?.position.x).not.toBe(anchor?.position.x);
+    expect(parentResponse?.position.y).toBeLessThan(anchor?.position.y ?? Number.POSITIVE_INFINITY);
+    expect(currentWeft?.position).toEqual({ x: 0, y: 600 });
+    expect(projection.edges).toContainEqual(
+      expect.objectContaining({
+        source: responseGraphNodeId("loom-a", "response-a"),
+        target: originId,
+        kind: "weft",
+      })
+    );
+  });
+
+  it("steps repeated ancestry expansion outward without overlapping parent nodes", () => {
+    const originId = loomGraphRootNodeId("weft-b");
+    const first = mergeLoomGraphAncestryStep(baseProjection(), originId, {
+      loomId: "weft-b",
+      hasParentAncestry: true,
+      parentLoom: {
+        loomId: "weft-a",
+        title: "Weft A",
+        kind: "weft",
+        hasParentAncestry: true,
+      },
+      parentOriginResponse: {
+        loomId: "weft-a",
+        responseId: "response-a",
+        title: "Response A",
+      },
+    });
+    const second = mergeLoomGraphAncestryStep(first, loomGraphRootNodeId("weft-a"), {
+      loomId: "weft-a",
+      hasParentAncestry: true,
+      parentLoom: {
+        loomId: "loom-root",
+        title: "Root Loom",
+        kind: "loom",
+        hasParentAncestry: false,
+      },
+      parentOriginResponse: {
+        loomId: "loom-root",
+        responseId: "response-root",
+        title: "Root response",
+      },
+    });
+
+    const firstParent = second.nodes.find((node) => node.loomId === "weft-a" && !node.responseId);
+    const secondParent = second.nodes.find((node) => node.loomId === "loom-root" && !node.responseId);
+    const rootResponse = second.nodes.find((node) => node.responseId === "response-root");
+    const occupiedPositions = new Set(second.nodes.map((node) => `${node.position.x}:${node.position.y}`));
+
+    expect(firstParent).toMatchObject({ kind: "weft", graphRole: "ancestor-context" });
+    expect(secondParent).toMatchObject({ kind: "loom", graphRole: "ancestor-context" });
+    expect(rootResponse).toMatchObject({ kind: "response", graphRole: "ancestor-response" });
+    expect(secondParent?.position.x).not.toBe(firstParent?.position.x);
+    expect(occupiedPositions.size).toBe(second.nodes.length);
+    expect(second.nodes.some((node) => node.responseId === "unrelated-response")).toBe(false);
+  });
+
+  it("places expanded ancestor in a lane distinct from origin-context and current-weft", () => {
+    // The origin-context node is now at x=-360 (lane -1) and the current-weft is at
+    // x=0 (lane 0).  Expanding the ancestor should not collide with either.
+    const originId = loomGraphRootNodeId("weft-b");
+    const projection = mergeLoomGraphAncestryStep(baseProjection(), originId, {
+      loomId: "weft-b",
+      hasParentAncestry: false,
+      parentLoom: {
+        loomId: "loom-a",
+        title: "Loom A",
+        kind: "loom",
+        hasParentAncestry: false,
+      },
+      parentOriginResponse: {
+        loomId: "loom-a",
+        responseId: "response-a",
+        title: "Response A",
+      },
+    });
+
+    const originContextNode = projection.nodes.find((node) => node.id === originId);
+    const currentWeft = projection.nodes.find((node) => node.loomId === "weft-c" && !node.responseId);
+    const expandedParent = projection.nodes.find((node) => node.loomId === "loom-a" && !node.responseId);
+    const expandedResponse = projection.nodes.find((node) => node.responseId === "response-a");
+
+    expect(expandedParent).toBeDefined();
+    expect(expandedResponse).toBeDefined();
+    // Ancestor is in a different lane from origin-context
+    expect(expandedParent?.position.x).not.toBe(originContextNode?.position.x);
+    // Ancestor is in a different lane from current-weft
+    expect(expandedParent?.position.x).not.toBe(currentWeft?.position.x);
+    // Ancestor response shares lane with ancestor loom
+    expect(expandedResponse?.position.x).toBe(expandedParent?.position.x);
+    // All node positions are unique
+    const occupied = new Set(projection.nodes.map((n) => `${n.position.x}:${n.position.y}`));
+    expect(occupied.size).toBe(projection.nodes.length);
+  });
+
+  it("does not duplicate nodes or edges on repeated expansion", () => {
+    const originId = loomGraphRootNodeId("weft-b");
+    const step = {
+      loomId: "weft-b",
+      hasParentAncestry: true,
+      parentLoom: {
+        loomId: "loom-a",
+        title: "Loom A",
+        kind: "loom" as const,
+        hasParentAncestry: false,
+      },
+      parentOriginResponse: {
+        loomId: "loom-a",
+        responseId: "response-a",
+        title: "Response A",
+      },
+    };
+    const once = mergeLoomGraphAncestryStep(baseProjection(), originId, step);
+    const twice = mergeLoomGraphAncestryStep(once, originId, step);
+
+    expect(twice.nodes.filter((node) => node.loomId === "loom-a" && !node.responseId))
+      .toHaveLength(1);
+    expect(twice.nodes.filter((node) => node.responseId === "response-a")).toHaveLength(1);
+    expect(
+      twice.edges.filter((edge) => edge.source === responseGraphNodeId("loom-a", "response-a"))
+    ).toHaveLength(1);
   });
 });
