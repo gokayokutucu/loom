@@ -21819,7 +21819,7 @@ function LoomsPanel({
                       {hasChildren ? (collapsed ? "›" : "⌄") : ""}
                     </span>
                     <span className={`looms-log__icon looms-log__icon--${node.type}`} aria-hidden="true">
-                      <Icon size={13} />
+                      <Icon size={11} />
                     </span>
                     <span className="looms-log__title">{title}</span>
                     {hasChildren && collapsed && (
