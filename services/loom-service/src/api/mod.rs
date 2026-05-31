@@ -161,6 +161,10 @@ pub fn router(
             "/attachments/:attachment_id",
             get(attachments::get_attachment).delete(attachments::delete_attachment),
         )
+        .route(
+            "/looms/:loom_id/attachments/:attachment_id/materialize",
+            post(attachments::materialize_attachment),
+        )
         .route("/code-snippets", get(code_snippets::list_code_snippets))
         .route("/wefts", post(wefts::create_weft))
         .route("/looms", get(looms::list_looms).post(looms::create_loom))
@@ -182,6 +186,10 @@ pub fn router(
             post(wefts::persist_weft_responses),
         )
         .route("/looms/:loom_id/graph", get(graph::get_graph))
+        .route(
+            "/looms/:loom_id/ancestry-step",
+            get(graph::get_ancestry_step),
+        )
         .route("/exports/loom", post(exports::export_loom))
         .route("/exports/response", post(exports::export_response))
         .route(

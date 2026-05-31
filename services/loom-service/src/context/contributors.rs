@@ -477,13 +477,22 @@ fn reference_contribution(reference: &ReferenceContext) -> ContextContribution {
         .clone()
         .or_else(|| reference.target_uri.clone())
         .unwrap_or_else(|| "Reference".to_string());
-    let content = reference
-        .capsule_summary
-        .clone()
-        .or_else(|| reference.selected_text.clone())
-        .unwrap_or_else(|| {
+
+    let content = match (&reference.selected_text, &reference.capsule_summary) {
+        // Selected fragment is the primary subject; source summary is background only.
+        (Some(selected), summary) => {
+            let mut parts = vec![format!("Primary selected fragment:\n\"{}\"", selected)];
+            if let Some(s) = summary {
+                parts.push(format!("Background source summary: {s}"));
+            }
+            parts.join("\n")
+        }
+        // No selected fragment — use source summary as-is (existing behavior).
+        (None, Some(summary)) => summary.clone(),
+        (None, None) => {
             "Reference metadata is available, but no summary text is ready.".to_string()
-        });
+        }
+    };
 
     contribution(
         reference.reference_id.clone(),
@@ -667,5 +676,95 @@ mod tests {
             memory_messages: Vec::new(),
             recent_messages: Vec::new(),
         }
+    }
+
+    // ── Fix 4: reference_contribution selected_text labeling ─────────────────
+
+    fn base_input() -> BuildContextInput {
+        BuildContextInput {
+            loom_id: "loom-1".to_string(),
+            current_head_response_id: None,
+            user_prompt: "explain".to_string(),
+            attached_references: Vec::new(),
+            response_mode: ResponseMode::Auto,
+            resolved_num_ctx: 8192,
+            answer_plan: None,
+            source: ContextSource::Composer,
+            weft_origin: None,
+            checkpoint: None,
+            memory_messages: Vec::new(),
+            recent_messages: Vec::new(),
+        }
+    }
+
+    fn fragment_ref_input(selected_text: &str, summary: Option<&str>) -> BuildContextInput {
+        let mut input = base_input();
+        input.attached_references = vec![AttachedReferenceInput {
+            reference: ReferenceContext {
+                reference_id: "frag-1".to_string(),
+                label: Some("GPS Explained".to_string()),
+                target_kind: "fragment".to_string(),
+                target_id: Some("resp-1".to_string()),
+                target_uri: None,
+                selected_text: Some(selected_text.to_string()),
+                capsule_summary: summary.map(|s| s.to_string()),
+            },
+            response_capsule: None,
+            attachment: None,
+        }];
+        input
+    }
+
+    #[test]
+    fn selected_text_reference_renders_primary_fragment_label() {
+        let input = fragment_ref_input("The Process of Trilateration", None);
+        let contributions = AttachedReferencesContributor.contribute(&input);
+        assert_eq!(contributions.len(), 1);
+        let content = &contributions[0].content;
+        assert!(
+            content.starts_with("Primary selected fragment:"),
+            "content should start with primary label, got: {content}"
+        );
+        assert!(content.contains("The Process of Trilateration"));
+    }
+
+    #[test]
+    fn selected_text_with_summary_renders_summary_as_background() {
+        let input = fragment_ref_input(
+            "The Process of Trilateration",
+            Some("GPS uses trilateration to determine positions."),
+        );
+        let contributions = AttachedReferencesContributor.contribute(&input);
+        let content = &contributions[0].content;
+        assert!(content.contains("Primary selected fragment:"));
+        assert!(content.contains("Background source summary:"));
+        assert!(content.contains("GPS uses trilateration"));
+        // Primary fragment must appear before background summary
+        let primary_pos = content.find("Primary selected fragment:").unwrap();
+        let background_pos = content.find("Background source summary:").unwrap();
+        assert!(primary_pos < background_pos);
+    }
+
+    #[test]
+    fn reference_without_selected_text_uses_capsule_summary_unchanged() {
+        let mut input = base_input();
+        input.attached_references = vec![AttachedReferenceInput {
+            reference: ReferenceContext {
+                reference_id: "resp-1".to_string(),
+                label: Some("GPS Overview".to_string()),
+                target_kind: "response".to_string(),
+                target_id: Some("resp-1".to_string()),
+                target_uri: None,
+                selected_text: None,
+                capsule_summary: Some("GPS relies on satellites.".to_string()),
+            },
+            response_capsule: None,
+            attachment: None,
+        }];
+        let contributions = AttachedReferencesContributor.contribute(&input);
+        let content = &contributions[0].content;
+        assert!(!content.contains("Primary selected fragment:"));
+        assert!(!content.contains("Background source summary:"));
+        assert!(content.contains("GPS relies on satellites."));
     }
 }

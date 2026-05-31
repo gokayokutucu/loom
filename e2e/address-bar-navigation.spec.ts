@@ -199,11 +199,11 @@ test.describe("[legacy-typescript-local][pure-ui-rendering] Address Bar navigati
     );
 
     await expect(page.locator(".conversation-context h1").first()).toHaveText(
-      "Loom AI navigation architecture"
+      "Loom navigation architecture"
     );
     await expect(page.getByLabel("Loom Address Bar")).toHaveAttribute(
       "placeholder",
-      /Loom AI navigation architecture \/ Address Bar as local AI web navigator/
+      /Loom navigation architecture \/ Address Bar as local AI web navigator/
     );
     await expect(page.locator('[data-response-id="r-address-bar"]')).toBeVisible();
   });
@@ -219,11 +219,11 @@ test.describe("[legacy-typescript-local][pure-ui-rendering] Address Bar navigati
 
     const response = page.locator('[data-response-id="r-address-bar"]');
     await expect(page.locator(".conversation-context h1").first()).toHaveText(
-      "Loom AI navigation architecture"
+      "Loom navigation architecture"
     );
     await expect(page.getByLabel("Loom Address Bar")).toHaveAttribute(
       "placeholder",
-      /Loom AI navigation architecture \/ Address Bar as local AI web navigator/
+      /Loom navigation architecture \/ Address Bar as local AI web navigator/
     );
     await expect(response).toBeVisible();
     await expect(response).toHaveAttribute("data-response-address", promotedAddressBarUri);
@@ -242,10 +242,10 @@ test.describe("[legacy-typescript-local][pure-ui-rendering] Address Bar navigati
 
     await expect(page.getByLabel("Loom Address Bar")).toHaveAttribute(
       "placeholder",
-      /Loom AI navigation architecture \/ Address Bar as local AI web navigator/
+      /Loom navigation architecture \/ Address Bar as local AI web navigator/
     );
 
-    const expectedLoomTitle = "Loom AI navigation architecture";
+    const expectedLoomTitle = "Loom navigation architecture";
 
     await page.getByRole("button", { name: "Share" }).click();
     const shareMenu = page.getByRole("menu", { name: "Share current Loom" });
@@ -318,5 +318,131 @@ test.describe("[legacy-typescript-local][pure-ui-rendering] Address Bar navigati
     await page.getByRole("button", { name: "Share" }).click();
     const finalShareMenu = page.getByRole("menu", { name: "Share current Loom" });
     await expect(finalShareMenu.getByRole("menuitem", { name: /Make Public/ })).toBeDisabled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Response context menu — Copy Loom Address uses canonical response address
+// ---------------------------------------------------------------------------
+
+test.describe("[legacy-typescript-local][pure-ui-rendering] Response kebab Copy Loom Address", () => {
+  test("copies the full canonical response address, not display code or raw path", async ({
+    page,
+  }) => {
+    await openAppWithPromotedAddressBarResponse(page);
+
+    // Navigate to the Loom that contains r-address-bar
+    await chooseAddressBarSuggestion(
+      page,
+      "Address Bar",
+      "Address Bar as local AI web navigator"
+    );
+
+    await expect(page.locator('[data-response-id="r-address-bar"]')).toBeVisible();
+
+    // Open the response context menu via right-click
+    const responseRow = page.locator('[data-response-id="r-address-bar"]');
+    await responseRow.click({ button: "right" });
+
+    // The in-app ContextMenu should appear (not Electron's native menu in test env)
+    const contextMenu = page.getByRole("menu").first();
+    await expect(contextMenu).toBeVisible();
+
+    // Click "Copy Loom Address" from the response context menu
+    await contextMenu.getByRole("menuitem", { name: "Copy Loom Address" }).click();
+
+    // The clipboard must contain a full loom:// response address
+    await expect
+      .poll(() => page.evaluate(() => window.localStorage.getItem("loom-test-clipboard")))
+      .toMatch(/^loom:\/\//);
+
+    const copiedAddress = await page.evaluate(() =>
+      window.localStorage.getItem("loom-test-clipboard")
+    );
+
+    // Must be the promoted canonical URI — the full response address with ?id=
+    expect(copiedAddress).toBe(promotedAddressBarUri);
+
+    // Must contain /r/ (response path segment) — not just a Loom-root address
+    expect(copiedAddress).toContain("/r/");
+
+    // Must contain ?id= for reliable navigation and bookmark identity matching
+    expect(copiedAddress).toContain("?id=");
+
+    // Must NOT be only a display code like R-ADDR
+    expect(copiedAddress).not.toBe("R-ADDR");
+    expect(copiedAddress?.startsWith("R-")).toBe(false);
+  });
+
+  test("response Copy Loom Address and footer Link resolve to the same canonical address", async ({
+    page,
+  }) => {
+    await openAppWithPromotedAddressBarResponse(page);
+
+    await chooseAddressBarSuggestion(
+      page,
+      "Address Bar",
+      "Address Bar as local AI web navigator"
+    );
+
+    await expect(page.locator('[data-response-id="r-address-bar"]')).toBeVisible();
+
+    // Read the canonical address via the footer Link chip's test ID
+    const footerLinkChip = page.getByTestId("response-link-r-address-bar");
+    await expect(footerLinkChip).toBeVisible();
+
+    // Click the footer Link chip (copies address into composed reference — also calls onCopyAddress on
+    // the AddressMetadataBadge when copying). Use the response's context menu to get the address
+    // without triggering a navigation by clicking the link.
+    const responseRow = page.locator('[data-response-id="r-address-bar"]');
+    await responseRow.click({ button: "right" });
+    const contextMenu = page.getByRole("menu").first();
+    await expect(contextMenu).toBeVisible();
+    await contextMenu.getByRole("menuitem", { name: "Copy Loom Address" }).click();
+
+    const kebabAddress = await page.evaluate(() =>
+      window.localStorage.getItem("loom-test-clipboard")
+    );
+
+    // The kebab-copied address must match the promoted canonical URI
+    expect(kebabAddress).toBe(promotedAddressBarUri);
+    expect(kebabAddress).toContain("/r/");
+    expect(kebabAddress).toContain("?id=");
+  });
+
+  test("Loom root address and response address remain distinct", async ({ page }) => {
+    await openAppWithPromotedAddressBarResponse(page);
+
+    await chooseAddressBarSuggestion(
+      page,
+      "Address Bar",
+      "Address Bar as local AI web navigator"
+    );
+
+    // Copy via share menu → gets Loom root address
+    await page.getByRole("button", { name: "Share" }).click();
+    await page
+      .getByRole("menu", { name: "Share current Loom" })
+      .getByRole("menuitem", { name: "Copy Loom Address" })
+      .click();
+
+    const loomAddress = await page.evaluate(() =>
+      window.localStorage.getItem("loom-test-clipboard")
+    );
+    expect(loomAddress).toMatch(/^loom:\/\//);
+    expect(loomAddress).not.toContain("/r/");
+
+    // Copy via response kebab → gets response address
+    const responseRow = page.locator('[data-response-id="r-address-bar"]');
+    await responseRow.click({ button: "right" });
+    const contextMenu = page.getByRole("menu").first();
+    await contextMenu.getByRole("menuitem", { name: "Copy Loom Address" }).click();
+
+    const responseAddress = await page.evaluate(() =>
+      window.localStorage.getItem("loom-test-clipboard")
+    );
+
+    expect(responseAddress).toContain("/r/");
+    expect(responseAddress).not.toBe(loomAddress);
   });
 });

@@ -1244,6 +1244,38 @@ fn reject_forbidden_payload(payload: Option<&str>) -> Result<(), ServiceError> {
     Ok(())
 }
 
+/// Removes stale `response_tags` rows with `tag_kind = 'code'` that were derived
+/// from pseudo-artifact code blocks deleted by migration 0019.
+///
+/// Code-language tags are exclusively sourced from code block language headers via
+/// `extract_tags_for_response` (`"code_block_language"` reason).  After migration 0019
+/// deleted pseudo-artifact code blocks, the corresponding `'code'` kind tags became
+/// orphaned.  This function is the Rust-level complement to migration 0021 and is
+/// called at startup as defense-in-depth to catch any rows that the SQL migration did
+/// not cover (e.g., blocks removed by `cleanup_pseudo_artifact_blocks` after startup).
+///
+/// Returns the number of orphaned tag rows deleted.
+pub async fn cleanup_orphaned_code_language_tags(pool: &SqlitePool) -> Result<usize, ServiceError> {
+    let result = sqlx::query(
+        "DELETE FROM response_tags
+         WHERE tag_kind = 'code'
+           AND NOT EXISTS (
+               SELECT 1 FROM response_code_blocks rcb
+               WHERE rcb.response_id = response_tags.response_id
+                 AND LOWER(COALESCE(rcb.language, '')) = response_tags.normalized_tag
+           )",
+    )
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        ServiceError::storage(format!(
+            "failed to clean orphaned code-language tags: {error}"
+        ))
+    })?;
+
+    Ok(result.rows_affected() as usize)
+}
+
 fn timestamp() -> String {
     crate::capabilities::repository::timestamp()
 }
@@ -1568,5 +1600,239 @@ mod tests {
             .await
             .expect("code blocks");
         assert_eq!(code_blocks.len(), 1);
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // cleanup_orphaned_code_language_tags
+    // ──────────────────────────────────────────────────────────────────────────
+
+    /// Simulate the pre-authority-boundary state: insert a code-language tag whose
+    /// source code block no longer exists, then verify cleanup removes it.
+    #[tokio::test]
+    async fn cleanup_orphaned_code_language_tags_removes_stale_tags() {
+        use super::cleanup_orphaned_code_language_tags;
+
+        let database = test_database().await;
+        seed_loom(&database).await;
+
+        // Insert a response without any content that would produce real code blocks.
+        insert_response(
+            &database,
+            "assistant-orphan",
+            "assistant",
+            1,
+            "No code here.",
+            None,
+        )
+        .await;
+
+        // Directly insert a stale 'code' kind tag simulating a pseudo-artifact block
+        // that was deleted by migration 0019 (no corresponding response_code_blocks row).
+        sqlx::query(
+            "INSERT INTO response_tags (
+                tag_id, response_id, loom_id, tag, normalized_tag, tag_kind,
+                confidence, source, metadata_json, created_at
+            ) VALUES ('stale-tag-1', 'assistant-orphan', 'loom-1', 'text', 'text', 'code',
+                      0.94, 'heuristic', NULL, '1')",
+        )
+        .execute(database.pool())
+        .await
+        .expect("insert stale code tag");
+
+        // Verify the stale tag is present before cleanup.
+        let tags_before = ResponseTagRepository::new(&database)
+            .list_by_response("assistant-orphan")
+            .await
+            .expect("tags before");
+        assert!(
+            tags_before.iter().any(|t| t.tag_kind == "code"),
+            "stale code tag should be present before cleanup"
+        );
+
+        // Run the cleanup.
+        let removed = cleanup_orphaned_code_language_tags(database.pool())
+            .await
+            .expect("cleanup should succeed");
+        assert_eq!(
+            removed, 1,
+            "exactly one orphaned code tag should be removed"
+        );
+
+        // Verify the stale tag is gone.
+        let tags_after = ResponseTagRepository::new(&database)
+            .list_by_response("assistant-orphan")
+            .await
+            .expect("tags after");
+        assert!(
+            !tags_after.iter().any(|t| t.tag_kind == "code"),
+            "stale code tag must be removed after cleanup"
+        );
+    }
+
+    /// A 'code' kind tag backed by a real surviving code block must NOT be removed.
+    #[tokio::test]
+    async fn cleanup_orphaned_code_language_tags_preserves_valid_code_tags() {
+        use super::cleanup_orphaned_code_language_tags;
+
+        let database = test_database().await;
+        seed_loom(&database).await;
+
+        // Insert a response with a real TypeScript block — this produces a 'code'/'ts' tag.
+        insert_response(
+            &database,
+            "assistant-real",
+            "assistant",
+            1,
+            "```ts\nconst value = 1;\n```",
+            None,
+        )
+        .await;
+
+        let tags_before = ResponseTagRepository::new(&database)
+            .list_by_response("assistant-real")
+            .await
+            .expect("tags before");
+        assert!(
+            tags_before
+                .iter()
+                .any(|t| t.tag_kind == "code" && t.normalized_tag == "ts"),
+            "real code block should produce a 'ts' code tag"
+        );
+
+        // Cleanup should not remove the tag backed by the surviving code block.
+        let removed = cleanup_orphaned_code_language_tags(database.pool())
+            .await
+            .expect("cleanup should succeed");
+        assert_eq!(
+            removed, 0,
+            "no tags should be removed when code block exists"
+        );
+
+        let tags_after = ResponseTagRepository::new(&database)
+            .list_by_response("assistant-real")
+            .await
+            .expect("tags after");
+        assert!(
+            tags_after
+                .iter()
+                .any(|t| t.tag_kind == "code" && t.normalized_tag == "ts"),
+            "valid code tag must survive cleanup"
+        );
+    }
+
+    /// Running cleanup twice must not produce an error and must return 0 on the
+    /// second call — confirms the operation is deterministic and idempotent.
+    #[tokio::test]
+    async fn cleanup_orphaned_code_language_tags_is_idempotent() {
+        use super::cleanup_orphaned_code_language_tags;
+
+        let database = test_database().await;
+        seed_loom(&database).await;
+        insert_response(
+            &database,
+            "assistant-idem",
+            "assistant",
+            1,
+            "No code.",
+            None,
+        )
+        .await;
+
+        // Plant a stale tag.
+        sqlx::query(
+            "INSERT INTO response_tags (
+                tag_id, response_id, loom_id, tag, normalized_tag, tag_kind,
+                confidence, source, metadata_json, created_at
+            ) VALUES ('idem-tag-1', 'assistant-idem', 'loom-1', 'text', 'text', 'code',
+                      0.94, 'heuristic', NULL, '1')",
+        )
+        .execute(database.pool())
+        .await
+        .expect("insert stale code tag");
+
+        let first = cleanup_orphaned_code_language_tags(database.pool())
+            .await
+            .expect("first cleanup");
+        assert_eq!(first, 1);
+
+        let second = cleanup_orphaned_code_language_tags(database.pool())
+            .await
+            .expect("second cleanup");
+        assert_eq!(second, 0, "idempotent: no rows to remove on second call");
+    }
+
+    /// Cleanup of orphaned code-language tags must not delete canonical response rows.
+    #[tokio::test]
+    async fn projection_cleanup_preserves_canonical_responses() {
+        use super::cleanup_orphaned_code_language_tags;
+        use crate::storage::repositories::responses::ResponseRepository;
+
+        let database = test_database().await;
+        seed_loom(&database).await;
+        insert_response(
+            &database,
+            "assistant-keep",
+            "assistant",
+            1,
+            "Some answer.",
+            None,
+        )
+        .await;
+
+        // Plant a stale code tag to trigger the cleanup predicate.
+        sqlx::query(
+            "INSERT INTO response_tags (
+                tag_id, response_id, loom_id, tag, normalized_tag, tag_kind,
+                confidence, source, metadata_json, created_at
+            ) VALUES ('keep-tag-1', 'assistant-keep', 'loom-1', 'text', 'text', 'code',
+                      0.94, 'heuristic', NULL, '1')",
+        )
+        .execute(database.pool())
+        .await
+        .expect("insert stale code tag");
+
+        cleanup_orphaned_code_language_tags(database.pool())
+            .await
+            .expect("cleanup");
+
+        // The response itself must still exist.
+        let response = ResponseRepository::new(&database)
+            .get_response("assistant-keep")
+            .await
+            .expect("get response")
+            .expect("response must still exist after projection cleanup");
+        assert_eq!(response.content, "Some answer.");
+    }
+
+    /// Fake Hash:/CODE-001 blocks must not produce code_for graph links.
+    #[tokio::test]
+    async fn fake_artifact_metadata_blocks_produce_no_graph_links() {
+        let database = test_database().await;
+        seed_loom(&database).await;
+        insert_response(
+            &database,
+            "assistant-fake",
+            "assistant",
+            1,
+            concat!(
+                "```text\n",
+                "Hash: abc123def456\n",
+                "Type: Security Analysis\n",
+                "Provenance: [timestamp, user, tool]\n",
+                "```\n"
+            ),
+            None,
+        )
+        .await;
+
+        let links = ContextGraphLinkRepository::new(&database)
+            .list_links_for_loom("loom-1")
+            .await
+            .expect("links");
+
+        assert!(
+            !links.iter().any(|l| l.link_kind == "code_for"),
+            "fake artifact metadata blocks must not produce code_for graph links"
+        );
     }
 }

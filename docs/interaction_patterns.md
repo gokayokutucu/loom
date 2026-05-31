@@ -7,7 +7,7 @@
 
 ## 1. Purpose
 
-This document collects reusable interaction rules for Loom AI.
+This document collects reusable interaction rules for Loom.
 
 It covers:
 
@@ -24,7 +24,7 @@ It covers:
 
 ## 2. Tooltip Rules
 
-Loom AI should use a reusable tooltip/hint system.
+Loom should use a reusable tooltip/hint system.
 
 ### Rule
 When hovering over icon-only or ambiguous controls:
@@ -223,7 +223,7 @@ The row should be subtle and premium, not noisy.
 
 ## 13. Summary
 
-Interaction patterns in Loom AI should feel:
+Interaction patterns in Loom should feel:
 
 - explicit
 - lightweight

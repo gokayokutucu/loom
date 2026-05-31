@@ -20,7 +20,7 @@ export interface LoomDesktopRuntimeStatus {
   binaryPath?: string;
   configPath?: string;
   dbPath?: string;
-  dataMode?: "shared-dev" | "isolated-dev" | "packaged";
+  dataMode?: "dev" | "packaged";
   health?: unknown;
   error?: string;
   startedByElectron?: boolean;
@@ -47,12 +47,18 @@ import type {
   AddressBarContextMenuParams,
   AddressBarContextMenuResult,
 } from "./services/addressBarContextMenu";
+import type {
+  ComposerContextMenuParams,
+  ComposerContextMenuResult,
+} from "./services/composerContextMenu";
 
 interface LoomDesktopBridge {
   getRuntimeInfo: () => LoomDesktopRuntimeInfo;
   runtime?: {
     status: () => Promise<LoomDesktopRuntimeStatus>;
     restart: () => Promise<LoomDesktopRuntimeStatus>;
+    /** Stops the service, physically deletes the DB file, restarts fresh. */
+    dbWipe: () => Promise<{ ok: boolean; error?: string }>;
   };
   runtimeStatus?: () => Promise<unknown>;
   logs?: {
@@ -73,6 +79,17 @@ interface LoomDesktopBridge {
     showContextMenu: (
       params: AddressBarContextMenuParams
     ) => Promise<AddressBarContextMenuResult>;
+  };
+  composer?: {
+    showContextMenu: (
+      params: ComposerContextMenuParams
+    ) => Promise<ComposerContextMenuResult>;
+  };
+  attachments?: {
+    openPath: (tempPath: string) => Promise<{ opened: boolean; error?: string }>;
+  };
+  appMenu?: {
+    onOpenSettings: (callback: () => void) => () => void;
   };
 }
 
@@ -117,6 +134,21 @@ export function getElectronPermissionsBridge() {
 export function getElectronAddressBarBridge() {
   if (typeof window === "undefined") return null;
   return window.loomDesktop?.addressBar ?? null;
+}
+
+export function getElectronAttachmentsBridge() {
+  if (typeof window === "undefined") return null;
+  return window.loomDesktop?.attachments ?? null;
+}
+
+export function getElectronComposerBridge() {
+  if (typeof window === "undefined") return null;
+  return window.loomDesktop?.composer ?? null;
+}
+
+export function getElectronAppMenuBridge() {
+  if (typeof window === "undefined") return null;
+  return window.loomDesktop?.appMenu ?? null;
 }
 
 export function logElectronEvent(

@@ -4,7 +4,7 @@
 **Status**: Active  
 **Start Date**: 2026-04-28
 
-This ledger records durable design decisions for Loom AI addressing, graph persistence, resolution, windows, and runtime audit behavior.
+This ledger records durable design decisions for Loom addressing, graph persistence, resolution, windows, and runtime audit behavior.
 
 Runtime graph events belong in SQLite table `loom_ledger_events`; this markdown file records architecture decisions only.
 

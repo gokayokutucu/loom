@@ -35,12 +35,18 @@ import {
   X,
 } from "lucide-react";
 import {
+  isLoomGraphDestinationNode,
   loomGraphRootNodeId,
+  mergeLoomGraphAncestryStep,
   responseGraphNodeId,
   type LoomGraphProjectionNode,
   type LoomGraphProjection,
 } from "../../services/loomGraphProjection";
-import type { Conversation, LoomForkRecord, ResponseItem } from "../../types";
+import type { Conversation, LoomForkRecord, LoomLink, ResponseItem } from "../../types";
+import {
+  referenceLabelForMode,
+  referenceTokenText,
+} from "../../services/referenceDisplay";
 import type { LoomEngineClient } from "../../engine";
 import { AssistantMarkdownContent } from "../../components/AssistantMarkdownContent";
 import { formatRelativeTimestamp } from "../../services/timeLabels";
@@ -227,7 +233,79 @@ function LoomGraphComposerNode({ data }: NodeProps<LoomGraphComposerFlowNode>) {
   );
 }
 
-function GraphResponsePreviewQuestion({ question }: { question: string }) {
+function renderQuestionWithChips(
+  text: string,
+  references: LoomLink[],
+  onOpenReference: (link: LoomLink) => void
+) {
+  const remainingRefs = [...references];
+  const parts: Array<string | JSX.Element> = [];
+  let cursor = 0;
+
+  type ChipMatch = { link: LoomLink; token: string; index: number; refIdx: number };
+
+  const findNext = (): ChipMatch | null => {
+    let best: ChipMatch | null = null;
+    remainingRefs.forEach((link, refIdx) => {
+      const candidates = Array.from(
+        new Set([
+          referenceTokenText(link, link.referenceDisplayMode ?? "title"),
+          referenceTokenText(link, "title"),
+          referenceTokenText(link, "code"),
+        ])
+      );
+      for (const token of candidates) {
+        const idx = text.indexOf(token, cursor);
+        if (idx < 0) continue;
+        if (!best || idx < best.index) {
+          best = { link, token, index: idx, refIdx };
+        }
+      }
+    });
+    return best;
+  };
+
+  while (remainingRefs.length > 0) {
+    const match = findNext();
+    if (!match) break;
+    if (match.index > cursor) parts.push(text.slice(cursor, match.index));
+    const label = referenceLabelForMode(
+      match.link,
+      match.link.referenceDisplayMode ?? "title"
+    );
+    parts.push(
+      <button
+        key={`chip-${match.link.id}-${match.index}`}
+        type="button"
+        className="sent-prompt-reference-token"
+        onClick={() => onOpenReference(match.link)}
+        title={match.link.title}
+        data-loom-id={match.link.id}
+        data-loom-path={match.link.path}
+        data-loom-title={match.link.title}
+        data-loom-type={match.link.type}
+        data-loom-canonical-uri={match.link.canonicalUri}
+      >
+        <span>{label}</span>
+      </button>
+    );
+    cursor = match.index + match.token.length;
+    remainingRefs.splice(match.refIdx, 1);
+  }
+
+  if (cursor < text.length) parts.push(text.slice(cursor));
+  return parts;
+}
+
+function GraphResponsePreviewQuestion({
+  question,
+  references,
+  onOpenReference,
+}: {
+  question: string;
+  references?: LoomLink[];
+  onOpenReference?: (link: LoomLink) => void;
+}) {
   const questionRef = useRef<HTMLParagraphElement | null>(null);
   const [expanded, setExpanded] = useState(false);
   const [collapsible, setCollapsible] = useState(false);
@@ -253,6 +331,11 @@ function GraphResponsePreviewQuestion({ question }: { question: string }) {
     return () => resizeObserver?.disconnect();
   }, [question, expanded]);
 
+  const renderedContent =
+    references && references.length > 0 && onOpenReference
+      ? renderQuestionWithChips(question, references, onOpenReference)
+      : question;
+
   return (
     <div
       className="graph-response-preview-question-content"
@@ -270,7 +353,7 @@ function GraphResponsePreviewQuestion({ question }: { question: string }) {
               } as CSSProperties)
         }
       >
-        {question}
+        {renderedContent}
       </p>
       {collapsible && (
         <button
@@ -370,6 +453,8 @@ function GraphViewInner({
   const skipNextFollowAfterContinuationFocusRef = useRef(false);
 
   const [projection, setProjection] = useState<LoomGraphProjection>({ nodes: [], edges: [] });
+  const [ancestryLoadingByNodeId, setAncestryLoadingByNodeId] = useState<Record<string, boolean>>({});
+  const [ancestryErrorByNodeId, setAncestryErrorByNodeId] = useState<Record<string, string>>({});
   const conversationTitlesById = useMemo(
     () =>
       Object.fromEntries(
@@ -439,7 +524,10 @@ function GraphViewInner({
       })
       .then((nextProjection) => {
         if (!cancelled) {
-          setProjection(nextProjection);
+          setProjection((current) => {
+            const hasExpandedAncestry = current.nodes.some((node) => node.graphRole === "ancestor-context");
+            return hasExpandedAncestry ? current : nextProjection;
+          });
           setProjectionError(null);
         }
       })
@@ -506,6 +594,31 @@ function GraphViewInner({
       setSelectedNodeId(nodeId);
     },
     [centerNode, graphNodeRenderPosition, projection.nodes, reactFlow]
+  );
+
+  const expandAncestryFromNode = useCallback(
+    async (node: LoomGraphProjectionNode) => {
+      if (!node.hasParentAncestry || ancestryLoadingByNodeId[node.id]) return;
+      setAncestryLoadingByNodeId((current) => ({ ...current, [node.id]: true }));
+      setAncestryErrorByNodeId((current) => {
+        const { [node.id]: _removed, ...rest } = current;
+        return rest;
+      });
+      try {
+        const step = await engineClient.getLoomAncestryStep({ loomId: node.loomId });
+        setProjection((current) => mergeLoomGraphAncestryStep(current, node.id, step));
+        window.requestAnimationFrame(() => {
+          focusNodeNearTop(loomGraphRootNodeId(step.parentLoom?.loomId ?? node.loomId), 520);
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Parent ancestry could not be loaded.";
+        setAncestryErrorByNodeId((current) => ({ ...current, [node.id]: message }));
+      } finally {
+        setAncestryLoadingByNodeId((current) => ({ ...current, [node.id]: false }));
+      }
+    },
+    [ancestryLoadingByNodeId, engineClient, focusNodeNearTop]
   );
 
   const positionContinuationComposer = useCallback((nodeId: string | undefined) => {
@@ -676,6 +789,9 @@ function GraphViewInner({
     setResponsePreviewNodeId(null);
     setResponsePreviewWeftPickerOpen(false);
     setBookmarkStateOverrides({});
+    setAncestryLoadingByNodeId({});
+    setAncestryErrorByNodeId({});
+    setProjection({ nodes: [], edges: [] });
   }, [activeLoomId]);
 
   const bookmarkOverrideForResponse = useCallback(
@@ -831,6 +947,48 @@ function GraphViewInner({
     return Boolean(response?.visibleProgress) && !responsePreview?.answerMarkdown.trim();
   }, [projection.nodes, responsePreview, responsePreviewNodeId, responsesByConversation]);
 
+  const handlePreviewReferenceOpen = useCallback(
+    (link: LoomLink) => {
+      // Try to find the referenced node inside the current graph projection
+      const matchingNode = projection.nodes.find((node) => {
+        if (node.canonicalUri && link.canonicalUri && node.canonicalUri === link.canonicalUri) {
+          return true;
+        }
+        const nodeResponse = responseForGraphNode(node, responsesByConversation);
+        if (!nodeResponse) return false;
+        return (
+          nodeResponse.id === link.id ||
+          nodeResponse.serviceUserResponseId === link.id ||
+          nodeResponse.address === link.id ||
+          nodeResponse.address === link.canonicalUri ||
+          (nodeResponse.meta?.canonicalUri && nodeResponse.meta.canonicalUri === link.canonicalUri)
+        );
+      });
+
+      setResponsePreviewNodeId(null);
+
+      if (matchingNode) {
+        setSelectedNodeId(matchingNode.id);
+        window.requestAnimationFrame(() => focusNodeNearTop(matchingNode.id));
+      } else {
+        // Navigate to the referenced loom — prefer sourceLoomId, then extract from canonicalUri/path
+        const targetLoomId =
+          link.sourceLoomId ??
+          (() => {
+            // canonicalUri may be loom://wefts/{loomId}/r/... or loom://looms/{loomId}/...
+            const uri = link.canonicalUri ?? link.path ?? "";
+            const weftMatch = /^loom:\/\/wefts\/([^/]+)/.exec(uri);
+            const loomMatch = /^loom:\/\/looms\/([^/]+)/.exec(uri);
+            return weftMatch?.[1] ?? loomMatch?.[1] ?? null;
+          })();
+        if (targetLoomId) {
+          onOpenLoom(targetLoomId);
+        }
+      }
+    },
+    [focusNodeNearTop, onOpenLoom, projection.nodes, responsesByConversation]
+  );
+
   const handleContinuationResponseCreated = useCallback(
     (response: ResponseItem) => {
       if (!continuationTarget) return;
@@ -878,9 +1036,9 @@ function GraphViewInner({
     () => {
       const nodes: LoomGraphAnyNode[] = projection.nodes.map((projectionNode) => {
         const response = responseForGraphNode(projectionNode, responsesByConversation);
-        // Root (loom) nodes aren't tracked in bookmarkedResponseAddresses via the
-        // response-specific helper, so derive their bookmark state from the loom path.
-        const isBookmarked = projectionNode.kind === "root"
+        // Loom destination nodes (root/weft) aren't tracked in bookmarkedResponseAddresses
+        // via the response-specific helper, so derive their bookmark state from the loom path.
+        const isBookmarked = isLoomGraphDestinationNode(projectionNode)
           ? (() => {
               const loom = conversations.find((c) => c.id === projectionNode.loomId);
               if (!loom) return false;
@@ -958,7 +1116,7 @@ function GraphViewInner({
             onBookmark: (node, nodeResponse) => {
               if (nodeResponse) {
                 onBookmarkResponse(node.loomId, nodeResponse, Boolean(node.isBookmarked));
-              } else if (node.kind === "root") {
+              } else if (isLoomGraphDestinationNode(node)) {
                 onBookmarkLoom?.(node.loomId, Boolean(node.isBookmarked));
               }
             },
@@ -966,7 +1124,7 @@ function GraphViewInner({
               if (nodeResponse) {
                 openContinuationForResponse(node, nodeResponse);
                 onLinkResponse(node.loomId, nodeResponse);
-              } else if (node.kind === "root") {
+              } else if (isLoomGraphDestinationNode(node)) {
                 onLinkLoom?.(node.loomId);
               }
             },
@@ -979,6 +1137,7 @@ function GraphViewInner({
             onContinue: (node, nodeResponse) => {
               if (nodeResponse) openContinuationForResponse(node, nodeResponse);
             },
+            onExpandAncestry: expandAncestryFromNode,
             hasExistingWeft,
             hasRevisionWeft,
             weftCount,
@@ -998,6 +1157,8 @@ function GraphViewInner({
             isResponsePending,
             continuationOpen:
               continuationOpen && continuationNodeId === projectionNode.id,
+            ancestryLoading: Boolean(ancestryLoadingByNodeId[projectionNode.id]),
+            ancestryError: ancestryErrorByNodeId[projectionNode.id],
             viewportZoom: graphZoom,
           },
         };
@@ -1040,6 +1201,9 @@ function GraphViewInner({
       forkRecords,
       projection.edges,
       projection.nodes,
+      ancestryErrorByNodeId,
+      ancestryLoadingByNodeId,
+      expandAncestryFromNode,
       responsesByConversation,
       selectedGraphRevisionByResponseId,
       selectedNodeId,
@@ -1423,7 +1587,11 @@ function GraphViewInner({
               <article className="graph-response-preview-scroll">
                 <div className="graph-response-preview-block graph-response-preview-question">
                   <span>Question</span>
-                  <GraphResponsePreviewQuestion question={responsePreview.question} />
+                  <GraphResponsePreviewQuestion
+                    question={responsePreview.question}
+                    references={responsePreview.references}
+                    onOpenReference={handlePreviewReferenceOpen}
+                  />
                 </div>
                 <div className="graph-response-preview-block graph-response-preview-answer">
                   <span>Answer</span>

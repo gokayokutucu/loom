@@ -11,7 +11,7 @@ import type {
 } from "../types";
 import type { LoomEngineClient } from "./LoomEngineClient";
 import type { ModelResponseMode } from "../services/appSettings";
-import type { LoomGraphProjection } from "../services/loomGraphProjection";
+import type { LoomGraphAncestryStep, LoomGraphProjection } from "../services/loomGraphProjection";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
@@ -435,6 +435,9 @@ export interface SendMessageInput {
   draftKey?: string;
   promptText: string;
   references: LoomLink[];
+  /** Full LoomLink array (including badge and presentationMode) persisted as
+   *  metadata.questionReferences so presentation mode survives app reload. */
+  questionReferences?: LoomLink[];
   attachments?: JsonValue[];
   responseMode: ModelResponseMode;
   focusedResponseId?: string;
@@ -499,6 +502,18 @@ export interface ListAttachmentsResult {
 
 export interface DeleteAttachmentInput {
   attachmentId: string;
+}
+
+export interface MaterializeAttachmentInput {
+  attachmentId: string;
+  /** Loom that owns the attachment. Verified server-side before bytes are returned. */
+  loomId: string;
+}
+
+export interface MaterializeAttachmentResult {
+  /** Absolute OS temp-file path for the materialized attachment blob. */
+  path: string;
+  fileName: string;
 }
 
 export interface RegenerateFromResponseInput {
@@ -914,6 +929,12 @@ export interface GraphProjectionInput {
 }
 
 export type GraphProjectionResult = LoomGraphProjection;
+
+export interface LoomAncestryStepInput {
+  loomId: string;
+}
+
+export type LoomAncestryStepResult = LoomGraphAncestryStep;
 
 export interface ExportLoomInput {
   loomId: string;

@@ -1,3 +1,11 @@
+@font-face {
+  font-family: "Symbols Nerd Font";
+  src: url("/fonts/SymbolsNerdFont-Regular.woff2") format("woff2");
+  font-weight: normal;
+  font-style: normal;
+  font-display: block;
+}
+
 :root {
   color-scheme: dark;
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system,
@@ -2278,6 +2286,10 @@ kbd {
   scrollbar-width: thin;
 }
 
+.chat-transcript.is-generating-response {
+  padding-bottom: clamp(320px, 52vh, 560px);
+}
+
 .weft-split-view {
   display: grid;
   grid-template-columns: minmax(0, 60%) minmax(0, 40%);
@@ -3377,6 +3389,23 @@ kbd {
 .assistant-response-content {
   position: relative;
   min-width: 0;
+}
+
+.assistant-response-tail {
+  display: block;
+  width: 1px;
+  height: 0;
+  pointer-events: none;
+}
+
+/* Real transcript content end marker — sits in normal document flow
+   immediately after the last qa-item, before the CSS padding-bottom.
+   getBoundingClientRect().bottom gives the true content boundary. */
+[data-transcript-content-end] {
+  display: block;
+  width: 0;
+  height: 0;
+  pointer-events: none;
 }
 
 .assistant-response-content.is-collapsed {
@@ -4979,6 +5008,54 @@ kbd {
 .sent-prompt-reference-overflow {
   color: var(--loom-text-muted);
   font-size: 11px;
+}
+
+/* Sent attachment chips — shown above user message bubbles */
+.sent-attachment-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-bottom: 6px;
+}
+
+.sent-attachment-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 8px;
+  border: 1px solid var(--loom-border, rgba(255, 255, 255, 0.1));
+  border-radius: 5px;
+  background: var(--loom-surface-raised, rgba(255, 255, 255, 0.06));
+  color: var(--loom-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  line-height: 1.3;
+  cursor: pointer;
+  max-width: 200px;
+  overflow: hidden;
+}
+
+.sent-attachment-chip:hover,
+.sent-attachment-chip:focus-visible {
+  border-color: var(--loom-link-blue, #5b9bd5);
+  color: var(--loom-text-primary);
+  outline: none;
+}
+
+.sent-attachment-chip svg {
+  flex: 0 0 auto;
+  color: var(--loom-text-muted);
+}
+
+.sent-attachment-chip:hover svg,
+.sent-attachment-chip:focus-visible svg {
+  color: var(--loom-link-blue, #5b9bd5);
+}
+
+.sent-attachment-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .composer-footer {
@@ -8601,6 +8678,24 @@ kbd {
   margin-bottom: 0;
 }
 
+.graph-response-preview-answer h1.assistant-markdown-heading,
+.graph-response-preview-answer h2.assistant-markdown-heading {
+  font-size: calc(var(--font-body-size) + 4px);
+  line-height: calc(var(--font-body-line) + 4px);
+}
+
+.graph-response-preview-answer h3.assistant-markdown-heading {
+  font-size: calc(var(--font-body-size) + 2px);
+  line-height: calc(var(--font-body-line) + 3px);
+}
+
+.graph-response-preview-answer h4.assistant-markdown-heading,
+.graph-response-preview-answer h5.assistant-markdown-heading,
+.graph-response-preview-answer h6.assistant-markdown-heading {
+  font-size: var(--font-body-size);
+  line-height: var(--font-body-line);
+}
+
 .loom-graph-node {
   position: relative;
   display: grid;
@@ -8939,6 +9034,78 @@ kbd {
   border-color: var(--loom-border-strong);
   background: color-mix(in srgb, var(--accent-fallback) 75%, transparent);
   pointer-events: none;
+}
+
+.loom-graph-node-ancestry-handle-button {
+  position: absolute;
+  top: -10px;
+  left: 50%;
+  z-index: 5;
+  display: grid;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--accent-fallback) 70%, var(--loom-border-strong));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-fallback) 84%, #120b08);
+  color: #120b08;
+  box-shadow:
+    0 0 0 2px var(--loom-graph-node-bg),
+    0 8px 18px rgba(0, 0, 0, 0.24);
+  cursor: pointer;
+  transform: translateX(-50%);
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    color 140ms ease,
+    opacity 140ms ease,
+    box-shadow 140ms ease;
+  place-items: center;
+}
+
+.loom-graph-node-ancestry-handle-button:hover,
+.loom-graph-node-ancestry-handle-button:focus-visible {
+  border-color: color-mix(in srgb, var(--accent-fallback) 88%, white);
+  background: color-mix(in srgb, var(--accent-fallback) 92%, white);
+  box-shadow:
+    0 0 0 2px var(--loom-graph-node-bg),
+    0 0 0 4px color-mix(in srgb, var(--accent-fallback) 20%, transparent),
+    0 10px 22px rgba(0, 0, 0, 0.26);
+  outline: 0;
+}
+
+.loom-graph-node-ancestry-handle-button.is-loading {
+  cursor: wait;
+  opacity: 0.68;
+  animation: graph-ancestry-handle-pulse 1.2s ease-in-out infinite;
+}
+
+.loom-graph-node-ancestry-handle-button.is-muted,
+.loom-graph-node-ancestry-handle-button:disabled {
+  border-color: color-mix(in srgb, var(--accent-fallback) 34%, var(--loom-border-subtle));
+  background: color-mix(in srgb, var(--accent-fallback) 22%, var(--loom-graph-node-bg));
+  color: color-mix(in srgb, var(--text-muted) 70%, transparent);
+  box-shadow:
+    0 0 0 2px var(--loom-graph-node-bg),
+    0 5px 14px rgba(0, 0, 0, 0.16);
+  cursor: default;
+  opacity: 0.62;
+}
+
+.loom-graph-node-ancestry-handle-button.has-error {
+  border-color: rgba(255, 107, 107, 0.64);
+  background: color-mix(in srgb, #ff6b6b 62%, var(--accent-fallback));
+  color: #160807;
+}
+
+@keyframes graph-ancestry-handle-pulse {
+  0%,
+  100% {
+    transform: translateX(-50%) scale(1);
+  }
+  50% {
+    transform: translateX(-50%) scale(0.92);
+  }
 }
 
 .loom-graph-handle--hidden {

@@ -344,6 +344,9 @@ test.describe("[product-service-backed][legacy-typescript-local] Graph bookmark 
       await expect(bookmarkRow).toHaveCount(0);
       await expect(graphBookmarkButton).toHaveAttribute("aria-pressed", "false");
       await expect(graphBookmarkButton).not.toHaveClass(/is-bookmarked/);
+      // The transcript footer chip must also reflect the unbookmarked state after sidebar deletion.
+      await expect(bookmarkButton).toHaveAttribute("aria-pressed", "false");
+      await expect(bookmarkButton).not.toHaveClass(/bookmarked/);
 
       const afterDelete = await scenario.fetchJson<BookmarkListResponse>("/bookmarks");
       expect(afterDelete.bookmarks).toHaveLength(0);
@@ -351,6 +354,68 @@ test.describe("[product-service-backed][legacy-typescript-local] Graph bookmark 
       expectNoForbiddenPayload(duplicate);
       expectNoForbiddenPayload(afterDelete);
       expect(scenario.dbPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] footer chip clears after sidebar delete for in-session footer-created bookmark", async ({
+    page,
+  }) => {
+    // This test exercises the bug where:
+    //   1. User bookmarks a response via the footer chip  (sets response.bookmarked = true)
+    //   2. User removes via footer chip                   (clears response.bookmarked = false)
+    //   3. User re-bookmarks via footer chip              (sets response.bookmarked = true again;
+    //      promoteBookmark finds the stale BMK_ object in localStorage → was returning type:"bookmark"
+    //      instead of type:"response", so removeBookmark skipped clearing response.bookmarked)
+    //   4. User deletes via sidebar                       (footer must go aria-pressed="false")
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(page, "Event Sourcing nedir?");
+      await expect(page.getByText("Event Store").first()).toBeVisible({ timeout: 30_000 });
+
+      // Step 1: bookmark via footer chip
+      const footerChip = page.locator(".response-bookmark-chip").last();
+      await expect(footerChip).toHaveAttribute("aria-pressed", "false");
+      await footerChip.click();
+      await expect(footerChip).toHaveAttribute("aria-pressed", "true");
+
+      // Step 2: un-bookmark via footer chip
+      await footerChip.click();
+      await expect(footerChip).toHaveAttribute("aria-pressed", "false");
+
+      // Step 3: re-bookmark via footer chip (triggers the stale-BMK_ promoteBookmark path)
+      await footerChip.click();
+      await expect(footerChip).toHaveAttribute("aria-pressed", "true");
+
+      // Step 4: open Bookmarks sidebar and delete the row
+      await page.getByRole("button", { name: "Bookmarks" }).click();
+      const bookmarkRow = page.locator("[data-testid^='utility-destination-row-']").first();
+      await expect(bookmarkRow).toBeVisible();
+      // Sidebar must show exactly one row (no duplicate created by the re-bookmark)
+      await expect(page.locator("[data-testid^='utility-destination-row-']")).toHaveCount(1);
+
+      await bookmarkRow.hover();
+      await bookmarkRow.locator(".bookmark-rail-button.danger").click();
+      await expect(bookmarkRow).toHaveCount(0);
+
+      // Footer chip must clear immediately after sidebar deletion — the core assertion
+      await expect(footerChip).toHaveAttribute("aria-pressed", "false");
+      await expect(footerChip).not.toHaveClass(/bookmarked/);
+
+      const afterDelete = await scenario.fetchJson<BookmarkListResponse>("/bookmarks");
+      expect(afterDelete.bookmarks).toHaveLength(0);
     } finally {
       const cleanup = await scenario.cleanup();
       expect(cleanup.serviceStopped).toBe(true);
@@ -444,5 +509,53 @@ test.describe("[product-service-backed][legacy-typescript-local] Graph bookmark 
 
     await expect(page.getByText("Link added")).toBeVisible();
     await expect(composer).toContainText("Focused graph positioning keeps work oriented");
+  });
+
+  test("[legacy-typescript-local] Weft graph node shows Bookmark and Link actions independent from origin Loom", async ({
+    page,
+  }) => {
+    await openGraphMapGraph(page);
+
+    const weftNode = page.locator(
+      '[data-id="loom:c-graph-continuation:root"] .loom-graph-node--weft'
+    );
+    await expect(weftNode).toBeVisible();
+
+    // Bookmark and Link action buttons must be visible on the Weft node.
+    const weftBookmarkButton = weftNode.locator(".loom-graph-node-bookmark");
+    const weftLinkButton = weftNode.getByRole("button", { name: "Link" });
+    await expect(weftBookmarkButton).toBeVisible();
+    await expect(weftLinkButton).toBeVisible();
+
+    // Initial state: not bookmarked.
+    await expect(weftBookmarkButton).not.toHaveClass(/is-bookmarked/);
+    await expect(weftBookmarkButton).toHaveAttribute("aria-pressed", "false");
+
+    // Root Loom (origin) bookmark state — capture before touching the Weft.
+    const rootNode = page.locator(
+      '[data-id="loom:c-graph-map:root"] .loom-graph-node--root'
+    );
+    const rootBookmarkButton = rootNode.locator(".loom-graph-node-bookmark");
+    const rootBookmarkedBefore = await rootBookmarkButton.getAttribute("aria-pressed");
+
+    // Click Bookmark on the Weft node.
+    await weftBookmarkButton.click();
+    await expect(weftBookmarkButton).toHaveClass(/is-bookmarked/);
+    await expect(weftBookmarkButton).toHaveAttribute("aria-pressed", "true");
+
+    // Origin Loom bookmark state must remain independent.
+    await expect(rootBookmarkButton).toHaveAttribute("aria-pressed", rootBookmarkedBefore ?? "false");
+
+    // Click Bookmark again — should unmark.
+    await weftBookmarkButton.click();
+    await expect(weftBookmarkButton).not.toHaveClass(/is-bookmarked/);
+    await expect(weftBookmarkButton).toHaveAttribute("aria-pressed", "false");
+
+    // Link action must add to composer and show toast.
+    await page.getByRole("button", { name: "Continue Loom", exact: true }).click();
+    const composer = page.getByTestId("graph-continuation-composer");
+    await expect(composer).toBeVisible();
+    await weftLinkButton.click();
+    await expect(page.getByText("Link added")).toBeVisible();
   });
 });

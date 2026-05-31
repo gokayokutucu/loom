@@ -1,8 +1,14 @@
 import { app, BrowserWindow, clipboard, ipcMain, Menu, nativeImage, shell, systemPreferences } from "electron";
 import crypto from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  buildAppMenuTemplate,
+  LOOM_APP_NAME,
+  sendOpenSettingsToWindow,
+} from "./app-menu.mjs";
 import { createAppLogger } from "./app-logger.mjs";
 import { LoomServiceSidecarManager } from "./sidecar-manager.mjs";
 
@@ -17,6 +23,8 @@ let sidecar;
 let quitInProgress = false;
 const appSessionId = crypto.randomUUID();
 let appLogger;
+
+app.setName(LOOM_APP_NAME);
 
 function sanitizeLogValue(value, depth = 0) {
   if (value == null) return value;
@@ -57,6 +65,16 @@ function getAppIconPath() {
 function getAppIcon() {
   const icon = nativeImage.createFromPath(getAppIconPath());
   return icon.isEmpty() ? null : icon;
+}
+
+function installApplicationMenu() {
+  const template = buildAppMenuTemplate({
+    appName: LOOM_APP_NAME,
+    onOpenSettings: () => {
+      sendOpenSettingsToWindow(mainWindow);
+    },
+  });
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
 function loadingHtml(message = "The local loom-service sidecar is starting. The app will open when the runtime is ready.") {
@@ -260,6 +278,90 @@ ipcMain.handle("loom:runtime-restart", async () => {
   return status;
 });
 
+// Full database wipe: stops the service (killing external dev/manual processes if needed),
+// physically deletes the DB file, then restarts a fresh service.
+// Used by the "Reset DB" action to guarantee data cannot survive a restart.
+ipcMain.handle("loom:db-wipe", async () => {
+  if (!sidecar) return { ok: false, error: "no sidecar available" };
+
+  const currentStatus = sidecar.getStatus();
+  const { dbPath, pid, startedByElectron, serviceUrl } = currentStatus;
+
+  appLogger?.info("db_wipe.requested", { dbPath, pid, startedByElectron });
+
+  // Step 1: Best-effort hard-reset via HTTP to flush WAL pages cleanly.
+  // Ignore failures — the DB might be empty/broken (no tables) which is fine.
+  if (serviceUrl) {
+    await fetch(`${serviceUrl}/hard-reset`, { method: "POST" }).catch(() => undefined);
+  }
+
+  // Step 2: Stop the sidecar. For Electron-owned processes this sends a
+  // graceful drain-shutdown and waits. For external dev/manual services it
+  // just marks the local state as stopped (we kill the process below).
+  await sidecar.stop().catch(() => undefined);
+
+  // Step 3: Kill external dev/manual process so the port is freed.
+  // (sidecar.stop() deliberately leaves externally-started processes alive.)
+  if (!startedByElectron && pid) {
+    try {
+      process.kill(Number(pid), "SIGTERM");
+      appLogger?.info("db_wipe.sigterm_sent", { pid });
+    } catch {
+      // Already dead — that's fine.
+    }
+    // Wait up to 3 s for the process to exit gracefully.
+    const deadline = Date.now() + 3000;
+    let dead = false;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 200));
+      try {
+        process.kill(Number(pid), 0); // Signal 0 = existence check
+      } catch {
+        dead = true;
+        break;
+      }
+    }
+    if (!dead) {
+      // Force-kill if it's still alive after the grace period.
+      try {
+        process.kill(Number(pid), "SIGKILL");
+        appLogger?.warn("db_wipe.sigkill_sent", { pid });
+      } catch {}
+      await new Promise((r) => setTimeout(r, 400));
+    }
+  }
+
+  // Step 4: Physically delete the DB and its WAL/SHM sidecar files.
+  // dbPath here is the path Electron resolves via resolveElectronDataPaths
+  // (.data/dev/loom.db in dev mode) — the file a freshly-spawned service
+  // would use — so deleting it is correct even when attached to an external
+  // process that happened to be using a different (stale) DB.
+  if (dbPath) {
+    for (const suffix of ["", "-wal", "-shm"]) {
+      try {
+        fs.rmSync(dbPath + suffix, { force: true });
+      } catch {}
+    }
+    appLogger?.info("db_wipe.files_deleted", { dbPath });
+  }
+
+  // Step 5: Start a fresh service. Electron will spawn its own child this
+  // time (port is free, no lock file) and pass LOOM_SERVICE_DB_PATH so the
+  // service uses the correct path and runs migrations on the empty file.
+  try {
+    const newStatus = await sidecar.start({
+      onStarting: (s) => mainWindow?.webContents.send("loom:runtime-status-changed", s),
+    });
+    mainWindow?.webContents.send("loom:runtime-status-changed", newStatus);
+    appLogger?.info("db_wipe.completed", { serviceUrl: newStatus.serviceUrl });
+    return { ok: true };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    appLogger?.error("db_wipe.restart_failed", { error });
+    return { ok: false, error: message };
+  }
+});
+
 ipcMain.handle("loom:app-log", (_event, payload) => {
   const entry = sanitizeRendererLogPayload(payload);
   const level = entry.level === "warn" || entry.level === "error" ? entry.level : "info";
@@ -375,7 +477,58 @@ ipcMain.handle("loom:address-bar-context-menu", (event, params) => {
   });
 });
 
+// Prompt-editor (contentEditable composer) right-click context menu.
+// Provides standard text-editing actions: cut, copy, paste, delete, select all.
+ipcMain.handle("loom:composer-context-menu", (event, params) => {
+  const clipboardText = clipboard.readText();
+  const hasClipboard = clipboardText.length > 0;
+  const { hasSelection = false, hasContent = false } = params ?? {};
+
+  return new Promise((resolve) => {
+    const send = (action) => () => resolve({ action, clipboardText });
+
+    /** @type {import("electron").MenuItemConstructorOptions[]} */
+    const template = [
+      { label: "Cut",       accelerator: "CmdOrCtrl+X", enabled: hasSelection, click: send("cut") },
+      { label: "Copy",      accelerator: "CmdOrCtrl+C", enabled: hasSelection, click: send("copy") },
+      { label: "Paste",     accelerator: "CmdOrCtrl+V", enabled: hasClipboard,  click: send("paste") },
+      { label: "Delete",    enabled: hasSelection, click: send("delete") },
+      { type: "separator" },
+      { label: "Select All", accelerator: "CmdOrCtrl+A", enabled: hasContent, click: send("selectAll") },
+    ];
+
+    const menu = Menu.buildFromTemplate(template);
+    menu.popup({
+      window: BrowserWindow.fromWebContents(event.sender),
+      callback: () => resolve({ action: "none", clipboardText }),
+    });
+  });
+});
+
+// Opens a materialized attachment temp-file path using the OS default app.
+// Only accepts absolute paths under the OS temp directory to prevent
+// the renderer from opening arbitrary filesystem paths.
+ipcMain.handle("loom:open-attachment-path", async (_event, tempPath) => {
+  if (typeof tempPath !== "string") {
+    return { opened: false, error: "invalid path" };
+  }
+  const normalizedPath = path.normalize(tempPath);
+  const tempDir = path.normalize(os.tmpdir());
+  if (!normalizedPath.startsWith(tempDir + path.sep) && normalizedPath !== tempDir) {
+    return { opened: false, error: "path outside temp directory" };
+  }
+  if (!fs.existsSync(normalizedPath)) {
+    return { opened: false, error: "file not found" };
+  }
+  const error = await shell.openPath(normalizedPath);
+  if (error) {
+    return { opened: false, error };
+  }
+  return { opened: true };
+});
+
 app.whenReady().then(async () => {
+  installApplicationMenu();
   appLogger = createAppLogger({ app, sessionId: appSessionId });
   appLogger.info("app.session_started", {
     appVersion: app.getVersion(),

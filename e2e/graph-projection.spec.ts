@@ -37,6 +37,23 @@ interface ServiceGraphProjection {
   warnings: string[];
 }
 
+interface ServiceAncestryStep {
+  loomId: string;
+  hasParentAncestry: boolean;
+  parentLoom?: {
+    loomId: string;
+    title: string;
+    kind: string;
+    hasParentAncestry: boolean;
+  };
+  parentOriginResponse?: {
+    loomId: string;
+    responseId: string;
+    title: string;
+  };
+  warnings: string[];
+}
+
 function loom(id: string, title: string): Conversation {
   return {
     id,
@@ -268,6 +285,11 @@ test.describe("[product-service-backed] Graph projection product proof", () => {
         seedMode: "none",
         createOriginContextSnapshot: true,
       });
+      const weftTurn = await scenario.sendPrompt(
+        weft.loomId,
+        "Bu Weft icinde Event Sourcing implementation detaylarini daralt."
+      );
+      expect(weftTurn.assistantResponseId).toBeTruthy();
 
       const reference: LoomLink = {
         id: originResponse!.id,
@@ -324,6 +346,59 @@ test.describe("[product-service-backed] Graph projection product proof", () => {
       expectCleanGraphLabels(graph);
       expectNoForbiddenGraphPayload(graph);
 
+      const weftGraph = await scenario.fetchJson<ServiceGraphProjection>(
+        `/looms/${encodeURIComponent(weft.loomId)}/graph?includeBookmarks=true`
+      );
+      expect(weftGraph.nodes.some((node) => node.id === `loom:${loomId}` && node.kind === "loom"))
+        .toBe(true);
+      expect(
+        weftGraph.nodes.some(
+          (node) => node.id === `response:${originResponse!.id}` && node.kind === "response"
+        )
+      ).toBe(true);
+      expect(
+        weftGraph.nodes.some((node) => node.id === `response:${latestResponse.id}`)
+      ).toBe(false);
+      expect(
+        weftGraph.nodes.some((node) => node.id === `loom:${weft.loomId}` && node.kind === "weft")
+      ).toBe(true);
+      expect(
+        weftGraph.nodes.some(
+          (node) =>
+            node.id === `response:${weftTurn.assistantResponseId}` &&
+            node.kind === "response"
+        )
+      ).toBe(true);
+      expect(JSON.stringify(weftGraph.nodes.find((node) => node.id === `loom:${loomId}`)?.metadata))
+        .toContain("\"graphRole\":\"origin-context\"");
+      expect(
+        JSON.stringify(
+          weftGraph.nodes.find((node) => node.id === `response:${originResponse!.id}`)?.metadata
+        )
+      ).toContain("\"graphRole\":\"origin-response\"");
+      expect(
+        JSON.stringify(
+          weftGraph.nodes.find((node) => node.id === `loom:${weft.loomId}`)?.metadata
+        )
+      ).toContain("\"graphRole\":\"current-root\"");
+      expect(
+        weftGraph.edges.some(
+          (edge) =>
+            edge.kind === "loom_response_origin" &&
+            edge.source === `loom:${loomId}` &&
+            edge.target === `response:${originResponse!.id}`
+        )
+      ).toBe(true);
+      expect(
+        weftGraph.edges.some(
+          (edge) =>
+            edge.kind === "weft_origin" &&
+            edge.source === `response:${originResponse!.id}` &&
+            edge.target === `loom:${weft.loomId}`
+        )
+      ).toBe(true);
+      expectNoForbiddenGraphPayload(weftGraph);
+
       await page.getByRole("button", { name: "Toggle Graph View" }).click();
       await expect(page.getByRole("heading", { name: "Weft-aware Loom graph" })).toBeVisible();
       await expect(page.locator(".loom-graph-shell")).toBeVisible();
@@ -336,6 +411,209 @@ test.describe("[product-service-backed] Graph projection product proof", () => {
       await expect(page.locator(".loom-graph-shell")).not.toContainText("[[");
       await expect(page.locator(".loom-graph-shell")).not.toContainText("Group 1");
       await expect(page.locator(".loom-graph-shell")).not.toContainText("raw_thinking");
+
+      await page.reload();
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+      await expect(page.getByTestId(`sidebar-loom-${weft.loomId}`)).toBeVisible();
+      await page.getByTestId(`sidebar-loom-${weft.loomId}`).click();
+      if ((await page.locator(".loom-graph-shell").count()) === 0) {
+        await page.getByRole("button", { name: "Toggle Graph View" }).click();
+      }
+      await expect(page.locator(".loom-graph-shell")).toBeVisible();
+      await expect(page.locator(".loom-graph-node--loom").filter({ hasText: rootLoom!.title }))
+        .toBeVisible();
+      await expect(page.locator(".loom-graph-node--weft").filter({ hasText: weft.title }))
+        .toBeVisible();
+      await expect(
+        page.locator(".loom-graph-node--response").filter({ hasText: originResponse!.question })
+      ).toBeVisible();
+      await expect(
+        page.locator(".loom-graph-node--response").filter({ hasText: latestResponse.question })
+      ).toHaveCount(0);
+
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] expands Weft ancestry exactly one parent step at a time", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(page, "Event Sourcing ancestry root nedir? Detaylı anlat.");
+      await expect(page.getByText("Event Store").first()).toBeVisible({ timeout: 30_000 });
+
+      const looms = await scenario.client.listLooms();
+      const rootLoom = looms.find((item) => item.title.includes("Event Sourcing"));
+      expect(rootLoom).toBeTruthy();
+      const loomAId = rootLoom!.loomId;
+
+      const secondTurn = await scenario.sendPrompt(
+        loomAId,
+        "Bu cevap Weft ancestry testinde kaynak Response olsun."
+      );
+      expect(secondTurn.assistantResponseId).toBeTruthy();
+      const loomADetail = await scenario.client.getLoom(loomAId);
+      const rootOriginResponse = loomADetail.responses.find(
+        (response) => response.id === secondTurn.assistantResponseId
+      );
+      expect(rootOriginResponse).toBeTruthy();
+      const unrelatedRootResponse = loomADetail.responses.find(
+        (response) => response.id !== rootOriginResponse!.id
+      );
+      expect(unrelatedRootResponse).toBeTruthy();
+
+      const weftB = await scenario.client.createOrOpenWeft({
+        originLoomId: loomAId,
+        originResponseId: rootOriginResponse!.id,
+        title: "Ancestry Weft B",
+        summary: "Middle Weft for ancestry expansion",
+        source: "graph_node",
+        seedMode: "none",
+        createOriginContextSnapshot: true,
+      });
+      const weftBTurn = await scenario.sendPrompt(
+        weftB.loomId,
+        "Weft B icinde parent ancestry icin kaynak cevap uret."
+      );
+      expect(weftBTurn.assistantResponseId).toBeTruthy();
+      const weftBDetail = await scenario.client.getLoom(weftB.loomId);
+      const weftBOriginResponse = weftBDetail.responses.find(
+        (response) => response.id === weftBTurn.assistantResponseId
+      );
+      expect(weftBOriginResponse).toBeTruthy();
+
+      const weftC = await scenario.client.createOrOpenWeft({
+        originLoomId: weftB.loomId,
+        originResponseId: weftBOriginResponse!.id,
+        title: "Ancestry Weft C",
+        summary: "Current Weft for ancestry expansion",
+        source: "graph_node",
+        seedMode: "none",
+        createOriginContextSnapshot: true,
+      });
+      const weftCTurn = await scenario.sendPrompt(
+        weftC.loomId,
+        "Weft C icinde current response olustur."
+      );
+      expect(weftCTurn.assistantResponseId).toBeTruthy();
+      const weftCDetail = await scenario.client.getLoom(weftC.loomId);
+
+      const rootGraph = await scenario.fetchJson<ServiceGraphProjection>(
+        `/looms/${encodeURIComponent(loomAId)}/graph?includeBookmarks=true`
+      );
+      expect(rootGraph.nodes.some((node) => node.id === `loom:${weftB.loomId}`)).toBe(true);
+      expect(rootGraph.nodes.some((node) => node.id === `loom:${weftC.loomId}`)).toBe(true);
+      expect(rootGraph.nodes.some((node) => node.id === `response:${weftBOriginResponse!.id}`))
+        .toBe(true);
+      expect(rootGraph.edges).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "weft_origin",
+            source: `response:${weftBOriginResponse!.id}`,
+            target: `loom:${weftC.loomId}`,
+          }),
+        ])
+      );
+
+      const initialGraph = await scenario.fetchJson<ServiceGraphProjection>(
+        `/looms/${encodeURIComponent(weftC.loomId)}/graph?includeBookmarks=true`
+      );
+      expect(initialGraph.nodes.some((node) => node.id === `loom:${weftB.loomId}`)).toBe(true);
+      expect(initialGraph.nodes.some((node) => node.id === `response:${weftBOriginResponse!.id}`))
+        .toBe(true);
+      expect(initialGraph.nodes.some((node) => node.id === `loom:${loomAId}`)).toBe(false);
+      expect(initialGraph.nodes.some((node) => node.id === `response:${rootOriginResponse!.id}`))
+        .toBe(false);
+      expect(
+        JSON.stringify(initialGraph.nodes.find((node) => node.id === `loom:${weftB.loomId}`)?.metadata)
+      ).toContain("\"hasParentAncestry\":true");
+
+      const ancestryStep = await scenario.fetchJson<ServiceAncestryStep>(
+        `/looms/${encodeURIComponent(weftB.loomId)}/ancestry-step`
+      );
+      expect(ancestryStep.parentLoom?.loomId).toBe(loomAId);
+      expect(ancestryStep.parentOriginResponse?.responseId).toBe(rootOriginResponse!.id);
+      expect(JSON.stringify(ancestryStep)).not.toContain(unrelatedRootResponse!.id);
+
+      await page.reload();
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+      await expect(page.getByTestId(`sidebar-loom-${weftC.loomId}`)).toBeVisible();
+      await page.getByTestId(`sidebar-loom-${weftC.loomId}`).click();
+      if ((await page.locator(".loom-graph-shell").count()) === 0) {
+        await page.getByRole("button", { name: "Toggle Graph View" }).click();
+      }
+
+      const graphShell = page.locator(".loom-graph-shell");
+      await expect(graphShell).toBeVisible();
+      await expect(graphShell.locator(".loom-graph-node--weft").filter({ hasText: weftBDetail.title }))
+        .toBeVisible();
+      await expect(graphShell.locator(".loom-graph-node--weft").filter({ hasText: weftCDetail.title }))
+        .toBeVisible();
+      await expect(graphShell.locator(".loom-graph-node--loom").filter({ hasText: rootLoom!.title }))
+        .toHaveCount(0);
+
+      // Immediate origin context fork layout: origin response must be in a different
+      // horizontal lane from the current Weft C so the weft_origin edge renders as a
+      // diagonal fork rather than a straight vertical continuation.
+      const immediateOriginResponseNode = graphShell
+        .locator(".loom-graph-node--response")
+        .filter({ hasText: weftBOriginResponse!.question });
+      const currentWeftCNode = graphShell
+        .locator(".loom-graph-node--weft")
+        .filter({ hasText: weftCDetail.title });
+      await expect(immediateOriginResponseNode).toBeVisible();
+      await expect(currentWeftCNode).toBeVisible();
+      const immediateOriginResponseBox = await immediateOriginResponseNode.boundingBox();
+      const currentWeftCBox = await currentWeftCNode.boundingBox();
+      expect(immediateOriginResponseBox).toBeTruthy();
+      expect(currentWeftCBox).toBeTruthy();
+      expect(immediateOriginResponseBox!.x).not.toBe(currentWeftCBox!.x);
+      expect(immediateOriginResponseBox!.y).toBeLessThan(currentWeftCBox!.y);
+
+      const ancestryButton = graphShell.getByRole("button", { name: "Show parent ancestry" });
+      await expect(ancestryButton).toBeVisible();
+      await expect(ancestryButton).toBeEnabled();
+      await expect(ancestryButton).toHaveClass(/loom-graph-node-ancestry-handle-button/);
+      await expect(ancestryButton).toHaveClass(/nodrag/);
+      await expect(ancestryButton).toHaveClass(/nopan/);
+      await expect(graphShell.locator(".loom-graph-node-header .loom-graph-node-ancestry")).toHaveCount(0);
+      await ancestryButton.dispatchEvent("click");
+      await expect(graphShell.locator(".loom-graph-node--loom").filter({ hasText: rootLoom!.title }))
+        .toBeVisible();
+      const parentOriginResponseNode = graphShell
+        .locator(".loom-graph-node--response")
+        .filter({ hasText: rootOriginResponse!.question });
+      const existingChildWeftNode = graphShell
+        .locator(".loom-graph-node--weft")
+        .filter({ hasText: weftBDetail.title });
+      await expect(parentOriginResponseNode).toBeVisible();
+      const parentOriginResponseBox = await parentOriginResponseNode.boundingBox();
+      const existingChildWeftBox = await existingChildWeftNode.boundingBox();
+      expect(parentOriginResponseBox).toBeTruthy();
+      expect(existingChildWeftBox).toBeTruthy();
+      expect(parentOriginResponseBox!.x).not.toBe(existingChildWeftBox!.x);
+      expect(parentOriginResponseBox!.y).toBeLessThan(existingChildWeftBox!.y);
+      await expect(graphShell.locator(".react-flow__edge-path.loom-graph-edge--weft")).not.toHaveCount(0);
+      await expect(
+        graphShell.locator(".loom-graph-node--response").filter({ hasText: unrelatedRootResponse!.question })
+      ).toHaveCount(0);
+      await expect(graphShell.getByRole("button", { name: "Show parent ancestry" })).toHaveCount(0);
+      await expect(graphShell.getByRole("button", { name: "Parent ancestry loaded" })).toHaveClass(/is-muted/);
 
       expect(scenario.dbPath).toContain(scenario.tempDir);
     } finally {

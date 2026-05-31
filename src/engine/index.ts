@@ -52,6 +52,8 @@ export type {
   ListBookmarksResult,
   ListHistoryResult,
   LoomDetail,
+  LoomAncestryStepInput,
+  LoomAncestryStepResult,
   LoomEngineMode,
   LoomSummary,
   OpenReferenceInput,

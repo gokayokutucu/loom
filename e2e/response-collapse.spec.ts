@@ -95,6 +95,13 @@ test.describe("[pure-ui-rendering] Assistant response collapse", () => {
     await forceUserPromptToLongVisualContent(page, "r-address-bar");
     await expect(toggle).toHaveText("Show full message");
     await expect(promptText).toHaveClass(/is-clamped/);
+    await expect
+      .poll(() =>
+        promptText.evaluate((element) =>
+          getComputedStyle(element).getPropertyValue("--user-message-collapse-lines").trim()
+        )
+      )
+      .toBe("10");
 
     await expect(article.locator(".prompt-copy-trigger")).toBeVisible();
     await expect(article.locator(".prompt-edit-trigger")).toBeVisible();
@@ -102,13 +109,25 @@ test.describe("[pure-ui-rendering] Assistant response collapse", () => {
     await article.locator(".prompt-copy-trigger").click({ force: true });
     await expect
       .poll(() => page.evaluate(() => window.localStorage.getItem("loom-test-clipboard")))
-      .toContain("How should the address bar work if Loom AI is a browser for conversations?");
+      .toContain("How should the address bar work if Loom is a browser for conversations?");
 
+    await article.evaluate((node) => node.scrollIntoView({ block: "start" }));
+    await page.locator(".chat-transcript").evaluate((node) => {
+      node.scrollTop += 36;
+    });
+    const topBeforeExpand = await promptText.evaluate((element) =>
+      Math.round(element.getBoundingClientRect().top)
+    );
     await toggle.click();
     await expect(toggle).toHaveText("Show less");
     await expect(promptText).not.toHaveClass(/is-clamped/);
+    await expect
+      .poll(() =>
+        promptText.evaluate((element) => Math.round(element.getBoundingClientRect().top))
+      )
+      .toBe(topBeforeExpand);
     await expect(userMessage).toContainText(
-      "How should the address bar work if Loom AI is a browser for conversations?"
+      "How should the address bar work if Loom is a browser for conversations?"
     );
 
     await toggle.click();

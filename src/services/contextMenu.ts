@@ -50,7 +50,12 @@ export interface ContextMenuItem {
 
 export type ContextMenuPayload =
   | { kind: "conversation"; conversation: Conversation; pinned: boolean }
-  | { kind: "response"; response: ResponseItem }
+  | {
+      kind: "response";
+      response: ResponseItem;
+      /** The Loom ID the response belongs to. Required to resolve the canonical response address. */
+      loomId: string;
+    }
   | { kind: "bookmark"; bookmark: BookmarkItem }
   | { kind: "history-entry"; entry: HistoryEntry }
   | { kind: "group"; group: TabGroup }

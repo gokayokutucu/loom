@@ -13,7 +13,7 @@ const stagingDir = path.join(releaseDir, "dmg-staging-arm64");
 const rwDmgPath = path.join(releaseDir, `Loom-${version}-mac-arm64.rw.dmg`);
 const dmgPath = path.join(releaseDir, `Loom-${version}-mac-arm64.dmg`);
 const volumeName = "Loom";
-const iconSourcePath = path.join(repoRoot, "public", "loom_logo.icns");
+const iconSourcePath = path.join(repoRoot, "build-assets", "loom_logo.icns");
 
 async function assertExists(target, label) {
   try {

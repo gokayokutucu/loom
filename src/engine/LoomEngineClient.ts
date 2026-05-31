@@ -22,9 +22,13 @@ import type {
   CapabilitySummary,
   DeleteBookmarkInput,
   DeleteAttachmentInput,
+  MaterializeAttachmentInput,
+  MaterializeAttachmentResult,
   GetBookmarkForTargetInput,
   GetBookmarkInput,
   GetReferenceInput,
+  LoomAncestryStepInput,
+  LoomAncestryStepResult,
   GetUiStateInput,
   GetUiStateResult,
   GraphProjectionInput,
@@ -106,6 +110,7 @@ export interface LoomEngineClient {
   createAttachment(input: CreateAttachmentInput): Promise<CreateAttachmentResult>;
   listAttachments(input: ListAttachmentsInput): Promise<ListAttachmentsResult>;
   deleteAttachment(input: DeleteAttachmentInput): Promise<void>;
+  materializeAttachment(input: MaterializeAttachmentInput): Promise<MaterializeAttachmentResult>;
   regenerateFromResponse(input: RegenerateFromResponseInput): AsyncIterable<EngineResponseEvent>;
   retryUserMessage(input: RetryUserMessageInput): AsyncIterable<EngineResponseEvent>;
   cancelMessage(input: CancelMessageInput): Promise<CancelMessageResult>;
@@ -134,6 +139,7 @@ export interface LoomEngineClient {
   bookmarkResponse(input: BookmarkResponseInput): Promise<BookmarkResult>;
   resolveAddress(input: ResolveAddressInput): Promise<ResolveAddressResult>;
   getGraphProjection(input: GraphProjectionInput): Promise<GraphProjectionResult>;
+  getLoomAncestryStep(input: LoomAncestryStepInput): Promise<LoomAncestryStepResult>;
   exportLoom(input: ExportLoomInput): Promise<ExportLoomResult>;
   exportResponse(input: ExportResponseInput): Promise<ExportLoomResult>;
 }

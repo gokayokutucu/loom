@@ -14,7 +14,7 @@ const appResourcesPath = path.join(resourcesPath, "app");
 const sidecarResourcesPath = path.join(resourcesPath, "loom-service");
 const bundledWhisperSourcePath = path.join(repoRoot, "resources", "bin", "whisper");
 const bundledWhisperResourcesPath = path.join(resourcesPath, "bin", "whisper");
-const iconSourcePath = path.join(repoRoot, "public", "loom_logo.icns");
+const iconSourcePath = path.join(repoRoot, "build-assets", "loom_logo.icns");
 const bundleIconFile = "loom_logo.icns";
 const bundleIconPath = path.join(resourcesPath, bundleIconFile);
 const macEntitlementsPath = path.join(repoRoot, "electron", "entitlements.mac.plist");
@@ -28,7 +28,7 @@ const serviceBinaryPath = path.join(
   "loom-service"
 );
 const microphoneUsageDescription =
-  "Loom AI needs microphone access for speech-to-text and voice AI interactions.";
+  "Loom needs microphone access for speech-to-text and voice AI interactions.";
 
 async function assertExists(target, label) {
   try {
@@ -56,7 +56,8 @@ async function assertFilesEqual(left, right, label) {
 
 async function writePackageManifest() {
   const manifest = {
-    name: "loom-ai",
+    name: "loom",
+    productName: "Loom",
     version: "0.1.0",
     private: true,
     type: "module",
@@ -69,6 +70,7 @@ async function copyElectronEntrypoints() {
   await fs.mkdir(path.join(appResourcesPath, "electron"), { recursive: true });
   for (const file of [
     "main.mjs",
+    "app-menu.mjs",
     "app-logger.mjs",
     "preload.cjs",
     "sidecar-manager.mjs",

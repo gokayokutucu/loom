@@ -2902,7 +2902,7 @@ export function AIProviderSettingsModal({
         <section className="provider-section">
           <div className="provider-section-heading">
             <div>
-              <span>Loom AI</span>
+              <span>Loom</span>
               <h3>Diagnostics</h3>
             </div>
           </div>

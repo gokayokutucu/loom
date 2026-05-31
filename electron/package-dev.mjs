@@ -20,18 +20,18 @@ const appResourcesPath = path.join(resourcesPath, "app");
 const sidecarResourcesPath = path.join(resourcesPath, "loom-service");
 const bundledWhisperSourcePath = path.join(repoRoot, "resources", "bin", "whisper");
 const bundledWhisperResourcesPath = path.join(resourcesPath, "bin", "whisper");
-const iconSourcePath = path.join(repoRoot, "public", "loom_logo.icns");
+const iconSourcePath = path.join(repoRoot, "build-assets", "loom_logo.icns");
 const bundleIconFile = "loom_logo.icns";
 const bundleIconPath = path.join(resourcesPath, bundleIconFile);
 const macEntitlementsPath = path.join(repoRoot, "electron", "entitlements.mac.plist");
 const microphoneUsageDescription =
-  "Loom AI needs microphone access for speech-to-text and voice AI interactions.";
+  "Loom needs microphone access for speech-to-text and voice AI interactions.";
 const serviceBinaryPath = path.join(
   repoRoot,
   "services",
   "loom-service",
   "target",
-  "debug",
+  "release",
   "loom-service"
 );
 
@@ -45,7 +45,8 @@ async function assertExists(target, label) {
 
 async function writePackageManifest() {
   const manifest = {
-    name: "loom-ai",
+    name: "loom",
+    productName: "Loom",
     version: "0.1.0",
     private: true,
     type: "module",
@@ -61,7 +62,6 @@ async function writeDevRuntimeMetadata() {
   const metadata = {
     kind: "loom-electron-dev-runtime",
     repoRoot,
-    dataMode: process.env.LOOM_ELECTRON_DATA_MODE === "isolated-dev" ? "isolated-dev" : "shared-dev",
   };
   await fs.writeFile(
     path.join(appResourcesPath, "electron-dev-runtime.json"),
@@ -167,7 +167,7 @@ async function copyBundledWhisperRuntimeIfPresent() {
 async function packageDevApp() {
   await assertExists(electronTemplateApp, "Electron app template");
   await assertExists(path.join(repoRoot, "dist", "index.html"), "React build");
-  await assertExists(serviceBinaryPath, "loom-service debug binary");
+  await assertExists(serviceBinaryPath, "loom-service release binary");
 
   await fs.rm(packageRoot, { recursive: true, force: true });
   await fs.mkdir(packageRoot, { recursive: true });
@@ -185,6 +185,10 @@ async function packageDevApp() {
   await fs.copyFile(
     path.join(repoRoot, "electron", "main.mjs"),
     path.join(appResourcesPath, "electron", "main.mjs")
+  );
+  await fs.copyFile(
+    path.join(repoRoot, "electron", "app-menu.mjs"),
+    path.join(appResourcesPath, "electron", "app-menu.mjs")
   );
   await fs.copyFile(
     path.join(repoRoot, "electron", "app-logger.mjs"),

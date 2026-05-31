@@ -273,6 +273,10 @@ pub struct OllamaWireMessage {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OllamaWireChunk {
+    /// Ollama error field: present when Ollama returns `{"error":"..."}` in the stream.
+    /// Must be checked before processing other fields — a chunk with `error` set is never
+    /// a valid content chunk regardless of the value of `done`.
+    pub error: Option<String>,
     pub message: Option<OllamaWireMessage>,
     pub response: Option<String>,
     pub thinking: Option<String>,
@@ -761,5 +765,40 @@ mod tests {
             assert!(!json.contains("chain_of_thought"));
             assert!(!json.contains("hidden_reasoning"));
         }
+    }
+
+    // ------------------------------------------------------------------
+    // OllamaWireChunk error field (Ollama error stream chunk support)
+    // ------------------------------------------------------------------
+
+    #[test]
+    fn wire_chunk_with_error_field_parses_correctly() {
+        let chunk: OllamaWireChunk =
+            serde_json::from_str(r#"{"error":"model not found"}"#).expect("valid error chunk");
+        assert_eq!(chunk.error.as_deref(), Some("model not found"));
+        assert!(chunk.message.is_none());
+        assert!(chunk.response.is_none());
+        assert!(!chunk.done);
+    }
+
+    #[test]
+    fn wire_chunk_without_error_field_parses_correctly() {
+        let chunk: OllamaWireChunk =
+            serde_json::from_str(r#"{"message":{"content":"hello"},"done":false}"#)
+                .expect("valid content chunk");
+        assert!(chunk.error.is_none());
+        assert_eq!(
+            chunk.message.as_ref().and_then(|m| m.content.as_deref()),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn wire_chunk_final_done_has_no_error() {
+        let chunk: OllamaWireChunk =
+            serde_json::from_str(r#"{"done":true,"total_duration":12345}"#)
+                .expect("valid final chunk");
+        assert!(chunk.error.is_none());
+        assert!(chunk.done);
     }
 }

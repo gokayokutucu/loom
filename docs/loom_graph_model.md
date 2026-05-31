@@ -7,11 +7,11 @@
 
 ## 1. Purpose
 
-This document defines the **canonical graph model** of Loom AI.
+This document defines the **canonical graph model** of Loom.
 
 It answers these questions:
 
-- What is a real object in Loom AI?
+- What is a real object in Loom?
 - What is only a view or projection?
 - How do objects connect to one another?
 - When does something become addressable?
@@ -24,7 +24,7 @@ It is the semantic truth layer.
 
 ## 2. Core Principle
 
-Loom AI is not only a transcript UI.
+Loom is not only a transcript UI.
 It is a graph of addressable knowledge objects.
 
 The graph has:
@@ -373,7 +373,7 @@ No duplicate Response is created.
 
 ## 12. Summary
 
-The graph truth of Loom AI is:
+The graph truth of Loom is:
 
 - **Loom** is the owner container
 - **Response** is the atomic reusable content node

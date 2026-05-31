@@ -17,9 +17,15 @@ impl DeterministicPlanner {
         let code_task = is_code_task(&prompt);
         let separate_line_references = has_separate_line_reference_questions(&lines, &references);
         let reference_prompt_text = input_text(&lines);
-        let single_reference_scoped = references.len() == 1
-            && !prompt.is_empty()
-            && prompt_mentions_reference(&reference_prompt_text, &references[0]);
+        // A fragment reference (target_kind=="fragment" or selected_text_preview present) is
+        // always reference-scoped, even when the user types a short bare prompt like "explain"
+        // that does not explicitly mention the reference token.
+        let fragment_reference_scoped =
+            references.len() == 1 && is_fragment_reference(&references[0]);
+        let single_reference_scoped = fragment_reference_scoped
+            || (references.len() == 1
+                && !prompt.is_empty()
+                && prompt_mentions_reference(&reference_prompt_text, &references[0]));
         let same_line_multi_reference = !separate_line_references && references.len() > 1;
 
         let mut intent = if simple_factual {
@@ -78,6 +84,12 @@ impl DeterministicPlanner {
             intent = AnswerIntent::Unknown;
         }
 
+        // For a short prompt with a single selected-fragment reference, anchor the
+        // rewritten_prompt to the fragment so the context manager and the model
+        // both see the explicit subject — not just "explain" in isolation.
+        let rewritten_prompt =
+            fragment_anchor_rewrite(&prompt, &references).unwrap_or_else(|| prompt.clone());
+
         AnswerPlan {
             intent,
             response_mode,
@@ -90,7 +102,7 @@ impl DeterministicPlanner {
             context_strategy,
             answer_style,
             question_units: question_units(&lines, &references, separate_line_references),
-            rewritten_prompt: prompt,
+            rewritten_prompt,
             needs_full_source_text: code_task
                 || contains_any(&input_text(&lines), &["full source", "tam kaynak"]),
             needs_exact_quote: contains_any(&input_text(&lines), &["quote", "alıntı", "aynen"]),
@@ -340,6 +352,73 @@ fn input_text(lines: &[String]) -> String {
     lines.join("\n")
 }
 
+/// Returns true for a reference that carries a selected text fragment —
+/// either via `target_kind == "fragment"` or a non-empty `selected_text_preview`.
+fn is_fragment_reference(reference: &PlannerReference) -> bool {
+    reference.target_kind == "fragment"
+        || reference
+            .selected_text_preview
+            .as_ref()
+            .is_some_and(|t| !t.trim().is_empty())
+}
+
+/// Returns true when the prompt explicitly asks the model to summarize or
+/// explain the *entire* source response — in those cases fragment anchoring
+/// must not apply.
+fn asks_for_full_source(prompt: &str) -> bool {
+    let lower = prompt.to_lowercase();
+    contains_any(
+        &lower,
+        &[
+            "whole",
+            "entire",
+            "full response",
+            "full answer",
+            "all of this",
+            "all of it",
+        ],
+    )
+}
+
+/// When exactly one fragment reference is attached and the user typed a short
+/// bare prompt, rewrites the prompt to explicitly name the selected fragment as
+/// the subject.
+///
+/// Examples:
+///   "explain"              → `explain: "The Process of Trilateration"`
+///   "why?"                 → `why: "The Process of Trilateration"`
+///   "what does this mean?" → `what does this mean: "The Process of Trilateration"`
+///
+/// Returns `None` when anchoring is not appropriate (long prompt, multi-ref,
+/// explicit whole-source request, or no selected text).
+pub fn fragment_anchor_rewrite(prompt: &str, references: &[PlannerReference]) -> Option<String> {
+    if references.len() != 1 {
+        return None;
+    }
+    let reference = &references[0];
+    if !is_fragment_reference(reference) {
+        return None;
+    }
+    let selected_text = reference.selected_text_preview.as_deref()?;
+    let selected_text = selected_text.trim();
+    if selected_text.is_empty() {
+        return None;
+    }
+    // Only anchor short, single-line prompts.
+    let char_count = prompt.chars().count();
+    if char_count >= 120 || prompt.contains('\n') {
+        return None;
+    }
+    // Never anchor when the user explicitly asked for the whole source.
+    if asks_for_full_source(prompt) {
+        return None;
+    }
+    // Truncate the fragment preview to avoid huge prompts.
+    let fragment: String = selected_text.chars().take(200).collect();
+    let verb = prompt.trim_end_matches('?').trim_end_matches('!').trim();
+    Some(format!("{verb}: \"{fragment}\""))
+}
+
 #[cfg(test)]
 mod tests {
     use super::DeterministicPlanner;
@@ -529,5 +608,172 @@ mod tests {
             source_response_code: None,
             source_title: Some(label.to_string()),
         }
+    }
+
+    fn fragment_reference(selected_text: &str) -> PlannerReference {
+        PlannerReference {
+            reference_id: "frag-1".to_string(),
+            label: None,
+            selected_text_preview: Some(selected_text.to_string()),
+            target_kind: "fragment".to_string(),
+            target_id: Some("response-1#frag-1".to_string()),
+            source_response_code: Some("R-GPS".to_string()),
+            source_title: Some("GPS Explained".to_string()),
+        }
+    }
+
+    const FRAGMENT: &str = "The Process of Trilateration";
+
+    // ── Fix 1: fragment reference forces ReferenceScopedQuestion ─────────────
+
+    #[test]
+    fn fragment_ref_with_bare_explain_is_reference_scoped() {
+        let plan = DeterministicPlanner::plan(PlannerInput {
+            clean_user_prompt: "explain".to_string(),
+            attached_references: vec![fragment_reference(FRAGMENT)],
+            ..PlannerInput::default()
+        });
+        assert_eq!(plan.intent, AnswerIntent::ReferenceScopedQuestion);
+        assert_eq!(plan.context_strategy, ContextStrategy::ReferenceCapsules);
+    }
+
+    #[test]
+    fn fragment_ref_with_bare_why_is_reference_scoped() {
+        let plan = DeterministicPlanner::plan(PlannerInput {
+            clean_user_prompt: "why?".to_string(),
+            attached_references: vec![fragment_reference(FRAGMENT)],
+            ..PlannerInput::default()
+        });
+        assert_eq!(plan.intent, AnswerIntent::ReferenceScopedQuestion);
+        assert_eq!(plan.context_strategy, ContextStrategy::ReferenceCapsules);
+    }
+
+    // ── Fix 2: short-prompt anchoring ────────────────────────────────────────
+
+    #[test]
+    fn explain_anchors_to_fragment_text() {
+        let plan = DeterministicPlanner::plan(PlannerInput {
+            clean_user_prompt: "explain".to_string(),
+            attached_references: vec![fragment_reference(FRAGMENT)],
+            ..PlannerInput::default()
+        });
+        assert!(
+            plan.rewritten_prompt.contains(FRAGMENT),
+            "rewritten_prompt should contain fragment text, got: {}",
+            plan.rewritten_prompt
+        );
+    }
+
+    #[test]
+    fn why_prompt_anchors_to_fragment() {
+        let plan = DeterministicPlanner::plan(PlannerInput {
+            clean_user_prompt: "why?".to_string(),
+            attached_references: vec![fragment_reference(FRAGMENT)],
+            ..PlannerInput::default()
+        });
+        assert!(plan.rewritten_prompt.contains(FRAGMENT));
+        // Trailing ? should be stripped from the verb part
+        assert!(plan.rewritten_prompt.starts_with("why:"));
+    }
+
+    #[test]
+    fn what_does_this_mean_anchors_to_fragment() {
+        let plan = DeterministicPlanner::plan(PlannerInput {
+            clean_user_prompt: "what does this mean?".to_string(),
+            attached_references: vec![fragment_reference(FRAGMENT)],
+            ..PlannerInput::default()
+        });
+        assert!(plan.rewritten_prompt.contains(FRAGMENT));
+    }
+
+    #[test]
+    fn give_an_example_anchors_to_fragment() {
+        let plan = DeterministicPlanner::plan(PlannerInput {
+            clean_user_prompt: "give an example".to_string(),
+            attached_references: vec![fragment_reference(FRAGMENT)],
+            ..PlannerInput::default()
+        });
+        assert!(plan.rewritten_prompt.contains(FRAGMENT));
+    }
+
+    #[test]
+    fn explicit_whole_source_prompt_is_not_anchored() {
+        let plan = DeterministicPlanner::plan(PlannerInput {
+            clean_user_prompt: "summarize the whole answer".to_string(),
+            attached_references: vec![fragment_reference(FRAGMENT)],
+            ..PlannerInput::default()
+        });
+        assert!(
+            !plan.rewritten_prompt.contains(FRAGMENT),
+            "whole-source request must not be anchored to fragment"
+        );
+    }
+
+    #[test]
+    fn explicit_full_response_prompt_is_not_anchored() {
+        let plan = DeterministicPlanner::plan(PlannerInput {
+            clean_user_prompt: "explain the entire response".to_string(),
+            attached_references: vec![fragment_reference(FRAGMENT)],
+            ..PlannerInput::default()
+        });
+        assert!(!plan.rewritten_prompt.contains(FRAGMENT));
+    }
+
+    #[test]
+    fn long_prompt_is_not_anchored() {
+        let long =
+            "explain this concept in detail and relate it to the broader context please".repeat(3);
+        let plan = DeterministicPlanner::plan(PlannerInput {
+            clean_user_prompt: long.clone(),
+            attached_references: vec![fragment_reference(FRAGMENT)],
+            ..PlannerInput::default()
+        });
+        // Long prompts should not be rewritten (they already provide enough context)
+        assert_eq!(plan.rewritten_prompt, long.trim());
+    }
+
+    #[test]
+    fn no_fragment_reference_means_no_anchoring() {
+        let plan = DeterministicPlanner::plan(PlannerInput {
+            clean_user_prompt: "explain".to_string(),
+            attached_references: vec![reference("ref-1", "GPS Explained")],
+            ..PlannerInput::default()
+        });
+        assert!(!plan.rewritten_prompt.contains(FRAGMENT));
+    }
+
+    // ── fragment_anchor_rewrite unit tests ────────────────────────────────────
+
+    #[test]
+    fn anchor_rewrite_formats_verb_colon_fragment() {
+        use super::fragment_anchor_rewrite;
+        let refs = vec![fragment_reference(FRAGMENT)];
+        let result = fragment_anchor_rewrite("explain", &refs).unwrap();
+        assert_eq!(result, format!("explain: \"{FRAGMENT}\""));
+    }
+
+    #[test]
+    fn anchor_rewrite_strips_trailing_question_mark() {
+        use super::fragment_anchor_rewrite;
+        let refs = vec![fragment_reference(FRAGMENT)];
+        let result = fragment_anchor_rewrite("why?", &refs).unwrap();
+        assert_eq!(result, format!("why: \"{FRAGMENT}\""));
+    }
+
+    #[test]
+    fn anchor_rewrite_returns_none_for_long_prompt() {
+        use super::fragment_anchor_rewrite;
+        let refs = vec![fragment_reference(FRAGMENT)];
+        let long = "x".repeat(120);
+        assert!(fragment_anchor_rewrite(&long, &refs).is_none());
+    }
+
+    #[test]
+    fn anchor_rewrite_returns_none_for_whole_source_request() {
+        use super::fragment_anchor_rewrite;
+        let refs = vec![fragment_reference(FRAGMENT)];
+        assert!(fragment_anchor_rewrite("summarize the whole answer", &refs).is_none());
+        assert!(fragment_anchor_rewrite("explain the entire response", &refs).is_none());
+        assert!(fragment_anchor_rewrite("summarize the full response", &refs).is_none());
     }
 }

@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld("loomDesktop", {
   runtime: {
     status: () => ipcRenderer.invoke("loom:runtime-status"),
     restart: () => ipcRenderer.invoke("loom:runtime-restart"),
+    dbWipe: () => ipcRenderer.invoke("loom:db-wipe"),
   },
   runtimeStatus: () => ipcRenderer.invoke("loom:runtime-status"),
   logs: {
@@ -40,5 +41,20 @@ contextBridge.exposeInMainWorld("loomDesktop", {
   addressBar: {
     showContextMenu: (params) =>
       ipcRenderer.invoke("loom:address-bar-context-menu", params),
+  },
+  composer: {
+    showContextMenu: (params) =>
+      ipcRenderer.invoke("loom:composer-context-menu", params),
+  },
+  attachments: {
+    openPath: (tempPath) => ipcRenderer.invoke("loom:open-attachment-path", tempPath),
+  },
+  appMenu: {
+    onOpenSettings: (callback) => {
+      if (typeof callback !== "function") return () => undefined;
+      const listener = () => callback();
+      ipcRenderer.on("loom:open-settings", listener);
+      return () => ipcRenderer.removeListener("loom:open-settings", listener);
+    },
   },
 });

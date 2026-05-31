@@ -1,0 +1,128 @@
+import { describe, expect, it } from "vitest";
+import { __rustHttpLoomEngineClientTest } from "./RustHttpLoomEngineClient";
+import type { AddReferenceInput } from "./LoomEngineTypes";
+import type { LoomLink } from "../types";
+
+const {
+  createReferencePayload,
+  loomLinkFromPlannerReference,
+  loomLinkFromQuestionReference,
+  mapReferenceForService,
+  referenceTargetKind,
+  validateServiceReference,
+} = __rustHttpLoomEngineClientTest;
+
+function makeLink(overrides: Partial<LoomLink> = {}): LoomLink {
+  return {
+    id: "loom-1",
+    type: "conversation",
+    title: "Reference title",
+    path: "loom://reference",
+    ...overrides,
+  };
+}
+
+describe("RustHttpLoomEngineClient reference targetKind mapping", () => {
+  it("preserves explicit targetKind values before inferring from type", () => {
+    expect(referenceTargetKind(makeLink({ targetKind: "weft", type: "conversation" }))).toBe("weft");
+    expect(referenceTargetKind(makeLink({ targetKind: "attachment", type: "conversation" }))).toBe("attachment");
+    expect(referenceTargetKind(makeLink({ targetKind: "fragment", type: "conversation" }))).toBe("fragment");
+    expect(referenceTargetKind(makeLink({ targetKind: "response", type: "conversation" }))).toBe("response");
+  });
+
+  it("infers loom only when targetKind is missing and type is Loom/conversation", () => {
+    expect(referenceTargetKind(makeLink({ type: "conversation", targetKind: undefined }))).toBe("loom");
+    expect(referenceTargetKind(makeLink({ type: "loom", targetKind: undefined }))).toBe("loom");
+  });
+
+  it("sends precise targetKind in planner reference payloads", () => {
+    expect(mapReferenceForService(makeLink({ targetKind: "weft" })).targetKind).toBe("weft");
+    expect(mapReferenceForService(makeLink({ targetKind: "attachment" })).targetKind).toBe("attachment");
+    expect(mapReferenceForService(makeLink({ targetKind: "fragment" })).targetKind).toBe("fragment");
+    expect(mapReferenceForService(makeLink({ targetKind: "response" })).targetKind).toBe("response");
+  });
+
+  it("sends precise targetKind when creating a service reference", () => {
+    const input: AddReferenceInput = {
+      loomId: "loom-1",
+      reference: makeLink({
+        id: "weft-1",
+        targetKind: "weft",
+        targetObjectId: "weft-1",
+        canonicalUri: "loom://weft",
+      }),
+    };
+
+    expect(createReferencePayload(input).targetKind).toBe("weft");
+  });
+
+  it("uses metadata targetKind only when the link has no explicit targetKind", () => {
+    const input: AddReferenceInput = {
+      loomId: "loom-1",
+      reference: makeLink({
+        id: "code-1",
+        targetKind: "fragment",
+      }),
+      metadata: { targetKind: "code_block", codeBlockId: "code-1" },
+    };
+
+    expect(createReferencePayload(input).targetKind).toBe("fragment");
+  });
+
+  it("hydrates planner references with targetKind, presentationMode, and selectedText", () => {
+    const link = loomLinkFromPlannerReference({
+      referenceId: "ref-1",
+      targetKind: "fragment",
+      targetId: "response-1",
+      selectedTextPreview: "selected fragment",
+      presentationMode: "inline-chip",
+    });
+
+    expect(link).toMatchObject({
+      type: "fragment",
+      targetKind: "fragment",
+      selectedText: "selected fragment",
+      presentationMode: "inline-chip",
+    });
+  });
+
+  it("hydrates question references with targetKind, presentationMode, and selectedText", () => {
+    const link = loomLinkFromQuestionReference({
+      id: "attachment-1",
+      title: "sleepdeprivation.pdf",
+      path: "loom://attachment/attachment-1",
+      targetKind: "attachment",
+      selectedText: "attachment excerpt",
+      presentationMode: "attached-card",
+    });
+
+    expect(link).toMatchObject({
+      type: "attachment",
+      targetKind: "attachment",
+      selectedText: "attachment excerpt",
+      presentationMode: "attached-card",
+    });
+  });
+
+  it("hydrates persisted service references without dropping targetKind", () => {
+    const link = validateServiceReference(
+      {
+        referenceId: "ref-1",
+        targetKind: "weft",
+        targetId: "weft-1",
+        targetUri: "loom://weft",
+        label: "Human Weft",
+        selectedText: "selected text",
+        metadata: { presentationMode: "attached-card" },
+      },
+      "/references/ref-1"
+    );
+
+    expect(link).toMatchObject({
+      type: "loom",
+      targetKind: "weft",
+      selectedText: "selected text",
+      presentationMode: "attached-card",
+    });
+  });
+});

@@ -427,6 +427,53 @@ fn timestamp() -> String {
         .unwrap_or_else(|_| "0".to_string())
 }
 
+/// Marks all `workflow_runs` that are still `running` or `pending` as `cancelled`.
+/// Also updates `metadata_json.status` on any associated `responses` that are still
+/// `streaming`, `pending`, or `running`. Called once at service startup to recover
+/// from unclean shutdowns (force-quit, crash, SIGKILL) where the cancel handler
+/// never had a chance to run.
+///
+/// Returns the number of workflow runs that were cancelled.
+pub async fn cleanup_orphaned_workflows(pool: &SqlitePool) -> Result<usize, ServiceError> {
+    let now = timestamp();
+
+    let result = sqlx::query(
+        "UPDATE workflow_runs
+         SET status = 'cancelled', finished_at = COALESCE(finished_at, ?1)
+         WHERE status IN ('running', 'pending')",
+    )
+    .bind(&now)
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        ServiceError::storage(format!("failed to cancel orphaned workflow runs: {error}"))
+    })?;
+
+    let cancelled_count = result.rows_affected() as usize;
+
+    // Update metadata_json.status on any responses still in a live generation state.
+    // SQLite's json_patch merges the object, preserving all other keys.
+    sqlx::query(
+        "UPDATE responses
+         SET metadata_json = json_patch(
+             COALESCE(metadata_json, '{}'),
+             json_object('status', 'cancelled')
+         ),
+         updated_at = ?1
+         WHERE json_extract(metadata_json, '$.status') IN ('streaming', 'pending', 'running')",
+    )
+    .bind(&now)
+    .execute(pool)
+    .await
+    .map_err(|error| {
+        ServiceError::storage(format!(
+            "failed to cancel orphaned response statuses: {error}"
+        ))
+    })?;
+
+    Ok(cancelled_count)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

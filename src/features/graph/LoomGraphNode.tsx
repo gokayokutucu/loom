@@ -1,6 +1,7 @@
 import {
   Bookmark,
   Bot,
+  ChevronsUpDown,
   ExternalLink,
   GitFork,
   Link2,
@@ -14,7 +15,11 @@ import { formatBadgeCode } from "../../services/displayCode";
 import { cleanMarkdownDisplayText } from "../../services/assistantMarkdown";
 import { polishDisplayTitle } from "../../services/displayTitlePolish";
 import { formatRelativeTimestamp } from "../../services/timeLabels";
-import type { LoomGraphProjectionNode } from "../../services/loomGraphProjection";
+import {
+  graphNodeLineageRole,
+  isLoomGraphDestinationNode,
+  type LoomGraphProjectionNode,
+} from "../../services/loomGraphProjection";
 import type { LoomForkRecord, ResponseItem } from "../../types";
 import { graphNodePreviewText } from "./graphNodePreview";
 
@@ -27,6 +32,7 @@ export interface LoomGraphNodeData extends Record<string, unknown> {
   onWeft: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
   onOpenWeftRecord?: (record: LoomForkRecord) => void;
   onContinue: (node: LoomGraphProjectionNode, response?: ResponseItem) => void;
+  onExpandAncestry?: (node: LoomGraphProjectionNode) => void;
   hasExistingWeft?: boolean;
   hasRevisionWeft?: boolean;
   weftCount?: number;
@@ -37,15 +43,22 @@ export interface LoomGraphNodeData extends Record<string, unknown> {
   isTerminalResponse?: boolean;
   isResponsePending?: boolean;
   continuationOpen?: boolean;
+  ancestryLoading?: boolean;
+  ancestryError?: string;
   viewportZoom?: number;
 }
 
 export type LoomGraphFlowNode = Node<LoomGraphNodeData, "loomGraphNode">;
 
+// Visual rendering intentionally checks `node.kind` directly in this file.
+// "root", "loom", and "weft" are Loom destination nodes — the distinction is topology/lineage,
+// not ontology. For semantic (non-visual) checks use isLoomGraphDestinationNode,
+// isWeftGraphNode, or graphNodeLineageRole from loomGraphProjection.
+
 function nodeClassName(node: LoomGraphProjectionNode) {
   return [
     "loom-graph-node",
-    `loom-graph-node--${node.kind}`,
+    `loom-graph-node--${node.kind}`,  // CSS variant intentionally encodes kind
     node.isFocused ? "is-focused" : "",
     node.isExpanded ? "is-expanded" : "",
   ]
@@ -54,11 +67,14 @@ function nodeClassName(node: LoomGraphProjectionNode) {
 }
 
 function nodeKindLabel(node: LoomGraphProjectionNode) {
-  if (node.kind === "root") return "Loom";
-  if (node.kind === "weft") return "Weft";
-  if (node.kind === "response") return "Response";
-  if (node.kind === "bookmark") return "Bookmark";
-  return "Reference";
+  // Display labels intentionally distinguish "root" (active Loom) from "weft" (branched Loom).
+  if (node.kind === "root") return "LOOM";
+  if (node.kind === "loom") return "LOOM";
+  if (graphNodeLineageRole(node) === "revision") return "REVISION";
+  if (node.kind === "weft") return "WEFT";
+  if (node.kind === "response") return "RESPONSE";
+  if (node.kind === "bookmark") return "BOOKMARK";
+  return "REFERENCE";
 }
 
 function normalizePreviewText(value?: string) {
@@ -75,6 +91,7 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
     onWeft,
     onOpenWeftRecord,
     onContinue,
+    onExpandAncestry,
     hasExistingWeft,
     hasRevisionWeft,
     weftCount = 0,
@@ -85,12 +102,14 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
     isTerminalResponse,
     isResponsePending,
     continuationOpen,
+    ancestryLoading,
+    ancestryError,
     viewportZoom = 1,
   } = data;
   const [weftPickerOpen, setWeftPickerOpen] = useState(false);
   const weftClusterRef = useRef<HTMLSpanElement | null>(null);
   const canActOnResponse = projectionNode.kind === "response" && Boolean(response);
-  const canActOnLoom = projectionNode.kind === "root";
+  const canActOnLoom = isLoomGraphDestinationNode(projectionNode);
   const canOpenNode = projectionNode.kind === "response" ? Boolean(response) : true;
   const showContinuationButton =
     canActOnResponse && isTerminalResponse && !continuationOpen;
@@ -113,6 +132,20 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
       ? revisionVariantIndex + 1
       : undefined;
   const canOpenWeftPicker = weftRecords.length > 0 && Boolean(onOpenWeftRecord);
+  const showAncestryHandleControl =
+    Boolean(onExpandAncestry) &&
+    Boolean(
+      projectionNode.hasParentAncestry ||
+        projectionNode.ancestryExpanded ||
+        ancestryLoading ||
+        ancestryError
+    );
+  const ancestryControlDisabled = !projectionNode.hasParentAncestry || Boolean(ancestryLoading);
+  const ancestryControlTitle = ancestryError
+    ? `Retry parent ancestry: ${ancestryError}`
+    : projectionNode.ancestryExpanded && !projectionNode.hasParentAncestry
+      ? "Parent ancestry loaded"
+      : "Show parent ancestry";
 
   useEffect(() => {
     if (!weftPickerOpen) return undefined;
@@ -127,6 +160,7 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
 
   return (
     <article className={nodeClassName(projectionNode)}>
+      {/* Root has no inbound edge, so the target handle is hidden for visual cleanliness. */}
       <Handle
         type="target"
         position={Position.Top}
@@ -137,8 +171,36 @@ export function LoomGraphNode({ data }: NodeProps<LoomGraphFlowNode>) {
         }
         isConnectable={false}
       />
+      {showAncestryHandleControl && (
+        <button
+          type="button"
+          className={[
+            "loom-graph-node-ancestry-handle-button",
+            "nodrag",
+            "nopan",
+            projectionNode.hasParentAncestry ? "is-actionable" : "is-muted",
+            ancestryLoading ? "is-loading" : "",
+            projectionNode.ancestryExpanded && !projectionNode.hasParentAncestry ? "is-expanded" : "",
+            ancestryError ? "has-error" : "",
+          ].filter(Boolean).join(" ")}
+          title={ancestryControlTitle}
+          aria-label={
+            projectionNode.hasParentAncestry ? "Show parent ancestry" : "Parent ancestry loaded"
+          }
+          disabled={ancestryControlDisabled}
+          aria-busy={ancestryLoading || undefined}
+          onClick={(event) => {
+            event.stopPropagation();
+            if (ancestryControlDisabled) return;
+            onExpandAncestry?.(projectionNode);
+          }}
+        >
+          <ChevronsUpDown size={11} strokeWidth={2.4} />
+        </button>
+      )}
       <div className="loom-graph-node-header">
         <span className="loom-graph-node-kind">
+          {/* Icon deliberately differs between root ("Loom") and weft ("Weft") for visual distinction. */}
           {projectionNode.kind === "weft" ? <Workflow size={13} /> : <MessageSquare size={13} />}
           {nodeKindLabel(projectionNode)}
         </span>
