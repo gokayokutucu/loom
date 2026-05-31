@@ -16979,7 +16979,7 @@ function ChatTranscript({
                           : undefined
                       }
                     >
-                      <WeftIcon size={13} />
+                      <WeftIcon size={11} />
                     </button>
                   </Tooltip>
                   {explorationWeftCount > 0 && (
