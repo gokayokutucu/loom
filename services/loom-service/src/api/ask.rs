@@ -1,11 +1,11 @@
 use crate::{
     api::state::AppState,
     providers::{
-        adapter::{ProviderAdapter, ProviderRegistry},
         contract::{
             ProviderContractEvent, ProviderContractMessage, ProviderContractMessageRole,
             ProviderContractOptions, ProviderContractRequest,
         },
+        pipeline::ProviderPipeline,
         types::{
             LoomServiceErrorPayload, OllamaChatRequest, OllamaMessage, OllamaOptions,
             OllamaRuntimeError, OllamaRuntimeErrorKind, ProviderError, ProviderErrorKind,
@@ -464,14 +464,14 @@ async fn quick_answer_from_provider_adapter(
     state: &AppState,
     request: OllamaChatRequest,
 ) -> Result<Option<String>, OllamaRuntimeError> {
-    let provider_registry = ProviderRegistry::new(state.ollama.clone());
-    let provider_adapter = provider_registry.default_generation_adapter();
+    let provider_pipeline = ProviderPipeline::new(state.ollama.clone());
+    let provider_profile = provider_pipeline.default_generation_profile();
     let provider_request = quick_provider_request_from_ollama_request(
         &request,
-        provider_adapter.provider_kind(),
-        provider_adapter.provider_profile_id(),
+        provider_profile.provider_kind,
+        &provider_profile.provider_profile_id,
     );
-    let mut provider_stream = provider_adapter.stream_chat(provider_request);
+    let mut provider_stream = provider_pipeline.stream_chat(provider_request);
     let mut events = Vec::new();
     while let Some(event) = provider_stream.next().await {
         events.push(event);

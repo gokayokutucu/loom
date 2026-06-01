@@ -23,12 +23,12 @@ use crate::{
         workflow::{RepositoryWorkflowRunner, WorkflowRun, WorkflowRunner},
     },
     providers::{
-        adapter::{ProviderAdapter, ProviderRegistry},
         contract::{
             ProviderContractEvent, ProviderContractMessage, ProviderContractMessageRole,
             ProviderContractOptions, ProviderContractRequest, ProviderUsageMetadata,
         },
         ollama::OllamaRuntime,
+        pipeline::ProviderPipeline,
         types::{
             done_reason_is_length, sanitize_provider_text, OllamaChatRequest, OllamaMessage,
             OllamaOptions, OllamaRuntimeError, OllamaRuntimeErrorKind, OllamaStreamChunk,
@@ -160,7 +160,7 @@ pub async fn cancel(
     State(state): State<crate::api::state::AppState>,
     Path(run_id): Path<String>,
 ) -> Json<OrchestrationCancelResponse> {
-    let cancelled = ProviderRegistry::new(state.ollama.clone()).cancel_generation(&run_id);
+    let cancelled = ProviderPipeline::new(state.ollama.clone()).cancel_generation(&run_id);
 
     // Persist the cancelled status to the database immediately so that if the
     // app is closed before the streaming workflow finalises, the response is not
@@ -3561,12 +3561,12 @@ fn execute_stream(
             return;
         }
 
-        let provider_registry = ProviderRegistry::new(state.ollama.clone());
-        let provider_adapter = provider_registry.default_generation_adapter();
-        let provider_capabilities = provider_adapter.capabilities();
+        let provider_pipeline = ProviderPipeline::new(state.ollama.clone());
+        let provider_profile = provider_pipeline.default_generation_profile();
+        let provider_capabilities = provider_pipeline.default_generation_capabilities();
         let provider_request = ProviderContractRequest {
-            provider_kind: provider_adapter.provider_kind(),
-            provider_profile_id: provider_adapter.provider_profile_id().to_string(),
+            provider_kind: provider_profile.provider_kind,
+            provider_profile_id: provider_profile.provider_profile_id,
             model_id: execution_input.model.clone(),
             messages: built_context
                 .messages
@@ -3614,7 +3614,7 @@ fn execute_stream(
             }),
         };
 
-        let mut provider_stream = provider_adapter.stream_chat(provider_request);
+        let mut provider_stream = provider_pipeline.stream_chat(provider_request);
         while let Some(provider_event) = provider_stream.next().await {
             match provider_event {
                 ProviderContractEvent::ThinkingStatus {
