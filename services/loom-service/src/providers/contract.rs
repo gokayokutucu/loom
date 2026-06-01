@@ -29,6 +29,7 @@ pub struct ProviderContractOptions {
     pub top_p: Option<f32>,
     pub max_tokens: Option<u32>,
     pub context_tokens: Option<u32>,
+    pub thinking: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -104,6 +105,10 @@ pub enum ProviderContractEvent {
         token_estimate: Option<u64>,
     },
     Completed {
+        done_reason: Option<String>,
+        usage: ProviderUsageMetadata,
+    },
+    Truncated {
         done_reason: Option<String>,
         usage: ProviderUsageMetadata,
     },
@@ -345,6 +350,7 @@ mod tests {
                 top_p: Some(0.9),
                 max_tokens: Some(512),
                 context_tokens: Some(4096),
+                thinking: Some(true),
             },
             stream: true,
             request_id: "run-contract-1".to_string(),

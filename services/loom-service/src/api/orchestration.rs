@@ -23,11 +23,16 @@ use crate::{
         workflow::{RepositoryWorkflowRunner, WorkflowRun, WorkflowRunner},
     },
     providers::{
+        adapter::{ProviderAdapter, ProviderRegistry},
+        contract::{
+            ProviderContractEvent, ProviderContractMessage, ProviderContractMessageRole,
+            ProviderContractOptions, ProviderContractRequest, ProviderUsageMetadata,
+        },
         ollama::OllamaRuntime,
         types::{
             done_reason_is_length, sanitize_provider_text, OllamaChatRequest, OllamaMessage,
             OllamaOptions, OllamaRuntimeError, OllamaRuntimeErrorKind, OllamaStreamChunk,
-            OllamaWireChunk,
+            OllamaWireChunk, ProviderError,
         },
     },
     runtime::OperationKind,
@@ -155,7 +160,7 @@ pub async fn cancel(
     State(state): State<crate::api::state::AppState>,
     Path(run_id): Path<String>,
 ) -> Json<OrchestrationCancelResponse> {
-    let cancelled = state.ollama.cancel(&run_id);
+    let cancelled = ProviderRegistry::new(state.ollama.clone()).cancel_generation(&run_id);
 
     // Persist the cancelled status to the database immediately so that if the
     // app is closed before the streaming workflow finalises, the response is not
@@ -1796,10 +1801,10 @@ async fn complete_successful_execution_stages(
     runner.mark_stage_done(run_id, "emit_events").await
 }
 
-fn ollama_error_event(
+fn provider_error_event(
     run_id: &str,
     model: &str,
-    error: &OllamaRuntimeError,
+    error: &ProviderError,
     elapsed_ms: u128,
     lifecycle: Option<&PersistedResponseLifecycle>,
 ) -> Event {
@@ -1812,9 +1817,15 @@ fn ollama_error_event(
                 "stage": "generate",
                 "model": model,
                 "kind": error.kind,
-                "message": error.message,
+                "message": error.technical_message.as_deref().unwrap_or(&error.user_message),
                 "elapsedMs": elapsed_ms,
-                "doneReason": error.done_reason
+                "provider": {
+                    "kind": error.provider_kind,
+                    "id": error.provider_id,
+                    "statusCode": error.status_code,
+                    "retryable": error.retryable,
+                    "details": error.safe_metadata
+                }
             }),
             lifecycle,
         ),
@@ -3550,238 +3561,85 @@ fn execute_stream(
             return;
         }
 
-        let request_id_for_cancel = run_id.clone();
-        let mut cancel_rx = state.ollama.register_cancellation(&request_id_for_cancel);
-        let ollama_request = OllamaChatRequest {
-            model: execution_input.model.clone(),
-            messages: built_context.messages.into_iter().map(|message| OllamaMessage {
-                role: match message.role {
-                    crate::context::types::ContextMessageRole::System => "system".to_string(),
-                    crate::context::types::ContextMessageRole::User => "user".to_string(),
-                    crate::context::types::ContextMessageRole::Assistant => "assistant".to_string(),
-                },
-                content: message.content,
-            }).collect(),
-            stream: Some(true),
-            think: Some(answer_plan.use_thinking),
-            options: Some(OllamaOptions {
-                num_ctx: execution_input.options.as_ref().and_then(|options| options.num_ctx),
-                num_predict: execution_input.options.as_ref().and_then(|options| options.num_predict),
-                temperature: execution_input.options.as_ref().and_then(|options| options.temperature),
-            }),
-            request_id: Some(request_id_for_cancel.clone()),
-        };
-
-        let response = match state.ollama.post_chat(&ollama_request).await {
-            Ok(response) => response,
-            Err(error) => {
-                let _ = runner.mark_stage_failed(&run_id, "generate", &format!("{:?}", error.kind)).await;
-                if let Some(lifecycle) = persisted_lifecycle.as_ref() {
-                    let _ = update_persisted_assistant_status(
-                        &state.database,
-                        lifecycle,
-                        "error",
-                        error.done_reason.as_deref(),
-                        Some(&format!("{:?}", error.kind)),
-                        Some(&error.message),
-                    )
-                    .await;
-                }
-                schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
-                yield Ok(ollama_error_event(&run_id, &execution_input.model, &error, started.elapsed().as_millis(), persisted_lifecycle.as_ref()));
-                state.ollama.finish_request(&request_id_for_cancel);
-                return;
-            }
-        };
-        let mut bytes_stream = response.bytes_stream();
-        let mut buffer = String::new();
-        let mut first_chunk = true;
-        let mut thinking_started_at: Option<Instant> = None;
-        let mut thinking_total_chars: usize = 0;
-
-        loop {
-            let idle_timeout = if first_chunk {
-                state.ollama.config().first_chunk_timeout
-            } else {
-                state.ollama.config().stream_idle_timeout
-            };
-            let next_chunk = tokio::select! {
-                _ = cancel_rx.changed() => {
-                    if *cancel_rx.borrow() {
-                        let _ = runner.mark_stage_failed(&run_id, "generate", "cancelled").await;
-                        if let Some(lifecycle) = persisted_lifecycle.as_ref() {
-                            let _ = update_persisted_assistant_status(
-                                &state.database,
-                                lifecycle,
-                                "cancelled",
-                                None,
-                                None,
-                                None,
-                            )
-                            .await;
+        let provider_registry = ProviderRegistry::new(state.ollama.clone());
+        let provider_adapter = provider_registry.default_generation_adapter();
+        let provider_capabilities = provider_adapter.capabilities();
+        let provider_request = ProviderContractRequest {
+            provider_kind: provider_adapter.provider_kind(),
+            provider_profile_id: provider_adapter.provider_profile_id().to_string(),
+            model_id: execution_input.model.clone(),
+            messages: built_context
+                .messages
+                .into_iter()
+                .map(|message| ProviderContractMessage {
+                    role: match message.role {
+                        crate::context::types::ContextMessageRole::System => {
+                            ProviderContractMessageRole::System
                         }
-                        schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
-                        let payload = merge_response_ids(json!({
-                            "runId": run_id,
-                            "elapsedMs": started.elapsed().as_millis()
-                        }), persisted_lifecycle.as_ref());
-                        let _ = runner
-                            .persist_event(
-                                run_id.clone(),
-                                "response.cancelled".to_string(),
-                                Some("generate".to_string()),
-                                payload.to_string(),
-                            )
-                            .await;
-                        yield Ok(to_sse_event(service_event(run_id.clone(), "response.cancelled", payload)));
-                        state.ollama.finish_request(&request_id_for_cancel);
-                        return;
-                    }
-                    continue;
-                }
-                result = timeout(idle_timeout, bytes_stream.next()) => result
-            };
+                        crate::context::types::ContextMessageRole::User => {
+                            ProviderContractMessageRole::User
+                        }
+                        crate::context::types::ContextMessageRole::Assistant => {
+                            ProviderContractMessageRole::Assistant
+                        }
+                    },
+                    content: message.content,
+                })
+                .collect(),
+            options: ProviderContractOptions {
+                temperature: execution_input
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.temperature),
+                top_p: None,
+                max_tokens: execution_input
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.num_predict),
+                context_tokens: execution_input
+                    .options
+                    .as_ref()
+                    .and_then(|options| options.num_ctx),
+                thinking: Some(answer_plan.use_thinking),
+            },
+            stream: true,
+            request_id: run_id.clone(),
+            runtime_metadata: json!({
+                "source": "orchestration.execute_stream",
+                "responseMode": execution_input.response_mode,
+                "capabilities": provider_capabilities,
+            }),
+            loom_context_metadata: json!({
+                "contextBuilt": true,
+            }),
+        };
 
-            let Some(chunk_result) = (match next_chunk {
-                Ok(value) => value,
-                Err(_) => {
-                    let error = OllamaRuntimeError::new(
-                        if first_chunk { OllamaRuntimeErrorKind::TimeoutBeforeFirstChunk } else { OllamaRuntimeErrorKind::TimeoutDuringStream },
-                        if first_chunk { "The model did not start responding in time." } else { "The model stopped responding before the answer finished." },
-                        true,
-                    );
-                    let _ = runner.mark_stage_failed(&run_id, "generate", &format!("{:?}", error.kind)).await;
-                    if let Some(lifecycle) = persisted_lifecycle.as_ref() {
-                        let _ = update_persisted_assistant_status(
-                            &state.database,
-                            lifecycle,
-                            "error",
-                            error.done_reason.as_deref(),
-                            Some(&format!("{:?}", error.kind)),
-                            Some(&error.message),
-                        )
-                        .await;
-                    }
-                    schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
-                    yield Ok(ollama_error_event(&run_id, &execution_input.model, &error, started.elapsed().as_millis(), persisted_lifecycle.as_ref()));
-                    state.ollama.finish_request(&request_id_for_cancel);
-                    return;
-                }
-            }) else {
-                let _ = runner.mark_stage_done(&run_id, "generate").await;
-                if let Some(lifecycle) = persisted_lifecycle.as_ref() {
-                    let _ = update_persisted_assistant_status(
-                        &state.database,
-                        lifecycle,
-                        "completed",
-                        None,
-                        None,
-                        None,
-                    )
-                    .await;
-                }
-                schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
-                if let Ok(run) = complete_successful_execution_stages(&runner, &run_id).await {
-                    yield Ok(progress_event(&run_id, &run));
-                }
-                let payload = merge_response_ids(json!({
-                    "runId": run_id,
-                    "elapsedMs": started.elapsed().as_millis(),
-                    "doneReason": Value::Null
-                }), persisted_lifecycle.as_ref());
-                let _ = runner
-                    .persist_event(
-                        run_id.clone(),
-                        "response.completed".to_string(),
-                        Some("generate".to_string()),
-                        payload.to_string(),
-                    )
-                    .await;
-                yield Ok(to_sse_event(service_event(
-                    run_id.clone(),
-                    "response.completed",
-                    payload,
-                )));
-                state.ollama.finish_request(&request_id_for_cancel);
-                return;
-            };
-            first_chunk = false;
-
-            let bytes = match chunk_result {
-                Ok(bytes) => bytes,
-                Err(error) => {
-                    let runtime_error = if error.is_connect() {
-                        OllamaRuntimeError::new(OllamaRuntimeErrorKind::RuntimeUnavailable, "Ollama is not reachable.", true)
-                    } else if error.is_timeout() {
-                        OllamaRuntimeError::new(OllamaRuntimeErrorKind::TimeoutDuringStream, "The model stopped responding before the answer finished.", true)
-                    } else {
-                        OllamaRuntimeError::new(OllamaRuntimeErrorKind::UnexpectedResponse, "Ollama returned an unexpected stream response.", true)
-                    };
-                    let _ = runner.mark_stage_failed(&run_id, "generate", &format!("{:?}", runtime_error.kind)).await;
-                    if let Some(lifecycle) = persisted_lifecycle.as_ref() {
-                        let _ = update_persisted_assistant_status(
-                            &state.database,
-                            lifecycle,
-                            "error",
-                            runtime_error.done_reason.as_deref(),
-                            Some(&format!("{:?}", runtime_error.kind)),
-                            Some(&runtime_error.message),
-                        )
-                        .await;
-                    }
-                    schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
-                    yield Ok(ollama_error_event(&run_id, &execution_input.model, &runtime_error, started.elapsed().as_millis(), persisted_lifecycle.as_ref()));
-                    state.ollama.finish_request(&request_id_for_cancel);
-                    return;
-                }
-            };
-
-            let chunks = match parse_ndjson_bytes(&mut buffer, &bytes) {
-                Ok(chunks) => chunks,
-                Err(error) => {
-                    let _ = runner.mark_stage_failed(&run_id, "generate", &format!("{:?}", error.kind)).await;
-                    if let Some(lifecycle) = persisted_lifecycle.as_ref() {
-                        let _ = update_persisted_assistant_status(
-                            &state.database,
-                            lifecycle,
-                            "error",
-                            error.done_reason.as_deref(),
-                            Some(&format!("{:?}", error.kind)),
-                            Some(&error.message),
-                        )
-                        .await;
-                    }
-                    schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
-                    yield Ok(ollama_error_event(&run_id, &execution_input.model, &error, started.elapsed().as_millis(), persisted_lifecycle.as_ref()));
-                    state.ollama.finish_request(&request_id_for_cancel);
-                    return;
-                }
-            };
-
-            for chunk in chunks {
-                if chunk.thinking_seen {
-                    let started_at = thinking_started_at.get_or_insert_with(Instant::now);
-                    thinking_total_chars += chunk.thinking_char_count;
-                    // ~3.5 chars per token is a reasonable estimate for mixed-language thinking text.
-                    let token_estimate = (thinking_total_chars as f64 / 3.5) as u64;
+        let mut provider_stream = provider_adapter.stream_chat(provider_request);
+        while let Some(provider_event) = provider_stream.next().await {
+            match provider_event {
+                ProviderContractEvent::ThinkingStatus {
+                    status,
+                    duration_ms,
+                    token_estimate,
+                } => {
                     yield Ok(to_sse_event(service_event(run_id.clone(), "orchestration.progress", json!({
                         "runId": run_id,
                         "thinking": {
-                            "status": "active",
-                            "durationMs": started_at.elapsed().as_millis(),
+                            "status": status,
+                            "durationMs": duration_ms,
                             "tokenEstimate": token_estimate
                         }
                     }))));
                 }
-                if let Some(content) = chunk.content.filter(|content| !content.is_empty()) {
+                ProviderContractEvent::Delta { text } => {
                     if let Some(lifecycle) = persisted_lifecycle.as_mut() {
-                        lifecycle.assistant_content.push_str(&content);
+                        lifecycle.assistant_content.push_str(&text);
                         let _ = update_persisted_assistant_content(&state.database, lifecycle).await;
                     }
                     let payload = merge_response_ids(json!({
                         "runId": run_id,
-                        "delta": content,
-                        "content": content
+                        "delta": text,
+                        "content": text
                     }), persisted_lifecycle.as_ref());
                     let _ = runner
                         .persist_event(
@@ -3793,13 +3651,20 @@ fn execute_stream(
                         .await;
                     yield Ok(to_sse_event(service_event(run_id.clone(), "response.delta", payload)));
                 }
-                if chunk.done {
-                    let done_reason = chunk.done_reason.clone();
-                    let event_type = done_reason
-                        .as_deref()
-                        .filter(|reason| done_reason_is_length(reason))
-                        .map(|_| "response.truncated")
-                        .unwrap_or("response.completed");
+                ProviderContractEvent::Completed { done_reason, usage } => {
+                    let event_type = if done_reason.as_deref().is_some_and(done_reason_is_length) {
+                        "response.truncated"
+                    } else {
+                        "response.completed"
+                    };
+                    let (prompt_token_count, eval_token_count) = match usage {
+                        ProviderUsageMetadata::Available {
+                            prompt_tokens,
+                            completion_tokens,
+                            total_tokens: _,
+                        } => (prompt_tokens, completion_tokens),
+                        ProviderUsageMetadata::Unavailable { .. } => (None, None),
+                    };
                     let _ = runner.mark_stage_done(&run_id, "generate").await;
                     if let Some(lifecycle) = persisted_lifecycle.as_ref() {
                         let _ = update_persisted_assistant_status(
@@ -3816,7 +3681,7 @@ fn execute_stream(
                             .update_response_inference_metadata(
                                 &lifecycle.assistant_response_id,
                                 Some(elapsed_ms),
-                                chunk.eval_count,
+                                eval_token_count,
                             )
                             .await;
                     }
@@ -3828,12 +3693,112 @@ fn execute_stream(
                         "runId": run_id,
                         "elapsedMs": started.elapsed().as_millis(),
                         "doneReason": done_reason,
-                        "evalTokenCount": chunk.eval_count,
-                        "promptTokenCount": chunk.prompt_eval_count
+                        "evalTokenCount": eval_token_count,
+                        "promptTokenCount": prompt_token_count
                     }), persisted_lifecycle.as_ref());
                     let _ = runner.persist_event(run_id.clone(), event_type.to_string(), Some("generate".to_string()), payload.to_string()).await;
                     yield Ok(to_sse_event(service_event(run_id.clone(), event_type, payload)));
-                    state.ollama.finish_request(&request_id_for_cancel);
+                    return;
+                }
+                ProviderContractEvent::Truncated { done_reason, usage } => {
+                    let event_type = "response.truncated";
+                    let (prompt_token_count, eval_token_count) = match usage {
+                        ProviderUsageMetadata::Available {
+                            prompt_tokens,
+                            completion_tokens,
+                            total_tokens: _,
+                        } => (prompt_tokens, completion_tokens),
+                        ProviderUsageMetadata::Unavailable { .. } => (None, None),
+                    };
+                    let _ = runner.mark_stage_done(&run_id, "generate").await;
+                    if let Some(lifecycle) = persisted_lifecycle.as_ref() {
+                        let _ = update_persisted_assistant_status(
+                            &state.database,
+                            lifecycle,
+                            if event_type == "response.truncated" { "truncated" } else { "completed" },
+                            done_reason.as_deref(),
+                            None,
+                            None,
+                        )
+                        .await;
+                        let elapsed_ms = started.elapsed().as_millis() as u64;
+                        let _ = crate::storage::repositories::responses::ResponseRepository::new(&state.database)
+                            .update_response_inference_metadata(
+                                &lifecycle.assistant_response_id,
+                                Some(elapsed_ms),
+                                eval_token_count,
+                            )
+                            .await;
+                    }
+                    schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
+                    if let Ok(run) = complete_successful_execution_stages(&runner, &run_id).await {
+                        yield Ok(progress_event(&run_id, &run));
+                    }
+                    let payload = merge_response_ids(json!({
+                        "runId": run_id,
+                        "elapsedMs": started.elapsed().as_millis(),
+                        "doneReason": done_reason,
+                        "evalTokenCount": eval_token_count,
+                        "promptTokenCount": prompt_token_count
+                    }), persisted_lifecycle.as_ref());
+                    let _ = runner.persist_event(run_id.clone(), event_type.to_string(), Some("generate".to_string()), payload.to_string()).await;
+                    yield Ok(to_sse_event(service_event(run_id.clone(), event_type, payload)));
+                    return;
+                }
+                ProviderContractEvent::Cancelled => {
+                    let _ = runner.mark_stage_failed(&run_id, "generate", "cancelled").await;
+                    if let Some(lifecycle) = persisted_lifecycle.as_ref() {
+                        let _ = update_persisted_assistant_status(
+                            &state.database,
+                            lifecycle,
+                            "cancelled",
+                            None,
+                            None,
+                            None,
+                        )
+                        .await;
+                    }
+                    schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
+                    let payload = merge_response_ids(json!({
+                        "runId": run_id,
+                        "elapsedMs": started.elapsed().as_millis()
+                    }), persisted_lifecycle.as_ref());
+                    let _ = runner
+                        .persist_event(
+                            run_id.clone(),
+                            "response.cancelled".to_string(),
+                            Some("generate".to_string()),
+                            payload.to_string(),
+                        )
+                        .await;
+                    yield Ok(to_sse_event(service_event(run_id.clone(), "response.cancelled", payload)));
+                    return;
+                }
+                ProviderContractEvent::Error { error } => {
+                    let _ = runner.mark_stage_failed(&run_id, "generate", &format!("{:?}", error.kind)).await;
+                    if let Some(lifecycle) = persisted_lifecycle.as_ref() {
+                        let message = error
+                            .technical_message
+                            .as_deref()
+                            .unwrap_or(&error.user_message);
+                        let _ = update_persisted_assistant_status(
+                            &state.database,
+                            lifecycle,
+                            "error",
+                            None,
+                            Some(&format!("{:?}", error.kind)),
+                            Some(message),
+                        )
+                        .await;
+                    }
+                    schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
+                    yield Ok(provider_error_event(
+                        &run_id,
+                        &execution_input.model,
+                        &error,
+                        started.elapsed().as_millis(),
+                        persisted_lifecycle.as_ref(),
+                    ));
                     return;
                 }
             }
