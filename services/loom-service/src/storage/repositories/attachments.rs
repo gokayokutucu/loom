@@ -297,6 +297,44 @@ impl AttachmentRepository {
         .map_err(|error| ServiceError::storage(format!("failed to get Attachment: {error}")))
     }
 
+    pub async fn reassign_attachment_loom(
+        &self,
+        attachment_id: &str,
+        from_loom_id: &str,
+        to_loom_id: &str,
+        updated_at: &str,
+    ) -> Result<Option<AttachmentRecord>, ServiceError> {
+        let Some(existing) = self.get_attachment(attachment_id).await? else {
+            return Ok(None);
+        };
+        if existing.loom_id == to_loom_id {
+            return Ok(Some(existing));
+        }
+        if existing.loom_id != from_loom_id {
+            return Ok(None);
+        }
+        let changed = sqlx::query(
+            "UPDATE attachments
+             SET loom_id = ?3,
+                 updated_at = ?4
+             WHERE attachment_id = ?1 AND loom_id = ?2",
+        )
+        .bind(attachment_id)
+        .bind(from_loom_id)
+        .bind(to_loom_id)
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to reassign Attachment Loom: {error}"))
+        })?
+        .rows_affected();
+        if changed == 0 {
+            return Ok(None);
+        }
+        self.get_attachment(attachment_id).await
+    }
+
     /// Returns the raw blob bytes and file name for an attachment.
     /// Verifies that the attachment belongs to `loom_id` before returning bytes —
     /// if the attachment exists but belongs to a different loom, `None` is returned

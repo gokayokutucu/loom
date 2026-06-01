@@ -1,6 +1,7 @@
 import type {
   AddReferenceInput,
   AddReferenceResult,
+  AdoptAttachmentInput,
   ArchiveLoomInput,
   BookmarkResponseInput,
   BookmarkResult,
@@ -110,6 +111,7 @@ export interface LoomEngineClient {
   createAttachment(input: CreateAttachmentInput): Promise<CreateAttachmentResult>;
   listAttachments(input: ListAttachmentsInput): Promise<ListAttachmentsResult>;
   deleteAttachment(input: DeleteAttachmentInput): Promise<void>;
+  adoptAttachment(input: AdoptAttachmentInput): Promise<CreateAttachmentResult>;
   materializeAttachment(input: MaterializeAttachmentInput): Promise<MaterializeAttachmentResult>;
   regenerateFromResponse(input: RegenerateFromResponseInput): AsyncIterable<EngineResponseEvent>;
   retryUserMessage(input: RetryUserMessageInput): AsyncIterable<EngineResponseEvent>;

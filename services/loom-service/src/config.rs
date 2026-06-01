@@ -740,6 +740,18 @@ fn serialize_config(config: &LoomServiceConfig) -> String {
         format_toml_string_array(&config.speech.warnings)
     )
     .expect("write speech warnings");
+    writeln!(
+        &mut output,
+        "localCommandOutputMode = \"{}\"",
+        config.speech.local_command_output_mode.as_config_str()
+    )
+    .expect("write speech local command output mode");
+    writeln!(
+        &mut output,
+        "localCommandTranscriptFileExtension = \"{}\"",
+        escape_toml_string(&config.speech.local_command_transcript_file_extension)
+    )
+    .expect("write speech transcript file extension");
 
     writeln!(&mut output, "\n[ocr]").expect("write ocr config");
     writeln!(&mut output, "enabled = {}", config.ocr.enabled).expect("write ocr enabled");
@@ -1230,6 +1242,19 @@ fn set_config_value(
         }
         ("speech", "warnings") => {
             config.speech.warnings = parse_toml_string_array(value, line_number)?;
+        }
+        ("speech", "localCommandOutputMode") => {
+            let parsed = parse_toml_string(value, line_number)?;
+            config.speech.local_command_output_mode =
+                crate::speech::LocalCommandOutputMode::parse(&parsed).ok_or_else(|| {
+                    ConfigParseError::new(format!(
+                        "line {line_number}: unknown speech.localCommandOutputMode {parsed}"
+                    ))
+                })?;
+        }
+        ("speech", "localCommandTranscriptFileExtension") => {
+            config.speech.local_command_transcript_file_extension =
+                parse_toml_string(value, line_number)?;
         }
         ("ocr", "enabled") => config.ocr.enabled = parse_toml_bool(value, line_number)?,
         ("ocr", "provider") => config.ocr.provider = parse_toml_string(value, line_number)?,
@@ -2538,6 +2563,59 @@ apiKey = "do-not-store"
             .expect_err("patch should fail");
 
         assert!(error.to_string().contains("loopback"));
+    }
+
+    #[test]
+    fn speech_output_mode_and_transcript_extension_survive_config_round_trip() {
+        use crate::speech::{LocalCommandOutputMode, SpeechToTextConfig, SpeechToTextProviderKind};
+
+        let path = test_path("speech-output-mode-round-trip");
+        let mut config = LoomServiceConfig::default();
+        config.speech = SpeechToTextConfig {
+            enabled: true,
+            default_provider_kind: SpeechToTextProviderKind::LocalCommand,
+            local_command_path: Some("/usr/local/bin/whisper-cli".to_string()),
+            local_command_args: vec![
+                "-m".to_string(),
+                "/tmp/ggml-base.bin".to_string(),
+                "-f".to_string(),
+                "{input}".to_string(),
+                "-otxt".to_string(),
+                "-of".to_string(),
+                "{output}".to_string(),
+            ],
+            local_command_output_mode: LocalCommandOutputMode::File,
+            local_command_transcript_file_extension: "txt".to_string(),
+            warnings: vec![],
+            ..SpeechToTextConfig::default()
+        };
+        write_config_atomic(&path, &config).expect("write config");
+
+        let toml = std::fs::read_to_string(&path).expect("read toml");
+        assert!(
+            toml.contains("localCommandOutputMode = \"file\""),
+            "localCommandOutputMode must be written to TOML; got:\n{toml}"
+        );
+        assert!(
+            toml.contains("localCommandTranscriptFileExtension = \"txt\""),
+            "localCommandTranscriptFileExtension must be written to TOML; got:\n{toml}"
+        );
+
+        let loaded = load_or_create_config(&path).expect("reload config");
+        assert_eq!(
+            loaded.speech.local_command_output_mode,
+            LocalCommandOutputMode::File,
+            "localCommandOutputMode must survive write→reload round-trip"
+        );
+        assert_eq!(
+            loaded.speech.local_command_transcript_file_extension, "txt",
+            "localCommandTranscriptFileExtension must survive write→reload round-trip"
+        );
+        assert_eq!(
+            loaded.speech.local_command_path.as_deref(),
+            Some("/usr/local/bin/whisper-cli")
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     fn test_path(name: &str) -> std::path::PathBuf {

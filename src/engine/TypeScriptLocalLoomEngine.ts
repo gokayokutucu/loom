@@ -7,6 +7,7 @@ import type { LoomEngineClient } from "./LoomEngineClient";
 import type {
   AddReferenceInput,
   AddReferenceResult,
+  AdoptAttachmentInput,
   ArchiveLoomInput,
   CreateAttachmentInput,
   CreateAttachmentResult,
@@ -292,6 +293,25 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
     if (this.dependencies.deleteAttachment) {
       return this.dependencies.deleteAttachment(input);
     }
+  }
+
+  async adoptAttachment(input: AdoptAttachmentInput): Promise<CreateAttachmentResult> {
+    if (this.dependencies.adoptAttachment) {
+      return this.dependencies.adoptAttachment(input);
+    }
+    const now = Date.now().toString();
+    return {
+      attachment: {
+        attachmentId: input.attachmentId,
+        loomId: input.toLoomId,
+        fileName: input.attachmentId,
+        sizeBytes: 0,
+        kind: "unsupported",
+        parseStatus: "unsupported",
+        createdAt: now,
+        updatedAt: now,
+      },
+    };
   }
 
   async materializeAttachment(_input: MaterializeAttachmentInput): Promise<MaterializeAttachmentResult> {

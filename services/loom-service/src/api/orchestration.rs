@@ -57,7 +57,9 @@ use std::{
 };
 use tokio::time::{sleep, timeout};
 
+#[cfg(test)]
 const DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES: usize = 24;
+const DEFAULT_MAX_RECENT_CONTEXT_PAIRS: usize = 20;
 const MAX_MEMORY_CONTEXT_MESSAGES: usize = 8;
 const MAX_MEMORY_CONTEXT_CHARS: usize = 1_200;
 const FORBIDDEN_CONTEXT_KEYS: [&str; 4] = [
@@ -1819,19 +1821,23 @@ fn ollama_error_event(
     ))
 }
 
-async fn attached_references(
+async fn attached_references_for_sources(
     database: &crate::storage::db::Database,
-    loom_id: &str,
     prompt: &str,
-    references: &[PlannerReference],
+    references: &[AttachmentReferenceCandidate],
 ) -> Result<Vec<AttachedReferenceInput>, crate::error::ServiceError> {
     let attachment_repository = AttachmentRepository::new(database);
     let mut attached_references = Vec::with_capacity(references.len());
-    for reference in references {
+    for candidate in references {
+        let reference = &candidate.reference;
         let attachment = if reference.target_kind == "attachment" {
             match reference.target_id.as_deref() {
                 Some(attachment_id) => attachment_repository
-                    .get_referenced_attachment_content(loom_id, attachment_id, prompt)
+                    .get_referenced_attachment_content(
+                        &candidate.source_loom_id,
+                        attachment_id,
+                        prompt,
+                    )
                     .await?
                     .map(attachment_context_from_record),
                 None => None,
@@ -1854,6 +1860,12 @@ async fn attached_references(
         });
     }
     Ok(attached_references)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct AttachmentReferenceCandidate {
+    reference: PlannerReference,
+    source_loom_id: String,
 }
 
 fn attachment_context_from_record(
@@ -2041,19 +2053,33 @@ fn references_from_response_metadata(metadata_json: Option<&str>) -> Vec<Planner
     let Ok(metadata) = serde_json::from_str::<Value>(metadata_json) else {
         return Vec::new();
     };
-    if let Some(references) = metadata.get("references").and_then(Value::as_array) {
-        let parsed = references
-            .iter()
-            .filter_map(|reference| {
-                serde_json::from_value::<PlannerReference>(reference.clone()).ok()
-            })
-            .collect::<Vec<_>>();
-        if !parsed.is_empty() {
-            return parsed;
-        }
-    }
-    metadata
-        .get("questionReferences")
+    let references = metadata
+        .get("references")
+        .and_then(Value::as_array)
+        .map(|references| {
+            references
+                .iter()
+                .filter_map(|reference| {
+                    serde_json::from_value::<PlannerReference>(reference.clone()).ok()
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    merge_context_references(
+        references,
+        planner_references_from_question_references(metadata.get("questionReferences")),
+    )
+}
+
+fn context_references_for_execute(input: &OrchestrationExecuteInput) -> Vec<PlannerReference> {
+    merge_context_references(
+        input.references.clone(),
+        planner_references_from_question_references(input.question_references.as_ref()),
+    )
+}
+
+fn planner_references_from_question_references(value: Option<&Value>) -> Vec<PlannerReference> {
+    value
         .and_then(Value::as_array)
         .map(|references| {
             references
@@ -2062,6 +2088,64 @@ fn references_from_response_metadata(metadata_json: Option<&str>) -> Vec<Planner
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn merge_context_references(
+    references: Vec<PlannerReference>,
+    question_references: Vec<PlannerReference>,
+) -> Vec<PlannerReference> {
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::with_capacity(references.len() + question_references.len());
+    for reference in references.into_iter().chain(question_references) {
+        let key = reference_dedup_key(&reference);
+        if seen.insert(key) {
+            merged.push(reference);
+        }
+    }
+    merged
+}
+
+fn reference_dedup_key(reference: &PlannerReference) -> String {
+    if reference.target_kind == "attachment" {
+        return reference
+            .target_id
+            .as_deref()
+            .unwrap_or(reference.reference_id.as_str())
+            .to_string();
+    }
+    if let Some(target_id) = reference.target_id.as_deref() {
+        return format!("{}:{target_id}", reference.target_kind);
+    }
+    format!("reference:{}", reference.reference_id)
+}
+
+fn merge_attachment_reference_candidates(
+    explicit_references: &[PlannerReference],
+    explicit_loom_id: &str,
+    window_references: Vec<AttachmentReferenceCandidate>,
+) -> Vec<AttachmentReferenceCandidate> {
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::with_capacity(explicit_references.len() + window_references.len());
+    for reference in explicit_references {
+        let key = format!("{explicit_loom_id}:{}", reference_dedup_key(reference));
+        if seen.insert(key) {
+            merged.push(AttachmentReferenceCandidate {
+                reference: reference.clone(),
+                source_loom_id: explicit_loom_id.to_string(),
+            });
+        }
+    }
+    for candidate in window_references {
+        let key = format!(
+            "{}:{}",
+            candidate.source_loom_id,
+            reference_dedup_key(&candidate.reference)
+        );
+        if seen.insert(key) {
+            merged.push(candidate);
+        }
+    }
+    merged
 }
 
 fn planner_reference_from_question_reference(value: &Value) -> Option<PlannerReference> {
@@ -2083,7 +2167,8 @@ fn planner_reference_from_question_reference(value: &Value) -> Option<PlannerRef
             .and_then(Value::as_str)
             .map(str::to_string),
         target_kind: object
-            .get("type")
+            .get("targetKind")
+            .or_else(|| object.get("type"))
             .and_then(Value::as_str)
             .unwrap_or("response")
             .to_string(),
@@ -2104,6 +2189,7 @@ fn planner_reference_from_question_reference(value: &Value) -> Option<PlannerRef
     })
 }
 
+#[cfg(test)]
 async fn recent_messages_before_response(
     database: &crate::storage::db::Database,
     loom_id: &str,
@@ -2128,6 +2214,31 @@ async fn recent_messages_before_response(
     ))
 }
 
+async fn context_window_before_response(
+    database: &crate::storage::db::Database,
+    loom_id: &str,
+    response_id: Option<&str>,
+    max_pairs: usize,
+) -> Result<AssembledContextWindow, crate::error::ServiceError> {
+    let Some(response_id) = response_id else {
+        return Ok(AssembledContextWindow::default());
+    };
+    let repository = ResponseRepository::new(database);
+    let Some(head) = repository.get_response(response_id).await? else {
+        return Ok(AssembledContextWindow::default());
+    };
+    let responses = repository.list_responses_for_loom(loom_id).await?;
+    let current_pairs = select_recent_context_pairs(
+        responses
+            .into_iter()
+            .filter(|response| response.sequence_index < head.sequence_index),
+        max_pairs,
+        ContextWindowSource::CurrentLoom,
+    );
+    Ok(AssembledContextWindow::from_pairs(current_pairs))
+}
+
+#[cfg(test)]
 async fn recent_messages_for_execution(
     database: &crate::storage::db::Database,
     loom_id: &str,
@@ -2155,6 +2266,185 @@ async fn recent_messages_for_execution(
         max_candidate_responses,
     )
     .await
+}
+
+async fn context_window_for_execution(
+    database: &crate::storage::db::Database,
+    loom_id: &str,
+    input: &OrchestrationExecuteInput,
+    lifecycle: Option<&PersistedResponseLifecycle>,
+    is_weft: bool,
+    origin_loom_id: Option<&str>,
+    origin_response_id: Option<&str>,
+    max_pairs: usize,
+) -> Result<AssembledContextWindow, crate::error::ServiceError> {
+    let current_head_response_id = if input.regenerate_from_response_id.is_some() {
+        input.response_id.as_deref()
+    } else {
+        lifecycle
+            .map(|lifecycle| lifecycle.user_response_id.as_str())
+            .or(input.response_id.as_deref())
+    };
+    let mut window =
+        context_window_before_response(database, loom_id, current_head_response_id, max_pairs)
+            .await?;
+    if is_weft && window.pair_count < max_pairs {
+        if let (Some(origin_loom_id), Some(origin_response_id)) =
+            (origin_loom_id, origin_response_id)
+        {
+            let remaining_pairs = max_pairs - window.pair_count;
+            let mut origin_window = origin_context_window_through_response(
+                database,
+                origin_loom_id,
+                origin_response_id,
+                remaining_pairs,
+            )
+            .await?;
+            window.pairs.append(&mut origin_window.pairs);
+            window.pair_count += origin_window.pair_count;
+        }
+    }
+    Ok(window)
+}
+
+async fn origin_context_window_through_response(
+    database: &crate::storage::db::Database,
+    origin_loom_id: &str,
+    origin_response_id: &str,
+    max_pairs: usize,
+) -> Result<AssembledContextWindow, crate::error::ServiceError> {
+    let repository = ResponseRepository::new(database);
+    let Some(head) = repository.get_response(origin_response_id).await? else {
+        return Ok(AssembledContextWindow::default());
+    };
+    if head.loom_id != origin_loom_id {
+        return Ok(AssembledContextWindow::default());
+    }
+    let responses = repository.list_responses_for_loom(origin_loom_id).await?;
+    let pairs = select_recent_context_pairs(
+        responses
+            .into_iter()
+            .filter(|response| response.sequence_index <= head.sequence_index),
+        max_pairs,
+        ContextWindowSource::OriginLoom,
+    );
+    Ok(AssembledContextWindow::from_pairs(pairs))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ContextWindowSource {
+    CurrentLoom,
+    OriginLoom,
+}
+
+#[derive(Debug, Clone)]
+struct ContextWindowTurn {
+    message: ContextMessage,
+    loom_id: String,
+    metadata_json: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ContextWindowPair {
+    user: ContextWindowTurn,
+    assistant: Option<ContextWindowTurn>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct AssembledContextWindow {
+    pairs: Vec<ContextWindowPair>,
+    pair_count: usize,
+}
+
+impl AssembledContextWindow {
+    fn from_pairs(pairs: Vec<ContextWindowPair>) -> Self {
+        let pair_count = pairs.len();
+        Self { pairs, pair_count }
+    }
+
+    fn messages(&self) -> Vec<ContextMessage> {
+        self.pairs
+            .iter()
+            .flat_map(|pair| {
+                std::iter::once(pair.user.message.clone())
+                    .chain(pair.assistant.iter().map(|turn| turn.message.clone()))
+            })
+            .collect()
+    }
+
+    fn attachment_reference_candidates(&self) -> Vec<AttachmentReferenceCandidate> {
+        let mut candidates = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        for pair in &self.pairs {
+            for reference in references_from_response_metadata(pair.user.metadata_json.as_deref()) {
+                if reference.target_kind != "attachment" {
+                    continue;
+                }
+                let Some(attachment_id) = reference.target_id.as_deref() else {
+                    continue;
+                };
+                if !seen.insert(format!("{}:{attachment_id}", pair.user.loom_id)) {
+                    continue;
+                }
+                candidates.push(AttachmentReferenceCandidate {
+                    reference,
+                    source_loom_id: pair.user.loom_id.clone(),
+                });
+            }
+        }
+        candidates
+    }
+}
+
+fn select_recent_context_pairs(
+    responses: impl IntoIterator<Item = ResponseRecord>,
+    max_pairs: usize,
+    source: ContextWindowSource,
+) -> Vec<ContextWindowPair> {
+    let max_pairs = max_pairs.max(1);
+    let mut pairs = Vec::new();
+    let mut pending_user: Option<ContextWindowTurn> = None;
+    for response in responses {
+        if response.role == "user" {
+            if let Some(user) = pending_user.take() {
+                pairs.push(ContextWindowPair {
+                    user,
+                    assistant: None,
+                });
+            }
+            pending_user = context_window_turn_from_response(response, source);
+            continue;
+        }
+        if response.role == "assistant" {
+            let Some(user) = pending_user.take() else {
+                continue;
+            };
+            let assistant = context_window_turn_from_response(response, source);
+            pairs.push(ContextWindowPair { user, assistant });
+        }
+    }
+    if let Some(user) = pending_user {
+        pairs.push(ContextWindowPair {
+            user,
+            assistant: None,
+        });
+    }
+    if pairs.len() > max_pairs {
+        pairs.drain(0..pairs.len() - max_pairs);
+    }
+    pairs
+}
+
+fn context_window_turn_from_response(
+    response: ResponseRecord,
+    _source: ContextWindowSource,
+) -> Option<ContextWindowTurn> {
+    let message = response_to_recent_context_message(response.clone())?;
+    Some(ContextWindowTurn {
+        message,
+        loom_id: response.loom_id,
+        metadata_json: response.metadata_json,
+    })
 }
 
 async fn memory_messages_for_execution(
@@ -2244,6 +2534,7 @@ fn truncate_context_text(value: &str, max_chars: usize) -> String {
     output
 }
 
+#[cfg(test)]
 fn limit_recent_candidate_responses(
     mut messages: Vec<ContextMessage>,
     max_candidate_responses: usize,
@@ -2450,11 +2741,38 @@ fn deterministic_e2e_answer(
         .to_lowercase();
     let has_event_context = context_text.contains("event sourcing")
         && (context_text.contains("event store") || context_text.contains("cqrs"));
+    let attachment_sentinel = "loom_attachment_context_sentinel_123";
+    let first_turn_attachment_sentinel = "loom_first_turn_attachment_sentinel_789";
+    let window_attachment_sentinel = "loom_window_attachment_sentinel_456";
 
     if deterministic_e2e_response_mode().as_deref() == Some("long-streaming-scroll")
         || prompt.contains("long streaming scroll fixture")
     {
         return Some(long_streaming_scroll_e2e_answer());
+    }
+
+    if (prompt.contains("attached")
+        || prompt.contains("uploaded document")
+        || prompt.contains("document")
+        || prompt.contains("file"))
+        && context_text.contains(attachment_sentinel)
+    {
+        return Some(
+            "The attached document includes LOOM_ATTACHMENT_CONTEXT_SENTINEL_123.".to_string(),
+        );
+    }
+    if (prompt.contains("attached")
+        || prompt.contains("uploaded document")
+        || prompt.contains("document")
+        || prompt.contains("file"))
+        && context_text.contains(first_turn_attachment_sentinel)
+    {
+        return Some(
+            "The attached file includes LOOM_FIRST_TURN_ATTACHMENT_SENTINEL_789.".to_string(),
+        );
+    }
+    if prompt.contains("window sentinel") && context_text.contains(window_attachment_sentinel) {
+        return Some("Window attachment content is visible.".to_string());
     }
 
     if prompt.contains("blue otter") && prompt.contains("event sourcing") {
@@ -2844,10 +3162,11 @@ fn execute_stream(
         let mut execution_input = input.clone();
         execution_input.response_mode = mode_resolution.resolved_response_mode.clone();
 
+        let context_references = context_references_for_execute(&execution_input);
         let planner_input = PlannerInput {
             clean_user_prompt: execution_input.prompt.clone(),
             prompt_lines: execution_input.prompt.lines().map(str::to_string).collect(),
-            attached_references: execution_input.references.clone(),
+            attached_references: context_references.clone(),
             selected_response_mode: execution_input.response_mode.clone(),
             loom_id: execution_input.loom_id.clone(),
             source: Some("orchestration_execute".to_string()),
@@ -2932,21 +3251,6 @@ fn execute_stream(
             }
         }
 
-        let attached_references = match attached_references(
-            &state.database,
-            &workflow_loom_id,
-            &execution_input.prompt,
-            &execution_input.references,
-        )
-        .await
-        {
-            Ok(references) => references,
-            Err(error) => {
-                let _ = runner.mark_stage_failed(&run_id, "prepare_context", &error.to_string()).await;
-                yield Ok(workflow_error_event(&run_id, "prepare_context", error.to_string()));
-                return;
-            }
-        };
         let (is_weft, origin_loom_id, origin_response_id) = match resolve_context_scope(
             &state.database,
             &workflow_loom_id,
@@ -2954,6 +3258,45 @@ fn execute_stream(
         .await
         {
             Ok(scope) => scope,
+            Err(error) => {
+                let _ = runner.mark_stage_failed(&run_id, "prepare_context", &error.to_string()).await;
+                yield Ok(workflow_error_event(&run_id, "prepare_context", error.to_string()));
+                return;
+            }
+        };
+        let service_config = state.config.current();
+        let context_window = match context_window_for_execution(
+            &state.database,
+            &workflow_loom_id,
+            &execution_input,
+            persisted_lifecycle.as_ref(),
+            is_weft,
+            origin_loom_id.as_deref(),
+            origin_response_id.as_deref(),
+            DEFAULT_MAX_RECENT_CONTEXT_PAIRS,
+        )
+        .await
+        {
+            Ok(window) => window,
+            Err(error) => {
+                let _ = runner.mark_stage_failed(&run_id, "prepare_context", &error.to_string()).await;
+                yield Ok(workflow_error_event(&run_id, "prepare_context", error.to_string()));
+                return;
+            }
+        };
+        let attachment_reference_candidates = merge_attachment_reference_candidates(
+            &context_references,
+            &workflow_loom_id,
+            context_window.attachment_reference_candidates(),
+        );
+        let attached_references = match attached_references_for_sources(
+            &state.database,
+            &execution_input.prompt,
+            &attachment_reference_candidates,
+        )
+        .await
+        {
+            Ok(references) => references,
             Err(error) => {
                 let _ = runner.mark_stage_failed(&run_id, "prepare_context", &error.to_string()).await;
                 yield Ok(workflow_error_event(&run_id, "prepare_context", error.to_string()));
@@ -3001,39 +3344,7 @@ fn execute_stream(
             "readiness": readiness
         }))));
 
-        let service_config = state.config.current();
-        let max_recent_candidate_responses = service_config
-            .context
-            .max_recent_candidate_responses
-            .try_into()
-            .unwrap_or(DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES);
-        let recent_messages = match recent_messages_for_execution(
-            &state.database,
-            &workflow_loom_id,
-            &execution_input,
-            persisted_lifecycle.as_ref(),
-            max_recent_candidate_responses,
-        )
-        .await
-        {
-            Ok(messages) => messages,
-            Err(error) => {
-                let _ = runner.mark_stage_failed(&run_id, "prepare_context", &error.to_string()).await;
-                if let Some(lifecycle) = persisted_lifecycle.as_ref() {
-                    let _ = update_persisted_assistant_status(
-                        &state.database,
-                        lifecycle,
-                        "error",
-                        None,
-                        Some("context_history_error"),
-                        Some(&error.to_string()),
-                    )
-                    .await;
-                }
-                yield Ok(workflow_error_event(&run_id, "prepare_context", error.to_string()));
-                return;
-            }
-        };
+        let recent_messages = context_window.messages();
         let memory_messages = match memory_messages_for_execution(&state.database, &service_config).await {
             Ok(messages) => messages,
             Err(error) => {
@@ -4355,9 +4666,10 @@ fn estimate_output_tokens(text: &str) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        apply_thinking_capability, best_available_draft, build_generation_events,
-        build_generation_response_state, build_generation_status, configured_quick_model,
-        context_built_event_payload, create_persisted_response_lifecycle,
+        apply_thinking_capability, attached_references_for_sources, best_available_draft,
+        build_generation_events, build_generation_response_state, build_generation_status,
+        configured_quick_model, context_built_event_payload, context_references_for_execute,
+        context_window_for_execution, create_persisted_response_lifecycle,
         ensure_main_model_configured, eval_prompt, eval_strategy_decision,
         fallback_auto_router_decision, memory_messages_for_execution, minimum_successful_drafts,
         parse_auto_router_decision, parse_ndjson_bytes, plan, recent_messages_before_response,
@@ -4365,6 +4677,7 @@ mod tests {
         sanitize_generation_value, synthesis_prompt, update_persisted_assistant_content,
         update_persisted_assistant_status, DeepSynthesisEvalPrompt, OrchestrationExecuteInput,
         ResponseModeResolution, DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES,
+        DEFAULT_MAX_RECENT_CONTEXT_PAIRS,
     };
     use crate::{
         api::state::AppState,
@@ -4378,7 +4691,7 @@ mod tests {
             },
         },
         orchestration::{
-            answer_plan::{ContextStrategy, PlannerInput, ResponseMode},
+            answer_plan::{ContextStrategy, PlannerInput, PlannerReference, ResponseMode},
             deep_synthesis::{
                 DeepSynthesisDraft, DeepSynthesisPlan, DeepSynthesisRequest,
                 DeepSynthesisStepStatus, DeepSynthesisWorkerRole,
@@ -4390,6 +4703,7 @@ mod tests {
         storage::{
             db::test_database,
             repositories::{
+                attachments::{AttachmentRepository, NewAttachment},
                 code_blocks::ResponseCodeBlockRepository,
                 looms::{LoomRepository, NewLoom},
                 memory::{MemoryRepository, NewMemory},
@@ -5740,6 +6054,235 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn context_window_counts_twenty_pairs_not_twenty_messages() {
+        let database = test_database().await;
+        insert_test_loom(&database).await;
+        let repository = ResponseRepository::new(&database);
+        for index in 0..21 {
+            insert_test_response_pair(&repository, "loom-1", index, None).await;
+        }
+        repository
+            .insert_response(&NewResponse {
+                response_id: "current-user".to_string(),
+                loom_id: "loom-1".to_string(),
+                role: "user".to_string(),
+                content: "Use recent context".to_string(),
+                title: None,
+                code: None,
+                canonical_uri: None,
+                created_at: "100".to_string(),
+                updated_at: "100".to_string(),
+                sequence_index: 100,
+                metadata_json: None,
+            })
+            .await
+            .expect("insert current user");
+
+        let mut input = execute_input(Some("loom-1"));
+        input.response_id = Some("current-user".to_string());
+        let window = context_window_for_execution(
+            &database,
+            "loom-1",
+            &input,
+            None,
+            false,
+            None,
+            None,
+            DEFAULT_MAX_RECENT_CONTEXT_PAIRS,
+        )
+        .await
+        .expect("context window");
+
+        let messages = window.messages();
+        assert_eq!(window.pair_count, 20);
+        assert_eq!(messages.len(), 40);
+        assert!(!messages
+            .iter()
+            .any(|message| message.content == "Question 0"));
+        assert!(messages
+            .iter()
+            .any(|message| message.content == "Question 1"));
+        assert!(messages
+            .iter()
+            .any(|message| message.content == "Answer 20"));
+    }
+
+    #[tokio::test]
+    async fn normal_loom_loads_attachment_from_included_prior_turn_only() {
+        let database = test_database().await;
+        insert_test_loom(&database).await;
+        let repository = ResponseRepository::new(&database);
+        insert_ready_text_attachment(
+            &database,
+            "loom-1",
+            "att-old",
+            "old.md",
+            "OLD_ATTACHMENT_SENTINEL",
+        )
+        .await;
+        insert_ready_text_attachment(
+            &database,
+            "loom-1",
+            "att-recent",
+            "recent.md",
+            "RECENT_ATTACHMENT_SENTINEL",
+        )
+        .await;
+        for index in 0..22 {
+            let attachment_id = match index {
+                0 => Some("att-old"),
+                21 => Some("att-recent"),
+                _ => None,
+            };
+            insert_test_response_pair(&repository, "loom-1", index, attachment_id).await;
+        }
+        repository
+            .insert_response(&NewResponse {
+                response_id: "current-user".to_string(),
+                loom_id: "loom-1".to_string(),
+                role: "user".to_string(),
+                content: "Summarize recent files".to_string(),
+                title: None,
+                code: None,
+                canonical_uri: None,
+                created_at: "200".to_string(),
+                updated_at: "200".to_string(),
+                sequence_index: 200,
+                metadata_json: None,
+            })
+            .await
+            .expect("insert current user");
+
+        let mut input = execute_input(Some("loom-1"));
+        input.response_id = Some("current-user".to_string());
+        input.prompt = "Summarize recent files".to_string();
+        let window = context_window_for_execution(
+            &database,
+            "loom-1",
+            &input,
+            None,
+            false,
+            None,
+            None,
+            DEFAULT_MAX_RECENT_CONTEXT_PAIRS,
+        )
+        .await
+        .expect("context window");
+
+        let attachments = attached_references_for_sources(
+            &database,
+            &input.prompt,
+            &window.attachment_reference_candidates(),
+        )
+        .await
+        .expect("attached references");
+        let joined = attachments
+            .iter()
+            .filter_map(|reference| reference.attachment.as_ref())
+            .filter_map(|attachment| attachment.content_text.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(joined.contains("RECENT_ATTACHMENT_SENTINEL"));
+        assert!(!joined.contains("OLD_ATTACHMENT_SENTINEL"));
+    }
+
+    #[tokio::test]
+    async fn weft_window_fills_from_origin_and_authorizes_origin_attachments() {
+        let database = test_database().await;
+        insert_test_loom(&database).await;
+        LoomRepository::new(&database)
+            .insert_loom(&NewLoom {
+                loom_id: "weft-1".to_string(),
+                title: "Weft".to_string(),
+                summary: None,
+                code: None,
+                canonical_uri: None,
+                kind: "weft".to_string(),
+                origin_loom_id: Some("loom-1".to_string()),
+                origin_response_id: Some("origin-assistant-21".to_string()),
+                created_at: "1".to_string(),
+                updated_at: "1".to_string(),
+                metadata_json: None,
+            })
+            .await
+            .expect("insert Weft");
+        let repository = ResponseRepository::new(&database);
+        insert_ready_text_attachment(
+            &database,
+            "loom-1",
+            "att-origin-old",
+            "origin-old.md",
+            "ORIGIN_OLD_ATTACHMENT_SENTINEL",
+        )
+        .await;
+        insert_ready_text_attachment(
+            &database,
+            "loom-1",
+            "att-origin-recent",
+            "origin-recent.md",
+            "ORIGIN_RECENT_ATTACHMENT_SENTINEL",
+        )
+        .await;
+        for index in 0..22 {
+            let attachment_id = match index {
+                0 => Some("att-origin-old"),
+                21 => Some("att-origin-recent"),
+                _ => None,
+            };
+            insert_origin_response_pair(&repository, index, attachment_id).await;
+        }
+        repository
+            .insert_response(&NewResponse {
+                response_id: "weft-current-user".to_string(),
+                loom_id: "weft-1".to_string(),
+                role: "user".to_string(),
+                content: "Use origin context".to_string(),
+                title: None,
+                code: None,
+                canonical_uri: None,
+                created_at: "300".to_string(),
+                updated_at: "300".to_string(),
+                sequence_index: 0,
+                metadata_json: None,
+            })
+            .await
+            .expect("insert current user");
+
+        let mut input = execute_input(Some("weft-1"));
+        input.response_id = Some("weft-current-user".to_string());
+        input.prompt = "Use origin context".to_string();
+        let window = context_window_for_execution(
+            &database,
+            "weft-1",
+            &input,
+            None,
+            true,
+            Some("loom-1"),
+            Some("origin-assistant-21"),
+            DEFAULT_MAX_RECENT_CONTEXT_PAIRS,
+        )
+        .await
+        .expect("context window");
+
+        let attachments = attached_references_for_sources(
+            &database,
+            &input.prompt,
+            &window.attachment_reference_candidates(),
+        )
+        .await
+        .expect("attached references");
+        let joined = attachments
+            .iter()
+            .filter_map(|reference| reference.attachment.as_ref())
+            .filter_map(|attachment| attachment.content_text.as_deref())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(window.pair_count, 20);
+        assert!(joined.contains("ORIGIN_RECENT_ATTACHMENT_SENTINEL"));
+        assert!(!joined.contains("ORIGIN_OLD_ATTACHMENT_SENTINEL"));
+    }
+
+    #[tokio::test]
     async fn recent_context_skips_stale_and_raw_thinking_responses() {
         let database = test_database().await;
         insert_test_loom(&database).await;
@@ -5940,6 +6483,89 @@ mod tests {
         assert_eq!(references[0].source_response_code.as_deref(), Some("R1"));
     }
 
+    #[test]
+    fn execute_context_references_include_tray_attachment_question_references() {
+        let mut input = execute_input(Some("loom-1"));
+        input.references = vec![PlannerReference {
+            reference_id: "response-ref".to_string(),
+            label: Some("Inline response".to_string()),
+            selected_text_preview: Some("selected text".to_string()),
+            target_kind: "response".to_string(),
+            target_id: Some("resp-1".to_string()),
+            source_response_code: None,
+            source_title: None,
+        }];
+        input.question_references = Some(serde_json::json!([
+            {
+                "id": "att-ready",
+                "title": "tray-note.md",
+                "type": "attachment",
+                "targetKind": "attachment",
+                "targetObjectId": "att-ready"
+            },
+            {
+                "id": "resp-duplicate",
+                "title": "Inline response duplicate",
+                "type": "response",
+                "targetObjectId": "resp-1"
+            }
+        ]));
+
+        let references = context_references_for_execute(&input);
+
+        assert_eq!(references.len(), 2);
+        assert!(references.iter().any(|reference| {
+            reference.target_kind == "response" && reference.target_id.as_deref() == Some("resp-1")
+        }));
+        let attachment = references
+            .iter()
+            .find(|reference| reference.target_kind == "attachment")
+            .expect("tray attachment reference");
+        assert_eq!(attachment.reference_id, "att-ready");
+        assert_eq!(attachment.target_id.as_deref(), Some("att-ready"));
+        assert_eq!(attachment.label.as_deref(), Some("tray-note.md"));
+    }
+
+    #[test]
+    fn response_metadata_references_merge_question_attachment_references() {
+        let metadata = serde_json::json!({
+            "references": [{
+                "referenceId": "att-ready",
+                "label": "from planner",
+                "targetKind": "attachment",
+                "targetId": "att-ready"
+            }],
+            "questionReferences": [
+                {
+                    "id": "att-ready",
+                    "title": "duplicate.md",
+                    "type": "attachment",
+                    "targetKind": "attachment",
+                    "targetObjectId": "att-ready"
+                },
+                {
+                    "id": "att-second",
+                    "title": "second.md",
+                    "type": "loom",
+                    "targetKind": "attachment",
+                    "targetObjectId": "att-second"
+                }
+            ]
+        })
+        .to_string();
+
+        let references = references_from_response_metadata(Some(&metadata));
+
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0].reference_id, "att-ready");
+        let second = references
+            .iter()
+            .find(|reference| reference.target_id.as_deref() == Some("att-second"))
+            .expect("second attachment");
+        assert_eq!(second.target_kind, "attachment");
+        assert_eq!(second.label.as_deref(), Some("second.md"));
+    }
+
     #[tokio::test]
     async fn orchestration_context_scope_detects_weft_origin_metadata() {
         let database = test_database().await;
@@ -6025,6 +6651,130 @@ mod tests {
                 .await
                 .expect("insert Event Sourcing response");
         }
+    }
+
+    async fn insert_ready_text_attachment(
+        database: &crate::storage::db::Database,
+        loom_id: &str,
+        attachment_id: &str,
+        file_name: &str,
+        content: &str,
+    ) {
+        let repository = AttachmentRepository::new(database);
+        repository
+            .insert_attachment(&NewAttachment {
+                attachment_id: attachment_id.to_string(),
+                loom_id: loom_id.to_string(),
+                file_name: file_name.to_string(),
+                mime_type: Some("text/markdown".to_string()),
+                bytes: content.as_bytes().to_vec(),
+                created_at: "2026-05-08T00:00:00Z".to_string(),
+            })
+            .await
+            .expect("insert Attachment");
+        repository
+            .parse_attachment_now(attachment_id, "2026-05-08T00:00:01Z")
+            .await
+            .expect("parse Attachment")
+            .expect("Attachment exists");
+    }
+
+    async fn insert_test_response_pair(
+        repository: &ResponseRepository,
+        loom_id: &str,
+        index: i64,
+        attachment_id: Option<&str>,
+    ) {
+        let metadata_json = attachment_id.map(attachment_metadata_json);
+        repository
+            .insert_response_pair(
+                &NewResponse {
+                    response_id: format!("user-{index}"),
+                    loom_id: loom_id.to_string(),
+                    role: "user".to_string(),
+                    content: format!("Question {index}"),
+                    title: None,
+                    code: None,
+                    canonical_uri: None,
+                    created_at: index.to_string(),
+                    updated_at: index.to_string(),
+                    sequence_index: index * 2,
+                    metadata_json,
+                },
+                &NewResponse {
+                    response_id: format!("assistant-{index}"),
+                    loom_id: loom_id.to_string(),
+                    role: "assistant".to_string(),
+                    content: format!("Answer {index}"),
+                    title: None,
+                    code: None,
+                    canonical_uri: None,
+                    created_at: index.to_string(),
+                    updated_at: index.to_string(),
+                    sequence_index: index * 2 + 1,
+                    metadata_json: Some(serde_json::json!({ "status": "completed" }).to_string()),
+                },
+            )
+            .await
+            .expect("insert pair");
+    }
+
+    async fn insert_origin_response_pair(
+        repository: &ResponseRepository,
+        index: i64,
+        attachment_id: Option<&str>,
+    ) {
+        let metadata_json = attachment_id.map(attachment_metadata_json);
+        repository
+            .insert_response_pair(
+                &NewResponse {
+                    response_id: format!("origin-user-{index}"),
+                    loom_id: "loom-1".to_string(),
+                    role: "user".to_string(),
+                    content: format!("Origin question {index}"),
+                    title: None,
+                    code: None,
+                    canonical_uri: None,
+                    created_at: index.to_string(),
+                    updated_at: index.to_string(),
+                    sequence_index: index * 2,
+                    metadata_json,
+                },
+                &NewResponse {
+                    response_id: format!("origin-assistant-{index}"),
+                    loom_id: "loom-1".to_string(),
+                    role: "assistant".to_string(),
+                    content: format!("Origin answer {index}"),
+                    title: None,
+                    code: None,
+                    canonical_uri: None,
+                    created_at: index.to_string(),
+                    updated_at: index.to_string(),
+                    sequence_index: index * 2 + 1,
+                    metadata_json: Some(serde_json::json!({ "status": "completed" }).to_string()),
+                },
+            )
+            .await
+            .expect("insert origin pair");
+    }
+
+    fn attachment_metadata_json(attachment_id: &str) -> String {
+        serde_json::json!({
+            "references": [{
+                "referenceId": attachment_id,
+                "label": attachment_id,
+                "targetKind": "attachment",
+                "targetId": attachment_id
+            }],
+            "questionReferences": [{
+                "id": attachment_id,
+                "referenceMentionId": attachment_id,
+                "title": attachment_id,
+                "targetKind": "attachment",
+                "targetObjectId": attachment_id
+            }]
+        })
+        .to_string()
     }
 
     async fn insert_event_sourcing_proof_turns(database: &crate::storage::db::Database) {

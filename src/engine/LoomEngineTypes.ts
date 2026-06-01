@@ -504,6 +504,12 @@ export interface DeleteAttachmentInput {
   attachmentId: string;
 }
 
+export interface AdoptAttachmentInput {
+  attachmentId: string;
+  fromLoomId: string;
+  toLoomId: string;
+}
+
 export interface MaterializeAttachmentInput {
   attachmentId: string;
   /** Loom that owns the attachment. Verified server-side before bytes are returned. */
@@ -967,6 +973,7 @@ export interface TypeScriptLocalLoomEngineDependencies {
   createAttachment?: (input: CreateAttachmentInput) => Promise<CreateAttachmentResult>;
   listAttachments?: (input: ListAttachmentsInput) => Promise<ListAttachmentsResult>;
   deleteAttachment?: (input: DeleteAttachmentInput) => Promise<void>;
+  adoptAttachment?: (input: AdoptAttachmentInput) => Promise<CreateAttachmentResult>;
   regenerateFromResponse?: (
     input: RegenerateFromResponseInput
   ) => AsyncIterable<EngineResponseEvent>;
