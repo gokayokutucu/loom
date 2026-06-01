@@ -856,6 +856,11 @@ impl ContextRetriever {
             let Some(candidate_kind) = fts_candidate_kind(&doc.source_kind) else {
                 continue;
             };
+            if candidate_kind == ContextRetrievalCandidateKind::AttachmentChunk
+                && !is_explicit_attachment_reference(input, doc.attachment_id.as_deref())
+            {
+                continue;
+            }
             let include_mode = match candidate_kind {
                 ContextRetrievalCandidateKind::CodeBlock => {
                     ContextRetrievalIncludeMode::CodeSummary
@@ -2777,6 +2782,39 @@ mod tests {
                 .get("attachmentId")
                 .and_then(Value::as_str)
                 == Some("att-other")
+        }));
+    }
+
+    #[tokio::test]
+    async fn fts_attachment_chunks_require_explicit_window_reference() {
+        let fixture = Fixture::new().await;
+        fixture
+            .insert_search_doc(TestSearchDoc {
+                doc_id: "attachment:att-1:chunk:0".to_string(),
+                source_kind: "attachment_chunk".to_string(),
+                source_id: "chunk-1".to_string(),
+                loom_id: Some("loom-1".to_string()),
+                response_id: None,
+                attachment_id: Some("att-1".to_string()),
+                title: Some("blue-otter-plan.md".to_string()),
+                body:
+                    "Blue Otter attachment plan should not be retrieved without a window reference."
+                        .to_string(),
+                tags: Some("md".to_string()),
+                source_rank: 9.0,
+                is_deleted: false,
+                metadata_json: None,
+            })
+            .await;
+
+        let result = fixture
+            .retriever()
+            .retrieve(&fixture.input("Blue Otter attachment plan", None))
+            .await
+            .expect("retrieve");
+
+        assert!(!result.candidates.iter().any(|candidate| {
+            candidate.candidate_kind == ContextRetrievalCandidateKind::AttachmentChunk
         }));
     }
 

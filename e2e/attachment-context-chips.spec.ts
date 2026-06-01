@@ -9,7 +9,10 @@
 import { expect, test, type Page } from "@playwright/test";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { createServiceTestHarness } from "./helpers/serviceTestHarness";
+import {
+  createServiceTestHarness,
+  type ServiceTestHarness,
+} from "./helpers/serviceTestHarness";
 
 const execFileAsync = promisify(execFile);
 
@@ -21,6 +24,45 @@ async function sendPrompt(page: Page, prompt: string) {
   await editor.click();
   await page.keyboard.insertText(prompt);
   await page.getByRole("button", { name: "Send" }).click();
+}
+
+async function collectAnswer(
+  scenario: ServiceTestHarness,
+  loomId: string,
+  promptText: string,
+  attachments: Array<{ id: string; name: string; loomId: string }>
+) {
+  return (await collectGeneration(scenario, loomId, promptText, attachments)).answer;
+}
+
+async function collectGeneration(
+  scenario: ServiceTestHarness,
+  loomId: string,
+  promptText: string,
+  attachments: Array<{ id: string; name: string; loomId: string }>
+) {
+  let answer = "";
+  let userResponseId: string | undefined;
+  let assistantResponseId: string | undefined;
+  for await (const event of scenario.client.sendMessage({
+    loomId,
+    promptText,
+    references: [],
+    questionReferences: [],
+    attachments,
+    responseMode: "auto",
+    source: "composer",
+    model: "deterministic-event-sourcing:e2e",
+    options: { numCtx: 8192, numPredict: 1024 },
+    persistWorkflow: true,
+  })) {
+    if (event.type === "user_message_created") userResponseId = event.payload.responseId;
+    if (event.type === "assistant_placeholder_created") {
+      assistantResponseId = event.payload.responseId;
+    }
+    if (event.type === "content_delta") answer += event.payload.delta;
+  }
+  return { answer, userResponseId, assistantResponseId };
 }
 
 async function openFilesTab(page: Page) {
@@ -147,9 +189,166 @@ const firstTurnNote = {
   ),
 };
 
+const windowNote = {
+  name: "window-sentinel.md",
+  mimeType: "text/markdown",
+  buffer: Buffer.from(
+    "This window-scoped file contains LOOM_WINDOW_ATTACHMENT_SENTINEL_456.",
+    "utf8"
+  ),
+};
+
 // ── Tests ──────────────────────────────────────────────────────────────────
 
 test.describe("[product-service-backed] Attachment context and chips", () => {
+  test("prior-turn attachment context expires at the 20-pair Loom window", async () => {
+    test.setTimeout(180_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: false,
+    });
+    try {
+      const { loom } = await scenario.client.createLoom({
+        loomId: "loom-attachment-window",
+        title: "Attachment window",
+        kind: "loom",
+      });
+      const created = await scenario.client.createAttachment({
+        loomId: loom.loomId,
+        fileName: windowNote.name,
+        mimeType: windowNote.mimeType,
+        sizeBytes: windowNote.buffer.byteLength,
+        contentBase64: windowNote.buffer.toString("base64"),
+      });
+      await expect
+        .poll(async () => {
+          const attachments = await scenario.client.listAttachments({ loomId: loom.loomId });
+          return attachments.attachments.find(
+            (attachment) => attachment.attachmentId === created.attachment.attachmentId
+          )?.parseStatus;
+        })
+        .toBe("ready");
+
+      const firstAnswer = await collectAnswer(
+        scenario,
+        loom.loomId,
+        "Please review the attached file and confirm the window sentinel.",
+        [
+          {
+            id: created.attachment.attachmentId,
+            name: created.attachment.fileName,
+            loomId: loom.loomId,
+          },
+        ]
+      );
+      expect(firstAnswer).toContain("Window attachment content is visible.");
+
+      const followUpAnswer = await collectAnswer(
+        scenario,
+        loom.loomId,
+        "Please use the uploaded file again and confirm the window sentinel.",
+        []
+      );
+      expect(followUpAnswer).toContain("Window attachment content is visible.");
+
+      for (let index = 0; index < 20; index += 1) {
+        await scenario.sendPrompt(
+          loom.loomId,
+          `Filler turn ${index}: explain Event Sourcing and CQRS briefly.`
+        );
+      }
+
+      const expiredAnswer = await collectAnswer(
+        scenario,
+        loom.loomId,
+        "Please use the uploaded file again and confirm the window sentinel.",
+        []
+      );
+      expect(expiredAnswer).not.toContain("Window attachment content is visible.");
+    } finally {
+      await scenario.cleanup();
+    }
+  });
+
+  test("Weft origin attachment context fills until current Weft has 20 pairs", async () => {
+    test.setTimeout(180_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: false,
+    });
+    try {
+      const { loom } = await scenario.client.createLoom({
+        loomId: "loom-origin-attachment-window",
+        title: "Origin attachment window",
+        kind: "loom",
+      });
+      const created = await scenario.client.createAttachment({
+        loomId: loom.loomId,
+        fileName: windowNote.name,
+        mimeType: windowNote.mimeType,
+        sizeBytes: windowNote.buffer.byteLength,
+        contentBase64: windowNote.buffer.toString("base64"),
+      });
+      await expect
+        .poll(async () => {
+          const attachments = await scenario.client.listAttachments({ loomId: loom.loomId });
+          return attachments.attachments.find(
+            (attachment) => attachment.attachmentId === created.attachment.attachmentId
+          )?.parseStatus;
+        })
+        .toBe("ready");
+
+      const originGeneration = await collectGeneration(
+        scenario,
+        loom.loomId,
+        "Please review the attached file and confirm the window sentinel.",
+        [
+          {
+            id: created.attachment.attachmentId,
+            name: created.attachment.fileName,
+            loomId: loom.loomId,
+          },
+        ]
+      );
+      expect(originGeneration.answer).toContain("Window attachment content is visible.");
+      expect(originGeneration.assistantResponseId).toBeTruthy();
+
+      const weft = await scenario.client.createOrOpenWeft({
+        originLoomId: loom.loomId,
+        originResponseId: originGeneration.assistantResponseId,
+        title: "Attachment origin Weft",
+        reuseExisting: false,
+        source: "response_action",
+        seedMode: "none",
+      });
+
+      const originFillAnswer = await collectAnswer(
+        scenario,
+        weft.loomId,
+        "Please use the uploaded file again and confirm the window sentinel.",
+        []
+      );
+      expect(originFillAnswer).toContain("Window attachment content is visible.");
+
+      for (let index = 0; index < 20; index += 1) {
+        await scenario.sendPrompt(
+          weft.loomId,
+          `Weft filler turn ${index}: explain Event Sourcing and CQRS briefly.`
+        );
+      }
+
+      const expiredAnswer = await collectAnswer(
+        scenario,
+        weft.loomId,
+        "Please use the uploaded file again and confirm the window sentinel.",
+        []
+      );
+      expect(expiredAnswer).not.toContain("Window attachment content is visible.");
+    } finally {
+      await scenario.cleanup();
+    }
+  });
+
   test("first-turn tray attachment reaches model context and survives retry", async ({ page }) => {
     test.setTimeout(120_000);
     const scenario = await createServiceTestHarness({

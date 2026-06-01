@@ -90,6 +90,23 @@ pub enum LocalCommandOutputMode {
     File,
 }
 
+impl LocalCommandOutputMode {
+    pub fn as_config_str(&self) -> &'static str {
+        match self {
+            Self::Stdout => "stdout",
+            Self::File => "file",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "stdout" => Some(Self::Stdout),
+            "file" => Some(Self::File),
+            _ => None,
+        }
+    }
+}
+
 impl Default for LocalCommandOutputMode {
     fn default() -> Self {
         Self::Stdout
