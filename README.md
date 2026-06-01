@@ -51,19 +51,29 @@ Quick Ask reduces context inflation. Instead of reopening giant conversations an
 
 ## Screenshots and Media
 
-<!-- Screenshot: Address Bar navigation -->
+### New Loom Conversation
 
-<!-- Screenshot: Quick Ask lightweight lookup -->
+![New Loom Conversation](public/screen_shot_new_conversation.png)
 
-<!-- Screenshot: Weft split/full exploration -->
+Start a new Loom, search your AI web, insert references, and build reusable knowledge instead of disposable chats.
 
-<!-- Screenshot: Graph lineage and provenance -->
+### References as Reusable Knowledge
 
-<!-- Screenshot: Attachment chips and explicit context -->
+![Reference Chip Workflow](public/screen_shot_reference_chip.png)
 
-<!-- Screenshot: Retrieval diagnostics / provenance view -->
+Turn any response into a reusable reference and compose new prompts directly on top of existing knowledge.
 
-<!-- GIF: Create a Weft from a Response -->
+### Weft Exploration
+
+![Weft Split View](public/screen_shot_with_weft.png)
+
+Branch from any response into a Weft while preserving origin context and maintaining exploration lineage.
+
+### Weft-aware Graph View
+
+![Weft-aware Graph View](public/screen_shot_graph_view.png)
+
+Navigate Looms, Responses, and Wefts through an addressable graph with visible provenance and branching relationships.
 
 ## Core Features
 
