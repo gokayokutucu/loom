@@ -83,6 +83,9 @@ fn chat_event_stream(
             json!({ "requestId": request_id }),
         )));
 
+        // This endpoint is intentionally legacy/provider-specific: it preserves
+        // the direct Ollama dev/debug SSE contract while product generation
+        // paths route through ProviderPipeline.
         let response = match state.ollama.post_chat(&input).await {
             Ok(response) => response,
             Err(error) => {
