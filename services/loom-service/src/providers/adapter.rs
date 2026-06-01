@@ -123,6 +123,37 @@ impl ProviderAdapter for OllamaProviderAdapter {
                 }
             };
 
+            if !request.stream {
+                let body = match response.json::<serde_json::Value>().await {
+                    Ok(body) => body,
+                    Err(_) => {
+                        let error = OllamaRuntimeError::new(
+                            OllamaRuntimeErrorKind::UnexpectedResponse,
+                            "Ollama returned malformed chat JSON.",
+                            true,
+                        );
+                        yield ProviderContractEvent::Error {
+                            error: ollama_error_to_provider_error(
+                                &error,
+                                &provider_profile_id,
+                                Some(&model_id),
+                            ),
+                        };
+                        runtime.finish_request(&request_id);
+                        return;
+                    }
+                };
+                if let Some(answer) = visible_text_from_ollama_body(&body) {
+                    yield ProviderContractEvent::Delta { text: answer };
+                }
+                yield ProviderContractEvent::Completed {
+                    done_reason: None,
+                    usage: ProviderUsageMetadata::unavailable("provider_did_not_report_usage"),
+                };
+                runtime.finish_request(&request_id);
+                return;
+            }
+
             let mut bytes_stream = response.bytes_stream();
             let mut buffer = String::new();
             let mut first_chunk = true;
@@ -297,6 +328,16 @@ fn usage_from_ollama_chunk(chunk: &OllamaStreamChunk) -> ProviderUsageMetadata {
                 .map(|(prompt, completion)| prompt.saturating_add(completion)),
         },
     }
+}
+
+fn visible_text_from_ollama_body(body: &serde_json::Value) -> Option<String> {
+    body.get("message")
+        .and_then(|message| message.get("content"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| body.get("response").and_then(serde_json::Value::as_str))
+        .map(str::trim)
+        .filter(|answer| !answer.is_empty())
+        .map(ToString::to_string)
 }
 
 fn parse_ndjson_bytes(
@@ -543,5 +584,20 @@ mod tests {
         };
 
         assert!(matches!(event, ProviderContractEvent::Truncated { .. }));
+    }
+
+    #[test]
+    fn non_stream_body_extracts_visible_text_without_reasoning() {
+        let body = json!({
+            "message": {
+                "thinking": "hidden raw thinking",
+                "content": "visible answer"
+            }
+        });
+
+        assert_eq!(
+            visible_text_from_ollama_body(&body).as_deref(),
+            Some("visible answer")
+        );
     }
 }
