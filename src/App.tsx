@@ -216,6 +216,10 @@ import {
   loomLinkFromMarkdownReference,
   withReferenceDisplayDefaults,
 } from "./services/referenceDisplay";
+import {
+  compactLoomAddressLabel,
+  extractLoomAddressSegments,
+} from "./services/composerPasteLoomAddress";
 import { polishDisplayTitle } from "./services/displayTitlePolish";
 import {
   repairHydratedLoomBookmarkTitle,
@@ -6529,6 +6533,12 @@ function App() {
     if (link.type === "fragment") return link;
     if (link.referenceMentionId || link.resolutionStatus) return link;
     const resolution = resolveLoomAddress(link.path, loomGraphRepository);
+    // When a link was created from a plain-text pasted `loom://` address via
+    // loomLinkFromMarkdownReference(address, address), its title equals its path
+    // (the raw address string). We detect this fingerprint and substitute the
+    // resolved object's human-readable title — or, when resolution fails, a
+    // compact display label — so the chip never shows the full raw address.
+    const rawAddressAsTitle = link.title === link.path;
     if (
       resolution.status !== "resolved" &&
       !(resolution.status === "alias_stale" && resolution.object)
@@ -6536,6 +6546,7 @@ function App() {
       loomGraphRepository.emitBrokenReference(link, resolution.reason ?? "Reference target did not resolve");
       return {
         ...link,
+        title: rawAddressAsTitle ? compactLoomAddressLabel(link.path) : link.title,
         badge:
           resolution.status === "deleted"
             ? "Deleted"
@@ -6560,6 +6571,9 @@ function App() {
     return targetObject
       ? {
           ...link,
+          // Substitute the graph object's human-readable title when the link
+          // title is a raw loom:// address (i.e. pasted from plain text).
+          title: rawAddressAsTitle ? (targetObject.title || link.title) : link.title,
           id: targetObject.objectId,
           path:
             resolution.status === "alias_stale"
@@ -19701,8 +19715,16 @@ function PromptComposer({
     const html = event.clipboardData.getData("text/html");
     const text = event.clipboardData.getData("text/plain");
     const segmentsFromHtml = referenceSegmentsFromHtml(html);
+    const segmentsFromMarkdown = referenceSegmentsFromMarkdown(text);
+    const hasMarkdownRefs = segmentsFromMarkdown.some((s) => s.kind === "reference");
+    // Priority: HTML inline tokens / anchors → Markdown [label](loom://…) →
+    // plain-text raw loom://… addresses → fall through to normal text paste.
     const segments =
-      segmentsFromHtml.length > 0 ? segmentsFromHtml : referenceSegmentsFromMarkdown(text);
+      segmentsFromHtml.length > 0
+        ? segmentsFromHtml
+        : hasMarkdownRefs
+          ? segmentsFromMarkdown
+          : extractLoomAddressSegments(text);
     const hasReferenceSegment = segments.some((segment) => segment.kind === "reference");
     if (!text && !hasReferenceSegment) return;
     event.preventDefault();
