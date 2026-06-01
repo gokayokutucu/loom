@@ -2,6 +2,7 @@ import type { LoomEngineClient } from "./LoomEngineClient";
 import type {
   AddReferenceInput,
   AddReferenceResult,
+  AdoptAttachmentInput,
   ArchiveLoomInput,
   BookmarkResponseInput,
   BookmarkResult,
@@ -1728,20 +1729,9 @@ function attachmentReferencesForService(
     // Service-generated IDs start with "att-"; local pending keys are
     // "name:size:lastModified" and are excluded.
     if (!id || !id.startsWith("att-")) continue;
-    // Skip attachments that failed to upload or are still processing.
-    // Only "ready" and "unsupported" attachments carry usable context;
-    // failed attachments have no valid blob for the service to read.
-    const parseStatus = stringValue(attachment, "parseStatus");
-    if (
-      parseStatus === "error" ||
-      parseStatus === "failed" ||
-      parseStatus === "queued" ||
-      parseStatus === "parsing" ||
-      parseStatus === "extracting_text" ||
-      parseStatus === "ocr_running"
-    ) {
-      continue;
-    }
+    // Include every persisted attachment. The service owns parse-status
+    // decisions so pending/failed attachments can still be represented safely
+    // in model context instead of disappearing from the request.
     const name = stringValue(attachment, "name") ?? id;
     result.push({
       referenceId: id,
@@ -3517,6 +3507,15 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
   async deleteAttachment(input: DeleteAttachmentInput): Promise<void> {
     const endpoint = `/attachments/${encodeURIComponent(input.attachmentId)}`;
     await this.requestJson<unknown>(endpoint, { method: "DELETE" });
+  }
+
+  async adoptAttachment(input: AdoptAttachmentInput): Promise<CreateAttachmentResult> {
+    const endpoint = `/looms/${encodeURIComponent(input.toLoomId)}/attachments/${encodeURIComponent(input.attachmentId)}/adopt`;
+    const response = await this.requestJson<unknown>(endpoint, {
+      method: "POST",
+      body: JSON.stringify({ fromLoomId: input.fromLoomId }),
+    });
+    return validateAttachmentEnvelope(response, endpoint);
   }
 
   async materializeAttachment(input: MaterializeAttachmentInput): Promise<MaterializeAttachmentResult> {

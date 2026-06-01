@@ -2041,19 +2041,33 @@ fn references_from_response_metadata(metadata_json: Option<&str>) -> Vec<Planner
     let Ok(metadata) = serde_json::from_str::<Value>(metadata_json) else {
         return Vec::new();
     };
-    if let Some(references) = metadata.get("references").and_then(Value::as_array) {
-        let parsed = references
-            .iter()
-            .filter_map(|reference| {
-                serde_json::from_value::<PlannerReference>(reference.clone()).ok()
-            })
-            .collect::<Vec<_>>();
-        if !parsed.is_empty() {
-            return parsed;
-        }
-    }
-    metadata
-        .get("questionReferences")
+    let references = metadata
+        .get("references")
+        .and_then(Value::as_array)
+        .map(|references| {
+            references
+                .iter()
+                .filter_map(|reference| {
+                    serde_json::from_value::<PlannerReference>(reference.clone()).ok()
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    merge_context_references(
+        references,
+        planner_references_from_question_references(metadata.get("questionReferences")),
+    )
+}
+
+fn context_references_for_execute(input: &OrchestrationExecuteInput) -> Vec<PlannerReference> {
+    merge_context_references(
+        input.references.clone(),
+        planner_references_from_question_references(input.question_references.as_ref()),
+    )
+}
+
+fn planner_references_from_question_references(value: Option<&Value>) -> Vec<PlannerReference> {
+    value
         .and_then(Value::as_array)
         .map(|references| {
             references
@@ -2062,6 +2076,35 @@ fn references_from_response_metadata(metadata_json: Option<&str>) -> Vec<Planner
                 .collect()
         })
         .unwrap_or_default()
+}
+
+fn merge_context_references(
+    references: Vec<PlannerReference>,
+    question_references: Vec<PlannerReference>,
+) -> Vec<PlannerReference> {
+    let mut seen = std::collections::HashSet::new();
+    let mut merged = Vec::with_capacity(references.len() + question_references.len());
+    for reference in references.into_iter().chain(question_references) {
+        let key = reference_dedup_key(&reference);
+        if seen.insert(key) {
+            merged.push(reference);
+        }
+    }
+    merged
+}
+
+fn reference_dedup_key(reference: &PlannerReference) -> String {
+    if reference.target_kind == "attachment" {
+        return reference
+            .target_id
+            .as_deref()
+            .unwrap_or(reference.reference_id.as_str())
+            .to_string();
+    }
+    if let Some(target_id) = reference.target_id.as_deref() {
+        return format!("{}:{target_id}", reference.target_kind);
+    }
+    format!("reference:{}", reference.reference_id)
 }
 
 fn planner_reference_from_question_reference(value: &Value) -> Option<PlannerReference> {
@@ -2083,7 +2126,8 @@ fn planner_reference_from_question_reference(value: &Value) -> Option<PlannerRef
             .and_then(Value::as_str)
             .map(str::to_string),
         target_kind: object
-            .get("type")
+            .get("targetKind")
+            .or_else(|| object.get("type"))
             .and_then(Value::as_str)
             .unwrap_or("response")
             .to_string(),
@@ -2450,11 +2494,34 @@ fn deterministic_e2e_answer(
         .to_lowercase();
     let has_event_context = context_text.contains("event sourcing")
         && (context_text.contains("event store") || context_text.contains("cqrs"));
+    let attachment_sentinel = "loom_attachment_context_sentinel_123";
+    let first_turn_attachment_sentinel = "loom_first_turn_attachment_sentinel_789";
 
     if deterministic_e2e_response_mode().as_deref() == Some("long-streaming-scroll")
         || prompt.contains("long streaming scroll fixture")
     {
         return Some(long_streaming_scroll_e2e_answer());
+    }
+
+    if (prompt.contains("attached")
+        || prompt.contains("uploaded document")
+        || prompt.contains("document")
+        || prompt.contains("file"))
+        && context_text.contains(attachment_sentinel)
+    {
+        return Some(
+            "The attached document includes LOOM_ATTACHMENT_CONTEXT_SENTINEL_123.".to_string(),
+        );
+    }
+    if (prompt.contains("attached")
+        || prompt.contains("uploaded document")
+        || prompt.contains("document")
+        || prompt.contains("file"))
+        && context_text.contains(first_turn_attachment_sentinel)
+    {
+        return Some(
+            "The attached file includes LOOM_FIRST_TURN_ATTACHMENT_SENTINEL_789.".to_string(),
+        );
     }
 
     if prompt.contains("blue otter") && prompt.contains("event sourcing") {
@@ -2844,10 +2911,11 @@ fn execute_stream(
         let mut execution_input = input.clone();
         execution_input.response_mode = mode_resolution.resolved_response_mode.clone();
 
+        let context_references = context_references_for_execute(&execution_input);
         let planner_input = PlannerInput {
             clean_user_prompt: execution_input.prompt.clone(),
             prompt_lines: execution_input.prompt.lines().map(str::to_string).collect(),
-            attached_references: execution_input.references.clone(),
+            attached_references: context_references.clone(),
             selected_response_mode: execution_input.response_mode.clone(),
             loom_id: execution_input.loom_id.clone(),
             source: Some("orchestration_execute".to_string()),
@@ -2936,7 +3004,7 @@ fn execute_stream(
             &state.database,
             &workflow_loom_id,
             &execution_input.prompt,
-            &execution_input.references,
+            &context_references,
         )
         .await
         {
@@ -4357,14 +4425,15 @@ mod tests {
     use super::{
         apply_thinking_capability, best_available_draft, build_generation_events,
         build_generation_response_state, build_generation_status, configured_quick_model,
-        context_built_event_payload, create_persisted_response_lifecycle,
-        ensure_main_model_configured, eval_prompt, eval_strategy_decision,
-        fallback_auto_router_decision, memory_messages_for_execution, minimum_successful_drafts,
-        parse_auto_router_decision, parse_ndjson_bytes, plan, recent_messages_before_response,
-        recent_messages_for_execution, references_from_response_metadata, resolve_context_scope,
-        sanitize_generation_value, synthesis_prompt, update_persisted_assistant_content,
-        update_persisted_assistant_status, DeepSynthesisEvalPrompt, OrchestrationExecuteInput,
-        ResponseModeResolution, DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES,
+        context_built_event_payload, context_references_for_execute,
+        create_persisted_response_lifecycle, ensure_main_model_configured, eval_prompt,
+        eval_strategy_decision, fallback_auto_router_decision, memory_messages_for_execution,
+        minimum_successful_drafts, parse_auto_router_decision, parse_ndjson_bytes, plan,
+        recent_messages_before_response, recent_messages_for_execution,
+        references_from_response_metadata, resolve_context_scope, sanitize_generation_value,
+        synthesis_prompt, update_persisted_assistant_content, update_persisted_assistant_status,
+        DeepSynthesisEvalPrompt, OrchestrationExecuteInput, ResponseModeResolution,
+        DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES,
     };
     use crate::{
         api::state::AppState,
@@ -4378,7 +4447,7 @@ mod tests {
             },
         },
         orchestration::{
-            answer_plan::{ContextStrategy, PlannerInput, ResponseMode},
+            answer_plan::{ContextStrategy, PlannerInput, PlannerReference, ResponseMode},
             deep_synthesis::{
                 DeepSynthesisDraft, DeepSynthesisPlan, DeepSynthesisRequest,
                 DeepSynthesisStepStatus, DeepSynthesisWorkerRole,
@@ -5938,6 +6007,89 @@ mod tests {
         assert_eq!(references[0].reference_id, "ref-local");
         assert_eq!(references[0].selected_text_preview.as_deref(), Some("MCP"));
         assert_eq!(references[0].source_response_code.as_deref(), Some("R1"));
+    }
+
+    #[test]
+    fn execute_context_references_include_tray_attachment_question_references() {
+        let mut input = execute_input(Some("loom-1"));
+        input.references = vec![PlannerReference {
+            reference_id: "response-ref".to_string(),
+            label: Some("Inline response".to_string()),
+            selected_text_preview: Some("selected text".to_string()),
+            target_kind: "response".to_string(),
+            target_id: Some("resp-1".to_string()),
+            source_response_code: None,
+            source_title: None,
+        }];
+        input.question_references = Some(serde_json::json!([
+            {
+                "id": "att-ready",
+                "title": "tray-note.md",
+                "type": "attachment",
+                "targetKind": "attachment",
+                "targetObjectId": "att-ready"
+            },
+            {
+                "id": "resp-duplicate",
+                "title": "Inline response duplicate",
+                "type": "response",
+                "targetObjectId": "resp-1"
+            }
+        ]));
+
+        let references = context_references_for_execute(&input);
+
+        assert_eq!(references.len(), 2);
+        assert!(references.iter().any(|reference| {
+            reference.target_kind == "response" && reference.target_id.as_deref() == Some("resp-1")
+        }));
+        let attachment = references
+            .iter()
+            .find(|reference| reference.target_kind == "attachment")
+            .expect("tray attachment reference");
+        assert_eq!(attachment.reference_id, "att-ready");
+        assert_eq!(attachment.target_id.as_deref(), Some("att-ready"));
+        assert_eq!(attachment.label.as_deref(), Some("tray-note.md"));
+    }
+
+    #[test]
+    fn response_metadata_references_merge_question_attachment_references() {
+        let metadata = serde_json::json!({
+            "references": [{
+                "referenceId": "att-ready",
+                "label": "from planner",
+                "targetKind": "attachment",
+                "targetId": "att-ready"
+            }],
+            "questionReferences": [
+                {
+                    "id": "att-ready",
+                    "title": "duplicate.md",
+                    "type": "attachment",
+                    "targetKind": "attachment",
+                    "targetObjectId": "att-ready"
+                },
+                {
+                    "id": "att-second",
+                    "title": "second.md",
+                    "type": "loom",
+                    "targetKind": "attachment",
+                    "targetObjectId": "att-second"
+                }
+            ]
+        })
+        .to_string();
+
+        let references = references_from_response_metadata(Some(&metadata));
+
+        assert_eq!(references.len(), 2);
+        assert_eq!(references[0].reference_id, "att-ready");
+        let second = references
+            .iter()
+            .find(|reference| reference.target_id.as_deref() == Some("att-second"))
+            .expect("second attachment");
+        assert_eq!(second.target_kind, "attachment");
+        assert_eq!(second.label.as_deref(), Some("second.md"));
     }
 
     #[tokio::test]

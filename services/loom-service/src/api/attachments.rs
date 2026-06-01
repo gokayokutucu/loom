@@ -55,6 +55,12 @@ pub struct AttachmentListResponse {
     pub attachments: Vec<AttachmentDto>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AdoptAttachmentRequest {
+    pub from_loom_id: String,
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AttachmentApiError {
@@ -146,6 +152,33 @@ pub async fn get_attachment(
     let repo = AttachmentRepository::new(&state.database);
     let record = repo
         .get_attachment(&attachment_id)
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(not_found)?;
+    Ok(Json(AttachmentEnvelope {
+        attachment: attachment_to_dto(record),
+    }))
+}
+
+pub async fn adopt_attachment(
+    State(state): State<AppState>,
+    Path((loom_id, attachment_id)): Path<(String, String)>,
+    Json(input): Json<AdoptAttachmentRequest>,
+) -> Result<Json<AttachmentEnvelope>, (StatusCode, Json<AttachmentApiError>)> {
+    if input.from_loom_id.trim().is_empty() {
+        return Err(bad_request(
+            "INVALID_SOURCE_LOOM",
+            "fromLoomId is required.",
+        ));
+    }
+    let repo = AttachmentRepository::new(&state.database);
+    let record = repo
+        .reassign_attachment_loom(
+            &attachment_id,
+            input.from_loom_id.trim(),
+            &loom_id,
+            &timestamp(),
+        )
         .await
         .map_err(storage_error)?
         .ok_or_else(not_found)?;
@@ -553,6 +586,43 @@ mod tests {
             "wrong loom must return 404, not a data response"
         );
         assert_eq!(error.code, "ATTACHMENT_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn adopt_attachment_reassigns_from_draft_to_materialized_loom() {
+        let state = test_state().await;
+        let attachment_id = create_text_attachment_for_materialize(
+            &state,
+            "draft-new-conversation",
+            "first.md",
+            "sentinel",
+        )
+        .await;
+        insert_loom(&state, "loom-first-turn").await;
+
+        let Json(payload) = adopt_attachment(
+            State(state.clone()),
+            Path(("loom-first-turn".to_string(), attachment_id.clone())),
+            Json(AdoptAttachmentRequest {
+                from_loom_id: "draft-new-conversation".to_string(),
+            }),
+        )
+        .await
+        .expect("adopt attachment");
+
+        assert_eq!(payload.attachment.loom_id, "loom-first-turn");
+        let old_owner_result = materialize_attachment(
+            State(state.clone()),
+            Path(("draft-new-conversation".to_string(), attachment_id.clone())),
+        )
+        .await;
+        assert!(old_owner_result.is_err());
+        let new_owner_result = materialize_attachment(
+            State(state),
+            Path(("loom-first-turn".to_string(), attachment_id)),
+        )
+        .await;
+        assert!(new_owner_result.is_ok());
     }
 
     #[tokio::test]

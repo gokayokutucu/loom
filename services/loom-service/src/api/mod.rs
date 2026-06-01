@@ -165,6 +165,10 @@ pub fn router(
             "/looms/:loom_id/attachments/:attachment_id/materialize",
             post(attachments::materialize_attachment),
         )
+        .route(
+            "/looms/:loom_id/attachments/:attachment_id/adopt",
+            post(attachments::adopt_attachment),
+        )
         .route("/code-snippets", get(code_snippets::list_code_snippets))
         .route("/wefts", post(wefts::create_weft))
         .route("/looms", get(looms::list_looms).post(looms::create_loom))
