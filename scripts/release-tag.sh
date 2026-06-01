@@ -36,7 +36,7 @@ ok()      { printf "  ${GREEN}✓${NC}  %s\n" "$1"; }
 warn()    { printf "  ${YELLOW}⚠${NC}  %s\n" "$1"; }
 info()    { printf "  ${CYAN}→${NC}  %s\n" "$1"; }
 fail()    { printf "\n${RED}${BOLD}✗ ERROR:${NC} %s\n" "$1" >&2; }
-cmd_echo(){ printf "  ${YELLOW}$${NC} %s\n" "$*"; }
+cmd_echo(){ printf '  %s$%s %s\n' "${YELLOW}" "${NC}" "$*"; }
 
 die() {
   fail "$1"
