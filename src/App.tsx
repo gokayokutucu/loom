@@ -95,6 +95,10 @@ import {
 } from "./services/contextMenu";
 import { browserHostShell } from "./services/hostShell";
 import {
+  isAttachmentLink as isAttachmentReferenceLink,
+  mergeAttachmentLinksForSend,
+} from "./services/attachmentContext";
+import {
   createHistoryEntry,
   getBackTraversal,
   getForwardTraversal,
@@ -850,9 +854,6 @@ function formatAttachmentDisplayName(fileName: string, maxLength = 22) {
   return `${baseName.slice(0, prefixLength)}...${baseName.slice(-suffixLength)}${extension}`;
 }
 
-function isAttachmentReferenceLink(link: Pick<LoomLink, "type" | "targetKind">) {
-  return link.type === "attachment" || link.targetKind === "attachment";
-}
 
 function composerReferenceTokenText(
   link: LoomLink,
@@ -1267,6 +1268,10 @@ function attachmentParseActive(attachment: ComposerAttachment) {
     attachment.parseStatus === "extracting_text" ||
     attachment.parseStatus === "ocr_running"
   );
+}
+
+function attachmentBlocksComposerSend(attachment: ComposerAttachment) {
+  return !attachment.attachmentId || attachmentParseActive(attachment);
 }
 
 const EPHEMERAL_DRAFT_ID = "draft-new-conversation";
@@ -7683,6 +7688,16 @@ function App() {
       return false;
     }
 
+    const blockingAttachment = draft.attachments?.find(attachmentBlocksComposerSend);
+    if (blockingAttachment) {
+      setComposerRuntimeTargetKey(originalDraftKey);
+      setComposerRuntimeState({
+        running: false,
+        message: `${blockingAttachment.name} is still processing. Send after the file is ready.`,
+      });
+      return false;
+    }
+
     const readinessMessage = modelReadinessMessage("main");
     if (readinessMessage && !useRustServiceGeneration) {
       setComposerRuntimeTargetKey(originalDraftKey);
@@ -7982,13 +7997,22 @@ function App() {
     const responseId = `r-${Date.now()}`;
     const title = normalizeLoomTitle(prompt ? prompt.slice(0, 64) : "Model response");
     const initialQuestion = prompt || "Use the linked Loom references.";
+    const attachmentsForSend = draft.attachments?.map((attachment) =>
+      attachment.attachmentId && attachment.loomId !== targetConversation.id
+        ? { ...attachment, loomId: targetConversation.id }
+        : attachment
+    );
+    const questionReferencesForSend = mergeAttachmentLinksForSend(
+      draft.links,
+      attachmentsForSend
+    );
     const response: ResponseItem = {
       id: responseId,
       title,
       address: `${targetConversation.path}/r-${responseSlug(title)}`,
       question: initialQuestion,
       createdAt: new Date().toISOString(),
-      questionReferences: draft.links,
+      questionReferences: questionReferencesForSend,
       answer: [""],
       visibleProgress: createInitialVisibleAnswerProgress(),
       suggestedLinks: [],
@@ -8247,6 +8271,26 @@ function App() {
           },
         });
 
+        const attachmentsToAdopt = (draft.attachments ?? []).filter((attachment) => {
+          const fromLoomId = attachment.loomId ?? targetLoomId;
+          return Boolean(
+            attachment.attachmentId &&
+              fromLoomId &&
+              fromLoomId !== targetConversation.id
+          );
+        });
+        if (attachmentsToAdopt.length > 0) {
+          await Promise.all(
+            attachmentsToAdopt.map((attachment) =>
+              loomEngineClient.adoptAttachment({
+                attachmentId: attachment.attachmentId!,
+                fromLoomId: attachment.loomId ?? targetLoomId,
+                toLoomId: targetConversation.id,
+              })
+            )
+          );
+        }
+
         setComposerRuntimeState({
           running: true,
           message: `Sending to ${mainModelName} through loom-service...`,
@@ -8270,14 +8314,18 @@ function App() {
           // the planner-format references so the service can persist it in
           // metadata.questionReferences.  This is the source of truth for
           // attached-card vs inline-chip rendering after app restart.
-          questionReferences: draft.links,
-          attachments: draft.attachments?.map((attachment) => ({
+          questionReferences: questionReferencesForSend,
+          attachments: attachmentsForSend?.map((attachment) => ({
             id: attachment.id,
             name: attachment.name,
             size: attachment.size,
             type: attachment.type,
             lastModified: attachment.lastModified,
             attachedAt: attachment.attachedAt ?? null,
+            loomId: attachment.loomId ?? null,
+            parseStatus: attachment.parseStatus ?? null,
+            attachmentId: attachment.attachmentId ?? null,
+            kind: attachment.kind ?? null,
           })),
           responseMode: selectedResponseMode,
           focusedResponseId: lastResponseInLoom(targetConversation.id)?.id,
@@ -11295,6 +11343,9 @@ function App() {
     }));
     setGeneratingResponseId(localResponseId);
     setComposerRuntimeTargetKey(loomId);
+    // Mirror new-prompt submit: mark a pending anchor before running=true so the
+    // streaming scroll-effect holds position during the transition.
+    pendingLatestTurnAnchorRef.current = true;
     setComposerRuntimeState({
       running: true,
       message: `Retrying through loom-service with ${mainModelName}...`,
@@ -11304,12 +11355,18 @@ function App() {
       responseId: localResponseId,
       cancelRequested: false,
     };
+    // Anchor the retried user-message using the same helper as new-prompt submit.
+    // The retry response sits at the same DOM position as the original user turn.
+    queueLatestUserTurnAnchor(loomId, localResponseId);
 
     const replaceActiveResponseId = (nextResponseId: string) => {
       if (nextResponseId === activeResponseId) return;
       const previousResponseId = activeResponseId;
       activeResponseId = nextResponseId;
       setGeneratingResponseId(nextResponseId);
+      // Keep the scroll anchor tracking the correct response ID after the
+      // service issues the real (non-local) response ID.
+      updateLatestUserTurnAnchorResponseId(previousResponseId, nextResponseId);
       if (mainServiceCancellationRef.current) {
         mainServiceCancellationRef.current = {
           ...mainServiceCancellationRef.current,
@@ -16038,7 +16095,7 @@ function SentAttachmentChips({
 }) {
   if (attachmentLinks.length === 0) return null;
   return (
-    <div className="sent-attachment-chips" aria-label="Sent attachments">
+    <div className="sent-attachment-tray sent-attachment-chips" aria-label="Sent attachments">
       {attachmentLinks.map((link) => (
         <button
           key={referenceIdentityKey(link)}
@@ -16494,11 +16551,17 @@ function ChatTranscript({
           ...response,
           title: responseTitleOverrides[response.id] ?? response.title,
         };
-        const { attached: attachedPromptReferences, inline: inlinePromptReferences } =
-          splitPromptReferences(displayResponse.questionReferences);
+        // Attachment-type links render exclusively in SentAttachmentChips —
+        // exclude them from splitPromptReferences to avoid duplicating them as
+        // inline chips or attached-reference cards.
         const sentAttachmentLinks = (displayResponse.questionReferences ?? []).filter(
           isAttachmentReferenceLink
         );
+        const nonAttachmentReferences = (displayResponse.questionReferences ?? []).filter(
+          (link) => !isAttachmentReferenceLink(link)
+        );
+        const { attached: attachedPromptReferences, inline: inlinePromptReferences } =
+          splitPromptReferences(nonAttachmentReferences);
         const cleanPromptText = stripAttachedReferenceTokens(
           displayResponse.question,
           attachedPromptReferences
@@ -16670,11 +16733,11 @@ function ChatTranscript({
                 .join(" ")}
               data-prompt-response-id={displayResponse.id}
             >
+              <SentAttachmentChips
+                attachmentLinks={sentAttachmentLinks}
+                onOpenAttachment={onOpenAttachment}
+              />
               <div className="user-message">
-                <SentAttachmentChips
-                  attachmentLinks={sentAttachmentLinks}
-                  onOpenAttachment={onOpenAttachment}
-                />
                 <AttachedPromptReferences
                   references={attachedPromptReferences}
                   onOpenReference={onOpenReference}
@@ -19366,6 +19429,14 @@ function PromptComposer({
     });
   }
 
+  function hasDraggedFiles(dataTransfer: DataTransfer) {
+    return Array.from(dataTransfer.types).includes("Files");
+  }
+
+  function hasDraggedLoomLink(dataTransfer: DataTransfer) {
+    return Array.from(dataTransfer.types).includes(LOOM_LINK_MIME);
+  }
+
   function removeAttachment(attachmentId: string) {
     const attachment = (draftRef.current.attachments ?? []).find((item) => item.id === attachmentId);
     if (attachment?.attachmentId) {
@@ -19707,16 +19778,18 @@ function PromptComposer({
         className={dragActive ? "prompt-surface drag-over" : "prompt-surface"}
         data-testid="prompt-surface"
         onDragEnter={(event) => {
-          if (event.dataTransfer.types.includes(LOOM_LINK_MIME)) {
+          if (hasDraggedLoomLink(event.dataTransfer) || hasDraggedFiles(event.dataTransfer)) {
             event.preventDefault();
             setDragActive(true);
           }
         }}
         onDragOver={(event) => {
-          if (event.dataTransfer.types.includes(LOOM_LINK_MIME)) {
+          if (hasDraggedLoomLink(event.dataTransfer) || hasDraggedFiles(event.dataTransfer)) {
             event.preventDefault();
             event.dataTransfer.dropEffect =
-              event.dataTransfer.types.includes(LOOM_INLINE_TOKEN_DRAG_MIME) && !event.altKey
+              hasDraggedLoomLink(event.dataTransfer) &&
+              event.dataTransfer.types.includes(LOOM_INLINE_TOKEN_DRAG_MIME) &&
+              !event.altKey
                 ? "move"
                 : "copy";
           }
@@ -19727,6 +19800,12 @@ function PromptComposer({
           }
         }}
         onDrop={(event) => {
+          if (event.dataTransfer.files.length > 0) {
+            event.preventDefault();
+            setDragActive(false);
+            addAttachments(event.dataTransfer.files);
+            return;
+          }
           const link = getLoomDragPayload(event);
           if (!link) return;
           event.preventDefault();

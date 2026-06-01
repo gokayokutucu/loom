@@ -3190,6 +3190,7 @@ kbd {
   gap: 8px;
   padding: 8px 10px;
   border-left: 2px solid var(--loom-border-strong);
+  user-select: none;
   border-radius: 7px;
   background: color-mix(in srgb, var(--loom-panel) 72%, transparent);
   color: var(--loom-text-muted);
@@ -5013,9 +5014,12 @@ kbd {
 /* Sent attachment chips — shown above user message bubbles */
 .sent-attachment-chips {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: flex-end;
+  justify-self: end;
   gap: 5px;
-  margin-bottom: 6px;
+  max-width: 100%;
+  margin-bottom: 0;
 }
 
 .sent-attachment-chip {
