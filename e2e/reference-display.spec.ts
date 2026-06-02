@@ -808,6 +808,208 @@ test.describe("[product-service-backed] Reference product proof", () => {
   });
 });
 
+// ── Containment helpers ───────────────────────────────────────────────────────
+
+/** Measures the bounding rect of an element and the document scroll state. */
+async function measureComposerContainment(page: Page) {
+  return page.evaluate(() => {
+    const surface = document.querySelector<HTMLElement>("[data-testid='prompt-surface']");
+    const chip = document.querySelector<HTMLElement>("[data-testid='selection-reference-chip']");
+    if (!surface) return null;
+    const surfaceRect = surface.getBoundingClientRect();
+    const chipRect = chip?.getBoundingClientRect() ?? null;
+    return {
+      surfaceWidth: surfaceRect.width,
+      surfaceLeft: surfaceRect.left,
+      surfaceRight: surfaceRect.right,
+      chipWidth: chipRect?.width ?? null,
+      chipRight: chipRect?.right ?? null,
+      documentScrollWidth: document.documentElement.scrollWidth,
+      documentClientWidth: document.documentElement.clientWidth,
+      bodyScrollWidth: document.body.scrollWidth,
+      bodyClientWidth: document.body.clientWidth,
+    };
+  });
+}
+
+/** Injects a composer draft with a fragment reference chip for a given loom id. */
+function injectComposerDraftWithChip(loomId: string, selectedText: string) {
+  const link = {
+    id: "containment-test-chip",
+    type: "fragment",
+    title: "Containment test response",
+    path: `loom://containment-test/${loomId}/r-test`,
+    badge: "Selection",
+    selectedText,
+    sourceResponseId: "r-test",
+    presentationMode: "attached-card",
+  };
+  const draft = { html: "", links: [link] };
+  window.localStorage.setItem(
+    "loom:composer-drafts-v1",
+    JSON.stringify({ [loomId]: draft })
+  );
+  window.localStorage.setItem(
+    "loom:last-active-loom-v1",
+    JSON.stringify({ activeLoomId: loomId })
+  );
+}
+
+test.describe("[legacy-typescript-local] Ask to Loom reference chip containment", () => {
+  const LONG_TEXT =
+    "Responses flowing downward, and Weft branches splitting sideways without breaking hierarchy, " +
+    "which means context is always preserved vertically while exploration spreads horizontally " +
+    "across the entire graph surface without ever losing the vertical reading path.";
+  const SHORT_TEXT = "The Process of Trilateration";
+  const LOOM_ID = "c-architecture";
+
+  async function openWithChip(page: Page, selectedText: string) {
+    await page.addInitScript(
+      ({ loomId, text }) => {
+        window.localStorage.clear();
+        const link = {
+          id: "containment-test-chip",
+          type: "fragment",
+          title: "Containment test response",
+          path: `loom://containment-test/${loomId}/r-test`,
+          badge: "Selection",
+          selectedText: text,
+          sourceResponseId: "r-test",
+          presentationMode: "attached-card",
+        };
+        const draft = { html: "", links: [link] };
+        window.localStorage.setItem(
+          "loom:composer-drafts-v1",
+          JSON.stringify({ [loomId]: draft })
+        );
+        window.localStorage.setItem(
+          "loom:last-active-loom-v1",
+          JSON.stringify({ activeLoomId: loomId })
+        );
+      },
+      { loomId: LOOM_ID, text: selectedText }
+    );
+    await page.goto("/");
+    await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+    // Navigate to the architecture loom so the composer is active
+    await page.getByTestId(`sidebar-pinned-loom-${LOOM_ID}`).click();
+    await expect(page.getByTestId("prompt-surface")).toBeVisible();
+  }
+
+  test("long selected text chip does not widen the composer surface", async ({ page }) => {
+    await openWithChip(page, LONG_TEXT);
+
+    const chip = page.getByTestId("selection-reference-chip").first();
+    await expect(chip).toBeVisible();
+
+    const metrics = await measureComposerContainment(page);
+    expect(metrics).not.toBeNull();
+
+    // Chip must not overflow the surface horizontally
+    expect(metrics!.chipWidth).not.toBeNull();
+    expect(metrics!.chipWidth!).toBeLessThanOrEqual(metrics!.surfaceWidth + 2);
+    if (metrics!.chipRight !== null) {
+      expect(metrics!.chipRight).toBeLessThanOrEqual(metrics!.surfaceRight + 2);
+    }
+  });
+
+  test("no horizontal document overflow after Ask to Loom with long text", async ({ page }) => {
+    await openWithChip(page, LONG_TEXT);
+    await expect(page.getByTestId("selection-reference-chip").first()).toBeVisible();
+
+    const metrics = await measureComposerContainment(page);
+    expect(metrics).not.toBeNull();
+
+    // No horizontal scrollbar / content overflow
+    expect(metrics!.documentScrollWidth).toBeLessThanOrEqual(metrics!.documentClientWidth + 8);
+    expect(metrics!.bodyScrollWidth).toBeLessThanOrEqual(metrics!.bodyClientWidth + 8);
+  });
+
+  test("short selected text chip is equally contained", async ({ page }) => {
+    await openWithChip(page, SHORT_TEXT);
+
+    const chip = page.getByTestId("selection-reference-chip").first();
+    await expect(chip).toBeVisible();
+
+    const metrics = await measureComposerContainment(page);
+    expect(metrics).not.toBeNull();
+
+    expect(metrics!.chipWidth!).toBeLessThanOrEqual(metrics!.surfaceWidth + 2);
+    if (metrics!.chipRight !== null) {
+      expect(metrics!.chipRight).toBeLessThanOrEqual(metrics!.surfaceRight + 2);
+    }
+    expect(metrics!.documentScrollWidth).toBeLessThanOrEqual(metrics!.documentClientWidth + 8);
+  });
+
+  test("full selected text is preserved in data attribute, visible label is shorter", async ({
+    page,
+  }) => {
+    await openWithChip(page, LONG_TEXT);
+
+    const chip = page.getByTestId("selection-reference-chip").first();
+    await expect(chip).toBeVisible();
+
+    const fullText = await chip.getAttribute("data-loom-selected-text");
+    expect(fullText).toBe(LONG_TEXT);
+
+    const visibleLabel = await chip.locator("span").first().innerText();
+    expect(visibleLabel.length).toBeLessThanOrEqual(FRAGMENT_CHIP_PREVIEW_MAX_CHARS + 1);
+    expect(visibleLabel.length).toBeLessThan(LONG_TEXT.length);
+  });
+
+  test("surface width is the same before and after chip is inserted", async ({ page }) => {
+    // Measure surface width without chip
+    await page.addInitScript((loomId) => {
+      window.localStorage.clear();
+      window.localStorage.setItem(
+        "loom:last-active-loom-v1",
+        JSON.stringify({ activeLoomId: loomId })
+      );
+    }, LOOM_ID);
+    await page.goto("/");
+    await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+    await page.getByTestId(`sidebar-pinned-loom-${LOOM_ID}`).click();
+    await expect(page.getByTestId("prompt-surface")).toBeVisible();
+
+    const widthBefore = await page
+      .getByTestId("prompt-surface")
+      .evaluate((el) => (el as HTMLElement).getBoundingClientRect().width);
+
+    // Now inject a chip and reload
+    await page.evaluate(
+      ({ loomId, text }) => {
+        const link = {
+          id: "containment-test-chip",
+          type: "fragment",
+          title: "Containment test response",
+          path: `loom://containment-test/${loomId}/r-test`,
+          badge: "Selection",
+          selectedText: text,
+          sourceResponseId: "r-test",
+          presentationMode: "attached-card",
+        };
+        const draft = { html: "", links: [link] };
+        window.localStorage.setItem(
+          "loom:composer-drafts-v1",
+          JSON.stringify({ [loomId]: draft })
+        );
+      },
+      { loomId: LOOM_ID, text: LONG_TEXT }
+    );
+    await page.reload();
+    await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+    await page.getByTestId(`sidebar-pinned-loom-${LOOM_ID}`).click();
+    await expect(page.getByTestId("selection-reference-chip").first()).toBeVisible();
+
+    const widthAfter = await page
+      .getByTestId("prompt-surface")
+      .evaluate((el) => (el as HTMLElement).getBoundingClientRect().width);
+
+    // Surface width must not grow due to the chip
+    expect(widthAfter).toBeLessThanOrEqual(widthBefore + 2);
+  });
+});
+
 test.describe("[legacy-typescript-local] Reference display tokens", () => {
   test("global Reference display setting applies to newly inserted tokens", async ({
     page,

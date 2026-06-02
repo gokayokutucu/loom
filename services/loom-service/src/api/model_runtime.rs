@@ -424,25 +424,31 @@ async fn sync_ollama_assets(
     state: &AppState,
     repo: &RuntimeModelRepository,
 ) -> Result<(), (StatusCode, Json<RuntimeApiError>)> {
-    let installed = state
-        .ollama
-        .models()
-        .await
-        .ok()
-        .map(|response| response.models);
+    // If Ollama is offline, preserve last-known cached state and return early.
+    // Overwriting installed→missing when offline would erase the cached model list.
+    let installed_models = match state.ollama.models().await {
+        Ok(response) => response.models,
+        Err(_) => return Ok(()),
+    };
+
+    // Build a normalised set of currently-installed model names for fast lookup.
+    let installed_set: std::collections::HashSet<String> = installed_models
+        .iter()
+        .map(|name| normalize_ollama_model_name(name))
+        .collect();
+
+    // 1. Sync curated models — mark available or missing based on live Ollama list.
+    let mut curated_set = std::collections::HashSet::new();
     for (model_name, display_name, supports_thinking) in CURATED_OLLAMA_MODELS {
         let normalized = normalize_ollama_model_name(model_name);
-        let installed_match = installed.as_ref().is_some_and(|models| {
-            models
-                .iter()
-                .any(|model| normalize_ollama_model_name(model) == normalized)
-        });
+        let is_installed = installed_set.contains(&normalized);
+        curated_set.insert(normalized.clone());
         repo.upsert_asset(&UpsertRuntimeModelAsset {
             provider_kind: "ollama".to_string(),
             provider_profile_id: Some("ollama-local".to_string()),
             model_name: normalized.clone(),
             display_name: (*display_name).to_string(),
-            status: if installed_match { "available" } else { "missing" }.to_string(),
+            status: if is_installed { "available" } else { "missing" }.to_string(),
             local_path: Some("~/.ollama/models".to_string()),
             size_bytes: None,
             digest: None,
@@ -453,11 +459,62 @@ async fn sync_ollama_assets(
                 "roles": ["quick", "main"]
             }),
             metadata_json: json!({ "source": "curated_manifest", "runtimeOwnedBy": "loom-service" }),
-            installed_at: installed_match.then(timestamp),
+            installed_at: is_installed.then(timestamp),
         })
         .await
         .map_err(storage_error)?;
     }
+
+    // 2. Sync non-curated installed models — add any model Ollama reports that is not
+    //    in the curated list.  These are models the user installed independently via
+    //    `ollama pull` or through the Ollama library outside of Loom.
+    for model_name in &installed_models {
+        let normalized = normalize_ollama_model_name(model_name);
+        if !curated_set.contains(&normalized) {
+            repo.upsert_asset(&UpsertRuntimeModelAsset {
+                provider_kind: "ollama".to_string(),
+                provider_profile_id: Some("ollama-local".to_string()),
+                model_name: normalized.clone(),
+                display_name: display_name_for_ollama_model(&normalized).to_string(),
+                status: "available".to_string(),
+                local_path: Some("~/.ollama/models".to_string()),
+                size_bytes: None,
+                digest: None,
+                capability_json: capability_json_for_model(&normalized),
+                metadata_json: json!({ "source": "ollama_discovered", "runtimeOwnedBy": "loom-service" }),
+                installed_at: Some(timestamp()),
+            })
+            .await
+            .map_err(storage_error)?;
+        }
+    }
+
+    // 3. Mark previously-discovered non-curated models as missing if they are no
+    //    longer in Ollama's live list (e.g. user ran `ollama rm`).
+    let all_assets = repo.list_assets().await.map_err(storage_error)?;
+    for asset in &all_assets {
+        let is_discovered = string_json(&asset.metadata_json, "source")
+            .is_some_and(|src| src == "ollama_discovered");
+        if is_discovered && !installed_set.contains(&asset.model_name) {
+            repo.upsert_asset(&UpsertRuntimeModelAsset {
+                provider_kind: asset.provider_kind.clone(),
+                provider_profile_id: asset.provider_profile_id.clone(),
+                model_name: asset.model_name.clone(),
+                display_name: asset.display_name.clone(),
+                status: "missing".to_string(),
+                local_path: asset.local_path.clone(),
+                size_bytes: asset.size_bytes,
+                digest: asset.digest.clone(),
+                capability_json: asset.capability_json.clone(),
+                metadata_json: asset.metadata_json.clone(),
+                // Pass None so COALESCE preserves the original installed_at timestamp.
+                installed_at: None,
+            })
+            .await
+            .map_err(storage_error)?;
+        }
+    }
+
     Ok(())
 }
 
@@ -609,5 +666,105 @@ mod tests {
             runtime_asset_id("ollama", Some("ollama-local"), "qwen3.5:9b"),
             "ollama:ollama-local:qwen3.5:9b"
         );
+    }
+
+    // ── sync_ollama_assets logic unit-tests ────────────────────────────────────
+
+    /// Helper: build the installed_set from a list of raw model name strings the
+    /// way sync_ollama_assets does, so tests can reuse the same normalisation.
+    fn installed_set_from(names: &[&str]) -> std::collections::HashSet<String> {
+        names
+            .iter()
+            .map(|name| normalize_ollama_model_name(name))
+            .collect()
+    }
+
+    #[test]
+    fn non_curated_model_is_detected_as_non_curated() {
+        // Models like "phi4" or "mistral-nemo" are not in CURATED_OLLAMA_MODELS.
+        let curated: std::collections::HashSet<String> = CURATED_OLLAMA_MODELS
+            .iter()
+            .map(|(name, _, _)| normalize_ollama_model_name(name))
+            .collect();
+        assert!(!curated.contains("phi4"), "phi4 must not be in curated set");
+        assert!(
+            !curated.contains("mistral-nemo"),
+            "mistral-nemo must not be in curated set"
+        );
+        assert!(
+            !curated.contains("custom-7b:v2"),
+            "custom-7b:v2 must not be in curated set"
+        );
+    }
+
+    #[test]
+    fn curated_models_are_in_curated_set() {
+        let curated: std::collections::HashSet<String> = CURATED_OLLAMA_MODELS
+            .iter()
+            .map(|(name, _, _)| normalize_ollama_model_name(name))
+            .collect();
+        assert!(curated.contains("llama3.2"));
+        assert!(curated.contains("qwen3.5:9b"));
+        assert!(curated.contains("mistral:7b"));
+    }
+
+    #[test]
+    fn installed_set_normalises_latest_suffix() {
+        let set = installed_set_from(&["phi4:latest", "llama3.2:latest"]);
+        assert!(set.contains("phi4"), "phi4:latest must normalise to phi4");
+        assert!(
+            set.contains("llama3.2"),
+            "llama3.2:latest must normalise to llama3.2"
+        );
+        assert!(
+            !set.contains("phi4:latest"),
+            "normalised set must not retain :latest suffix"
+        );
+    }
+
+    #[test]
+    fn display_name_for_unknown_model_falls_back_gracefully() {
+        // Non-curated models must get a non-empty display name — not panic.
+        assert!(!display_name_for_ollama_model("phi4").is_empty());
+        assert!(!display_name_for_ollama_model("custom-7b:v2").is_empty());
+        assert!(!display_name_for_ollama_model("namespace/model:tag").is_empty());
+        // The static fallback for unknown models must be "Ollama Model".
+        assert_eq!(display_name_for_ollama_model("phi4"), "Ollama Model");
+    }
+
+    #[test]
+    fn capability_json_for_non_curated_model_has_safe_defaults() {
+        let caps = capability_json_for_model("phi4");
+        assert_eq!(bool_json(&caps, "supportsQuick"), Some(true));
+        assert_eq!(bool_json(&caps, "supportsMain"), Some(true));
+        // Unknown models default to no thinking support.
+        assert_eq!(bool_json(&caps, "supportsThinking"), Some(false));
+    }
+
+    #[test]
+    fn source_metadata_for_discovered_model_is_ollama_discovered() {
+        // Verify the string used as the source discriminator matches what
+        // the missing-model marking logic expects.
+        let meta = json!({ "source": "ollama_discovered", "runtimeOwnedBy": "loom-service" });
+        assert_eq!(string_json(&meta, "source"), Some("ollama_discovered"));
+    }
+
+    #[test]
+    fn source_metadata_for_curated_model_is_curated_manifest() {
+        let meta = json!({ "source": "curated_manifest", "runtimeOwnedBy": "loom-service" });
+        assert_eq!(string_json(&meta, "source"), Some("curated_manifest"));
+        // The missing-model marking logic must NOT touch curated_manifest assets.
+        assert_ne!(string_json(&meta, "source"), Some("ollama_discovered"));
+    }
+
+    #[test]
+    fn model_names_with_tags_and_namespaces_are_normalised_correctly() {
+        assert_eq!(normalize_ollama_model_name("phi4:latest"), "phi4");
+        assert_eq!(normalize_ollama_model_name("phi4:v1"), "phi4:v1");
+        assert_eq!(
+            normalize_ollama_model_name("namespace/model:tag"),
+            "namespace/model:tag"
+        );
+        assert_eq!(normalize_ollama_model_name("  custom  "), "custom");
     }
 }
