@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   createSidecarLifecycleState,
   sidecarEventForBinaryResolution,
@@ -105,11 +106,12 @@ async function waitForHealth(serviceUrl, timeoutMs = HEALTH_TIMEOUT_MS) {
 }
 
 function resolveRepoRoot() {
-  return path.resolve(path.dirname(new URL(import.meta.url).pathname), "..");
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 }
 
 function resolvePackagedBinaryPath() {
-  return path.join(process.resourcesPath, "loom-service", "loom-service");
+  const binaryName = process.platform === "win32" ? "loom-service.exe" : "loom-service";
+  return path.join(process.resourcesPath, "loom-service", binaryName);
 }
 
 function isPackagedRuntime() {
@@ -133,7 +135,8 @@ function resolveBinaryPath(repoRoot, app) {
   if (app?.isPackaged || isPackagedRuntime()) {
     return resolvePackagedBinaryPath();
   }
-  return path.join(repoRoot, "services", "loom-service", "target", "debug", "loom-service");
+  const binaryName = process.platform === "win32" ? "loom-service.exe" : "loom-service";
+  return path.join(repoRoot, "services", "loom-service", "target", "debug", binaryName);
 }
 
 function resolveElectronDataPaths(repoRoot, app) {

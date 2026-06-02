@@ -989,6 +989,10 @@ fn write_provider_profile(output: &mut String, profile: &ProviderProfileConfig) 
     }
     writeln!(output, "requiresSecret = {}", profile.requires_secret)
         .expect("write provider requires secret");
+    if let Some(secret_ref) = &profile.secret_ref {
+        writeln!(output, "secretRef = \"{}\"", escape_toml_string(secret_ref))
+            .expect("write provider secret ref");
+    }
     writeln!(
         output,
         "modelDiscoveryEnabled = {}",
@@ -1126,6 +1130,7 @@ fn parse_config(text: &str) -> Result<LoomServiceConfig, ConfigParseError> {
                 base_url: None,
                 default_model: None,
                 requires_secret: false,
+                secret_ref: None,
                 model_discovery: ProviderModelDiscoveryConfig::default(),
                 request_defaults: ProviderRequestDefaultsConfig::default(),
                 security: ProviderSecurityPolicyConfig::default(),
@@ -1393,6 +1398,7 @@ fn set_provider_profile_value(
         }
         "defaultModel" => profile.default_model = Some(parse_toml_string(value, line_number)?),
         "requiresSecret" => profile.requires_secret = parse_toml_bool(value, line_number)?,
+        "secretRef" => profile.secret_ref = Some(parse_toml_string(value, line_number)?),
         "modelDiscoveryEnabled" => {
             profile.model_discovery.enabled = parse_toml_bool(value, line_number)?;
         }
@@ -1580,9 +1586,16 @@ fn is_forbidden_config_key(key: &str) -> bool {
         key,
         "api_key"
             | "apiKey"
+            | "apikey"
+            | "token"
+            | "bearer"
+            | "authorization"
             | "bearer_token"
             | "bearerToken"
             | "password"
+            | "credential"
+            | "client_secret"
+            | "private_key"
             | "refresh_token"
             | "refreshToken"
             | "raw_thinking"
@@ -2263,6 +2276,8 @@ mod tests {
         let mut config = LoomServiceConfig::default();
         config.providers.profiles[0].request_defaults.num_ctx = Some(8192);
         config.providers.profiles[0].request_defaults.num_predict = Some(1024);
+        config.providers.profiles[0].requires_secret = true;
+        config.providers.profiles[0].secret_ref = Some("provider:ollama-local:apiKey".to_string());
         let path = test_path("provider-profile");
         write_config_atomic(&path, &config).expect("write config");
 
@@ -2277,6 +2292,10 @@ mod tests {
         assert_eq!(profile.base_url.as_deref(), Some("http://127.0.0.1:11434"));
         assert_eq!(profile.request_defaults.num_ctx, Some(8192));
         assert_eq!(profile.request_defaults.num_predict, Some(1024));
+        assert_eq!(
+            profile.secret_ref.as_deref(),
+            Some("provider:ollama-local:apiKey")
+        );
         assert!(!profile.security.allow_unsafe_model_management);
     }
 
@@ -2286,8 +2305,13 @@ mod tests {
         for forbidden in [
             "apiKey",
             "api_key",
+            "token",
+            "authorization",
             "bearerToken",
             "password",
+            "credential",
+            "client_secret",
+            "private_key",
             "refreshToken",
             "raw_thinking",
             "thinking_text",

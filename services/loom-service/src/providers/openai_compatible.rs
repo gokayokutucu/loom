@@ -710,6 +710,7 @@ mod tests {
             base_url: Some(base_url.to_string()),
             default_model: Some("test-model".to_string()),
             requires_secret: false,
+            secret_ref: None,
             model_discovery: crate::providers::config::ProviderModelDiscoveryConfig {
                 enabled: true,
                 endpoint_path: Some("/v1/models".to_string()),
@@ -780,6 +781,7 @@ mod tests {
     async fn missing_secret_returns_missing_secret_without_leaking_values() {
         let mut profile = openai_profile("http://127.0.0.1:8080");
         profile.requires_secret = true;
+        profile.secret_ref = Some("provider:openai-compatible-test:apiKey".to_string());
         let runtime = OpenAiCompatibleRuntime::new(profile, None);
 
         let health = runtime.health().await;

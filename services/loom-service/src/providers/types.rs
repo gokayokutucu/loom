@@ -2,12 +2,18 @@ use crate::providers::config::ProviderKind;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
-const FORBIDDEN_PROVIDER_ERROR_KEYS: [&str; 10] = [
+const FORBIDDEN_PROVIDER_ERROR_KEYS: [&str; 16] = [
     "api_key",
     "apikey",
     "apiKey",
+    "token",
+    "bearer",
+    "authorization",
     "bearer_token",
     "password",
+    "credential",
+    "client_secret",
+    "private_key",
     "prompt",
     "raw_thinking",
     "thinking_text",
@@ -705,6 +711,10 @@ mod tests {
         .with_safe_metadata(serde_json::json!({
             "prompt": "private prompt",
             "apiKey": "private",
+            "authorization": "Bearer sk-secret",
+            "client_secret": "client-secret",
+            "private_key": "private-key",
+            "credential": "credential",
             "safe": "value",
             "nested": {
                 "hidden_reasoning": "private"
@@ -720,6 +730,11 @@ mod tests {
             "hidden_reasoning",
             "private prompt",
             "apiKey",
+            "authorization",
+            "client_secret",
+            "private_key",
+            "credential",
+            "sk-secret",
             "private",
         ] {
             assert!(!json.contains(forbidden));
@@ -727,7 +742,7 @@ mod tests {
 
         let metadata = sanitize_provider_metadata(&serde_json::json!({
             "raw_thinking": "private",
-            "safe": ["visible", {"password": "secret"}]
+            "safe": ["visible", {"password": "secret", "token": "secret"}]
         }));
         let metadata_json = serde_json::to_string(&metadata).expect("metadata json");
         assert!(metadata_json.contains("visible"));

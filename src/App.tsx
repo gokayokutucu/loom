@@ -285,6 +285,7 @@ import {
 import { insertTranscriptAtCursorText } from "./services/speechTranscriptInsertion";
 import {
   getProfileModel,
+  getInstalledModels,
   isMockResponseModeEnabled,
   ModelProviderError,
   readAIProviderSettings,
@@ -351,6 +352,7 @@ import {
   type ToastNotificationIcon,
 } from "./components/ToastNotification";
 import { WeftView } from "./components/WeftView";
+import { truncateFragmentChipPreview } from "./services/fragmentChipPreview";
 import type {
   AddressSuggestion,
   BookmarkItem,
@@ -944,6 +946,10 @@ function mergeUniqueReferences(links: LoomLink[]) {
 
 function fragmentQuoteText(link: LoomLink) {
   return (link.selectedText ?? link.title).replace(/\s+/g, " ").trim();
+}
+
+function fragmentChipPreview(link: LoomLink) {
+  return truncateFragmentChipPreview(fragmentQuoteText(link));
 }
 
 function stripAttachedReferenceTokens(text: string, references?: LoomLink[]) {
@@ -3044,22 +3050,33 @@ function App() {
       ],
       searchText: [conversation.summary, conversation.meta?.summary ?? ""],
     }));
-    const loomOptions = Object.values(conversationResponses)
-      .flat()
-      .map((response) => ({
-        id: response.id,
-        type: "response" as const,
-        title: response.title,
-        path: response.address,
-        badge: typeLabel.response,
-        canonicalUri: response.meta?.canonicalUri,
-        meta: response.meta,
-        referenceCode: response.meta?.code,
-        group: "Responses" as const,
-        subtitle: response.meta?.summary || response.question || "Response",
-        keywords: ["Response", ...(response.meta?.keywords ?? [])],
-        searchText: [response.question, response.meta?.summary ?? "", ...response.answer],
-      }));
+    const loomOptions = conversations.flatMap((conversation) =>
+      (conversationResponses[conversation.id] ?? []).map((response) => {
+        const responseLink = responseLinkForNavigation(conversation.id, response);
+        const visibleCode = formatBadgeCode(response.meta ?? {});
+        return {
+          ...responseLink,
+          referenceCode: visibleCode || responseLink.referenceCode,
+          resolutionStatus: responseLink.resolutionStatus ?? "resolved" as const,
+          group: "Responses" as const,
+          subtitle: response.meta?.summary || response.question || conversation.title,
+          keywords: [
+            "Response",
+            conversation.title,
+            visibleCode,
+            response.meta?.code,
+            response.meta?.displayCode,
+            ...(response.meta?.keywords ?? []),
+          ].filter((keyword): keyword is string => Boolean(keyword)),
+          searchText: [
+            response.question,
+            response.meta?.summary ?? "",
+            conversation.title,
+            ...response.answer,
+          ],
+        };
+      })
+    );
     const bookmarkOptions = bookmarks.map((bookmark) => ({
       ...bookmark,
       title: cleanPolishedDisplayTitle(bookmark.editableTitle) || bookmark.editableTitle,
@@ -3096,7 +3113,17 @@ function App() {
       ...bookmarkOptions,
       ...historyOptions,
     ];
-  }, [bookmarks, conversationResponses, conversations, forkRecords, history, serviceCodeSnippetItems]);
+  }, [
+    archived,
+    bookmarks,
+    conversationResponses,
+    conversations,
+    draftConversation,
+    forkRecords,
+    history,
+    responseTitleOverrides,
+    serviceCodeSnippetItems,
+  ]);
 
   const attachContentItems = useMemo<AttachContentItem[]>(() => {
     const bookmarkItems = bookmarks.map((bookmark) => ({
@@ -5221,6 +5248,7 @@ function App() {
     const responseUrl = responseConversation
       ? responseAddressForConversation(responseConversation, response)
       : response.meta?.canonicalUri ?? response.address;
+    const canonicalResponseId = responseIdFromReferenceAddress(responseUrl) ?? response.id;
     return {
       id: response.id,
       type: "response",
@@ -5230,9 +5258,9 @@ function App() {
       targetObjectId: runtimeGraphObjectIdFor("response", `${loomId}_${response.id}`),
       canonicalUri: responseUrl,
       meta: response.meta,
-      referenceCode: response.meta?.code,
+      referenceCode: formatBadgeCode(response.meta ?? {}) || response.meta?.code,
       sourceLoomId: loomId,
-      sourceResponseId: response.id,
+      sourceResponseId: canonicalResponseId,
       sourceCanonicalUri: responseUrl,
     };
   }
@@ -16701,7 +16729,7 @@ function ChatTranscript({
           ),
           canonicalUri: responseUrl,
           meta: displayResponse.meta,
-          referenceCode: displayResponse.meta?.code,
+          referenceCode: formatBadgeCode(displayResponse.meta ?? {}) || displayResponse.meta?.code,
           sourceLoomId: conversation.id,
           sourceResponseId: displayResponse.id,
           sourceCanonicalUri: responseUrl,
@@ -17351,14 +17379,35 @@ function PromptComposer({
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const lastTextInsertionRequestRef = useRef(0);
   const mainModel = getProfileModel(providerSettings, "main");
-  const installedModels = providerSettings.ollama.models.filter((model) => model.installed);
+  const installedModels = getInstalledModels(providerSettings);
+  const selectedModelMissing =
+    mainModel.provider !== "mock" && !installedModels.some((model) => model.id === mainModel.id);
   const selectableModels =
     mainModel.provider === "mock"
       ? [mainModel]
-      : installedModels.length > 0
-        ? installedModels
-        : providerSettings.ollama.models;
+      : installedModels;
   const selectedModelId = mainModel.id;
+  const providerStatus = providerSettings.ollama.lastConnectionStatus;
+  const modelPickerInstalledState =
+    mainModel.provider === "mock"
+      ? "live"
+      : providerStatus === "connected"
+        ? "live"
+        : installedModels.length > 0
+          ? "cached"
+          : providerStatus === "offline"
+            ? "offline-empty"
+            : "unknown-empty";
+  const modelPickerStatusText =
+    modelPickerInstalledState === "cached"
+      ? "Ollama is offline. Showing last discovered local models."
+      : modelPickerInstalledState === "offline-empty"
+        ? "Ollama is not available."
+        : modelPickerInstalledState === "unknown-empty"
+          ? "Test Ollama to discover installed local models."
+          : selectableModels.length === 0
+            ? "No local models installed."
+            : null;
   const runtimeWarning =
     getConfiguredLoomEngineMode() === "rust-service"
       ? null
@@ -17697,7 +17746,8 @@ function PromptComposer({
         mention &&
         editorRef.current &&
         !editorRef.current.contains(target) &&
-        !mentionMenuRef.current?.contains(target)
+        !mentionMenuRef.current?.contains(target) &&
+        !((target as Element | null)?.closest(".composer-mention-menu"))
       ) {
         setMention(null);
       }
@@ -17742,7 +17792,8 @@ function PromptComposer({
         target &&
         editorRef.current &&
         !editorRef.current.contains(target) &&
-        !mentionMenuRef.current?.contains(target)
+        !mentionMenuRef.current?.contains(target) &&
+        !((target as Element | null)?.closest(".composer-mention-menu"))
       ) {
         setMention(null);
       }
@@ -17915,7 +17966,7 @@ function PromptComposer({
       const minWidth = Math.max(buttonRect.width, 220);
       let left = buttonRect.left;
       let top = buttonRect.bottom + gap;
-      const menuHeight = menuRect.height || 44 * selectableModels.length;
+      const menuHeight = menuRect.height || 44 * Math.max(selectableModels.length, 1);
 
       if (top + menuHeight > window.innerHeight - viewportPadding) {
         top = Math.max(viewportPadding, buttonRect.top - gap - menuHeight);
@@ -17937,7 +17988,7 @@ function PromptComposer({
       window.removeEventListener("resize", updateModelPopoverPosition);
       window.removeEventListener("scroll", updateModelPopoverPosition, true);
     };
-  }, [modelPickerOpen, selectableModels.length]);
+  }, [modelPickerOpen, selectableModels.length, modelPickerStatusText, selectedModelMissing]);
 
   useLayoutEffect(() => {
     if (!mention) return;
@@ -19149,6 +19200,7 @@ function PromptComposer({
     intent: ComposerEditIntent = "reference-insert",
     syncExternalLink = true
   ) {
+    const editor = editorRef.current;
     const resolvedLink = onResolveReference({
       ...link,
       selectedAt: link.selectedAt ?? Date.now(),
@@ -19158,9 +19210,18 @@ function PromptComposer({
       countEditorInlineReferenceOccurrences(resolvedLink) + 1
     );
     const token = makeToken(occurrenceLink);
-    range.deleteContents();
-    range.insertNode(document.createTextNode(" "));
-    range.insertNode(token);
+    try {
+      range.deleteContents();
+      range.insertNode(document.createTextNode(" "));
+      range.insertNode(token);
+    } catch {
+      // A contenteditable Range can become stale between autocomplete render
+      // and selection. Preserve the selected Reference rather than dropping it.
+    }
+    if (editor && !editor.contains(token)) {
+      if (editor.textContent?.trim()) editor.append(document.createTextNode(" "));
+      editor.append(token, document.createTextNode(" "));
+    }
     placeCaretAfter(token);
     insertedPathsRef.current.add(occurrenceLink.path);
     if (syncExternalLink) onDropLink(occurrenceLink);
@@ -19232,10 +19293,37 @@ function PromptComposer({
   }
 
   function getMentionRange() {
+    const editor = editorRef.current;
+    if (!editor) return null;
+    const activeEditor = editor;
+
+    function mentionRangeFromTextNode(textNode: Node, offset: number) {
+      const text = textNode.textContent ?? "";
+      const beforeCaret = text.slice(0, offset);
+      const match = beforeCaret.match(/(?:^|\s)#([^\s#]*)$/);
+      if (!match) return null;
+      const query = match[1] ?? "";
+      const hashIndex = beforeCaret.lastIndexOf("#");
+      const mentionRange = document.createRange();
+      mentionRange.setStart(textNode, hashIndex);
+      mentionRange.setEnd(textNode, offset);
+      return { query, range: mentionRange };
+    }
+
+    function mentionRangeAtEditorEnd() {
+      const walker = document.createTreeWalker(activeEditor, NodeFilter.SHOW_TEXT);
+      let lastTextNode: Node | null = null;
+      while (walker.nextNode()) {
+        lastTextNode = walker.currentNode;
+      }
+      if (!lastTextNode) return null;
+      return mentionRangeFromTextNode(lastTextNode, lastTextNode.textContent?.length ?? 0);
+    }
+
     const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0) return null;
+    if (!selection || selection.rangeCount === 0) return mentionRangeAtEditorEnd();
     const range = selection.getRangeAt(0);
-    if (!editorRef.current?.contains(range.startContainer)) return null;
+    if (!activeEditor.contains(range.startContainer)) return mentionRangeAtEditorEnd();
 
     let textNode = range.startContainer;
     let offset = range.startOffset;
@@ -19244,21 +19332,12 @@ function PromptComposer({
         .slice(0, Math.max(offset, 1))
         .reverse()
         .find((node) => node.nodeType === Node.TEXT_NODE);
-      if (!fallbackNode) return null;
+      if (!fallbackNode) return mentionRangeAtEditorEnd();
       textNode = fallbackNode;
       offset = fallbackNode.textContent?.length ?? 0;
     }
 
-    const text = textNode.textContent ?? "";
-    const beforeCaret = text.slice(0, offset);
-    const match = beforeCaret.match(/(?:^|\s)#([^\s#]*)$/);
-    if (!match) return null;
-    const query = match[1] ?? "";
-    const hashIndex = beforeCaret.lastIndexOf("#");
-    const mentionRange = document.createRange();
-    mentionRange.setStart(textNode, hashIndex);
-    mentionRange.setEnd(textNode, offset);
-    return { query, range: mentionRange };
+    return mentionRangeFromTextNode(textNode, offset) ?? mentionRangeAtEditorEnd();
   }
 
   function updateMention() {
@@ -19277,9 +19356,19 @@ function PromptComposer({
   }
 
   function selectMentionOption(option: ComposerReferenceOption) {
-    const range = mention?.range;
-    if (!range) return;
-    insertTokenAtRange(option, range);
+    const range = getMentionRange()?.range ?? mention?.range;
+    if (range) {
+      try {
+        range.deleteContents();
+      } catch {
+        // Keep the selection action usable even if the saved contenteditable
+        // range is stale; the selected Reference is still inserted below.
+      }
+    }
+    const resolvedLink = insertTokenAtEnd(option);
+    void resolvedLink;
+    commitDraftChange("reference-insert");
+    setMention(null);
   }
 
   function isReferenceSelected(link: LoomLink) {
@@ -19525,6 +19614,15 @@ function PromptComposer({
       return;
     }
     if (!mention && event.key === "Enter" && !event.shiftKey) {
+      const liveMention = getMentionRange();
+      const liveOptions = liveMention
+        ? filterAndRankReferenceSuggestions(referenceOptions, liveMention.query)
+        : [];
+      if (liveMention && liveOptions[0]) {
+        event.preventDefault();
+        insertTokenAtRange(liveOptions[0], liveMention.range);
+        return;
+      }
       if (runtimeState.running) return;
       event.preventDefault();
       submitComposer();
@@ -19898,9 +19996,11 @@ function PromptComposer({
                 }
                 key={referenceIdentityKey(link)}
                 data-loom-path={link.path}
+                data-loom-selected-text={isFragmentReference(link) ? fragmentQuoteText(link) : undefined}
+                data-testid="selection-reference-chip"
               >
                 {isFragmentReference(link) ? <CornerDownRightIcon /> : <FileText size={13} />}
-                <span>{isFragmentReference(link) ? fragmentQuoteText(link) : link.title}</span>
+                <span>{isFragmentReference(link) ? fragmentChipPreview(link) : link.title}</span>
                 <button
                   type="button"
                   onClick={() => removeLinkedReference(link)}
@@ -20386,6 +20486,27 @@ function PromptComposer({
               }
             >
               <div className="model-picker-section-label">Models</div>
+              {modelPickerStatusText && (
+                <div
+                  className={
+                    modelPickerInstalledState === "cached"
+                      ? "model-picker-status cached"
+                      : "model-picker-status"
+                  }
+                  role="note"
+                >
+                  {modelPickerStatusText}
+                </div>
+              )}
+              {selectedModelMissing && (
+                <div className="model-picker-missing-model" role="note">
+                  <span aria-hidden="true" />
+                  <span>
+                    <strong>{mainModel.name}</strong>
+                    <small>Selected model is unavailable</small>
+                  </span>
+                </div>
+              )}
               {selectableModels.map((model) => {
                 const selected = model.id === selectedModelId;
                 return (
@@ -20636,7 +20757,10 @@ function ComposerMentionMenu({
                   key={`${group.group}-${option.path}`}
                   className={selected ? "mention-option selected" : "mention-option"}
                   data-selected={selected ? "true" : "false"}
-                  onMouseDown={(event) => event.preventDefault()}
+                  onMouseDown={(event) => {
+                    event.preventDefault();
+                    onSelect(option);
+                  }}
                   onClick={() => onSelect(option)}
                   role="option"
                   aria-selected={selected}

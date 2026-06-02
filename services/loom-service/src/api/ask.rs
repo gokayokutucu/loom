@@ -1,13 +1,21 @@
 use crate::{
     api::state::AppState,
-    providers::types::{
-        LoomServiceErrorPayload, OllamaChatRequest, OllamaMessage, OllamaOptions,
-        OllamaRuntimeError, OllamaRuntimeErrorKind,
+    providers::{
+        contract::{
+            ProviderContractEvent, ProviderContractMessage, ProviderContractMessageRole,
+            ProviderContractOptions, ProviderContractRequest,
+        },
+        pipeline::ProviderPipeline,
+        types::{
+            LoomServiceErrorPayload, OllamaChatRequest, OllamaMessage, OllamaOptions,
+            OllamaRuntimeError, OllamaRuntimeErrorKind, ProviderError, ProviderErrorKind,
+        },
     },
 };
 use axum::{extract::State, http::StatusCode, response::IntoResponse, Json};
+use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::json;
 
 const MAX_QUICK_NUM_CTX: u32 = 2_048;
 const MAX_QUICK_NUM_PREDICT: u32 = 1_536;
@@ -274,8 +282,8 @@ pub async fn quick(
     let request_id = format!("quick-{}", input.session_id);
     let request = quick_ollama_request(&input, model.clone(), request_id.clone());
 
-    let response = match state.ollama.post_chat(&request).await {
-        Ok(response) => response,
+    let answer = match quick_answer_from_provider_adapter(&state, request).await {
+        Ok(Some(answer)) => answer,
         Err(error) => {
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
@@ -287,37 +295,10 @@ pub async fn quick(
             )
                 .into_response();
         }
-    };
-
-    let status = response.status();
-    if !status.is_success() {
-        let error = OllamaRuntimeError::new(
-            if status.as_u16() == 404 {
-                OllamaRuntimeErrorKind::ModelMissing
-            } else {
-                OllamaRuntimeErrorKind::UnexpectedResponse
-            },
-            "Ollama rejected the quick Ask request.",
-            true,
-        )
-        .with_status(status.as_u16());
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(error_payload(
-                &request_id,
-                &error,
-                &state.ollama.config().base_url,
-            )),
-        )
-            .into_response();
-    }
-
-    let body = match response.json::<Value>().await {
-        Ok(body) => body,
-        Err(_) => {
+        Ok(None) => {
             let error = OllamaRuntimeError::new(
                 OllamaRuntimeErrorKind::UnexpectedResponse,
-                "Ollama returned malformed quick Ask JSON.",
+                "Ollama quick Ask response did not include visible answer content.",
                 true,
             );
             return (
@@ -331,22 +312,6 @@ pub async fn quick(
                 .into_response();
         }
     };
-    let Some(answer) = quick_answer_from_ollama_body(&body) else {
-        let error = OllamaRuntimeError::new(
-            OllamaRuntimeErrorKind::UnexpectedResponse,
-            "Ollama quick Ask response did not include visible answer content.",
-            true,
-        );
-        return (
-            StatusCode::BAD_GATEWAY,
-            Json(error_payload(
-                &request_id,
-                &error,
-                &state.ollama.config().base_url,
-            )),
-        )
-            .into_response();
-    };
     let first_attempt_validation = quick_answer_validation(&answer, &focus, &input);
     if quick_answer_contract_required(&focus) && !first_attempt_validation.validation_passed {
         let repair_request = quick_repair_ollama_request(
@@ -356,15 +321,10 @@ pub async fn quick(
             model.clone(),
             format!("{request_id}-repair"),
         );
-        let retry_answer = match state.ollama.post_chat(&repair_request).await {
-            Ok(response) if response.status().is_success() => {
-                match response.json::<Value>().await {
-                    Ok(body) => quick_answer_from_ollama_body(&body),
-                    Err(_) => None,
-                }
-            }
-            _ => None,
-        };
+        let retry_answer = quick_answer_from_provider_adapter(&state, repair_request)
+            .await
+            .ok()
+            .flatten();
 
         if let Some(retry_answer) = retry_answer {
             let retry_validation = quick_answer_validation(&retry_answer, &focus, &input)
@@ -489,14 +449,149 @@ fn quick_validation_error_response(
     }
 }
 
-fn quick_answer_from_ollama_body(body: &Value) -> Option<String> {
+#[cfg(test)]
+fn quick_answer_from_ollama_body(body: &serde_json::Value) -> Option<String> {
     body.get("message")
         .and_then(|message| message.get("content"))
-        .and_then(Value::as_str)
-        .or_else(|| body.get("response").and_then(Value::as_str))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| body.get("response").and_then(serde_json::Value::as_str))
         .map(str::trim)
         .filter(|answer| !answer.is_empty())
         .map(ToString::to_string)
+}
+
+async fn quick_answer_from_provider_adapter(
+    state: &AppState,
+    request: OllamaChatRequest,
+) -> Result<Option<String>, OllamaRuntimeError> {
+    let provider_pipeline = ProviderPipeline::new(state.ollama.clone());
+    let provider_profile = provider_pipeline.default_generation_profile();
+    let provider_request = quick_provider_request_from_ollama_request(
+        &request,
+        provider_profile.provider_kind,
+        &provider_profile.provider_profile_id,
+    );
+    let mut provider_stream = provider_pipeline.stream_chat(provider_request);
+    let mut events = Vec::new();
+    while let Some(event) = provider_stream.next().await {
+        events.push(event);
+    }
+    collect_quick_answer_from_provider_events(events)
+}
+
+fn quick_provider_request_from_ollama_request(
+    request: &OllamaChatRequest,
+    provider_kind: crate::providers::config::ProviderKind,
+    provider_profile_id: &str,
+) -> ProviderContractRequest {
+    ProviderContractRequest {
+        provider_kind,
+        provider_profile_id: provider_profile_id.to_string(),
+        model_id: request.model.clone(),
+        messages: request
+            .messages
+            .iter()
+            .map(|message| ProviderContractMessage {
+                role: match message.role.as_str() {
+                    "system" => ProviderContractMessageRole::System,
+                    "assistant" => ProviderContractMessageRole::Assistant,
+                    _ => ProviderContractMessageRole::User,
+                },
+                content: message.content.clone(),
+            })
+            .collect(),
+        options: ProviderContractOptions {
+            temperature: request
+                .options
+                .as_ref()
+                .and_then(|options| options.temperature),
+            top_p: None,
+            max_tokens: request
+                .options
+                .as_ref()
+                .and_then(|options| options.num_predict),
+            context_tokens: request.options.as_ref().and_then(|options| options.num_ctx),
+            thinking: request.think,
+        },
+        stream: request.stream.unwrap_or(false),
+        request_id: request
+            .request_id
+            .clone()
+            .unwrap_or_else(|| "quick-ask".to_string()),
+        runtime_metadata: json!({
+            "source": "ask.quick",
+            "quickAsk": true,
+        }),
+        loom_context_metadata: json!({
+            "contextOwnedBy": "quick_ask_prompt_builder",
+        }),
+    }
+}
+
+fn collect_quick_answer_from_provider_events(
+    events: impl IntoIterator<Item = ProviderContractEvent>,
+) -> Result<Option<String>, OllamaRuntimeError> {
+    let mut answer = String::new();
+    for event in events {
+        match event {
+            ProviderContractEvent::Delta { text } => answer.push_str(&text),
+            ProviderContractEvent::ThinkingStatus { .. } => {}
+            ProviderContractEvent::Completed { .. } | ProviderContractEvent::Truncated { .. } => {
+                let visible = answer.trim();
+                return Ok((!visible.is_empty()).then(|| visible.to_string()));
+            }
+            ProviderContractEvent::Cancelled => {
+                return Err(OllamaRuntimeError::new(
+                    OllamaRuntimeErrorKind::Aborted,
+                    "Quick Ask provider request was cancelled.",
+                    true,
+                ));
+            }
+            ProviderContractEvent::Error { error } => {
+                return Err(quick_ollama_error_from_provider_error(error));
+            }
+        }
+    }
+    let visible = answer.trim();
+    Ok((!visible.is_empty()).then(|| visible.to_string()))
+}
+
+fn quick_ollama_error_from_provider_error(error: ProviderError) -> OllamaRuntimeError {
+    let kind = match error.kind {
+        ProviderErrorKind::InvalidConfig
+        | ProviderErrorKind::UnsafeEndpoint
+        | ProviderErrorKind::RemoteEndpointBlocked
+        | ProviderErrorKind::InsecureRemoteHttpBlocked
+        | ProviderErrorKind::MissingSecret
+        | ProviderErrorKind::SecretUnavailable => OllamaRuntimeErrorKind::InvalidConfig,
+        ProviderErrorKind::RuntimeUnavailable
+        | ProviderErrorKind::ConnectionRefused
+        | ProviderErrorKind::DnsFailed
+        | ProviderErrorKind::ServiceUnavailable => OllamaRuntimeErrorKind::RuntimeUnavailable,
+        ProviderErrorKind::ModelMissing | ProviderErrorKind::ModelUnavailable => {
+            OllamaRuntimeErrorKind::ModelMissing
+        }
+        ProviderErrorKind::TimeoutBeforeFirstChunk | ProviderErrorKind::RequestTimeout => {
+            OllamaRuntimeErrorKind::TimeoutBeforeFirstChunk
+        }
+        ProviderErrorKind::TimeoutDuringStream => OllamaRuntimeErrorKind::TimeoutDuringStream,
+        ProviderErrorKind::Cancelled => OllamaRuntimeErrorKind::Aborted,
+        ProviderErrorKind::DoneReasonLength | ProviderErrorKind::OutputLimitReached => {
+            OllamaRuntimeErrorKind::DoneReasonLength
+        }
+        ProviderErrorKind::ProviderRejectedThink => OllamaRuntimeErrorKind::ProviderRejectedThink,
+        ProviderErrorKind::StreamParseError => OllamaRuntimeErrorKind::StreamParseError,
+        _ => OllamaRuntimeErrorKind::UnexpectedResponse,
+    };
+    let message = error
+        .technical_message
+        .or(error.raw_provider_message)
+        .unwrap_or(error.user_message);
+    let mut runtime_error = OllamaRuntimeError::new(kind, message, error.retryable);
+    if let Some(status) = error.status_code {
+        runtime_error = runtime_error.with_status(status);
+    }
+    runtime_error
 }
 
 async fn quick_title_from_model(
@@ -512,13 +607,11 @@ async fn quick_title_from_model(
         model.to_string(),
         format!("quick-title-{}", input.session_id),
     );
-    let title = match state.ollama.post_chat(&request).await {
-        Ok(response) if response.status().is_success() => match response.json::<Value>().await {
-            Ok(body) => quick_title_from_ollama_body(&body),
-            Err(_) => None,
-        },
-        _ => None,
-    };
+    let title = quick_answer_from_provider_adapter(state, request)
+        .await
+        .ok()
+        .flatten()
+        .and_then(|answer| clean_quick_title(&answer));
     match title {
         Some(title) => title,
         None => {
@@ -586,11 +679,6 @@ fn quick_title_ollama_request(
         }),
         request_id: Some(request_id),
     }
-}
-
-fn quick_title_from_ollama_body(body: &Value) -> Option<String> {
-    let visible = quick_answer_from_ollama_body(body)?;
-    clean_quick_title(&visible)
 }
 
 fn clean_quick_title(value: &str) -> Option<String> {
@@ -3640,6 +3728,86 @@ mod tests {
         assert!(serialized.contains("deep synthesis"));
         assert!(!serialized.contains("raw_thinking"));
         assert!(!serialized.contains("chain_of_thought"));
+    }
+
+    #[test]
+    fn quick_provider_request_preserves_non_stream_contract_mapping() {
+        let mut request = quick_request_with_turns();
+        request.options.num_ctx = Some(99_999);
+        request.options.num_predict = Some(99_999);
+        let ollama =
+            quick_ollama_request(&request, "quick-model".to_string(), "quick-1".to_string());
+        let provider_request = quick_provider_request_from_ollama_request(
+            &ollama,
+            crate::providers::config::ProviderKind::Ollama,
+            "ollama-local",
+        );
+
+        assert_eq!(provider_request.provider_profile_id, "ollama-local");
+        assert_eq!(provider_request.model_id, "quick-model");
+        assert!(!provider_request.stream);
+        assert_eq!(provider_request.options.thinking, Some(false));
+        assert_eq!(
+            provider_request.options.context_tokens,
+            Some(MAX_QUICK_NUM_CTX)
+        );
+        assert_eq!(
+            provider_request.options.max_tokens,
+            Some(MAX_QUICK_NUM_PREDICT)
+        );
+        assert_eq!(
+            provider_request.messages[0].role,
+            ProviderContractMessageRole::System
+        );
+        assert_eq!(
+            provider_request.messages[1].role,
+            ProviderContractMessageRole::User
+        );
+    }
+
+    #[test]
+    fn quick_provider_events_collect_visible_deltas_and_ignore_thinking_status() {
+        let answer = collect_quick_answer_from_provider_events(vec![
+            ProviderContractEvent::ThinkingStatus {
+                status: "active".to_string(),
+                duration_ms: Some(12),
+                token_estimate: Some(4),
+            },
+            ProviderContractEvent::Delta {
+                text: "Event ".to_string(),
+            },
+            ProviderContractEvent::Delta {
+                text: "Sourcing".to_string(),
+            },
+            ProviderContractEvent::Completed {
+                done_reason: Some("stop".to_string()),
+                usage: crate::providers::contract::ProviderUsageMetadata::unavailable(
+                    "provider_did_not_report_usage",
+                ),
+            },
+        ])
+        .expect("provider events");
+
+        assert_eq!(answer.as_deref(), Some("Event Sourcing"));
+    }
+
+    #[test]
+    fn quick_provider_error_maps_to_existing_quick_error_kind() {
+        let provider_error = ProviderError::new(
+            ProviderErrorKind::ModelMissing,
+            crate::providers::config::ProviderKind::Ollama,
+        )
+        .with_provider_id("ollama-local")
+        .with_model(Some("missing-model".to_string()))
+        .with_technical_message("selected model is missing");
+
+        let error = collect_quick_answer_from_provider_events(vec![ProviderContractEvent::Error {
+            error: provider_error,
+        }])
+        .expect_err("provider error");
+
+        assert_eq!(error.kind, OllamaRuntimeErrorKind::ModelMissing);
+        assert_eq!(error.message, "selected model is missing");
     }
 
     #[test]

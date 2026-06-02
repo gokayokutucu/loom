@@ -508,6 +508,7 @@ mod tests {
                 PathBuf::from("/tmp/loom-service-attachment-test.toml"),
                 LoomServiceConfig::default(),
             ),
+            secret_store: crate::providers::secret_store::ProviderSecretStore::default(),
             operations: OperationTracker::default(),
             restart: RestartState::default(),
         }

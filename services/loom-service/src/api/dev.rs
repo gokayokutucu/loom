@@ -320,6 +320,7 @@ mod tests {
             database,
             ollama,
             config: ConfigManager::new(PathBuf::from("/tmp/loom-service-test.toml"), config_file),
+            secret_store: crate::providers::secret_store::ProviderSecretStore::default(),
             operations: OperationTracker::default(),
             restart: RestartState::default(),
         }
