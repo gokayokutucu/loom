@@ -694,6 +694,52 @@ export function modelPickerStatusText(
   return null;
 }
 
+// ── Composer generation-state helpers ─────────────────────────────────────────
+
+export interface ComposerRunState {
+  running: boolean;
+  message: string | null;
+  blockedByOtherGeneration: boolean;
+}
+
+/**
+ * Pure function: derive per-composer runtime state from global generation state.
+ * The `targetKey` is the Loom/draft whose generation is currently active.
+ * A non-target composer that sees `globalRunning=true` is blocked.
+ */
+export function computeComposerRunState(
+  draftKey: string,
+  targetKey: string | null,
+  globalState: { running: boolean; message: string | null }
+): ComposerRunState {
+  const isTarget = targetKey === draftKey;
+  if (isTarget) return { ...globalState, blockedByOtherGeneration: false };
+  if (globalState.running) {
+    return {
+      running: false,
+      message: "Another response is generating.",
+      blockedByOtherGeneration: true,
+    };
+  }
+  return { running: false, message: null, blockedByOtherGeneration: false };
+}
+
+/**
+ * Pure function: determine why Quick Ask submit should be blocked, if at all.
+ * Returns a human-readable reason string or null when not blocked.
+ */
+export function computeQuickAskBlockedReason(
+  mainRunning: boolean,
+  quickModelId: string,
+  mainModelId: string
+): string | null {
+  if (!mainRunning) return null;
+  if (quickModelId === mainModelId) {
+    return "Quick Ask uses the same model currently generating";
+  }
+  return null;
+}
+
 export function getProfileModel(settings: AIProviderSettings, profile: ModelProfileId) {
   if (isMockResponseModeEnabled(settings)) return mockModels[profile];
   const modelId =

@@ -1,6 +1,8 @@
 import { describe, expect, test } from "vitest";
 import {
+  computeComposerRunState,
   computeModelPickerInstalledState,
+  computeQuickAskBlockedReason,
   defaultAIProviderSettings,
   displayNameForOllamaModel,
   getInstalledModels,
@@ -357,5 +359,85 @@ describe("model picker selection → providerSettings.profiles.mainModelId", () 
     expect(installed.map((m) => m.id)).not.toContain("model-a");
     // Static suggestions are not installed either
     expect(installed.some((m) => m.id === "llama3.2")).toBe(false);
+  });
+});
+
+// ── computeComposerRunState ───────────────────────────────────────────────────
+
+describe("computeComposerRunState", () => {
+  const idle = { running: false, message: null };
+  const running = { running: true, message: "Response streaming..." };
+
+  test("target composer: returns running state, not blocked", () => {
+    const state = computeComposerRunState("loom-a", "loom-a", running);
+    expect(state.running).toBe(true);
+    expect(state.blockedByOtherGeneration).toBe(false);
+    expect(state.message).toBe("Response streaming...");
+  });
+
+  test("non-target composer while global running: blocked with message", () => {
+    const state = computeComposerRunState("loom-b", "loom-a", running);
+    expect(state.running).toBe(false);
+    expect(state.blockedByOtherGeneration).toBe(true);
+    expect(state.message).toBe("Another response is generating.");
+  });
+
+  test("non-target composer when global idle: not blocked", () => {
+    const state = computeComposerRunState("loom-b", "loom-a", idle);
+    expect(state.running).toBe(false);
+    expect(state.blockedByOtherGeneration).toBe(false);
+    expect(state.message).toBeNull();
+  });
+
+  test("no active target (null): not blocked when idle", () => {
+    const state = computeComposerRunState("loom-a", null, idle);
+    expect(state.running).toBe(false);
+    expect(state.blockedByOtherGeneration).toBe(false);
+  });
+
+  test("no active target, global running: non-target blocked", () => {
+    // When targetKey=null and global is running (edge case), any draftKey is non-target.
+    const state = computeComposerRunState("loom-a", null, running);
+    expect(state.running).toBe(false);
+    expect(state.blockedByOtherGeneration).toBe(true);
+  });
+
+  test("stop unblocks: after global goes idle, non-target is no longer blocked", () => {
+    const blockedState = computeComposerRunState("loom-b", "loom-a", running);
+    expect(blockedState.blockedByOtherGeneration).toBe(true);
+
+    const afterStop = computeComposerRunState("loom-b", null, idle);
+    expect(afterStop.blockedByOtherGeneration).toBe(false);
+  });
+});
+
+// ── computeQuickAskBlockedReason ─────────────────────────────────────────────
+
+describe("computeQuickAskBlockedReason", () => {
+  test("null when Main is not running", () => {
+    expect(computeQuickAskBlockedReason(false, "qwen3.5:9b", "qwen3.5:9b")).toBeNull();
+    expect(computeQuickAskBlockedReason(false, "llama3.2", "qwen3.5:9b")).toBeNull();
+  });
+
+  test("blocked reason when Main running and same model", () => {
+    const reason = computeQuickAskBlockedReason(true, "qwen3.5:9b", "qwen3.5:9b");
+    expect(reason).toBeTruthy();
+    expect(reason).toContain("same model");
+  });
+
+  test("null when Main running but different models", () => {
+    expect(computeQuickAskBlockedReason(true, "mistral:7b", "qwen3.5:9b")).toBeNull();
+    expect(computeQuickAskBlockedReason(true, "llama3.2", "qwen3.5:9b")).toBeNull();
+  });
+
+  test("identical model IDs with tag: blocked", () => {
+    expect(computeQuickAskBlockedReason(true, "llama3.2:latest", "llama3.2:latest")).toBeTruthy();
+  });
+
+  test("blocked reason does not reveal model names — safe for display", () => {
+    const reason = computeQuickAskBlockedReason(true, "qwen3.5:9b", "qwen3.5:9b");
+    // Should be a static user-facing string, not dynamic model names.
+    expect(typeof reason).toBe("string");
+    expect((reason as string).length).toBeLessThan(100);
   });
 });

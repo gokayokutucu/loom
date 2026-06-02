@@ -8371,6 +8371,13 @@ kbd {
   line-height: 1.45;
 }
 
+.ask-submit-blocked {
+  margin: 8px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--loom-text-muted);
+}
+
 .ask-actions {
   flex: 0 0 auto;
   display: flex;

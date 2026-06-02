@@ -284,7 +284,9 @@ import {
 } from "./services/referenceSuggestions";
 import { insertTranscriptAtCursorText } from "./services/speechTranscriptInsertion";
 import {
+  computeComposerRunState,
   computeModelPickerInstalledState,
+  computeQuickAskBlockedReason,
   getProfileModel,
   getInstalledModels,
   isMockResponseModeEnabled,
@@ -4386,10 +4388,7 @@ function App() {
   }
 
   function runtimeStateForComposer(draftKey: string) {
-    if (composerRuntimeTargetKey !== draftKey) {
-      return { running: false, message: null };
-    }
-    return composerRuntimeState;
+    return computeComposerRunState(draftKey, composerRuntimeTargetKey, composerRuntimeState);
   }
 
   function maybeAutoAnswerNow(responseId: string, progress: ModelExecutionProgress) {
@@ -13729,11 +13728,18 @@ function App() {
         />
       )}
 
-      {askState && (
+      {askState && (() => {
+        const quickAskSubmitBlockedReason = computeQuickAskBlockedReason(
+          composerRuntimeState.running,
+          getProfileModel(providerSettings, "quick").id,
+          getProfileModel(providerSettings, "main").id
+        );
+        return (
         <AskPopup
           state={askState}
           onUpdate={setAskState}
           onClose={closeSelectionAskFlow}
+          submitBlockedReason={quickAskSubmitBlockedReason}
           onLoom={async () => {
             const completedTurns = (askState.exchanges ?? [])
               .filter((exchange) => exchange.question.trim() && exchange.answer.trim())
@@ -13791,7 +13797,8 @@ function App() {
           onStop={stopQuickAskResponse}
           showDebug={false}
         />
-      )}
+        );
+      })()}
 
       {providerSettingsOpen && (
         <AIProviderSettingsModal
@@ -17276,7 +17283,7 @@ function PromptComposer({
   modelResponseMode: ModelResponseMode;
   providerSettings: AIProviderSettings;
   engineClient: LoomEngineClient;
-  runtimeState: { running: boolean; message: string | null };
+  runtimeState: { running: boolean; message: string | null; blockedByOtherGeneration?: boolean };
   runtimeHealth: RuntimeHealthState & {
     checking: boolean;
     testRuntime: () => Promise<RuntimeHealthState>;
@@ -20646,8 +20653,18 @@ function PromptComposer({
             className="send-button"
             aria-label={runtimeState.running ? "Stop response" : "Send"}
             onClick={submitComposer}
-            disabled={!runtimeState.running && Boolean(runtimeWarning)}
-            title={runtimeState.running ? "Stop response" : runtimeWarning ?? "Send"}
+            disabled={
+              (!runtimeState.running && Boolean(runtimeWarning)) ||
+              Boolean(runtimeState.blockedByOtherGeneration)
+            }
+            title={
+              runtimeState.running
+                ? "Stop response"
+                : runtimeState.blockedByOtherGeneration
+                  ? "Another response is already generating"
+                  : runtimeWarning ?? "Send"
+            }
+            data-testid={runtimeState.blockedByOtherGeneration ? "send-blocked-other-generation" : undefined}
           >
             {runtimeState.running ? <Square size={13} fill="currentColor" /> : <ArrowUp size={16} />}
           </button>
@@ -20659,10 +20676,13 @@ function PromptComposer({
                 ? "composer-runtime-status error"
                 : runtimeState.running
                 ? "composer-runtime-status"
-                : runtimeState.message?.includes("responded")
+                : runtimeState.blockedByOtherGeneration
                   ? "composer-runtime-status"
-                  : "composer-runtime-status error"
+                  : runtimeState.message?.includes("responded")
+                    ? "composer-runtime-status"
+                    : "composer-runtime-status error"
             }
+            data-testid={runtimeState.blockedByOtherGeneration ? "blocked-other-generation-message" : undefined}
           >
             {runtimeWarning ?? runtimeState.message}
           </p>

@@ -337,6 +337,7 @@ export function AskPopup({
   onSubmit,
   onStop,
   showDebug,
+  submitBlockedReason,
 }: {
   state: AskPopupState;
   onUpdate: (state: AskPopupState) => void;
@@ -345,6 +346,7 @@ export function AskPopup({
   onSubmit: () => void;
   onStop: () => void;
   showDebug: boolean;
+  submitBlockedReason?: string | null;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const answerListRef = useRef<HTMLDivElement | null>(null);
@@ -490,6 +492,11 @@ export function AskPopup({
           tabIndex={0}
         />
         {state.error && <p className="ask-error">{state.error}</p>}
+        {submitBlockedReason && !state.running && (
+          <p className="ask-submit-blocked" data-testid="quick-ask-submit-blocked">
+            {submitBlockedReason}
+          </p>
+        )}
         <div className="ask-actions">
           <button tabIndex={0} onClick={onLoom} disabled={!hasAnswer || state.running}>
             Convert to Weft
@@ -498,8 +505,10 @@ export function AskPopup({
           className="primary"
           tabIndex={0}
           onClick={state.running ? onStop : onSubmit}
-          disabled={!state.running && !state.question.trim()}
+          disabled={(!state.running && !state.question.trim()) || Boolean(!state.running && submitBlockedReason)}
           aria-label={state.running ? "Stop Ask response" : "Ask"}
+          title={!state.running && submitBlockedReason ? submitBlockedReason : undefined}
+          data-testid={!state.running && submitBlockedReason ? "quick-ask-blocked-button" : undefined}
         >
           {state.running ? <Square size={13} fill="currentColor" /> : <CornerDownLeft size={15} />}
           {state.running ? "Asking..." : "Ask"}
