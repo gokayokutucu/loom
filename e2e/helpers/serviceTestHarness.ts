@@ -18,6 +18,7 @@ export interface ServiceTestHarnessOptions {
   forceGenericQuickAskFirstAttempt?: boolean;
   deterministicThinkingDelayMs?: number;
   deterministicStreamChunkDelayMs?: number;
+  ollamaBaseUrl?: string;
   requestTimeoutMs?: number;
   startApp?: boolean;
 }
@@ -103,7 +104,7 @@ export async function createServiceTestHarness(
       LOOM_SERVICE_HOST: "127.0.0.1",
       LOOM_SERVICE_PORT: String(port),
       LOOM_SERVICE_LOG: "warn,sqlx=warn",
-      LOOM_OLLAMA_BASE_URL: "http://127.0.0.1:9",
+      LOOM_OLLAMA_BASE_URL: options.ollamaBaseUrl ?? "http://127.0.0.1:9",
       ...(options.deterministicProvider
         ? { LOOM_SERVICE_E2E_PROVIDER: options.deterministicProvider }
         : {}),
