@@ -351,6 +351,7 @@ import {
   type ToastNotificationIcon,
 } from "./components/ToastNotification";
 import { WeftView } from "./components/WeftView";
+import { truncateFragmentChipPreview } from "./services/fragmentChipPreview";
 import type {
   AddressSuggestion,
   BookmarkItem,
@@ -944,6 +945,10 @@ function mergeUniqueReferences(links: LoomLink[]) {
 
 function fragmentQuoteText(link: LoomLink) {
   return (link.selectedText ?? link.title).replace(/\s+/g, " ").trim();
+}
+
+function fragmentChipPreview(link: LoomLink) {
+  return truncateFragmentChipPreview(fragmentQuoteText(link));
 }
 
 function stripAttachedReferenceTokens(text: string, references?: LoomLink[]) {
@@ -19898,9 +19903,11 @@ function PromptComposer({
                 }
                 key={referenceIdentityKey(link)}
                 data-loom-path={link.path}
+                data-loom-selected-text={isFragmentReference(link) ? fragmentQuoteText(link) : undefined}
+                data-testid="selection-reference-chip"
               >
                 {isFragmentReference(link) ? <CornerDownRightIcon /> : <FileText size={13} />}
-                <span>{isFragmentReference(link) ? fragmentQuoteText(link) : link.title}</span>
+                <span>{isFragmentReference(link) ? fragmentChipPreview(link) : link.title}</span>
                 <button
                   type="button"
                   onClick={() => removeLinkedReference(link)}
