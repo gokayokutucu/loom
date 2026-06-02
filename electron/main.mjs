@@ -212,6 +212,7 @@ function createWindow(runtimeStatus) {
     backgroundColor: "#101112",
     icon: appIcon ? getAppIconPath() : undefined,
     show: false,
+    autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
