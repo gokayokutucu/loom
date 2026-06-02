@@ -661,6 +661,39 @@ export function getInstalledModels(settings: AIProviderSettings) {
   return settings.ollama.models.filter((model) => model.installed);
 }
 
+export type ModelPickerInstalledState =
+  | "live"
+  | "scanning"
+  | "cached"
+  | "offline-empty"
+  | "unknown-empty";
+
+export function computeModelPickerInstalledState(input: {
+  isMockProvider: boolean;
+  isScanningModels: boolean;
+  providerStatus: "unknown" | "connected" | "offline";
+  installedCount: number;
+}): ModelPickerInstalledState {
+  if (input.isMockProvider) return "live";
+  if (input.isScanningModels) return "scanning";
+  if (input.providerStatus === "connected") return "live";
+  if (input.installedCount > 0) return "cached";
+  if (input.providerStatus === "offline") return "offline-empty";
+  return "unknown-empty";
+}
+
+export function modelPickerStatusText(
+  state: ModelPickerInstalledState,
+  selectableCount: number
+): string | null {
+  if (state === "scanning") return "Scanning local Ollama models…";
+  if (state === "cached") return "Ollama is offline. Showing last discovered local models.";
+  if (state === "offline-empty") return "Ollama is not available.";
+  if (state === "unknown-empty") return "Test Ollama to discover installed local models.";
+  if (selectableCount === 0) return "No local models installed.";
+  return null;
+}
+
 export function getProfileModel(settings: AIProviderSettings, profile: ModelProfileId) {
   if (isMockResponseModeEnabled(settings)) return mockModels[profile];
   const modelId =

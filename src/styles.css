@@ -5265,7 +5265,16 @@ kbd {
   background: var(--loom-border-subtle);
 }
 
-.model-picker-status,
+/* Status text (bare text node — no grid columns needed). */
+.model-picker-status {
+  min-height: 34px;
+  padding: 6px 9px;
+  color: var(--loom-text-muted);
+  font-size: 12px;
+  line-height: 1.3;
+}
+
+/* Missing-model row has icon + text children — uses 2-column grid. */
 .model-picker-missing-model {
   display: grid;
   grid-template-columns: 18px minmax(0, 1fr);
@@ -5280,6 +5289,22 @@ kbd {
 
 .model-picker-status.cached {
   color: var(--loom-text-secondary);
+}
+
+.model-picker-status.scanning {
+  color: var(--loom-text-secondary);
+  animation: model-picker-scanning-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .model-picker-status.scanning {
+    animation: none;
+  }
+}
+
+@keyframes model-picker-scanning-pulse {
+  0%, 100% { opacity: 1; }
+  50%       { opacity: 0.45; }
 }
 
 .model-picker-missing-model span:last-child {

@@ -284,18 +284,23 @@ import {
 } from "./services/referenceSuggestions";
 import { insertTranscriptAtCursorText } from "./services/speechTranscriptInsertion";
 import {
+  computeModelPickerInstalledState,
   getProfileModel,
   getInstalledModels,
   isMockResponseModeEnabled,
+  mergeOllamaModels,
+  modelPickerStatusText,
   ModelProviderError,
   readAIProviderSettings,
   resolveOllamaContextLength,
   runModelProfileRequest,
   writeAIProviderSettings,
   type AIProviderSettings,
+  type ModelDescriptor,
   type ModelEffort,
   type ModelExecutionProgress,
   type ModelOutputBudget,
+  type ModelPickerInstalledState,
   type ModelProfileId,
   type RuntimeHealthState,
 } from "./services/modelProviders";
@@ -17341,6 +17346,8 @@ function PromptComposer({
   } | null>(null);
   const [referenceOpenError, setReferenceOpenError] = useState<string | null>(null);
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
+  const [isScanningModels, setIsScanningModels] = useState(false);
+  const modelScanGuardRef = useRef(false);
   const [modelPopoverStyle, setModelPopoverStyle] = useState<{
     left: number;
     top: number;
@@ -17388,26 +17395,13 @@ function PromptComposer({
       : installedModels;
   const selectedModelId = mainModel.id;
   const providerStatus = providerSettings.ollama.lastConnectionStatus;
-  const modelPickerInstalledState =
-    mainModel.provider === "mock"
-      ? "live"
-      : providerStatus === "connected"
-        ? "live"
-        : installedModels.length > 0
-          ? "cached"
-          : providerStatus === "offline"
-            ? "offline-empty"
-            : "unknown-empty";
-  const modelPickerStatusText =
-    modelPickerInstalledState === "cached"
-      ? "Ollama is offline. Showing last discovered local models."
-      : modelPickerInstalledState === "offline-empty"
-        ? "Ollama is not available."
-        : modelPickerInstalledState === "unknown-empty"
-          ? "Test Ollama to discover installed local models."
-          : selectableModels.length === 0
-            ? "No local models installed."
-            : null;
+  const modelPickerInstalledState: ModelPickerInstalledState = computeModelPickerInstalledState({
+    isMockProvider: mainModel.provider === "mock",
+    isScanningModels,
+    providerStatus,
+    installedCount: installedModels.length,
+  });
+  const pickerStatusText = modelPickerStatusText(modelPickerInstalledState, selectableModels.length);
   const runtimeWarning =
     getConfiguredLoomEngineMode() === "rust-service"
       ? null
@@ -17988,7 +17982,67 @@ function PromptComposer({
       window.removeEventListener("resize", updateModelPopoverPosition);
       window.removeEventListener("scroll", updateModelPopoverPosition, true);
     };
-  }, [modelPickerOpen, selectableModels.length, modelPickerStatusText, selectedModelMissing]);
+  }, [modelPickerOpen, selectableModels.length, pickerStatusText, selectedModelMissing]);
+
+  // Auto-scan: when the picker opens in unknown-empty state and the service is
+  // available, immediately discover installed Ollama models so the user does
+  // not need to open AI Providers → Models manually.
+  useEffect(() => {
+    if (
+      !modelPickerOpen ||
+      modelPickerInstalledState !== "unknown-empty" ||
+      getConfiguredLoomEngineMode() !== "rust-service" ||
+      modelScanGuardRef.current
+    ) {
+      return;
+    }
+    modelScanGuardRef.current = true;
+    setIsScanningModels(true);
+
+    engineClient.getRuntimeModels().then(
+      (result) => {
+        const descriptors: ModelDescriptor[] = result.models.map((model) => ({
+          id: model.modelName,
+          name: model.displayName,
+          provider: "ollama" as const,
+          installed: model.installed,
+          location: model.localPath ?? result.provider.modelStorePath,
+        }));
+        const merged = mergeOllamaModels(descriptors);
+        onProviderSettingsChange({
+          ...providerSettings,
+          ollama: {
+            ...providerSettings.ollama,
+            models: merged,
+            lastConnectionStatus: "connected",
+            lastCheckedAt: new Date().toISOString(),
+          },
+        });
+        setIsScanningModels(false);
+        // Guard resets when picker closes so next open re-scans if still empty.
+      },
+      () => {
+        // Ollama unreachable — mark offline so cached state can show if available.
+        onProviderSettingsChange({
+          ...providerSettings,
+          ollama: {
+            ...providerSettings.ollama,
+            lastConnectionStatus: "offline",
+            lastCheckedAt: new Date().toISOString(),
+          },
+        });
+        setIsScanningModels(false);
+      }
+    );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelPickerOpen]);
+
+  // Reset scan guard when picker closes so the next open can scan again if needed.
+  useEffect(() => {
+    if (!modelPickerOpen) {
+      modelScanGuardRef.current = false;
+    }
+  }, [modelPickerOpen]);
 
   useLayoutEffect(() => {
     if (!mention) return;
@@ -20486,16 +20540,20 @@ function PromptComposer({
               }
             >
               <div className="model-picker-section-label">Models</div>
-              {modelPickerStatusText && (
+              {pickerStatusText && (
                 <div
-                  className={
-                    modelPickerInstalledState === "cached"
-                      ? "model-picker-status cached"
-                      : "model-picker-status"
-                  }
+                  className={[
+                    "model-picker-status",
+                    modelPickerInstalledState === "cached" ? "cached" : "",
+                    modelPickerInstalledState === "scanning" ? "scanning" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
                   role="note"
+                  aria-live={modelPickerInstalledState === "scanning" ? "polite" : undefined}
+                  aria-busy={modelPickerInstalledState === "scanning" ? true : undefined}
                 >
-                  {modelPickerStatusText}
+                  {pickerStatusText}
                 </div>
               )}
               {selectedModelMissing && (
