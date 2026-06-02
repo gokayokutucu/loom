@@ -1,3 +1,5 @@
+#[cfg(feature = "experimental-rig")]
+use crate::providers::rig_openai_compatible::RigOpenAiCompatibleProviderAdapter;
 use crate::providers::{
     config::ProviderKind,
     contract::{
@@ -28,22 +30,77 @@ pub trait ProviderAdapter: Clone + Send + Sync + 'static {
 
 #[derive(Debug, Clone)]
 pub struct ProviderRegistry {
-    ollama: OllamaProviderAdapter,
+    default_generation: ProviderRegistryAdapter,
 }
 
 impl ProviderRegistry {
     pub fn new(ollama: OllamaRuntime) -> Self {
+        #[cfg(feature = "experimental-rig")]
+        if let Some(adapter) = RigOpenAiCompatibleProviderAdapter::from_env_for_e2e() {
+            return Self {
+                default_generation: ProviderRegistryAdapter::RigOpenAiCompatible(adapter),
+            };
+        }
         Self {
-            ollama: OllamaProviderAdapter::new(ollama),
+            default_generation: ProviderRegistryAdapter::Ollama(OllamaProviderAdapter::new(ollama)),
         }
     }
 
-    pub fn default_generation_adapter(&self) -> &OllamaProviderAdapter {
-        &self.ollama
+    pub fn default_generation_adapter(&self) -> &ProviderRegistryAdapter {
+        &self.default_generation
     }
 
     pub fn cancel_generation(&self, request_id: &str) -> bool {
-        self.ollama.cancel(request_id)
+        self.default_generation.cancel(request_id)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ProviderRegistryAdapter {
+    Ollama(OllamaProviderAdapter),
+    #[cfg(feature = "experimental-rig")]
+    RigOpenAiCompatible(RigOpenAiCompatibleProviderAdapter),
+}
+
+impl ProviderAdapter for ProviderRegistryAdapter {
+    fn provider_kind(&self) -> ProviderKind {
+        match self {
+            Self::Ollama(adapter) => adapter.provider_kind(),
+            #[cfg(feature = "experimental-rig")]
+            Self::RigOpenAiCompatible(adapter) => adapter.provider_kind(),
+        }
+    }
+
+    fn provider_profile_id(&self) -> &str {
+        match self {
+            Self::Ollama(adapter) => adapter.provider_profile_id(),
+            #[cfg(feature = "experimental-rig")]
+            Self::RigOpenAiCompatible(adapter) => adapter.provider_profile_id(),
+        }
+    }
+
+    fn capabilities(&self) -> ProviderContractCapabilities {
+        match self {
+            Self::Ollama(adapter) => adapter.capabilities(),
+            #[cfg(feature = "experimental-rig")]
+            Self::RigOpenAiCompatible(adapter) => adapter.capabilities(),
+        }
+    }
+
+    fn stream_chat(&self, request: ProviderContractRequest) -> ProviderEventStream {
+        match self {
+            Self::Ollama(adapter) => adapter.stream_chat(request),
+            #[cfg(feature = "experimental-rig")]
+            Self::RigOpenAiCompatible(adapter) => adapter.stream_chat(request),
+        }
+    }
+
+    fn cancel(&self, request_id: &str) -> bool {
+        match self {
+            Self::Ollama(adapter) => adapter.cancel(request_id),
+            #[cfg(feature = "experimental-rig")]
+            Self::RigOpenAiCompatible(adapter) => adapter.cancel(request_id),
+        }
     }
 }
 

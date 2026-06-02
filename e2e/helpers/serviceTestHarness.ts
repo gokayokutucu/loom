@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { RustHttpLoomEngineClient } from "../../src/engine";
 import type { EngineResponseEvent } from "../../src/engine/LoomEngineTypes";
 
-export type DeterministicProviderMode = "event-sourcing";
+export type DeterministicProviderMode = "event-sourcing" | "rig-openai-compatible";
 export type DeterministicResponseMode = "long-streaming-scroll";
 export type DeterministicChunkMode = "word" | "phrase";
 
@@ -19,6 +19,8 @@ export interface ServiceTestHarnessOptions {
   deterministicThinkingDelayMs?: number;
   deterministicStreamChunkDelayMs?: number;
   ollamaBaseUrl?: string;
+  openAiCompatibleBaseUrl?: string;
+  openAiCompatibleApiKey?: string;
   requestTimeoutMs?: number;
   startApp?: boolean;
 }
@@ -105,6 +107,12 @@ export async function createServiceTestHarness(
       LOOM_SERVICE_PORT: String(port),
       LOOM_SERVICE_LOG: "warn,sqlx=warn",
       LOOM_OLLAMA_BASE_URL: options.ollamaBaseUrl ?? "http://127.0.0.1:9",
+      ...(options.openAiCompatibleBaseUrl
+        ? { LOOM_SERVICE_E2E_OPENAI_BASE_URL: options.openAiCompatibleBaseUrl }
+        : {}),
+      ...(options.openAiCompatibleApiKey
+        ? { LOOM_SERVICE_E2E_OPENAI_API_KEY: options.openAiCompatibleApiKey }
+        : {}),
       ...(options.deterministicProvider
         ? { LOOM_SERVICE_E2E_PROVIDER: options.deterministicProvider }
         : {}),

@@ -15,7 +15,7 @@ pub trait ProviderPipelineRegistry: Clone + Send + Sync + 'static {
 }
 
 impl ProviderPipelineRegistry for ProviderRegistry {
-    type Adapter = crate::providers::adapter::OllamaProviderAdapter;
+    type Adapter = crate::providers::adapter::ProviderRegistryAdapter;
 
     fn default_generation_adapter(&self) -> &Self::Adapter {
         ProviderRegistry::default_generation_adapter(self)

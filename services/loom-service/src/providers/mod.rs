@@ -4,4 +4,6 @@ pub mod contract;
 pub mod ollama;
 pub mod openai_compatible;
 pub mod pipeline;
+#[cfg(feature = "experimental-rig")]
+pub mod rig_openai_compatible;
 pub mod types;
