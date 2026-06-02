@@ -285,6 +285,7 @@ import {
 import { insertTranscriptAtCursorText } from "./services/speechTranscriptInsertion";
 import {
   getProfileModel,
+  getInstalledModels,
   isMockResponseModeEnabled,
   ModelProviderError,
   readAIProviderSettings,
@@ -17356,14 +17357,35 @@ function PromptComposer({
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const lastTextInsertionRequestRef = useRef(0);
   const mainModel = getProfileModel(providerSettings, "main");
-  const installedModels = providerSettings.ollama.models.filter((model) => model.installed);
+  const installedModels = getInstalledModels(providerSettings);
+  const selectedModelMissing =
+    mainModel.provider !== "mock" && !installedModels.some((model) => model.id === mainModel.id);
   const selectableModels =
     mainModel.provider === "mock"
       ? [mainModel]
-      : installedModels.length > 0
-        ? installedModels
-        : providerSettings.ollama.models;
+      : installedModels;
   const selectedModelId = mainModel.id;
+  const providerStatus = providerSettings.ollama.lastConnectionStatus;
+  const modelPickerInstalledState =
+    mainModel.provider === "mock"
+      ? "live"
+      : providerStatus === "connected"
+        ? "live"
+        : installedModels.length > 0
+          ? "cached"
+          : providerStatus === "offline"
+            ? "offline-empty"
+            : "unknown-empty";
+  const modelPickerStatusText =
+    modelPickerInstalledState === "cached"
+      ? "Ollama is offline. Showing last discovered local models."
+      : modelPickerInstalledState === "offline-empty"
+        ? "Ollama is not available."
+        : modelPickerInstalledState === "unknown-empty"
+          ? "Test Ollama to discover installed local models."
+          : selectableModels.length === 0
+            ? "No local models installed."
+            : null;
   const runtimeWarning =
     getConfiguredLoomEngineMode() === "rust-service"
       ? null
@@ -17920,7 +17942,7 @@ function PromptComposer({
       const minWidth = Math.max(buttonRect.width, 220);
       let left = buttonRect.left;
       let top = buttonRect.bottom + gap;
-      const menuHeight = menuRect.height || 44 * selectableModels.length;
+      const menuHeight = menuRect.height || 44 * Math.max(selectableModels.length, 1);
 
       if (top + menuHeight > window.innerHeight - viewportPadding) {
         top = Math.max(viewportPadding, buttonRect.top - gap - menuHeight);
@@ -17942,7 +17964,7 @@ function PromptComposer({
       window.removeEventListener("resize", updateModelPopoverPosition);
       window.removeEventListener("scroll", updateModelPopoverPosition, true);
     };
-  }, [modelPickerOpen, selectableModels.length]);
+  }, [modelPickerOpen, selectableModels.length, modelPickerStatusText, selectedModelMissing]);
 
   useLayoutEffect(() => {
     if (!mention) return;
@@ -20393,6 +20415,27 @@ function PromptComposer({
               }
             >
               <div className="model-picker-section-label">Models</div>
+              {modelPickerStatusText && (
+                <div
+                  className={
+                    modelPickerInstalledState === "cached"
+                      ? "model-picker-status cached"
+                      : "model-picker-status"
+                  }
+                  role="note"
+                >
+                  {modelPickerStatusText}
+                </div>
+              )}
+              {selectedModelMissing && (
+                <div className="model-picker-missing-model" role="note">
+                  <span aria-hidden="true" />
+                  <span>
+                    <strong>{mainModel.name}</strong>
+                    <small>Selected model is unavailable</small>
+                  </span>
+                </div>
+              )}
               {selectableModels.map((model) => {
                 const selected = model.id === selectedModelId;
                 return (
