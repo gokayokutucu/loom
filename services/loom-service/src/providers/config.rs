@@ -1,16 +1,23 @@
 use crate::error::ServiceError;
+use crate::providers::secret_store::validate_secret_ref;
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::net::IpAddr;
 
-const FORBIDDEN_CONFIG_KEYS: [&str; 12] = [
+const FORBIDDEN_CONFIG_KEYS: [&str; 18] = [
     "api_key",
     "apikey",
     "apiKey",
+    "token",
+    "bearer",
+    "authorization",
     "bearer_token",
     "bearerToken",
     "password",
+    "credential",
+    "client_secret",
+    "private_key",
     "refresh_token",
     "refreshToken",
     "raw_thinking",
@@ -142,6 +149,7 @@ pub struct ProviderProfileConfig {
     pub base_url: Option<String>,
     pub default_model: Option<String>,
     pub requires_secret: bool,
+    pub secret_ref: Option<String>,
     pub model_discovery: ProviderModelDiscoveryConfig,
     pub request_defaults: ProviderRequestDefaultsConfig,
     pub security: ProviderSecurityPolicyConfig,
@@ -159,6 +167,7 @@ impl ProviderProfileConfig {
             base_url: Some(base_url.trim_end_matches('/').to_string()),
             default_model: Some(default_model),
             requires_secret: false,
+            secret_ref: None,
             model_discovery: ProviderModelDiscoveryConfig::default(),
             request_defaults: ProviderRequestDefaultsConfig::default(),
             security: ProviderSecurityPolicyConfig::default(),
@@ -247,6 +256,19 @@ fn validate_profile_identity(profile: &ProviderProfileConfig) -> Result<(), Serv
             return Err(ServiceError::config(
                 "providers.profiles.defaultModel must not be empty when present",
             ));
+        }
+    }
+    if let Some(secret_ref) = &profile.secret_ref {
+        validate_secret_ref(secret_ref)?;
+        if let Some(profile_id) = secret_ref
+            .strip_prefix("provider:")
+            .and_then(|value| value.strip_suffix(":apiKey"))
+        {
+            if profile_id != profile.id {
+                return Err(ServiceError::config(
+                    "providers.profiles.secretRef provider id must match profile id",
+                ));
+            }
         }
     }
     Ok(())

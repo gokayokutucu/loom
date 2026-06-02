@@ -1,6 +1,6 @@
 use crate::{
     config::ConfigManager,
-    providers::ollama::OllamaRuntime,
+    providers::{ollama::OllamaRuntime, secret_store::ProviderSecretStore},
     runtime::{OperationTracker, RestartState},
     storage::db::Database,
 };
@@ -10,6 +10,7 @@ pub struct AppState {
     pub database: Database,
     pub ollama: OllamaRuntime,
     pub config: ConfigManager,
+    pub secret_store: ProviderSecretStore,
     pub operations: OperationTracker,
     pub restart: RestartState,
 }

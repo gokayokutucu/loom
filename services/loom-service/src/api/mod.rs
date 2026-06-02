@@ -17,6 +17,7 @@ mod model_runtime;
 mod ocr;
 mod ollama;
 mod orchestration;
+mod provider_secrets;
 mod references;
 mod reset;
 pub(crate) mod resolve;
@@ -28,7 +29,7 @@ mod ui_state;
 mod wefts;
 
 use crate::config::ConfigManager;
-use crate::providers::ollama::OllamaRuntime;
+use crate::providers::{ollama::OllamaRuntime, secret_store::ProviderSecretStore};
 use crate::runtime::{OperationTracker, RestartState};
 use crate::storage::db::Database;
 use axum::{
@@ -53,6 +54,7 @@ pub fn router(
         database,
         ollama,
         config,
+        secret_store: ProviderSecretStore::default(),
         operations,
         restart,
     };
@@ -242,6 +244,16 @@ pub fn router(
         .route("/providers/ollama/models", get(ollama::models))
         .route("/providers/ollama/chat", post(ollama::chat))
         .route("/providers/ollama/cancel/:request_id", post(ollama::cancel))
+        .route(
+            "/providers/secrets/:profile_id",
+            get(provider_secrets::provider_secret_status)
+                .put(provider_secrets::set_provider_secret)
+                .delete(provider_secrets::delete_provider_secret),
+        )
+        .route(
+            "/providers/secrets/:profile_id/test",
+            post(provider_secrets::test_provider_secret),
+        )
         // Loom intentionally does not proxy Ollama /api/create or /api/push.
         // Model-management APIs can load attacker-controlled model data or
         // publish local model data and are disabled by default policy.

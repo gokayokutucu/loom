@@ -4831,6 +4831,7 @@ mod tests {
                 PathBuf::from("/tmp/loom-orchestration-runtime-test.toml"),
                 LoomServiceConfig::default(),
             ),
+            secret_store: crate::providers::secret_store::ProviderSecretStore::default(),
             operations: OperationTracker::default(),
             restart: RestartState::default(),
         }
