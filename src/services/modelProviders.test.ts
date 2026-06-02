@@ -1,10 +1,13 @@
 import { describe, expect, test } from "vitest";
 import {
   defaultAIProviderSettings,
+  displayNameForOllamaModel,
   getInstalledModels,
   getProfileModel,
   mergeOllamaModels,
+  normalizeOllamaModelId,
   type AIProviderSettings,
+  type ModelDescriptor,
 } from "./modelProviders";
 
 function settingsWithModels(models: AIProviderSettings["ollama"]["models"]): AIProviderSettings {
@@ -15,6 +18,10 @@ function settingsWithModels(models: AIProviderSettings["ollama"]["models"]): AIP
       models,
     },
   };
+}
+
+function installedDescriptor(id: string): ModelDescriptor {
+  return { id, name: id, provider: "ollama", installed: true };
 }
 
 describe("model provider installed model filtering", () => {
@@ -52,5 +59,112 @@ describe("model provider installed model filtering", () => {
     expect(mainModel.name).toBe("Qwen 3.5 9B");
     expect(mainModel.installed).toBe(false);
     expect(getInstalledModels(settings).some((model) => model.id === mainModel.id)).toBe(false);
+  });
+});
+
+// ── Non-curated model discovery tests ────────────────────────────────────────
+
+describe("mergeOllamaModels — non-curated installed models", () => {
+  test("non-curated installed model appears as installed after merge", () => {
+    // Simulates a service refresh that returns a user-installed model
+    // not in the curated list (e.g. phi4, mistral-nemo, custom-7b).
+    const models = mergeOllamaModels([installedDescriptor("phi4")]);
+    const installed = getInstalledModels(settingsWithModels(models));
+
+    expect(installed.some((m) => m.id === "phi4")).toBe(true);
+    expect(installed.find((m) => m.id === "phi4")?.installed).toBe(true);
+  });
+
+  test("non-curated model with tag is preserved and appears installed", () => {
+    const models = mergeOllamaModels([installedDescriptor("custom-7b:v2")]);
+    const installed = getInstalledModels(settingsWithModels(models));
+
+    expect(installed.some((m) => m.id === "custom-7b:v2")).toBe(true);
+  });
+
+  test("non-curated model with namespace/name:tag is preserved", () => {
+    const models = mergeOllamaModels([installedDescriptor("namespace/model:tag")]);
+    const installed = getInstalledModels(settingsWithModels(models));
+
+    expect(installed.some((m) => m.id === "namespace/model:tag")).toBe(true);
+  });
+
+  test("static suggestions remain not-installed even after refresh with non-curated model", () => {
+    // Refresh returns phi4 only; all curated suggestions must stay not-installed.
+    const models = mergeOllamaModels([installedDescriptor("phi4")]);
+    const installed = getInstalledModels(settingsWithModels(models));
+
+    const suggestedIds = ["llama3.2", "qwen3.5:9b", "codeqwen:7b-code", "qwen:7b",
+      "llama3.1:8b", "qwen2.5:7b", "mistral:7b", "nomic-embed-text"];
+    suggestedIds.forEach((id) => {
+      expect(installed.some((m) => m.id === id)).toBe(false);
+    });
+  });
+
+  test("refresh result with new model updates installed list", () => {
+    // Stale state: llama3.2 was installed.
+    const stale = mergeOllamaModels([installedDescriptor("llama3.2")]);
+    const staleInstalled = getInstalledModels(settingsWithModels(stale));
+    expect(staleInstalled.map((m) => m.id)).toContain("llama3.2");
+
+    // Fresh refresh: llama3.2 AND phi4 are now installed.
+    const fresh = mergeOllamaModels([
+      installedDescriptor("llama3.2"),
+      installedDescriptor("phi4"),
+    ]);
+    const freshInstalled = getInstalledModels(settingsWithModels(fresh));
+
+    expect(freshInstalled.map((m) => m.id)).toContain("llama3.2");
+    expect(freshInstalled.map((m) => m.id)).toContain("phi4");
+    expect(freshInstalled.length).toBeGreaterThan(staleInstalled.length);
+  });
+
+  test("live refresh result replaces stale installed cache", () => {
+    // The cache (providerSettings.ollama.models) is replaced entirely by the
+    // result of mergeOllamaModels on every refresh call.  If a model was in the
+    // stale cache but is no longer returned by the service, it must not appear
+    // as installed in the new settings.
+    const afterRefresh = mergeOllamaModels([installedDescriptor("phi4")]);
+    const installed = getInstalledModels(settingsWithModels(afterRefresh));
+
+    // llama3.2 was not returned by this refresh — must not be installed.
+    expect(installed.some((m) => m.id === "llama3.2")).toBe(false);
+    expect(installed.some((m) => m.id === "phi4")).toBe(true);
+  });
+});
+
+// ── Model name / tag normalisation tests ─────────────────────────────────────
+
+describe("normalizeOllamaModelId — tag and name preservation", () => {
+  test(":latest suffix is stripped", () => {
+    expect(normalizeOllamaModelId("phi4:latest")).toBe("phi4");
+    expect(normalizeOllamaModelId("llama3.2:latest")).toBe("llama3.2");
+  });
+
+  test("non-latest tags are preserved", () => {
+    expect(normalizeOllamaModelId("custom-7b:v2")).toBe("custom-7b:v2");
+    expect(normalizeOllamaModelId("phi4:instruct")).toBe("phi4:instruct");
+  });
+
+  test("namespace/model:tag names are preserved verbatim", () => {
+    expect(normalizeOllamaModelId("namespace/model:tag")).toBe("namespace/model:tag");
+    expect(normalizeOllamaModelId("vendor/phi4:latest")).toBe("vendor/phi4");
+  });
+
+  test("whitespace is trimmed", () => {
+    expect(normalizeOllamaModelId("  phi4  ")).toBe("phi4");
+  });
+});
+
+describe("displayNameForOllamaModel — unknown model fallback", () => {
+  test("unknown model ID produces a non-empty display name", () => {
+    expect(displayNameForOllamaModel("phi4")).toBeTruthy();
+    expect(displayNameForOllamaModel("mistral-nemo")).toBeTruthy();
+    expect(displayNameForOllamaModel("custom-7b:v2")).toBeTruthy();
+  });
+
+  test("known model ID returns its exact display name", () => {
+    expect(displayNameForOllamaModel("llama3.2")).toBe("Llama 3.2 3B");
+    expect(displayNameForOllamaModel("qwen3.5:9b")).toBe("Qwen 3.5 9B");
   });
 });

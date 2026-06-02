@@ -4422,6 +4422,9 @@ kbd {
   min-height: 88px;
   border: 0;
   border-radius: 12px;
+  /* overflow: hidden so chip rows cannot widen the surface.
+     All inline popovers use position:fixed and are not clipped. */
+  overflow: hidden;
   background: var(--loom-bg-surface-raised);
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.045),
@@ -4779,7 +4782,12 @@ kbd {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
   padding: 8px 10px 0;
+  overflow: hidden;
+  box-sizing: border-box;
 }
 
 .attached-file-row {
@@ -4807,6 +4815,7 @@ kbd {
   align-items: center;
   gap: 6px;
   max-width: min(520px, 100%);
+  min-width: 0;
   min-height: 26px;
   padding: 4px 5px 4px 8px;
   border-radius: 8px;
