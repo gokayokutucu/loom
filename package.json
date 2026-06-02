@@ -14,6 +14,10 @@
     "electron:package:dev": "cargo build --manifest-path services/loom-service/Cargo.toml --release && npm run build && node electron/package-dev.mjs",
     "electron:package:mac:arm64": "cargo build --manifest-path services/loom-service/Cargo.toml --release --target aarch64-apple-darwin && npm run build && node electron/package-mac-arm64.mjs",
     "electron:dist:mac:arm64": "npm run electron:package:mac:arm64 && node electron/dist-mac-arm64.mjs",
+    "electron:package:win": "node electron/build-win.mjs",
+    "electron:dist:win": "npm run electron:package:win && node electron/dist-win.mjs",
+    "electron:package:linux": "cargo build --manifest-path services/loom-service/Cargo.toml --release && npm run build && node electron/package-linux.mjs",
+    "electron:dist:linux": "npm run electron:package:linux && node electron/dist-linux.mjs",
     "test:e2e": "playwright test",
     "service:dev": "cargo run --manifest-path services/loom-service/Cargo.toml",
     "service:check": "cargo check --manifest-path services/loom-service/Cargo.toml",
@@ -39,6 +43,7 @@
     "@playwright/test": "^1.59.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
+    "cross-env": "^10.1.0",
     "electron": "^41.6.1",
     "vitest": "^4.1.7"
   }
