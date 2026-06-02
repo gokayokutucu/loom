@@ -12,6 +12,8 @@ export interface ReferenceSuggestionMatch {
   reason?: string;
 }
 
+const RESPONSE_CODE_QUERY_PATTERN = /\bR-[a-z0-9]{0,6}\b/i;
+
 function normalizeSearchValue(value: string) {
   return value.trim().toLowerCase();
 }
@@ -39,7 +41,23 @@ function bestMatch(
 }
 
 export function readableReferenceCode(item: ReferenceSuggestionSearchItem) {
-  return item.referenceCode ?? item.meta?.code ?? "";
+  return item.referenceCode ?? item.meta?.displayCode ?? item.meta?.code ?? "";
+}
+
+export function responseCodeQuery(rawQuery: string) {
+  const match = RESPONSE_CODE_QUERY_PATTERN.exec(rawQuery.trim());
+  return match?.[0] ?? "";
+}
+
+function uniqueQueries(values: string[]) {
+  const seen = new Set<string>();
+  return values
+    .map(normalizeSearchValue)
+    .filter((value) => {
+      if (!value || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
 }
 
 export function scoreReferenceSuggestion(
@@ -67,11 +85,19 @@ export function scoreReferenceSuggestion(
   const normalizedCode = normalizeSearchValue(code);
   const normalizedId = normalizeSearchValue(id);
   const normalizedTitle = normalizeSearchValue(title);
+  const codeQueries = uniqueQueries([query, responseCodeQuery(rawQuery)]);
 
   if (normalizedCode) {
-    if (normalizedCode === query) match = bestMatch(match, 1000, `code: ${code}`);
-    else if (normalizedCode.startsWith(query)) match = bestMatch(match, 920, `code: ${code}`);
-    else if (normalizedCode.includes(query)) match = bestMatch(match, 820, `code: ${code}`);
+    codeQueries.forEach((codeQuery) => {
+      const responseCodeBoost = item.type === "response" && codeQuery.startsWith("r-") ? 200 : 0;
+      if (normalizedCode === codeQuery) {
+        match = bestMatch(match, 1000 + responseCodeBoost, `code: ${code}`);
+      } else if (normalizedCode.startsWith(codeQuery)) {
+        match = bestMatch(match, 920 + responseCodeBoost, `code: ${code}`);
+      } else if (normalizedCode.includes(codeQuery)) {
+        match = bestMatch(match, 820 + responseCodeBoost, `code: ${code}`);
+      }
+    });
   }
 
   if (normalizedId) {
