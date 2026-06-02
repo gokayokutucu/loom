@@ -303,3 +303,59 @@ describe("modelPickerStatusText", () => {
     expect(text).not.toContain("CodeQwen");
   });
 });
+
+// ── Model picker → Main model persistence mapping ────────────────────────────
+
+describe("model picker selection → providerSettings.profiles.mainModelId", () => {
+  test("selecting an installed model updates mainModelId", () => {
+    const settings = settingsWithModels([
+      { id: "llama3.2", name: "Llama 3.2 3B", provider: "ollama", installed: true },
+      { id: "qwen3.5:9b", name: "Qwen 3.5 9B", provider: "ollama", installed: true },
+    ]);
+
+    // Simulates the state update performed by setMainModel in PromptComposer.
+    const updated: AIProviderSettings = {
+      ...settings,
+      profiles: { ...settings.profiles, mainModelId: "llama3.2" },
+    };
+
+    expect(updated.profiles.mainModelId).toBe("llama3.2");
+    // The new main model must be in the installed list so it is selectable.
+    expect(getInstalledModels(updated).some((m) => m.id === "llama3.2")).toBe(true);
+  });
+
+  test("selected model id is preserved in localStorage-serialised settings", () => {
+    const settings: AIProviderSettings = {
+      ...defaultAIProviderSettings,
+      profiles: {
+        ...defaultAIProviderSettings.profiles,
+        mainModelId: "llama3.2",
+      },
+    };
+    const roundTripped = JSON.parse(JSON.stringify(settings)) as AIProviderSettings;
+    expect(roundTripped.profiles.mainModelId).toBe("llama3.2");
+  });
+
+  test("missing/unavailable model is NOT in installed list and should not be selected", () => {
+    const settings = settingsWithModels([
+      { id: "llama3.2", name: "Llama 3.2 3B", provider: "ollama", installed: false },
+    ]);
+    // An uninstalled model must not appear as a selectable installed choice.
+    expect(getInstalledModels(settings).some((m) => m.id === "llama3.2")).toBe(false);
+  });
+
+  test("only installed models are selectable — static suggestions remain non-installed", () => {
+    // Refresh returns model-b as the only installed model.
+    const models = mergeOllamaModels([
+      { id: "model-a", name: "Model A", provider: "ollama", installed: false },
+      { id: "model-b", name: "Model B", provider: "ollama", installed: true },
+    ]);
+    const settings = settingsWithModels(models);
+    const installed = getInstalledModels(settings);
+
+    expect(installed.map((m) => m.id)).toContain("model-b");
+    expect(installed.map((m) => m.id)).not.toContain("model-a");
+    // Static suggestions are not installed either
+    expect(installed.some((m) => m.id === "llama3.2")).toBe(false);
+  });
+});

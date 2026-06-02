@@ -197,3 +197,120 @@ test.describe("[pure-ui-rendering] Ollama model picker installed model states", 
     await expect(menu.getByText("Selected model is unavailable")).toBeVisible();
   });
 });
+
+// ── Model picker selection persists as Main model ────────────────────────────
+
+test.describe("[pure-ui-rendering] Model picker selection → Main model persistence", () => {
+  const MODEL_A = { id: "llama3.2", name: "Llama 3.2 3B", installed: true };
+  const MODEL_B = { id: "qwen:7b", name: "Qwen 7B", installed: true };
+
+  async function openAIProvidersModelsSettings(page: Page) {
+    await page.getByTestId("profile-menu-trigger").click();
+    await page.getByTestId("open-app-settings").click();
+    await page.getByRole("button", { name: /Models/ }).click();
+  }
+
+  test("selecting model B in picker updates model picker button to model B", async ({
+    page,
+  }) => {
+    await openApp(
+      page,
+      providerSettings({ status: "connected", mainModelId: MODEL_A.id, models: [MODEL_A, MODEL_B] })
+    );
+
+    const menu = await openModelPicker(page);
+    await menu.getByRole("menuitemradio", { name: new RegExp(MODEL_B.name) }).click();
+
+    // Menu closes after selection; picker button must now show model B.
+    await expect(page.getByRole("button", { name: "Select model" })).toContainText(MODEL_B.name);
+  });
+
+  test("selected model B is reflected in AI Providers → Models as Main", async ({ page }) => {
+    await openApp(
+      page,
+      providerSettings({ status: "connected", mainModelId: MODEL_A.id, models: [MODEL_A, MODEL_B] })
+    );
+
+    // Select model B in picker.
+    const menu = await openModelPicker(page);
+    await menu.getByRole("menuitemradio", { name: new RegExp(MODEL_B.name) }).click();
+
+    // Open Settings → Models.
+    await openAIProvidersModelsSettings(page);
+
+    // Use a strong-element exact match to avoid "CodeQwen 7B Code" false positives.
+    const modelBRow = page
+      .locator(".provider-model-row")
+      .filter({ has: page.locator("strong").filter({ hasText: new RegExp(`^${MODEL_B.name}$`) }) });
+    const modelARow = page
+      .locator(".provider-model-row")
+      .filter({ has: page.locator("strong").filter({ hasText: new RegExp(`^${MODEL_A.name}$`) }) });
+
+    await expect(modelBRow).toContainText("Main");
+    await expect(modelARow).not.toContainText("Main");
+  });
+
+  test("selected model B is persisted to localStorage immediately after selection", async ({
+    page,
+  }) => {
+    // addInitScript re-runs on every page.goto/reload, so we verify localStorage
+    // directly instead of reloading (which would reset state via addInitScript).
+    await openApp(
+      page,
+      providerSettings({ status: "connected", mainModelId: MODEL_A.id, models: [MODEL_A, MODEL_B] })
+    );
+
+    // Select model B.
+    const menu = await openModelPicker(page);
+    await menu.getByRole("menuitemradio", { name: new RegExp(MODEL_B.name) }).click();
+    await expect(page.getByRole("button", { name: "Select model" })).toContainText(MODEL_B.name);
+
+    // Verify localStorage was updated so the choice survives reload.
+    const savedMainModelId = await page.evaluate(
+      (key) => {
+        const raw = localStorage.getItem(key);
+        if (!raw) return null;
+        const parsed = JSON.parse(raw) as { profiles?: { mainModelId?: string } };
+        return parsed?.profiles?.mainModelId ?? null;
+      },
+      providerSettingsKey
+    );
+    expect(savedMainModelId).toBe(MODEL_B.id);
+  });
+
+  test("unavailable model is not selectable in picker", async ({ page }) => {
+    await openApp(
+      page,
+      providerSettings({
+        status: "connected",
+        mainModelId: MODEL_A.id,
+        models: [
+          MODEL_A,
+          { id: MODEL_B.id, name: MODEL_B.name, installed: false }, // B is NOT installed
+        ],
+      })
+    );
+
+    const menu = await openModelPicker(page);
+
+    // Model B must not appear as a menuitemradio (not selectable).
+    await expect(menu.getByRole("menuitemradio", { name: new RegExp(MODEL_B.name) })).toHaveCount(0);
+    // Model A is installed and selectable.
+    await expect(menu.getByRole("menuitemradio", { name: new RegExp(MODEL_A.name) })).toBeVisible();
+  });
+
+  test("static suggestions are not selectable as installed models after picker selection", async ({
+    page,
+  }) => {
+    await openApp(
+      page,
+      providerSettings({ status: "connected", mainModelId: MODEL_A.id, models: [MODEL_A, MODEL_B] })
+    );
+
+    const menu = await openModelPicker(page);
+
+    // Static suggestions (Mistral 7B) that are NOT in the installed list must not appear.
+    await expect(menu.getByRole("menuitemradio", { name: /Mistral 7B/ })).toHaveCount(0);
+    await expect(menu.getByRole("menuitemradio", { name: /CodeQwen 7B/ })).toHaveCount(0);
+  });
+});

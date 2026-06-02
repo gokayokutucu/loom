@@ -17417,6 +17417,7 @@ function PromptComposer({
   const electronPermissions = getElectronPermissionsBridge();
 
   function setMainModel(modelId: string) {
+    // Optimistic local update — writes to localStorage immediately.
     onProviderSettingsChange({
       ...providerSettings,
       profiles: {
@@ -17424,6 +17425,17 @@ function PromptComposer({
         mainModelId: modelId,
       },
     });
+    // Persist to service config so that Settings / AI Providers reflects the
+    // selection and so the choice survives app restart.  Guard is intentional:
+    // updateServiceConfig throws in typescript-local/test mode.
+    if (getConfiguredLoomEngineMode() === "rust-service") {
+      void engineClient
+        .updateServiceConfig({ providers: { defaultMainModel: modelId } })
+        .catch(() => {
+          // Service update failed — local state already updated; the selection
+          // will hold until Settings overrides it from the service config.
+        });
+    }
   }
 
   const resizeEditorToContent = useCallback(() => {
