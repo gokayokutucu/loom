@@ -296,6 +296,7 @@ import {
   readAIProviderSettings,
   resolveOllamaContextLength,
   runModelProfileRequest,
+  validateOllamaBaseUrlSecurity,
   writeAIProviderSettings,
   type AIProviderSettings,
   type ModelDescriptor,
@@ -306,6 +307,11 @@ import {
   type ModelProfileId,
   type RuntimeHealthState,
 } from "./services/modelProviders";
+import {
+  canQueueLocalMainGeneration,
+  removeQueuedLocalMainGeneration,
+  type LocalMainGenerationQueueItem,
+} from "./services/localGenerationQueue";
 import { isSimpleAutoAnswerCandidate } from "./services/thinkingGuard";
 import { checkPromptGuard } from "./services/promptGuard";
 import {
@@ -684,6 +690,14 @@ interface ComposerDraft {
   links: LoomLink[];
   attachments?: ComposerAttachment[];
 }
+
+type QueuedMainGenerationResult = "start" | "cancelled";
+
+interface QueuedMainGenerationPayload {
+  resolve: (result: QueuedMainGenerationResult) => void;
+}
+
+type QueuedMainGenerationItem = LocalMainGenerationQueueItem<QueuedMainGenerationPayload>;
 
 interface TextInsertionRequest {
   id: number;
@@ -2529,6 +2543,10 @@ function App() {
     message: string | null;
   }>({ running: false, message: null });
   const [composerRuntimeTargetKey, setComposerRuntimeTargetKey] = useState<string | null>(null);
+  const [queuedMainGenerationByLoom, setQueuedMainGenerationByLoom] = useState<
+    Record<string, { id: string; responseId: string; message: string }>
+  >({});
+  const queuedMainGenerationQueueRef = useRef<QueuedMainGenerationItem[]>([]);
   const mainGenerationRef = useRef(0);
   const mainComposerSubmissionInFlightRef = useRef(false);
   const mainAbortRef = useRef<AbortController | null>(null);
@@ -4385,9 +4403,117 @@ function App() {
     thinkingAutoAnswerResponseRef.current = null;
     if (revealTarget) showResponseCompletionActions(revealTarget.responseId);
     setComposerRuntimeState({ running: false, message: "Response stopped." });
+    startNextQueuedMainGeneration();
+  }
+
+  function queueLocalMainGenerationStart(input: {
+    id: string;
+    loomId: string;
+    responseId: string;
+    modelId: string;
+  }) {
+    return new Promise<QueuedMainGenerationResult>((resolve) => {
+      const item: QueuedMainGenerationItem = {
+        id: input.id,
+        loomId: input.loomId,
+        responseId: input.responseId,
+        providerKind: "ollama",
+        modelId: input.modelId,
+        payload: { resolve },
+      };
+      queuedMainGenerationQueueRef.current = [
+        ...queuedMainGenerationQueueRef.current,
+        item,
+      ];
+      setQueuedMainGenerationByLoom((current) => ({
+        ...current,
+        [input.loomId]: {
+          id: input.id,
+          responseId: input.responseId,
+          message: "Queued. Waiting for current local response to finish...",
+        },
+      }));
+      startNextQueuedMainGeneration();
+    });
+  }
+
+  function startNextQueuedMainGeneration() {
+    if (mainAbortRef.current || queuedMainGenerationQueueRef.current.length === 0) return;
+    const [next, ...remaining] = queuedMainGenerationQueueRef.current;
+    queuedMainGenerationQueueRef.current = remaining;
+    setQueuedMainGenerationByLoom((current) => {
+      const { [next.loomId]: _discard, ...rest } = current;
+      return rest;
+    });
+    next.payload.resolve("start");
+  }
+
+  function cancelQueuedMainGenerationForLoom(loomId: string) {
+    const queued = queuedMainGenerationByLoom[loomId];
+    if (!queued) return false;
+    const { removed, remaining } = removeQueuedLocalMainGeneration(
+      queuedMainGenerationQueueRef.current,
+      queued.id
+    );
+    queuedMainGenerationQueueRef.current = remaining;
+    setQueuedMainGenerationByLoom((current) => {
+      const { [loomId]: _discard, ...rest } = current;
+      return rest;
+    });
+    removed?.payload.resolve("cancelled");
+    setConversationResponses((current) => ({
+      ...current,
+      [loomId]: (current[loomId] ?? []).map((response) =>
+        response.id === queued.responseId
+          ? {
+              ...response,
+              answer: ["Queued response cancelled."],
+              visibleProgress: undefined,
+              serviceGenerationStatus: "cancelled",
+            }
+          : response
+      ),
+    }));
+    showResponseCompletionActions(queued.responseId);
+    setComposerRuntimeState({ running: false, message: "Queued response cancelled." });
+    return true;
+  }
+
+  function stopMainResponseForComposer(draftKey: string) {
+    if (cancelQueuedMainGenerationForLoom(draftKey)) return;
+    stopMainResponse();
   }
 
   function runtimeStateForComposer(draftKey: string) {
+    const queued = queuedMainGenerationByLoom[draftKey];
+    if (queued) {
+      return {
+        running: true,
+        message: queued.message,
+        blockedByOtherGeneration: false,
+      };
+    }
+    const mainModel = getProfileModel(providerSettings, "main");
+    const ollamaSecurity = validateOllamaBaseUrlSecurity(providerSettings.ollama.baseUrl);
+    if (
+      getConfiguredLoomEngineMode() === "rust-service" &&
+      draftKey !== EPHEMERAL_DRAFT_ID &&
+      !temporaryWefts[draftKey] &&
+      canQueueLocalMainGeneration({
+        active: composerRuntimeState.running,
+        activeLoomId: composerRuntimeTargetKey,
+        targetLoomId: draftKey,
+        providerKind: ollamaSecurity.allowed && ollamaSecurity.localOnly ? "ollama" : "unknown",
+        generationType: "main",
+        modelId: mainModel.id,
+      })
+    ) {
+      return {
+        running: false,
+        message: "Local model is busy. This prompt will queue.",
+        blockedByOtherGeneration: false,
+      };
+    }
     return computeComposerRunState(draftKey, composerRuntimeTargetKey, composerRuntimeState);
   }
 
@@ -7719,8 +7845,26 @@ function App() {
     const prompt = promptTextFromDraft(draft);
     const meaningful = prompt.length > 0 || draft.links.length > 0;
     const originalDraftKey = options.loomId ?? activeConversationId;
-    if (!meaningful || composerRuntimeState.running) return false;
     const useRustServiceGeneration = getConfiguredLoomEngineMode() === "rust-service";
+    const mainModelForQueue = getProfileModel(providerSettings, "main");
+    const ollamaSecurityForQueue = validateOllamaBaseUrlSecurity(providerSettings.ollama.baseUrl);
+    const queueableLocalMainGeneration =
+      useRustServiceGeneration &&
+      originalDraftKey !== EPHEMERAL_DRAFT_ID &&
+      !temporaryWefts[originalDraftKey] &&
+      canQueueLocalMainGeneration({
+        active: composerRuntimeState.running,
+        activeLoomId: composerRuntimeTargetKey,
+        targetLoomId: originalDraftKey,
+        providerKind: ollamaSecurityForQueue.allowed && ollamaSecurityForQueue.localOnly
+          ? "ollama"
+          : "unknown",
+        generationType: "main",
+        modelId: mainModelForQueue.id,
+      });
+    if (!meaningful || (composerRuntimeState.running && !queueableLocalMainGeneration)) {
+      return false;
+    }
 
     // ── Prompt guard: block implicit/incomplete prompts before model call ──
     const guardResult = checkPromptGuard({
@@ -7751,23 +7895,28 @@ function App() {
       return false;
     }
 
-    if (mainComposerSubmissionInFlightRef.current) return false;
-    mainComposerSubmissionInFlightRef.current = true;
+    if (mainComposerSubmissionInFlightRef.current && !queueableLocalMainGeneration) return false;
+    const ownsSubmissionInFlightFlag = !queueableLocalMainGeneration;
+    if (ownsSubmissionInFlightFlag) mainComposerSubmissionInFlightRef.current = true;
     try {
-    const generationId = mainGenerationRef.current + 1;
-    mainGenerationRef.current = generationId;
+    let generationId = queueableLocalMainGeneration ? 0 : mainGenerationRef.current + 1;
+    if (!queueableLocalMainGeneration) mainGenerationRef.current = generationId;
     const controller = new AbortController();
-    mainAbortRef.current = controller;
-    mainRevealTargetRef.current = null;
-    setComposerRuntimeTargetKey(originalDraftKey);
+    if (!queueableLocalMainGeneration) {
+      mainAbortRef.current = controller;
+      mainRevealTargetRef.current = null;
+    }
+    if (!queueableLocalMainGeneration) setComposerRuntimeTargetKey(originalDraftKey);
 
     // Mark that a latest-turn anchor is about to be queued so the streaming
     // effect holds scroll position during the async gap before the anchor lands.
-    pendingLatestTurnAnchorRef.current = true;
-    setComposerRuntimeState({
-      running: true,
-      message: "Understanding question...",
-    });
+    if (!queueableLocalMainGeneration) {
+      pendingLatestTurnAnchorRef.current = true;
+      setComposerRuntimeState({
+        running: true,
+        message: "Understanding question...",
+      });
+    }
     let targetLoomId = originalDraftKey;
     let promotedSeedResponses: ResponseItem[] | undefined;
     let promotedTargetConversation: Conversation | undefined;
@@ -8119,7 +8268,7 @@ function App() {
       queueLoomMetadataGeneration(targetConversation);
     }
 
-    setComposerRuntimeTargetKey(targetConversation.id);
+    if (!queueableLocalMainGeneration) setComposerRuntimeTargetKey(targetConversation.id);
     setConversationResponses((current) => ({
       ...current,
       [targetConversation.id]: [
@@ -8127,7 +8276,7 @@ function App() {
         response,
       ],
     }));
-    setGeneratingResponseId(response.id);
+    if (!queueableLocalMainGeneration) setGeneratingResponseId(response.id);
     setCompletionActionRevealResponseId(null);
     setSentUserTurnIds((current) => {
       const next = new Set(current);
@@ -8136,7 +8285,9 @@ function App() {
     });
     queueLatestUserTurnAnchor(targetConversation.id, response.id);
     options.onResponseCreated?.(targetConversation.id, response);
-    mainRevealTargetRef.current = { loomId: targetConversation.id, responseId: response.id };
+    if (!queueableLocalMainGeneration) {
+      mainRevealTargetRef.current = { loomId: targetConversation.id, responseId: response.id };
+    }
     setComposerDrafts((current) => {
       const {
         [targetLoomId]: _discardTarget,
@@ -8181,6 +8332,61 @@ function App() {
         `Writing to ${targetConversation.id}/${response.id}`
       )
     );
+    if (queueableLocalMainGeneration) {
+      setResponseProgress(
+        appendVisibleProgressEvent(
+          createVisibleAnswerProgressFromStatus(
+            "Queued. Waiting for current local response to finish...",
+            "orchestration"
+          ),
+          "Local generation queued",
+          `Waiting behind ${composerRuntimeTargetKey ?? "active Loom"}`
+        )
+      );
+      setConversationResponses((current) => ({
+        ...current,
+        [targetConversation.id]: (current[targetConversation.id] ?? []).map((item) =>
+          item.id === response.id
+            ? { ...item, serviceGenerationStatus: "queued" }
+            : item
+        ),
+      }));
+      const queueResult = await queueLocalMainGenerationStart({
+        id: `local-main-${targetConversation.id}-${response.id}-${Date.now()}`,
+        loomId: targetConversation.id,
+        responseId: response.id,
+        modelId: mainModelForQueue.id,
+      });
+      if (queueResult === "cancelled") {
+        return true;
+      }
+      generationId = mainGenerationRef.current + 1;
+      mainGenerationRef.current = generationId;
+      mainAbortRef.current = controller;
+      mainRevealTargetRef.current = {
+        loomId: targetConversation.id,
+        responseId: response.id,
+      };
+      setComposerRuntimeTargetKey(targetConversation.id);
+      setGeneratingResponseId(response.id);
+      pendingLatestTurnAnchorRef.current = true;
+      setComposerRuntimeState({
+        running: true,
+        message: "Understanding question...",
+      });
+      visibleProgress = createOrchestrationVisibleProgress();
+      setResponseProgress(
+        appendVisibleProgressEvent(
+          updateVisibleProgressDebug(visibleProgress, {
+            targetLoomId: targetConversation.id,
+            targetResponseId: response.id,
+            referenceCount: draft.links.length,
+          }),
+          "Queued generation started",
+          `Writing to ${targetConversation.id}/${response.id}`
+        )
+      );
+    }
     const modelPrompt = prompt || "Use the attached Loom references to continue this conversation.";
     const selectedResponseMode = options.mode ?? appSettings.modelResponseMode;
     const promotedWeftOrigin =
@@ -8522,6 +8728,7 @@ function App() {
               currentMainRequestRef.current = null;
             }
             queueResponseMetadataGeneration(targetConversation.id, completedResponse);
+            startNextQueuedMainGeneration();
             return true;
           }
           if (event.type === "response_error") {
@@ -8553,6 +8760,7 @@ function App() {
             if (mainAbortRef.current === controller) mainAbortRef.current = null;
             mainServiceCancellationRef.current = null;
             mainRevealTargetRef.current = null;
+            startNextQueuedMainGeneration();
             return true;
           }
           if (event.type === "response_cancelled") {
@@ -8572,6 +8780,7 @@ function App() {
             if (mainAbortRef.current === controller) mainAbortRef.current = null;
             mainServiceCancellationRef.current = null;
             mainRevealTargetRef.current = null;
+            startNextQueuedMainGeneration();
             return true;
           }
         }
@@ -8581,6 +8790,7 @@ function App() {
           if (mainAbortRef.current === controller) mainAbortRef.current = null;
           mainServiceCancellationRef.current = null;
           mainRevealTargetRef.current = null;
+          startNextQueuedMainGeneration();
           return false;
         }
         if (useRustServiceGeneration || serviceAccepted) {
@@ -8595,6 +8805,7 @@ function App() {
           if (mainAbortRef.current === controller) mainAbortRef.current = null;
           mainServiceCancellationRef.current = null;
           mainRevealTargetRef.current = null;
+          startNextQueuedMainGeneration();
           return false;
         }
       }
@@ -9057,7 +9268,7 @@ function App() {
       return false;
     }
     } finally {
-      mainComposerSubmissionInFlightRef.current = false;
+      if (ownsSubmissionInFlightFlag) mainComposerSubmissionInFlightRef.current = false;
     }
   }
 
@@ -12737,7 +12948,7 @@ function App() {
             preserveNavigation: showWeftSplit,
           })
         }
-        onStop={stopMainResponse}
+        onStop={() => stopMainResponseForComposer(loomId)}
         onUserTyping={() => {
           const transcript =
             panel === "origin" ? originTranscriptRef.current : transcriptRef.current;
@@ -13111,7 +13322,7 @@ function App() {
                   composerFocusRef.current = focus;
                 }}
                 onSend={sendComposerToModel}
-                onStop={stopMainResponse}
+                onStop={() => stopMainResponseForComposer(activeDraftKey)}
                 onUserTyping={scrollTranscriptToBottom}
               />
               {!newLoomDraftHasText && (
@@ -13246,7 +13457,7 @@ function App() {
                         const meaningful = prompt.length > 0 || draft.links.length > 0;
                         if (!meaningful) return false;
                         if (runtimeStateForComposer(loomId).running) {
-                          stopMainResponse();
+                          stopMainResponseForComposer(loomId);
                           return false;
                         }
                         onSubmitStart();
@@ -13268,7 +13479,7 @@ function App() {
                         }
                         return sent;
                       }}
-                      onStop={stopMainResponse}
+                      onStop={() => stopMainResponseForComposer(loomId)}
                       onUserTyping={() => undefined}
                     />
                   )}
@@ -13633,7 +13844,7 @@ function App() {
                     composerFocusRef.current = focus;
                   }}
                   onSend={sendComposerToModel}
-                  onStop={stopMainResponse}
+                  onStop={() => stopMainResponseForComposer(activeDraftKey)}
                   onUserTyping={() => scrollTranscriptToBottomIfNearBottom()}
                 />
               )}

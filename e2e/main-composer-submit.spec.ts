@@ -156,6 +156,85 @@ test.describe("[product-service-backed] Main composer submit", () => {
     }
   });
 
+  test("local Ollama Main requests queue visibly across different Looms", async ({ page }) => {
+    test.setTimeout(150_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      deterministicResponseMode: "long-streaming-scroll",
+      deterministicChunkMode: "word",
+      deterministicThinkingDelayMs: 500,
+      deterministicStreamChunkDelayMs: 20,
+      startApp: true,
+    });
+
+    try {
+      const { loom: loomA } = await scenario.client.createLoom({
+        title: "Queue Source Loom",
+        summary: "Starts the active local generation.",
+      });
+      const { loom: loomB } = await scenario.client.createLoom({
+        title: "Queue Target Loom",
+        summary: "Receives the queued local generation.",
+      });
+
+      await page.addInitScript(() => {
+        window.localStorage.setItem(
+          "loom-ai-app-settings-v1",
+          JSON.stringify({ mockDataEnabled: false, modelResponseMode: "thinking" })
+        );
+      });
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await page.getByTestId(`sidebar-loom-${loomA.loomId}`).click();
+      await fillPrompt(page, `${LONG_STREAMING_FIXTURE_PROMPT} active ${Date.now()}`);
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        "Long Streaming Scroll Fixture",
+        { timeout: 30_000 }
+      );
+
+      await page.getByTestId(`sidebar-loom-${loomB.loomId}`).click();
+      const queuedPrompt = `${LONG_STREAMING_FIXTURE_PROMPT} queued ${Date.now()}`;
+      await fillPrompt(page, queuedPrompt);
+      await expect(page.getByRole("button", { name: "Send" })).toBeEnabled();
+      await page.getByRole("button", { name: "Send" }).click();
+
+      await expect(page.locator(".user-message").last()).toContainText(queuedPrompt, {
+        timeout: 10_000,
+      });
+      await expect(page.locator(".thinking-panel").last()).toContainText("Queued", {
+        timeout: 10_000,
+      });
+      await expect(page.locator(".thinking-panel").last()).toContainText(
+        "Waiting for current local response to finish",
+        { timeout: 10_000 }
+      );
+
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        LONG_STREAMING_FIXTURE_MARKER,
+        { timeout: 60_000 }
+      );
+
+      await expect
+        .poll(
+          async () => {
+            const detail = await scenario.client.getLoom(loomB.loomId);
+            return detail.responses.map((response) => response.answer.join("\n")).join("\n");
+          },
+          { timeout: 30_000 }
+        )
+        .toContain(LONG_STREAMING_FIXTURE_MARKER);
+
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+    }
+  });
+
   test("long submitted prompt stays collapsed while service streaming starts", async ({ page }) => {
     test.setTimeout(120_000);
     const scenario = await createServiceTestHarness({
