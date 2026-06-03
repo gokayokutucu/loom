@@ -200,6 +200,9 @@ mod tests {
                 );
                 profile.id = id.to_string();
                 profile.provider_kind = ProviderKind::OpenAiCompatible;
+                profile.transport_kind =
+                    crate::providers::config::ProviderTransportKind::NativeOpenAiCompatible;
+                profile.vendor = crate::providers::config::ProviderVendor::Custom;
                 profile.display_name = "OpenAI Compatible Test".to_string();
                 profile.security.local_only_required = false;
                 profile.capabilities.supports_thinking = false;

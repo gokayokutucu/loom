@@ -705,8 +705,11 @@ mod tests {
         ProviderProfileConfig {
             id: "openai-compatible-test".to_string(),
             provider_kind: ProviderKind::OpenAiCompatible,
+            transport_kind: crate::providers::config::ProviderTransportKind::NativeOpenAiCompatible,
+            vendor: crate::providers::config::ProviderVendor::Custom,
             display_name: "OpenAI Compatible Test".to_string(),
             enabled: true,
+            experimental: false,
             base_url: Some(base_url.to_string()),
             default_model: Some("test-model".to_string()),
             requires_secret: false,
@@ -780,14 +783,26 @@ mod tests {
     #[tokio::test]
     async fn missing_secret_returns_missing_secret_without_leaking_values() {
         let mut profile = openai_profile("http://127.0.0.1:8080");
+        profile.id = "nvidia".to_string();
+        profile.display_name = "NVIDIA NIM".to_string();
+        profile.vendor = crate::providers::config::ProviderVendor::Nvidia;
+        profile.enabled = true;
+        profile.experimental = true;
         profile.requires_secret = true;
-        profile.secret_ref = Some("provider:openai-compatible-test:apiKey".to_string());
+        profile.secret_ref = Some("env:LOOM_TEST_MISSING_NVIDIA_API_KEY".to_string());
+        std::env::remove_var("LOOM_TEST_MISSING_NVIDIA_API_KEY");
         let runtime = OpenAiCompatibleRuntime::new(profile, None);
 
         let health = runtime.health().await;
         let json = serde_json::to_string(&health).expect("health json");
 
         assert_eq!(health.status, "missing_secret");
+        assert_eq!(health.provider_kind, ProviderKind::OpenAiCompatible);
+        assert!(!health.models_endpoint_reachable);
+        assert_eq!(
+            health.reason.as_deref(),
+            Some("OpenAI-compatible provider requires a secret reference that is not available.")
+        );
         assert!(!json.contains("api_key"));
         assert!(!json.contains("bearer"));
         assert!(!json.contains("password"));

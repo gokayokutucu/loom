@@ -54,6 +54,63 @@ impl ProviderKind {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderTransportKind {
+    Ollama,
+    NativeOpenAiCompatible,
+    RigOpenAiCompatible,
+}
+
+impl ProviderTransportKind {
+    pub fn as_config_str(&self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::NativeOpenAiCompatible => "native_openai_compatible",
+            Self::RigOpenAiCompatible => "rig_openai_compatible",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "ollama" => Some(Self::Ollama),
+            "native_openai_compatible" => Some(Self::NativeOpenAiCompatible),
+            "rig_openai_compatible" => Some(Self::RigOpenAiCompatible),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderVendor {
+    Ollama,
+    Nvidia,
+    OpenAi,
+    Custom,
+}
+
+impl ProviderVendor {
+    pub fn as_config_str(&self) -> &'static str {
+        match self {
+            Self::Ollama => "ollama",
+            Self::Nvidia => "nvidia",
+            Self::OpenAi => "openai",
+            Self::Custom => "custom",
+        }
+    }
+
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "ollama" => Some(Self::Ollama),
+            "nvidia" => Some(Self::Nvidia),
+            "openai" => Some(Self::OpenAi),
+            "custom" => Some(Self::Custom),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderModelDiscoveryConfig {
     pub enabled: bool,
@@ -144,8 +201,11 @@ impl Default for ProviderCapabilitiesConfig {
 pub struct ProviderProfileConfig {
     pub id: String,
     pub provider_kind: ProviderKind,
+    pub transport_kind: ProviderTransportKind,
+    pub vendor: ProviderVendor,
     pub display_name: String,
     pub enabled: bool,
+    pub experimental: bool,
     pub base_url: Option<String>,
     pub default_model: Option<String>,
     pub requires_secret: bool,
@@ -162,8 +222,11 @@ impl ProviderProfileConfig {
         Self {
             id: "ollama-local".to_string(),
             provider_kind: ProviderKind::Ollama,
+            transport_kind: ProviderTransportKind::Ollama,
+            vendor: ProviderVendor::Ollama,
             display_name: "Ollama Local".to_string(),
             enabled: true,
+            experimental: false,
             base_url: Some(base_url.trim_end_matches('/').to_string()),
             default_model: Some(default_model),
             requires_secret: false,
@@ -173,6 +236,54 @@ impl ProviderProfileConfig {
             security: ProviderSecurityPolicyConfig::default(),
             capabilities: ProviderCapabilitiesConfig::default(),
             metadata_json: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn nvidia_openai_compatible_example() -> Self {
+        Self {
+            id: "nvidia".to_string(),
+            provider_kind: ProviderKind::OpenAiCompatible,
+            transport_kind: ProviderTransportKind::NativeOpenAiCompatible,
+            vendor: ProviderVendor::Nvidia,
+            display_name: "NVIDIA NIM".to_string(),
+            enabled: false,
+            experimental: true,
+            base_url: Some("https://integrate.api.nvidia.com/v1".to_string()),
+            default_model: Some("meta/llama-3.1-70b-instruct".to_string()),
+            requires_secret: true,
+            secret_ref: Some("env:NVIDIA_API_KEY".to_string()),
+            model_discovery: ProviderModelDiscoveryConfig {
+                enabled: true,
+                endpoint_path: Some("/models".to_string()),
+                refresh_interval_seconds: Some(3600),
+            },
+            request_defaults: ProviderRequestDefaultsConfig {
+                temperature: Some(0.2),
+                top_p: Some(0.9),
+                num_ctx: None,
+                num_predict: None,
+                think: Some(false),
+                stream: Some(true),
+            },
+            security: ProviderSecurityPolicyConfig {
+                local_only_required: false,
+                allow_remote_endpoint: true,
+                allow_insecure_http_remote: false,
+                allow_unsafe_model_management: false,
+            },
+            capabilities: ProviderCapabilitiesConfig {
+                supports_streaming: true,
+                supports_cancellation: false,
+                supports_model_listing: true,
+                supports_thinking: false,
+                supports_system_prompt: true,
+                supports_json_mode: Some(true),
+            },
+            metadata_json: Some(serde_json::json!({
+                "documentation": "https://docs.nvidia.com/nim/",
+                "profileStatus": "example_disabled"
+            })),
         }
     }
 }
@@ -228,6 +339,7 @@ pub fn validate_provider_profiles(profiles: &[ProviderProfileConfig]) -> Result<
     let mut ids = std::collections::BTreeSet::new();
     for profile in profiles {
         validate_profile_identity(profile)?;
+        validate_profile_transport(profile)?;
         if !ids.insert(profile.id.clone()) {
             return Err(ServiceError::config(format!(
                 "providers.profiles id '{}' must be unique",
@@ -269,6 +381,51 @@ fn validate_profile_identity(profile: &ProviderProfileConfig) -> Result<(), Serv
                     "providers.profiles.secretRef provider id must match profile id",
                 ));
             }
+        }
+    } else if profile.requires_secret {
+        return Err(ServiceError::config(
+            "providers.profiles.secretRef is required when requiresSecret=true",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_profile_transport(profile: &ProviderProfileConfig) -> Result<(), ServiceError> {
+    match profile.provider_kind {
+        ProviderKind::Ollama => {
+            if profile.transport_kind != ProviderTransportKind::Ollama {
+                return Err(ServiceError::config(
+                    "ollama provider profiles must use transportKind=ollama",
+                ));
+            }
+            if profile.vendor != ProviderVendor::Ollama {
+                return Err(ServiceError::config(
+                    "ollama provider profiles must use vendor=ollama",
+                ));
+            }
+        }
+        ProviderKind::OpenAiCompatible => {
+            if !matches!(
+                profile.transport_kind,
+                ProviderTransportKind::NativeOpenAiCompatible
+                    | ProviderTransportKind::RigOpenAiCompatible
+            ) {
+                return Err(ServiceError::config(
+                    "openai_compatible provider profiles must use an OpenAI-compatible transportKind",
+                ));
+            }
+            if profile.transport_kind == ProviderTransportKind::RigOpenAiCompatible
+                && !rig_transport_available()
+            {
+                return Err(ServiceError::config(
+                    "rig_openai_compatible transport requires the experimental-rig feature",
+                ));
+            }
+        }
+        ProviderKind::CustomHttpLater => {
+            return Err(ServiceError::config(
+                "custom_http_later provider profiles are reserved and cannot be enabled yet",
+            ));
         }
     }
     Ok(())
@@ -352,9 +509,32 @@ pub fn reject_forbidden_config_value(value: &Value) -> Result<(), ServiceError> 
                 reject_forbidden_config_value(value)?;
             }
         }
+        Value::String(value) => {
+            if looks_like_raw_secret_value(value) {
+                return Err(ServiceError::config(
+                    "provider config must not contain raw secret-looking values",
+                ));
+            }
+        }
         _ => {}
     }
     Ok(())
+}
+
+fn looks_like_raw_secret_value(value: &str) -> bool {
+    let trimmed = value.trim();
+    if trimmed.len() < 16 {
+        return false;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    lower.starts_with("bearer ")
+        || lower.starts_with("sk-")
+        || lower.starts_with("nvapi-")
+        || (lower.contains("-----begin ") && lower.contains("private key"))
+}
+
+fn rig_transport_available() -> bool {
+    cfg!(feature = "experimental-rig")
 }
 
 pub fn classify_provider_config_change(
@@ -524,5 +704,66 @@ mod tests {
         );
         profile.metadata_json = Some(serde_json::json!({ "apiKey": "hidden" }));
         assert!(validate_provider_profiles(&[profile]).is_err());
+    }
+
+    #[test]
+    fn invalid_secret_ref_is_rejected() {
+        let mut profile = ProviderProfileConfig::nvidia_openai_compatible_example();
+        profile.secret_ref = Some("provider:nvidia:token".to_string());
+
+        let error = validate_provider_profiles(&[profile]).expect_err("invalid secret ref");
+
+        assert!(error.to_string().contains("secretRef"));
+    }
+
+    #[test]
+    fn requires_secret_requires_secret_ref() {
+        let mut profile = ProviderProfileConfig::nvidia_openai_compatible_example();
+        profile.secret_ref = None;
+
+        let error = validate_provider_profiles(&[profile]).expect_err("missing secret ref");
+
+        assert!(error.to_string().contains("secretRef"));
+    }
+
+    #[test]
+    fn provider_metadata_rejects_secret_looking_values() {
+        let mut profile = ProviderProfileConfig::nvidia_openai_compatible_example();
+        profile.metadata_json = Some(serde_json::json!({ "sample": "nvapi-this-is-a-secret" }));
+
+        let error = validate_provider_profiles(&[profile]).expect_err("raw secret value");
+
+        assert!(error.to_string().contains("raw secret"));
+    }
+
+    #[test]
+    fn nvidia_openai_compatible_example_validates_while_disabled() {
+        let profile = ProviderProfileConfig::nvidia_openai_compatible_example();
+
+        assert!(!profile.enabled);
+        assert!(profile.experimental);
+        assert_eq!(profile.provider_kind, ProviderKind::OpenAiCompatible);
+        assert_eq!(
+            profile.transport_kind,
+            ProviderTransportKind::NativeOpenAiCompatible
+        );
+        assert_eq!(profile.vendor, ProviderVendor::Nvidia);
+        validate_provider_profiles(&[profile]).expect("disabled nvidia example validates");
+    }
+
+    #[test]
+    fn rig_transport_is_feature_gated() {
+        let mut profile = ProviderProfileConfig::nvidia_openai_compatible_example();
+        profile.id = "rig-nvidia".to_string();
+        profile.secret_ref = Some("env:NVIDIA_API_KEY".to_string());
+        profile.transport_kind = ProviderTransportKind::RigOpenAiCompatible;
+
+        let result = validate_provider_profiles(&[profile]);
+        if cfg!(feature = "experimental-rig") {
+            result.expect("rig transport is valid with feature");
+        } else {
+            let error = result.expect_err("rig transport requires feature");
+            assert!(error.to_string().contains("experimental-rig"));
+        }
     }
 }

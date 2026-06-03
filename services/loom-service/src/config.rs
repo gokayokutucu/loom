@@ -4,7 +4,7 @@ use crate::{
         classify_provider_config_change, reject_forbidden_config_value, validate_provider_profiles,
         ProviderCapabilitiesConfig, ProviderConfigChangeClassification, ProviderKind,
         ProviderModelDiscoveryConfig, ProviderProfileConfig, ProviderRequestDefaultsConfig,
-        ProviderSecurityPolicyConfig,
+        ProviderSecurityPolicyConfig, ProviderTransportKind, ProviderVendor,
     },
     speech::{
         apply_speech_patch, validate_speech_config, SpeechToTextConfig, SpeechToTextPatch,
@@ -970,11 +970,21 @@ fn write_provider_profile(output: &mut String, profile: &ProviderProfileConfig) 
     .expect("write provider kind");
     writeln!(
         output,
+        "transportKind = \"{}\"",
+        profile.transport_kind.as_config_str()
+    )
+    .expect("write provider transport kind");
+    writeln!(output, "vendor = \"{}\"", profile.vendor.as_config_str())
+        .expect("write provider vendor");
+    writeln!(
+        output,
         "displayName = \"{}\"",
         escape_toml_string(&profile.display_name)
     )
     .expect("write provider display name");
     writeln!(output, "enabled = {}", profile.enabled).expect("write provider enabled");
+    writeln!(output, "experimental = {}", profile.experimental)
+        .expect("write provider experimental flag");
     if let Some(base_url) = &profile.base_url {
         writeln!(output, "baseUrl = \"{}\"", escape_toml_string(base_url))
             .expect("write provider base url");
@@ -1125,8 +1135,11 @@ fn parse_config(text: &str) -> Result<LoomServiceConfig, ConfigParseError> {
             config.providers.profiles.push(ProviderProfileConfig {
                 id: String::new(),
                 provider_kind: ProviderKind::Ollama,
+                transport_kind: ProviderTransportKind::Ollama,
+                vendor: ProviderVendor::Ollama,
                 display_name: String::new(),
                 enabled: true,
+                experimental: false,
                 base_url: None,
                 default_model: None,
                 requires_secret: false,
@@ -1387,8 +1400,23 @@ fn set_provider_profile_value(
                 ConfigParseError::new(format!("line {line_number}: unknown providerKind {parsed}"))
             })?;
         }
+        "transportKind" => {
+            let parsed = parse_toml_string(value, line_number)?;
+            profile.transport_kind = ProviderTransportKind::parse(&parsed).ok_or_else(|| {
+                ConfigParseError::new(format!(
+                    "line {line_number}: unknown transportKind {parsed}"
+                ))
+            })?;
+        }
+        "vendor" => {
+            let parsed = parse_toml_string(value, line_number)?;
+            profile.vendor = ProviderVendor::parse(&parsed).ok_or_else(|| {
+                ConfigParseError::new(format!("line {line_number}: unknown vendor {parsed}"))
+            })?;
+        }
         "displayName" => profile.display_name = parse_toml_string(value, line_number)?,
         "enabled" => profile.enabled = parse_toml_bool(value, line_number)?,
+        "experimental" => profile.experimental = parse_toml_bool(value, line_number)?,
         "baseUrl" => {
             profile.base_url = Some(
                 parse_toml_string(value, line_number)?
@@ -2300,6 +2328,65 @@ mod tests {
     }
 
     #[test]
+    fn remote_provider_profile_toml_round_trip_preserves_non_secret_fields() {
+        let mut config = LoomServiceConfig::default();
+        config
+            .providers
+            .profiles
+            .push(ProviderProfileConfig::nvidia_openai_compatible_example());
+        let path = test_path("remote-provider-profile");
+        write_config_atomic(&path, &config).expect("write config");
+
+        let serialized = std::fs::read_to_string(&path).expect("read config");
+        assert!(serialized.contains("id = \"nvidia\""));
+        assert!(serialized.contains("providerKind = \"openai_compatible\""));
+        assert!(serialized.contains("transportKind = \"native_openai_compatible\""));
+        assert!(serialized.contains("vendor = \"nvidia\""));
+        assert!(serialized.contains("experimental = true"));
+        assert!(serialized.contains("baseUrl = \"https://integrate.api.nvidia.com/v1\""));
+        assert!(serialized.contains("secretRef = \"env:NVIDIA_API_KEY\""));
+        assert!(!serialized.contains("nvapi-"));
+        assert!(!serialized.contains("Bearer "));
+
+        let loaded = load_or_create_config(&path).expect("load config");
+        let profile = loaded
+            .providers
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "nvidia")
+            .expect("nvidia profile");
+
+        assert_eq!(profile.provider_kind, ProviderKind::OpenAiCompatible);
+        assert_eq!(
+            profile.transport_kind,
+            crate::providers::config::ProviderTransportKind::NativeOpenAiCompatible
+        );
+        assert_eq!(
+            profile.vendor,
+            crate::providers::config::ProviderVendor::Nvidia
+        );
+        assert!(!profile.enabled);
+        assert!(profile.experimental);
+        assert_eq!(profile.secret_ref.as_deref(), Some("env:NVIDIA_API_KEY"));
+        assert_eq!(
+            profile.base_url.as_deref(),
+            Some("https://integrate.api.nvidia.com/v1")
+        );
+    }
+
+    #[test]
+    fn enabled_remote_profile_with_missing_secret_ref_value_does_not_break_config_validation() {
+        let mut config = LoomServiceConfig::default();
+        let mut nvidia = ProviderProfileConfig::nvidia_openai_compatible_example();
+        nvidia.enabled = true;
+        nvidia.secret_ref = Some("env:LOOM_TEST_MISSING_NVIDIA_API_KEY".to_string());
+        std::env::remove_var("LOOM_TEST_MISSING_NVIDIA_API_KEY");
+        config.providers.profiles.push(nvidia);
+
+        validate_config(&config).expect("missing secret value is runtime status, not boot failure");
+    }
+
+    #[test]
     fn provider_profile_serializes_without_secrets_or_raw_thinking() {
         let serialized = serialize_config(&LoomServiceConfig::default());
         for forbidden in [
@@ -2548,6 +2635,20 @@ apiKey = "do-not-store"
         std::fs::write(&path, text).expect("write test config");
         let error = load_or_create_config(&path).expect_err("secret field rejected");
         assert!(error.to_string().contains("secret"));
+    }
+
+    #[test]
+    fn provider_config_rejects_raw_secret_looking_values() {
+        let mut config = LoomServiceConfig::default();
+        let mut profile = ProviderProfileConfig::nvidia_openai_compatible_example();
+        profile.metadata_json = Some(serde_json::json!({
+            "example": "sk-this-is-a-raw-secret-value"
+        }));
+        config.providers.profiles.push(profile);
+
+        let error = validate_config(&config).expect_err("raw secret value rejected");
+
+        assert!(error.to_string().contains("raw secret"));
     }
 
     #[test]
