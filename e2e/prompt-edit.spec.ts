@@ -182,7 +182,8 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         revisionResponses.some((response) => response.content.includes(originalPrompt))
       ).toBe(false);
       await expect(page.locator(".weft-split-view")).toBeVisible();
-      await expect(page.locator(".origin-split-panel")).toContainText(editedPrompt);
+      await expect(page.locator(".origin-split-panel")).not.toContainText(editedPrompt);
+      await expect(page.locator(".origin-split-panel")).toContainText(originalPrompt);
       await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
         "2/2"
       );
@@ -410,7 +411,8 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         )
       ).toBe(true);
       await expect(page.locator(".weft-split-view")).toBeVisible();
-      await expect(page.locator(".origin-split-panel")).toContainText(editedPrompt);
+      await expect(page.locator(".origin-split-panel")).not.toContainText(editedPrompt);
+      await expect(page.locator(".origin-split-panel")).toContainText(promptB);
       await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
         "2/2"
       );
@@ -430,7 +432,15 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
       await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
         "1/2"
       );
-      await page.waitForTimeout(300);
+
+      // Verify highlights are applied immediately on click (response only)
+      await expect(page.locator(".origin-split-panel .revision-focus-highlight--user")).toHaveCount(0);
+      await expect(page.locator(".origin-split-panel .revision-focus-highlight--response")).toBeVisible();
+
+      // Wait for highlight duration to expire
+      await page.waitForTimeout(1800);
+      await expect(page.locator(".origin-split-panel .revision-focus-highlight--response")).toHaveCount(0);
+
       const originScrollAfterOriginalRevision = await originTranscript.evaluate(
         (element) => element.scrollTop
       );
@@ -440,10 +450,15 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         .locator(".origin-split-panel .prompt-revision-action-counter")
         .getByRole("button", { name: "Next message revision" })
         .click({ force: true });
-      await expect(page.locator(".origin-split-panel")).toContainText(editedPrompt);
+      await expect(page.locator(".origin-split-panel")).not.toContainText(editedPrompt);
       await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
         "2/2"
       );
+
+      // Verify highlights are applied immediately on click for weft panel target (response only)
+      await expect(page.locator(".weft-split-panel .revision-focus-highlight--user")).toHaveCount(0);
+      await expect(page.locator(".weft-split-panel .revision-focus-highlight--response")).toBeVisible();
+
       await expect(page.locator(".weft-split-panel")).toContainText(editedPrompt);
       await expect
         .poll(async () =>
