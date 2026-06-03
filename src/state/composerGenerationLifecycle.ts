@@ -194,6 +194,7 @@ export function normalizeComposerGenerationEvent(
     case "status":
     case "answer_plan_ready":
     case "context_ready":
+    case "thinking_delta":
       return null;
   }
 }

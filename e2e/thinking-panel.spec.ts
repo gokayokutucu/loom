@@ -46,7 +46,35 @@ test.describe("[product-service-backed] thinking panel", () => {
       await expect(detail).toBeVisible();
       await expect(detail.locator(".assistant-response-progress--compact")).toBeVisible();
       await expect(detail).toContainText(/Preparing answer plan|Building Loom context|Understanding/);
-      await expect(detail).not.toContainText("Raw model thinking is private");
+      const liveStream = detail.getByTestId("thinking-live-stream");
+      await expect(liveStream).toBeVisible({ timeout: 10_000 });
+      await expect(liveStream).toContainText("Reviewing the prompt and available Loom context");
+      await expect
+        .poll(
+          async () =>
+            liveStream.evaluate((element) => ({
+              scrollable: element.scrollHeight > element.clientHeight,
+              maxHeight: Number.parseFloat(getComputedStyle(element).maxHeight),
+            })),
+          { timeout: 10_000 }
+        )
+        .toMatchObject({ scrollable: true, maxHeight: 190 });
+      await liveStream.evaluate((element) => {
+        element.scrollTop = 0;
+        element.dispatchEvent(new Event("scroll", { bubbles: true }));
+      });
+      await expect(liveStream).toContainText("Preparing a concise response plan", {
+        timeout: 10_000,
+      });
+      await expect(liveStream).toContainText("Starting the visible answer now", {
+        timeout: 10_000,
+      });
+      await expect
+        .poll(async () => liveStream.evaluate((element) => element.scrollTop), {
+          timeout: 3_000,
+        })
+        .toBeLessThan(24);
+      await expect(liveStream).not.toContainText("raw_thinking");
 
       const pageText = await page.locator("body").innerText();
       expect(pageText).not.toContain("raw_thinking");
@@ -58,6 +86,23 @@ test.describe("[product-service-backed] thinking panel", () => {
         timeout: 30_000,
       });
       await expect(page.locator(".thinking-panel.is-running")).toHaveCount(0);
+      await expect(page.getByText("Reviewing the prompt and available Loom context")).toHaveCount(0);
+
+      const [loom] = await scenario.client.listLooms();
+      const detailResponse = await scenario.fetchJson<{
+        loom: { responses: Array<{ role: "user" | "assistant"; content: string; metadata?: unknown }> };
+      }>(`/looms/${encodeURIComponent(loom.loomId)}`);
+      const serialized = JSON.stringify(detailResponse);
+      expect(serialized).not.toContain("Reviewing the prompt and available Loom context");
+      expect(serialized).not.toContain("Preparing a concise response plan");
+      expect(serialized).not.toContain("raw_thinking");
+
+      await page.reload();
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+      await page.getByTestId(`sidebar-loom-${loom.loomId}`).click();
+      await expect(page.locator(".qa-item")).toHaveCount(1, { timeout: 20_000 });
+      await expect(page.getByText("Event Store kayıt kaynağıdır")).toBeVisible();
+      await expect(page.getByText("Reviewing the prompt and available Loom context")).toHaveCount(0);
     } finally {
       const cleanup = await scenario.cleanup();
       expect(cleanup.serviceStopped).toBe(true);

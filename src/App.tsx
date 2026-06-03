@@ -2701,6 +2701,28 @@ function App() {
     activeConversationIdRef.current = activeConversationId;
   }, [activeConversationId]);
 
+  const previousActiveConversationIdRef = useRef(activeConversationId);
+
+  useEffect(() => {
+    if (previousActiveConversationIdRef.current === activeConversationId) return;
+    previousActiveConversationIdRef.current = activeConversationId;
+    setConversationResponses((current) => {
+      let changed = false;
+      const next = Object.fromEntries(
+        Object.entries(current).map(([loomId, responses]) => {
+          const cleaned = responses.map((response) => {
+            if (response.liveThinkingText === undefined) return response;
+            changed = true;
+            const { liveThinkingText: _discard, ...rest } = response;
+            return rest;
+          });
+          return [loomId, cleaned];
+        })
+      );
+      return changed ? next : current;
+    });
+  }, [activeConversationId]);
+
   useEffect(() => {
     pinnedConversationIdsRef.current = pinnedConversationIds;
   }, [pinnedConversationIds]);
@@ -4206,6 +4228,38 @@ function App() {
           ? withVisibleProgress(withVisiblePlan(response, visiblePlan), visibleProgress)
           : response
       ),
+    }));
+  }
+
+  function appendResponseLiveThinking(
+    loomId: string,
+    responseId: string,
+    delta: string
+  ) {
+    if (!delta) return;
+    setConversationResponses((current) => ({
+      ...current,
+      [loomId]: (current[loomId] ?? []).map((response) =>
+        response.id === responseId
+          ? {
+              ...response,
+              liveThinkingText: `${response.liveThinkingText ?? ""}${delta}`,
+            }
+          : response
+      ),
+    }));
+  }
+
+  function clearResponseLiveThinking(loomId: string, responseId: string) {
+    setConversationResponses((current) => ({
+      ...current,
+      [loomId]: (current[loomId] ?? []).map((response) => {
+        if (response.id !== responseId || response.liveThinkingText === undefined) {
+          return response;
+        }
+        const { liveThinkingText: _discard, ...rest } = response;
+        return rest;
+      }),
     }));
   }
 
@@ -8631,6 +8685,14 @@ function App() {
             );
             continue;
           }
+          if (event.type === "thinking_delta") {
+            appendResponseLiveThinking(
+              targetConversation.id,
+              serviceResponseId,
+              event.payload.delta
+            );
+            continue;
+          }
           if (event.type === "thinking_status") {
             updateResponseThinking(targetConversation.id, serviceResponseId, {
               thinkingStartedAt: new Date().toISOString(),
@@ -8662,6 +8724,7 @@ function App() {
             replaceServiceResponseId(event.payload.responseId);
             const sanitizedFinalContent = sanitizeModelAnswer(serviceFinalContent);
             const answer = answerParagraphs(sanitizedFinalContent);
+            clearResponseLiveThinking(targetConversation.id, serviceResponseId);
             const completedResponse: ResponseItem = {
               ...response,
               id: serviceResponseId,
@@ -8747,6 +8810,7 @@ function App() {
               undefined
             );
             updateResponseThinking(targetConversation.id, serviceResponseId, { done: true });
+            clearResponseLiveThinking(targetConversation.id, serviceResponseId);
             setConversationResponses((current) => ({
               ...current,
               [targetConversation.id]: (current[targetConversation.id] ?? []).map((item) =>
@@ -8767,6 +8831,7 @@ function App() {
             serviceAccepted = true;
             retainServiceWorkflowRunId(event.payload.workflowRunId);
             updateResponseThinking(targetConversation.id, serviceResponseId, { done: true });
+            clearResponseLiveThinking(targetConversation.id, serviceResponseId);
             setConversationResponses((current) => ({
               ...current,
               [targetConversation.id]: (current[targetConversation.id] ?? []).map((item) =>
@@ -11385,6 +11450,10 @@ function App() {
           advanceRegeneratedProgress("context_ready", true);
           continue;
         }
+        if (event.type === "thinking_delta") {
+          appendResponseLiveThinking(loomId, activeResponseId, event.payload.delta);
+          continue;
+        }
         if (event.type === "thinking_status") {
           updateResponseThinking(loomId, activeResponseId, {
             thinkingStartedAt: new Date().toISOString(),
@@ -11412,6 +11481,7 @@ function App() {
           replaceActiveResponseId(event.payload.responseId);
           const sanitizedFinalContent = sanitizeModelAnswer(finalContent);
           const answer = answerParagraphs(sanitizedFinalContent);
+          clearResponseLiveThinking(loomId, activeResponseId);
           const completedResponse: ResponseItem = {
             ...regeneratedResponse,
             id: activeResponseId,
@@ -11464,6 +11534,7 @@ function App() {
           if (event.payload.responseId) replaceActiveResponseId(event.payload.responseId);
           const message = event.payload.message;
           updateResponseThinking(loomId, activeResponseId, { done: true });
+          clearResponseLiveThinking(loomId, activeResponseId);
           updateResponseAnswer(loomId, activeResponseId, [message]);
           updateResponseVisiblePlanAndProgress(loomId, activeResponseId, undefined, undefined);
           setComposerRuntimeState({ running: false, message });
@@ -11475,6 +11546,7 @@ function App() {
         }
         if (event.type === "response_cancelled") {
           updateResponseThinking(loomId, activeResponseId, { done: true });
+          clearResponseLiveThinking(loomId, activeResponseId);
           setComposerRuntimeState({ running: false, message: "Response stopped." });
           setGeneratingResponseId(null);
           showResponseCompletionActions(activeResponseId);
@@ -11683,6 +11755,10 @@ function App() {
           advanceRetryProgress("context_ready", true);
           continue;
         }
+        if (event.type === "thinking_delta") {
+          appendResponseLiveThinking(loomId, activeResponseId, event.payload.delta);
+          continue;
+        }
         if (event.type === "thinking_status") {
           updateResponseThinking(loomId, activeResponseId, {
             thinkingStartedAt: new Date().toISOString(),
@@ -11710,6 +11786,7 @@ function App() {
           replaceActiveResponseId(event.payload.responseId);
           const sanitizedFinalContent = sanitizeModelAnswer(finalContent);
           const answer = answerParagraphs(sanitizedFinalContent);
+          clearResponseLiveThinking(loomId, activeResponseId);
           const completedResponse: ResponseItem = {
             ...retryResponse,
             id: activeResponseId,
@@ -11762,6 +11839,7 @@ function App() {
           if (event.payload.responseId) replaceActiveResponseId(event.payload.responseId);
           const message = event.payload.message;
           updateResponseThinking(loomId, activeResponseId, { done: true });
+          clearResponseLiveThinking(loomId, activeResponseId);
           updateResponseAnswer(loomId, activeResponseId, [message]);
           updateResponseVisiblePlanAndProgress(loomId, activeResponseId, undefined, undefined);
           setComposerRuntimeState({ running: false, message });
@@ -11773,6 +11851,7 @@ function App() {
         }
         if (event.type === "response_cancelled") {
           updateResponseThinking(loomId, activeResponseId, { done: true });
+          clearResponseLiveThinking(loomId, activeResponseId);
           setComposerRuntimeState({ running: false, message: "Response stopped." });
           setGeneratingResponseId(null);
           showResponseCompletionActions(activeResponseId);
@@ -15902,6 +15981,7 @@ function ThinkingPanel({
     ? visibleStatusLabel
     : undefined;
   const ariaLabel = secondaryLabel ? `${primaryLabel} · ${secondaryLabel}` : primaryLabel;
+  const liveThinkingText = thinkingRunning ? response.liveThinkingText : undefined;
 
   return (
     <section className={thinkingRunning ? "thinking-panel is-running" : "thinking-panel"}>
@@ -15928,6 +16008,9 @@ function ThinkingPanel({
             />
           ) : (
             <span>{secondaryLabel ?? primaryLabel}</span>
+          )}
+          {liveThinkingText && (
+            <LiveThinkingStream text={liveThinkingText} />
           )}
         </div>
       )}
@@ -15963,6 +16046,34 @@ function ThinkingPanel({
         </div>
       )}
     </section>
+  );
+}
+
+function LiveThinkingStream({ text }: { text: string }) {
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const autoFollowRef = useRef(true);
+
+  useEffect(() => {
+    const element = scrollRef.current;
+    if (!element || !autoFollowRef.current) return;
+    element.scrollTop = element.scrollHeight;
+  }, [text]);
+
+  return (
+    <div
+      ref={scrollRef}
+      className="thinking-live-stream"
+      data-testid="thinking-live-stream"
+      onScroll={(event) => {
+        const element = event.currentTarget;
+        const distanceToBottom =
+          element.scrollHeight - element.scrollTop - element.clientHeight;
+        autoFollowRef.current = distanceToBottom < 24;
+      }}
+      aria-label="Live reasoning stream"
+    >
+      <pre>{text}</pre>
+    </div>
   );
 }
 

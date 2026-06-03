@@ -3483,6 +3483,35 @@ fn execute_stream(
             let e2e_thinking_delay_ms = deterministic_e2e_thinking_delay_ms();
             if answer_plan.use_thinking && e2e_thinking_delay_ms > 0 {
                 let thinking_started_at = Instant::now();
+                let first_thinking_delta = [
+                    "Reviewing the prompt and available Loom context.",
+                    "Checking selected references and recent visible turns.",
+                    "Separating source context from the latest user request.",
+                    "Estimating the response shape and useful detail level.",
+                    "Keeping hidden provider reasoning out of persisted artifacts.",
+                    "Preparing a concise response plan before visible answer tokens.",
+                    "Confirming the final answer should stay grounded in the Loom.",
+                    "Checking that transient notes stay attached only to this active run.",
+                    "Comparing the response outline with the requested Loom surface.",
+                    "Prioritizing source-backed claims over speculative filler.",
+                    "Keeping the eventual assistant response free of private planning text.",
+                    "Verifying that the visible answer can start from stable context.",
+                    "Holding the remaining reasoning in the live panel only.",
+                    "Preparing the final response shape and section order.",
+                    "Reviewing whether a short answer would miss important nuance.",
+                    "Separating durable response content from temporary provider notes.",
+                    "Making sure reload will reconstruct only the visible answer.",
+                    "Leaving copy/export/persistence paths with answer text only.",
+                    "Using the live panel as a temporary progress window.",
+                    "Ready to start the visible answer stream.",
+                    "",
+                ]
+                .join("\n");
+                yield Ok(to_sse_event(service_event(run_id.clone(), "orchestration.progress", json!({
+                    "runId": run_id,
+                    "thinkingDelta": first_thinking_delta,
+                    "transient": true
+                }))));
                 yield Ok(to_sse_event(service_event(run_id.clone(), "orchestration.progress", json!({
                     "runId": run_id,
                     "thinking": {
@@ -3491,6 +3520,18 @@ fn execute_stream(
                     }
                 }))));
                 sleep(Duration::from_millis(e2e_thinking_delay_ms)).await;
+                let second_thinking_delta = [
+                    "Rechecking answer outline against the requested response mode.",
+                    "Discarding transient reasoning before persistence.",
+                    "Starting the visible answer now.",
+                    "",
+                ]
+                .join("\n");
+                yield Ok(to_sse_event(service_event(run_id.clone(), "orchestration.progress", json!({
+                    "runId": run_id,
+                    "thinkingDelta": second_thinking_delta,
+                    "transient": true
+                }))));
                 yield Ok(to_sse_event(service_event(run_id.clone(), "orchestration.progress", json!({
                     "runId": run_id,
                     "thinking": {
@@ -3498,6 +3539,7 @@ fn execute_stream(
                         "durationMs": thinking_started_at.elapsed().as_millis()
                     }
                 }))));
+                sleep(Duration::from_millis((e2e_thinking_delay_ms / 4).max(250))).await;
             }
             let chunk_delay_ms = deterministic_e2e_stream_chunk_delay_ms();
             for chunk in deterministic_e2e_answer_chunks(&answer, chunk_delay_ms) {
@@ -3616,6 +3658,13 @@ fn execute_stream(
         let mut provider_stream = provider_pipeline.stream_chat(provider_request);
         while let Some(provider_event) = provider_stream.next().await {
             match provider_event {
+                ProviderContractEvent::ThinkingDelta { text } => {
+                    yield Ok(to_sse_event(service_event(run_id.clone(), "orchestration.progress", json!({
+                        "runId": run_id,
+                        "thinkingDelta": text,
+                        "transient": true
+                    }))));
+                }
                 ProviderContractEvent::ThinkingStatus {
                     status,
                     duration_ms,
@@ -4447,6 +4496,7 @@ fn collect_provider_events_text(
     for event in events {
         match event {
             ProviderContractEvent::Delta { text } => output.push_str(&text),
+            ProviderContractEvent::ThinkingDelta { .. } => {}
             ProviderContractEvent::ThinkingStatus { .. } => {}
             ProviderContractEvent::Completed { .. } | ProviderContractEvent::Truncated { .. } => {
                 return Ok(output);

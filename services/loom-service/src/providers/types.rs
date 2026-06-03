@@ -1,4 +1,6 @@
 use crate::providers::config::ProviderKind;
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -302,9 +304,10 @@ pub struct OllamaWireChunk {
     pub prompt_eval_count: Option<u64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct OllamaStreamChunk {
     pub content: Option<String>,
+    pub thinking_text: Option<String>,
     pub thinking_seen: bool,
     /// Raw byte length of thinking text in this chunk (used for live token estimation).
     pub thinking_char_count: usize,
@@ -314,6 +317,22 @@ pub struct OllamaStreamChunk {
     pub eval_count: Option<u64>,
     /// Authoritative prompt token count from the final chunk.
     pub prompt_eval_count: Option<u64>,
+}
+
+impl fmt::Debug for OllamaStreamChunk {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OllamaStreamChunk")
+            .field("content", &self.content)
+            .field("thinking_text_present", &self.thinking_text.is_some())
+            .field("thinking_seen", &self.thinking_seen)
+            .field("thinking_char_count", &self.thinking_char_count)
+            .field("done", &self.done)
+            .field("done_reason", &self.done_reason)
+            .field("eval_count", &self.eval_count)
+            .field("prompt_eval_count", &self.prompt_eval_count)
+            .finish()
+    }
 }
 
 impl From<OllamaWireChunk> for OllamaStreamChunk {
@@ -330,9 +349,16 @@ impl From<OllamaWireChunk> for OllamaStreamChunk {
         let top_level_thinking = chunk.thinking.as_deref();
         let thinking_char_count = message_thinking.map(str::len).unwrap_or(0)
             + top_level_thinking.map(str::len).unwrap_or(0);
+        let thinking_text = [message_thinking, top_level_thinking]
+            .into_iter()
+            .flatten()
+            .filter(|thinking| !thinking.is_empty())
+            .collect::<Vec<_>>()
+            .join("");
 
         Self {
             content: message_content.or(chunk.response),
+            thinking_text: (!thinking_text.is_empty()).then_some(thinking_text),
             thinking_seen: message_thinking_seen
                 || top_level_thinking.is_some_and(|thinking| !thinking.is_empty()),
             thinking_char_count,
@@ -553,13 +579,17 @@ mod tests {
     }
 
     #[test]
-    fn parses_thinking_without_exposing_raw_text() {
+    fn parses_thinking_as_transient_stream_text() {
         let chunk: OllamaWireChunk =
             serde_json::from_str(r#"{"message":{"thinking":"private raw thinking"},"done":false}"#)
                 .expect("valid chunk");
         let sanitized = OllamaStreamChunk::from(chunk);
 
         assert!(sanitized.thinking_seen);
+        assert_eq!(
+            sanitized.thinking_text.as_deref(),
+            Some("private raw thinking")
+        );
         assert!(sanitized.content.is_none());
     }
 

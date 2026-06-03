@@ -7,6 +7,7 @@ const {
   createReferencePayload,
   loomLinkFromPlannerReference,
   loomLinkFromQuestionReference,
+  mapServiceEventToEngineEvents,
   mapReferenceForService,
   referenceTargetKind,
   validateServiceReference,
@@ -124,5 +125,25 @@ describe("RustHttpLoomEngineClient reference targetKind mapping", () => {
       selectedText: "selected text",
       presentationMode: "attached-card",
     });
+  });
+});
+
+describe("RustHttpLoomEngineClient streaming event mapping", () => {
+  it("maps transient thinking deltas without requiring a response id", () => {
+    expect(
+      mapServiceEventToEngineEvents({
+        type: "orchestration.progress",
+        payload: {
+          runId: "run-1",
+          thinkingDelta: "Reviewing context.\n",
+          transient: true,
+        },
+      })
+    ).toEqual([
+      {
+        type: "thinking_delta",
+        payload: { delta: "Reviewing context.\n" },
+      },
+    ]);
   });
 });

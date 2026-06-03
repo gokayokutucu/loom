@@ -99,6 +99,9 @@ pub enum ProviderContractEvent {
     Delta {
         text: String,
     },
+    ThinkingDelta {
+        text: String,
+    },
     ThinkingStatus {
         status: String,
         duration_ms: Option<u64>,

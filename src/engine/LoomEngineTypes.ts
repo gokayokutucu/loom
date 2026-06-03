@@ -701,6 +701,7 @@ export type EngineResponseEvent =
         tokenEstimate?: number;
       };
     }
+  | { type: "thinking_delta"; payload: { delta: string } }
   | { type: "content_delta"; payload: { responseId: string; delta: string } }
   | {
       type: "response_completed";

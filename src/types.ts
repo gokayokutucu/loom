@@ -442,6 +442,8 @@ export interface ResponseItem {
   thinkingStopped?: boolean;
   /** Live thinking token count: estimated during streaming, overwritten by authoritative eval_count on completion. */
   thinkingTokenCount?: number;
+  /** Transient provider reasoning text shown only while the response is actively streaming. Never persisted. */
+  liveThinkingText?: string;
   /** Finalized authoritative total elapsed inference time (ms). Set from Ollama completion payload and persisted. */
   inferenceMs?: number;
   /** Finalized authoritative total token count (eval_count). Set from Ollama completion payload and persisted. */

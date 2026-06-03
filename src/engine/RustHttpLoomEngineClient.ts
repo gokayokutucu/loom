@@ -2460,6 +2460,10 @@ function mapServiceEventToEngineEvents(value: unknown): EngineResponseEvent[] {
   }
 
   if (eventType === "orchestration.progress") {
+    const thinkingDelta = servicePayloadString(payload, "thinkingDelta");
+    if (thinkingDelta) {
+      return [{ type: "thinking_delta", payload: { delta: thinkingDelta } }];
+    }
     const thinking = isRecord(payload.thinking) ? payload.thinking : undefined;
     if (thinking) {
       return [
@@ -3707,6 +3711,7 @@ export const __rustHttpLoomEngineClientTest = {
   createReferencePayload,
   loomLinkFromPlannerReference,
   loomLinkFromQuestionReference,
+  mapServiceEventToEngineEvents,
   mapReferenceForService,
   referenceTargetKind,
   validateServiceReference,

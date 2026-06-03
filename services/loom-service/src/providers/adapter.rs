@@ -307,6 +307,9 @@ impl ProviderAdapter for OllamaProviderAdapter {
                         let started_at = thinking_started_at.get_or_insert_with(Instant::now);
                         thinking_total_chars += chunk.thinking_char_count;
                         let token_estimate = (thinking_total_chars as f64 / 3.5) as u64;
+                        if let Some(text) = chunk.thinking_text.clone() {
+                            yield ProviderContractEvent::ThinkingDelta { text };
+                        }
                         yield ProviderContractEvent::ThinkingStatus {
                             status: "active".to_string(),
                             duration_ms: Some(started_at.elapsed().as_millis() as u64),
@@ -543,6 +546,7 @@ mod tests {
     fn usage_mapping_uses_ollama_final_counts() {
         let chunk = OllamaStreamChunk {
             content: None,
+            thinking_text: None,
             thinking_seen: false,
             thinking_char_count: 0,
             done: true,
@@ -565,6 +569,7 @@ mod tests {
     fn usage_mapping_is_explicit_when_unavailable() {
         let chunk = OllamaStreamChunk {
             content: None,
+            thinking_text: None,
             thinking_seen: false,
             thinking_char_count: 0,
             done: true,
@@ -580,7 +585,7 @@ mod tests {
     }
 
     #[test]
-    fn parser_suppresses_raw_thinking_and_emits_status_metadata_only() {
+    fn parser_keeps_thinking_as_transient_stream_text() {
         let mut buffer = String::new();
         let chunks = parse_ndjson_bytes(
             &mut buffer,
@@ -592,6 +597,10 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].content.as_deref(), Some("visible"));
         assert!(chunks[0].thinking_seen);
+        assert_eq!(
+            chunks[0].thinking_text.as_deref(),
+            Some("hidden raw thoughts")
+        );
         assert_eq!(chunks[0].thinking_char_count, "hidden raw thoughts".len());
     }
 
@@ -616,6 +625,7 @@ mod tests {
     fn completed_length_reason_becomes_truncated_event() {
         let chunk = OllamaStreamChunk {
             content: None,
+            thinking_text: None,
             thinking_seen: false,
             thinking_char_count: 0,
             done: true,

@@ -535,6 +535,7 @@ fn collect_quick_answer_from_provider_events(
     for event in events {
         match event {
             ProviderContractEvent::Delta { text } => answer.push_str(&text),
+            ProviderContractEvent::ThinkingDelta { .. } => {}
             ProviderContractEvent::ThinkingStatus { .. } => {}
             ProviderContractEvent::Completed { .. } | ProviderContractEvent::Truncated { .. } => {
                 let visible = answer.trim();
