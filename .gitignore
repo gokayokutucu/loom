@@ -54,3 +54,6 @@ tree_loom.txt
 # and services/loom-service/target folder is always ignored
 services/loom-service/target/
 
+
+# JetBrains IDE
+.idea/
