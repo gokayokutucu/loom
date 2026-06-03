@@ -114,9 +114,37 @@ Before finishing any change:
 - Run targeted E2E when the task touches a tested feature
 - Run full E2E when broad architecture, routing, or test infrastructure changes occur
 
+## 8.1) Loom Validation Workflow
+
+Use the root `./loom.sh` helper as the standard local validation entry point after files are manually staged or scoped.
+
+Agent rules:
+
+- Do not stage files automatically unless explicitly asked.
+- Do not commit, push, tag, merge, or release unless explicitly asked.
+- At the end of implementation reports, include the exact manual validation commands the user should run.
+- Prefer `./loom.sh` for standard validation.
+- If the task changes Rust service code, provider runtime, service endpoints, orchestration, or Electron sidecar behavior, include:
+  `./loom.sh --publish --test`
+- If the task changes ThinkingPanel live reasoning stream behavior, include:
+  `./loom.sh --publish --test --e2e-thinking`
+- If a specific E2E port is needed, include:
+  `./loom.sh --publish --test --e2e-thinking --e2e-port <port>`
+- If the task is frontend-only and does not need a Rust rebuild, include:
+  `./loom.sh --test`
+- Always include `git diff --cached --name-only` before the validation script when preparing a commit.
+- Always remind that `loom.sh` does not stage, commit, push, tag, merge, or release.
+
+Every task completion report should include a "Manual validation" block adjusted to the task type:
+
+```bash
+git diff --cached --name-only
+./loom.sh --publish --test
+```
+
 ---
 
-## 8.1) E2E Data Authority Policy
+## 8.2) E2E Data Authority Policy
 
 Product-mode E2E tests MUST:
 
@@ -179,6 +207,7 @@ Every Codex task output must include:
 - Files changed
 - Behavior changed
 - Validation commands and results
+- Manual validation block with the exact commands to run next
 - Commit/push status
 - Ledger update recommendation:
   - move from ACTIVE to LOCKED
