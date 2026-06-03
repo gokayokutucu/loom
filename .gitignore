@@ -2,6 +2,7 @@ node_modules/
 dist/
 dist-electron/
 release/
+.idea/
 *m-main/
 .DS_Store
 *.log
@@ -55,5 +56,4 @@ tree_loom.txt
 services/loom-service/target/
 
 
-# JetBrains IDE
-.idea/
+
