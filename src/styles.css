@@ -3261,6 +3261,61 @@ kbd {
   line-height: 1.5;
 }
 
+.thinking-live-stream p {
+  margin: 0 0 6px;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--loom-text-muted);
+}
+
+.thinking-live-stream p:last-child {
+  margin-bottom: 0;
+}
+
+.thinking-live-stream .assistant-markdown-list {
+  font-size: 11px;
+  line-height: 1.45;
+  gap: 4px;
+  margin: 0 0 6px;
+  padding-left: 18px;
+  color: var(--loom-text-muted);
+}
+
+.thinking-live-stream .assistant-markdown-heading {
+  font-size: 11px !important;
+  line-height: 1.45 !important;
+  margin: 8px 0 4px;
+  color: var(--loom-text-secondary);
+}
+
+.thinking-live-stream .assistant-markdown-heading:first-child {
+  margin-top: 0;
+}
+
+.thinking-live-stream .assistant-code-block {
+  margin: 6px 0;
+  font-size: 11px;
+}
+
+.thinking-live-stream .assistant-code-block figcaption {
+  min-height: 24px;
+  padding: 0 8px;
+  font-size: 10px;
+}
+
+.thinking-live-stream .assistant-code-block pre {
+  padding: 0 8px 8px;
+}
+
+.thinking-live-stream .assistant-code-block code {
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.thinking-live-stream .assistant-code-line {
+  min-height: 1.45em;
+}
+
 .thinking-panel-guard {
   display: flex;
   flex-wrap: wrap;

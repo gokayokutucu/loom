@@ -3484,7 +3484,8 @@ fn execute_stream(
             if answer_plan.use_thinking && e2e_thinking_delay_ms > 0 {
                 let thinking_started_at = Instant::now();
                 let first_thinking_delta = [
-                    "Reviewing the prompt and available Loom context.",
+                    "**Plan:**",
+                    "- Reviewing the prompt and `Loom` context.",
                     "Checking selected references and recent visible turns.",
                     "Separating source context from the latest user request.",
                     "Estimating the response shape and useful detail level.",
@@ -3522,8 +3523,6 @@ fn execute_stream(
                 sleep(Duration::from_millis(e2e_thinking_delay_ms)).await;
                 let second_thinking_delta = [
                     "Rechecking answer outline against the requested response mode.",
-                    "Discarding transient reasoning before persistence.",
-                    "Starting the visible answer now.",
                     "",
                 ]
                 .join("\n");
@@ -3539,7 +3538,43 @@ fn execute_stream(
                         "durationMs": thinking_started_at.elapsed().as_millis()
                     }
                 }))));
-                sleep(Duration::from_millis((e2e_thinking_delay_ms / 4).max(250))).await;
+                sleep(Duration::from_millis(e2e_thinking_delay_ms)).await;
+                let third_thinking_delta = [
+                    "Discarding transient reasoning before persistence.",
+                    "",
+                ]
+                .join("\n");
+                yield Ok(to_sse_event(service_event(run_id.clone(), "orchestration.progress", json!({
+                    "runId": run_id,
+                    "thinkingDelta": third_thinking_delta,
+                    "transient": true
+                }))));
+                yield Ok(to_sse_event(service_event(run_id.clone(), "orchestration.progress", json!({
+                    "runId": run_id,
+                    "thinking": {
+                        "status": "active",
+                        "durationMs": thinking_started_at.elapsed().as_millis()
+                    }
+                }))));
+                sleep(Duration::from_millis(e2e_thinking_delay_ms)).await;
+                let fourth_thinking_delta = [
+                    "Starting the visible answer now.",
+                    "",
+                ]
+                .join("\n");
+                yield Ok(to_sse_event(service_event(run_id.clone(), "orchestration.progress", json!({
+                    "runId": run_id,
+                    "thinkingDelta": fourth_thinking_delta,
+                    "transient": true
+                }))));
+                yield Ok(to_sse_event(service_event(run_id.clone(), "orchestration.progress", json!({
+                    "runId": run_id,
+                    "thinking": {
+                        "status": "active",
+                        "durationMs": thinking_started_at.elapsed().as_millis()
+                    }
+                }))));
+                sleep(Duration::from_millis(e2e_thinking_delay_ms)).await;
             }
             let chunk_delay_ms = deterministic_e2e_stream_chunk_delay_ms();
             for chunk in deterministic_e2e_answer_chunks(&answer, chunk_delay_ms) {

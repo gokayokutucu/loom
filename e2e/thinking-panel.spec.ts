@@ -17,7 +17,7 @@ test.describe("[product-service-backed] thinking panel", () => {
     test.setTimeout(90_000);
     const scenario = await createServiceTestHarness({
       deterministicProvider: "event-sourcing",
-      deterministicThinkingDelayMs: 2_500,
+      deterministicThinkingDelayMs: 2_000,
       startApp: true,
     });
 
@@ -48,7 +48,14 @@ test.describe("[product-service-backed] thinking panel", () => {
       await expect(detail).toContainText(/Preparing answer plan|Building Loom context|Understanding/);
       const liveStream = detail.getByTestId("thinking-live-stream");
       await expect(liveStream).toBeVisible({ timeout: 10_000 });
-      await expect(liveStream).toContainText("Reviewing the prompt and available Loom context");
+      await expect(liveStream).toContainText("Reviewing the prompt and Loom context");
+      await expect(liveStream).not.toContainText("raw_thinking");
+
+      // Assert Markdown elements render as actual HTML elements instead of raw text
+      await expect(liveStream.locator("strong")).toContainText("Plan:");
+      await expect(liveStream.locator("li")).toContainText("Reviewing the prompt and Loom context");
+      await expect(liveStream.locator("code")).toContainText("Loom");
+
       await expect
         .poll(
           async () =>
@@ -59,22 +66,51 @@ test.describe("[product-service-backed] thinking panel", () => {
           { timeout: 10_000 }
         )
         .toMatchObject({ scrollable: true, maxHeight: 190 });
+
+      // 1. User scrolls up once (simulate manual scroll up)
       await liveStream.evaluate((element) => {
         element.scrollTop = 0;
         element.dispatchEvent(new Event("scroll", { bubbles: true }));
       });
-      await expect(liveStream).toContainText("Preparing a concise response plan", {
-        timeout: 10_000,
+
+      // 2. Assert a new chunk arrives during the 2-second lock, and it does not jump to bottom.
+      await expect(liveStream).toContainText("Rechecking answer outline", {
+        timeout: 5_000,
       });
+
+      // scrollTop should remain near the top (less than 24)
+      const scrollTopDuringLock = await liveStream.evaluate((element) => element.scrollTop);
+      expect(scrollTopDuringLock).toBeLessThan(24);
+
+      // 3. Wait more than 2 seconds since the scroll up (lock duration is 2000ms)
+      await page.waitForTimeout(2200);
+
+      // 4. Assert another chunk (third_thinking_delta) arrives while still away from bottom,
+      // and it still does not jump to bottom.
+      await expect(liveStream).toContainText("Discarding transient reasoning", {
+        timeout: 5_000,
+      });
+
+      const scrollTopAfterLockExpired = await liveStream.evaluate((element) => element.scrollTop);
+      expect(scrollTopAfterLockExpired).toBeLessThan(24);
+
+      // 5. User scrolls back to bottom (simulate manual scroll to bottom)
+      await liveStream.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+        element.dispatchEvent(new Event("scroll", { bubbles: true }));
+      });
+
+      // 6. Next chunk (fourth_thinking_delta) auto-scrolls again
       await expect(liveStream).toContainText("Starting the visible answer now", {
-        timeout: 10_000,
+        timeout: 5_000,
       });
-      await expect
-        .poll(async () => liveStream.evaluate((element) => element.scrollTop), {
-          timeout: 3_000,
-        })
-        .toBeLessThan(24);
-      await expect(liveStream).not.toContainText("raw_thinking");
+
+      // Verify it auto-scrolls back to the bottom now that we are near the bottom
+      await page.waitForTimeout(100);
+      const scrollTopAfterScrollDown = await liveStream.evaluate((element) => element.scrollTop);
+      const scrollHeight = await liveStream.evaluate((element) => element.scrollHeight);
+      const clientHeight = await liveStream.evaluate((element) => element.clientHeight);
+      expect(scrollTopAfterScrollDown).toBeGreaterThanOrEqual(scrollHeight - clientHeight - 24);
 
       const pageText = await page.locator("body").innerText();
       expect(pageText).not.toContain("raw_thinking");
@@ -86,7 +122,7 @@ test.describe("[product-service-backed] thinking panel", () => {
         timeout: 30_000,
       });
       await expect(page.locator(".thinking-panel.is-running")).toHaveCount(0);
-      await expect(page.getByText("Reviewing the prompt and available Loom context")).toHaveCount(0);
+      await expect(page.getByText("Reviewing the prompt and Loom context")).toHaveCount(0);
 
       const [loom] = await scenario.client.listLooms();
       const detailResponse = await scenario.fetchJson<{

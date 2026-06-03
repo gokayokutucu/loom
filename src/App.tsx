@@ -265,6 +265,7 @@ import {
   shouldFollowLatestTurnTail,
 } from "./services/latestTurnScroll";
 import { codeToClipboardHtml } from "./services/clipboard";
+import { shouldAutoScrollThinkingStream } from "./services/thinkingScrollLock";
 import { prepareContextArtifactsForGeneration } from "./services/contextReadinessGate";
 import {
   activateVisibleAnswerStage,
@@ -16251,13 +16252,47 @@ function ThinkingPanel({
 
 function LiveThinkingStream({ text }: { text: string }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const autoFollowRef = useRef(true);
+  const manualScrollLockUntilRef = useRef<number>(0);
+  const isNearBottomRef = useRef<boolean>(true);
+  const autoScrollEnabledRef = useRef<boolean>(true);
+  const isProgrammaticScrollRef = useRef<boolean>(false);
+  const rafRef = useRef<number[]>([]);
 
   useEffect(() => {
     const element = scrollRef.current;
-    if (!element || !autoFollowRef.current) return;
-    element.scrollTop = element.scrollHeight;
+    if (!element) return;
+    const now = Date.now();
+    if (
+      shouldAutoScrollThinkingStream({
+        now,
+        manualScrollLockUntil: manualScrollLockUntilRef.current,
+        autoScrollEnabled: autoScrollEnabledRef.current,
+        isNearBottom: isNearBottomRef.current,
+      })
+    ) {
+      isProgrammaticScrollRef.current = true;
+      element.scrollTop = element.scrollHeight;
+
+      // Cancel pending frames
+      rafRef.current.forEach(cancelAnimationFrame);
+      rafRef.current = [];
+
+      const firstId = requestAnimationFrame(() => {
+        const secondId = requestAnimationFrame(() => {
+          isProgrammaticScrollRef.current = false;
+        });
+        rafRef.current.push(secondId);
+      });
+      rafRef.current.push(firstId);
+    }
   }, [text]);
+
+  useEffect(() => {
+    return () => {
+      // eslint-disable-next-line react-hooks/exhaustive-deps
+      rafRef.current.forEach(cancelAnimationFrame);
+    };
+  }, []);
 
   return (
     <div
@@ -16265,14 +16300,27 @@ function LiveThinkingStream({ text }: { text: string }) {
       className="thinking-live-stream"
       data-testid="thinking-live-stream"
       onScroll={(event) => {
+        if (isProgrammaticScrollRef.current) {
+          return;
+        }
+
         const element = event.currentTarget;
         const distanceToBottom =
           element.scrollHeight - element.scrollTop - element.clientHeight;
-        autoFollowRef.current = distanceToBottom < 24;
+        const nearBottom = distanceToBottom < 24;
+        if (!nearBottom) {
+          autoScrollEnabledRef.current = false;
+          isNearBottomRef.current = false;
+          manualScrollLockUntilRef.current = Date.now() + 2000;
+        } else {
+          autoScrollEnabledRef.current = true;
+          isNearBottomRef.current = true;
+          manualScrollLockUntilRef.current = 0;
+        }
       }}
       aria-label="Live reasoning stream"
     >
-      <pre>{text}</pre>
+      <AssistantMarkdownContent markdown={text} />
     </div>
   );
 }
