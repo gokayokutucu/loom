@@ -328,7 +328,9 @@ function validateNavigationDestination(value: unknown): value is LoomNavigationD
     (scrollMode === undefined ||
       scrollMode === "origin" ||
       scrollMode === "lastResponse" ||
-      scrollMode === "exact") &&
+      scrollMode === "exact" ||
+      scrollMode === "fragment" ||
+      scrollMode === "top") &&
     (source === "userNavigation" ||
       source === "addressBar" ||
       source === "weftCreate" ||

@@ -168,6 +168,7 @@ import {
 } from "./services/exportService";
 import { formatRelativeTimestamp } from "./services/timeLabels";
 import { formatBadgeCode } from "./services/displayCode";
+import { referenceNavigationOverridesForLink } from "./services/referenceFragmentScroll";
 import {
   codeSnippetFirstMeaningfulLine,
   codeSnippetLanguageLabel,
@@ -2355,6 +2356,9 @@ function App() {
   // and queueLatestUserTurnAnchor() in the main send path.  While this is true
   // the streaming effect must HOLD (not follow) even though there is no anchor yet.
   const pendingLatestTurnAnchorRef = useRef(false);
+  const referenceNavigationInProgressRef = useRef(false);
+  const referenceNavigationTimerRef = useRef<number | null>(null);
+  const referenceFragmentHighlightTimerRef = useRef<number | null>(null);
   const activeVisitLoomIdRef = useRef<string | null>(null);
   const activeVisitKnownResponseIdsRef = useRef<Set<string>>(new Set());
   const wasWeftSplitVisibleRef = useRef(false);
@@ -5210,7 +5214,18 @@ function App() {
 
   function findResponseInLoom(loomId: string, responseId?: string) {
     if (!responseId) return undefined;
-    return (conversationResponses[loomId] ?? []).find((response) => response.id === responseId);
+    const conversation = conversations.find((item) => item.id === loomId);
+    const lookupCandidates = new Set(
+      [responseId, responseIdFromReferenceAddress(responseId)].filter(
+        (candidate): candidate is string => Boolean(candidate)
+      )
+    );
+    return (conversationResponses[loomId] ?? []).find((response) => {
+      const responseCandidates = responseIdentityCandidates(loomId, response, conversation);
+      return Array.from(lookupCandidates).some((candidate) =>
+        responseCandidates.has(candidate)
+      );
+    });
   }
 
   function findResponseByPath(loomId: string, path: string) {
@@ -5617,8 +5632,12 @@ function App() {
       mode,
       originLoomId: overrides.originLoomId ?? origin?.originLoomId,
       originResponseId: overrides.originResponseId ?? origin?.originResponseId,
+      preserveOriginScroll: overrides.preserveOriginScroll,
       scrollTargetResponseId,
       scrollMode,
+      fragmentText: overrides.fragmentText,
+      fragmentHash: overrides.fragmentHash,
+      fragmentIncludeCode: overrides.fragmentIncludeCode,
       source,
     };
   }
@@ -6324,6 +6343,7 @@ function App() {
         pendingScrollDestinationRef.current = null;
         pendingScrollPathRef.current = null;
         pendingScrollHighlightRef.current = false;
+        clearReferenceNavigationGuard();
         finishLoomSurfaceLoading();
         completedScroll = true;
       };
@@ -6332,14 +6352,19 @@ function App() {
         responseId?: string,
         path?: string,
         highlight = false,
-        targetPrompt = false
+        targetPrompt = false,
+        targetLoomId?: string
       ) => {
         if (!transcript) return false;
+        const resolvedResponseId =
+          responseId && targetLoomId
+            ? findResponseInLoom(targetLoomId, responseId)?.id ?? responseId
+            : responseId;
         const target = responseId
           ? transcript.querySelector<HTMLElement>(
               targetPrompt
-                ? `[data-prompt-response-id="${CSS.escape(responseId)}"]`
-                : `[data-response-id="${CSS.escape(responseId)}"]`
+                ? `[data-prompt-response-id="${CSS.escape(resolvedResponseId ?? responseId)}"]`
+                : `[data-response-id="${CSS.escape(resolvedResponseId ?? responseId)}"]`
             )
           : path
             ? transcript.querySelector<HTMLElement>(
@@ -6347,11 +6372,31 @@ function App() {
               )
             : null;
         if (!target) return false;
+        if (pendingDestination?.scrollMode === "fragment") {
+          const fragmentRange = pendingDestination.fragmentText
+            ? findFragmentRangeInResponse(
+                target,
+                pendingDestination.fragmentText,
+                Boolean(pendingDestination.fragmentIncludeCode)
+              )
+            : null;
+          if (fragmentRange && scrollRangeIntoViewFromCurrent(transcript, fragmentRange)) {
+            highlightFragmentRange(fragmentRange, target);
+            completePendingScroll();
+            return true;
+          }
+        }
         scrollElementIntoViewFromCurrent(
           transcript,
           target,
-          targetPrompt ? "start" : "center",
-          targetPrompt
+          targetPrompt ||
+            pendingDestination?.scrollMode === "exact" ||
+            pendingDestination?.scrollMode === "fragment"
+            ? "start"
+            : "center",
+          targetPrompt ||
+            pendingDestination?.scrollMode === "exact" ||
+            pendingDestination?.scrollMode === "fragment"
         );
         if (highlight) {
           target.classList.remove("response-scroll-highlight");
@@ -6391,7 +6436,8 @@ function App() {
           pendingDestination.originResponseId,
           undefined,
           false,
-          true
+          true,
+          pendingDestination.originLoomId
         );
       }
 
@@ -6426,7 +6472,8 @@ function App() {
           pendingDestination.scrollTargetResponseId,
           undefined,
           shouldHighlightPendingScroll,
-          pendingDestination.scrollMode === "origin"
+          pendingDestination.scrollMode === "origin",
+          pendingDestination.loomId
         )
       ) {
         return;
@@ -6437,8 +6484,26 @@ function App() {
         !serviceLoomsLoading &&
         activeConversationId === pendingDestination.loomId
       ) {
-        const latest = lastResponseInLoom(pendingDestination.loomId);
         const transcript = transcriptForLoom(pendingDestination.loomId);
+        if (
+          pendingDestination.scrollMode === "exact" ||
+          pendingDestination.scrollMode === "origin" ||
+          pendingDestination.scrollMode === "fragment"
+        ) {
+          if (transcript) {
+            if (import.meta.env.DEV) {
+              console.warn("Reference scroll target was not found.", {
+                loomId: pendingDestination.loomId,
+                responseId: pendingDestination.scrollTargetResponseId,
+                scrollMode: pendingDestination.scrollMode,
+              });
+            }
+            completePendingScroll();
+            return;
+          }
+          return;
+        }
+        const latest = lastResponseInLoom(pendingDestination.loomId);
         if (latest && scrollTranscriptToEnd(transcript)) return;
         if (transcript) {
           completePendingScroll();
@@ -7460,15 +7525,137 @@ function App() {
   function findResponseRecordByObjectId(objectId?: string) {
     if (!objectId) return undefined;
     for (const [loomId, responses] of Object.entries(conversationResponses)) {
-      const response = responses.find(
-        (item) => runtimeGraphObjectIdFor("response", `${loomId}_${item.id}`) === objectId
+      const conversation = conversations.find((item) => item.id === loomId);
+      const response = responses.find((item) =>
+        responseIdentityCandidates(loomId, item, conversation).has(objectId)
       );
       if (!response) continue;
-      const conversation = conversations.find((item) => item.id === loomId);
       if (!conversation) continue;
       return { loomId, conversation, response };
     }
     return undefined;
+  }
+
+  function clearReferenceNavigationGuard() {
+    referenceNavigationInProgressRef.current = false;
+    if (referenceNavigationTimerRef.current !== null) {
+      window.clearTimeout(referenceNavigationTimerRef.current);
+      referenceNavigationTimerRef.current = null;
+    }
+  }
+
+  function beginReferenceNavigationGuard() {
+    clearReferenceNavigationGuard();
+    referenceNavigationInProgressRef.current = true;
+    referenceNavigationTimerRef.current = window.setTimeout(() => {
+      referenceNavigationTimerRef.current = null;
+      referenceNavigationInProgressRef.current = false;
+    }, 1800);
+  }
+
+  function clearReferenceFragmentHighlights(root: ParentNode = document) {
+    if (referenceFragmentHighlightTimerRef.current !== null) {
+      window.clearTimeout(referenceFragmentHighlightTimerRef.current);
+      referenceFragmentHighlightTimerRef.current = null;
+    }
+    root
+      .querySelectorAll<HTMLElement>(".reference-fragment-scroll-highlight")
+      .forEach((element) => {
+        element.classList.remove("reference-fragment-scroll-highlight");
+      });
+  }
+
+  function textNodeCanMatchFragment(node: Node, includeCode: boolean) {
+    const element = node.parentNode instanceof Element ? node.parentNode : null;
+    if (!element) return false;
+    if (element.closest(".inline-loom-token, button, textarea, input")) return false;
+    if (!includeCode && element.closest("pre, code")) return false;
+    return Boolean(element.closest(".assistant-response-content"));
+  }
+
+  function findFragmentRangeInResponse(
+    responseElement: HTMLElement,
+    selectedText: string,
+    includeCode = false
+  ): Range | null {
+    const query = selectedText.trim();
+    if (!query) return null;
+    const content = responseElement.querySelector<HTMLElement>(".assistant-response-content");
+    if (!content) return null;
+    const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
+      acceptNode(node) {
+        return textNodeCanMatchFragment(node, includeCode)
+          ? NodeFilter.FILTER_ACCEPT
+          : NodeFilter.FILTER_REJECT;
+      },
+    });
+    const nodes: Text[] = [];
+    let combined = "";
+    while (walker.nextNode()) {
+      const node = walker.currentNode as Text;
+      if (!node.data) continue;
+      nodes.push(node);
+      combined += node.data;
+    }
+    const matchIndex = combined.indexOf(query);
+    if (matchIndex < 0) return null;
+    let cursor = 0;
+    let startNode: Text | null = null;
+    let endNode: Text | null = null;
+    let startOffset = 0;
+    let endOffset = 0;
+    const matchEnd = matchIndex + query.length;
+    for (const node of nodes) {
+      const nextCursor = cursor + node.data.length;
+      if (!startNode && matchIndex >= cursor && matchIndex <= nextCursor) {
+        startNode = node;
+        startOffset = matchIndex - cursor;
+      }
+      if (matchEnd >= cursor && matchEnd <= nextCursor) {
+        endNode = node;
+        endOffset = matchEnd - cursor;
+        break;
+      }
+      cursor = nextCursor;
+    }
+    if (!startNode || !endNode) return null;
+    const range = document.createRange();
+    range.setStart(startNode, startOffset);
+    range.setEnd(endNode, endOffset);
+    return range;
+  }
+
+  function scrollRangeIntoViewFromCurrent(
+    transcript: HTMLElement,
+    range: Range,
+    offset = 16
+  ) {
+    const rect = range.getBoundingClientRect();
+    if (!rect.width && !rect.height) return false;
+    const transcriptRect = transcript.getBoundingClientRect();
+    const nextTop = transcript.scrollTop + rect.top - transcriptRect.top - offset;
+    transcript.scrollTo({
+      top: Math.max(0, nextTop),
+      behavior: "smooth",
+    });
+    return true;
+  }
+
+  function highlightFragmentRange(range: Range, root: ParentNode) {
+    clearReferenceFragmentHighlights(root);
+    const ancestor =
+      range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+        ? (range.commonAncestorContainer as Element)
+        : range.commonAncestorContainer.parentElement;
+    const target = ancestor?.closest<HTMLElement>(
+      "p, li, td, th, h1, h2, h3, h4, h5, h6"
+    );
+    if (!target) return;
+    target.classList.add("reference-fragment-scroll-highlight");
+    referenceFragmentHighlightTimerRef.current = window.setTimeout(() => {
+      target.classList.remove("reference-fragment-scroll-highlight");
+      referenceFragmentHighlightTimerRef.current = null;
+    }, 1800);
   }
 
   function visitResolvedReference(link: LoomLink, resolution: LoomResolutionResult) {
@@ -7534,15 +7721,18 @@ function App() {
   }
 
   function openComposerReference(link: LoomLink) {
+    beginReferenceNavigationGuard();
     if (link.type === "fragment" || link.targetKind === "code_block") {
       const target = findReferenceTargetResponse(link);
-      if (!target) return "This Reference source cannot be opened.";
+      if (!target) {
+        clearReferenceNavigationGuard();
+        return "This Reference source cannot be opened.";
+      }
       const destination = responseLinkForNavigation(target.loomId, target.response);
       visitDestination(destination, {
         source: "userNavigation",
         navigationDestination: navigationDestinationForLink(destination, "userNavigation", {
-          scrollTargetResponseId: target.response.id,
-          scrollMode: "exact",
+          ...referenceNavigationOverridesForLink(link, target.response.id),
         }),
       });
       focusComposerAfterNavigation();
@@ -7575,6 +7765,7 @@ function App() {
         resolution.reason ?? "Reference target did not resolve"
       );
     }
+    clearReferenceNavigationGuard();
     return resolution.reason ?? "This Reference target cannot be opened.";
   }
 
@@ -9990,9 +10181,11 @@ function App() {
     // transitions to anchor-geometry mode rather than holding indefinitely.
     pendingLatestTurnAnchorRef.current = false;
     latestTurnAnchorModeRef.current = true;
-    pendingScrollDestinationRef.current = null;
-    pendingScrollPathRef.current = null;
-    pendingScrollHighlightRef.current = false;
+    if (!referenceNavigationInProgressRef.current) {
+      pendingScrollDestinationRef.current = null;
+      pendingScrollPathRef.current = null;
+      pendingScrollHighlightRef.current = false;
+    }
     latestUserTurnAnchorRef.current = {
       loomId,
       responseId,
@@ -12892,6 +13085,7 @@ function App() {
     }
 
     if (isRunning) {
+      if (referenceNavigationInProgressRef.current) return;
       const anchor = latestUserTurnAnchorRef.current;
       if (anchor && !anchor.cancelled) {
         if (!anchor.anchored) {
@@ -12949,7 +13143,7 @@ function App() {
             // that just appeared at completion) is visible above the composer.
             // Using the response tail here would miss the reference-strip.
             const transcript = transcriptRef.current;
-            if (transcript) {
+            if (transcript && !referenceNavigationInProgressRef.current) {
               scrollRealContentEndIntoSafeView(transcript);
             }
             latestUserTurnAnchorRef.current = null;
@@ -12968,7 +13162,11 @@ function App() {
         // Rule D: snap to real content end (respects composer boundary) rather
         // than scrollHeight which may be stale or larger than visible area.
         const transcript = transcriptRef.current;
-        if (transcript && !scrollRealContentEndIntoSafeView(transcript)) {
+        if (
+          transcript &&
+          !referenceNavigationInProgressRef.current &&
+          !scrollRealContentEndIntoSafeView(transcript)
+        ) {
           followTranscriptToBottom("smooth");
         }
         transcriptAutoFollowPausedRef.current = false;
@@ -15538,6 +15736,8 @@ function traversalEntryMeta(entry: HistoryEntry) {
         ? "Latest"
         : destination?.scrollMode === "exact"
           ? "Exact"
+          : destination?.scrollMode === "fragment"
+            ? "Fragment"
           : undefined;
   const badge = [mode, scroll, displayObjectTypeLabel(entry.badge)].filter(Boolean).join(" · ");
 

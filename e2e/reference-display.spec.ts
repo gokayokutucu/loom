@@ -40,7 +40,12 @@ test.describe("[pure-ui-rendering] Fragment chip preview truncation", () => {
       "Responses flowing downward, and Weft branches splitting sideways without breaking hierarchy, " +
       "which means context is always preserved vertically while exploration spreads horizontally.";
 
-    await page.addInitScript(() => window.localStorage.clear());
+    await page.addInitScript(() => {
+      if (!window.localStorage.getItem("loom:initialized")) {
+        window.localStorage.clear();
+        window.localStorage.setItem("loom:initialized", "true");
+      }
+    });
     await page.goto("/");
     await expect(page.getByTestId("loom-sidebar")).toBeVisible();
 
@@ -57,30 +62,18 @@ test.describe("[pure-ui-rendering] Fragment chip preview truncation", () => {
           presentationMode: "attached-card",
         };
         const draft = {
-          text: "",
           html: "",
-          references: [link],
+          links: [link],
           attachments: [],
         };
-        const key = Object.keys(window.localStorage).find((k) => k.startsWith("loom:")) ?? "loom:test";
-        const looms = JSON.parse(window.localStorage.getItem("loom:looms-list-v2") ?? "[]");
-        if (!looms.length) {
-          const loomId = "loom-preview-test";
-          window.localStorage.setItem(
-            "loom:looms-list-v2",
-            JSON.stringify([{ loomId, title: "Preview test loom" }])
-          );
-          window.localStorage.setItem(
-            `loom:composer-drafts-v1`,
-            JSON.stringify({ [loomId]: draft })
-          );
-          void key;
-        } else {
-          const loomId = looms[0].loomId;
-          const drafts = JSON.parse(window.localStorage.getItem("loom:composer-drafts-v1") ?? "{}");
-          drafts[loomId] = draft;
-          window.localStorage.setItem("loom:composer-drafts-v1", JSON.stringify(drafts));
-        }
+        const loomId = "draft-new-conversation";
+        const drafts = JSON.parse(window.localStorage.getItem("loom:composer-drafts-v1") ?? "{}");
+        drafts[loomId] = draft;
+        window.localStorage.setItem("loom:composer-drafts-v1", JSON.stringify(drafts));
+        window.localStorage.setItem(
+          "loom:last-active-loom-v1",
+          JSON.stringify({ activeLoomId: loomId })
+        );
         void maxChars;
       },
       { text: LONG_SELECTED_TEXT, maxChars: FRAGMENT_CHIP_PREVIEW_MAX_CHARS }
@@ -90,12 +83,7 @@ test.describe("[pure-ui-rendering] Fragment chip preview truncation", () => {
     await expect(page.getByTestId("loom-sidebar")).toBeVisible();
 
     const chip = page.getByTestId("selection-reference-chip").first();
-    if (!(await chip.isVisible())) {
-      // If the draft injection didn't surface a chip (seeded data varies by run),
-      // skip the DOM assertion rather than fail — the unit tests are the authority.
-      test.skip();
-      return;
-    }
+    await expect(chip).toBeVisible();
 
     const visibleLabel = await chip.locator("span").first().innerText();
     const fullText = await chip.getAttribute("data-loom-selected-text");
@@ -110,7 +98,12 @@ test.describe("[pure-ui-rendering] Fragment chip preview truncation", () => {
   test("short selected text: visible chip label matches full text exactly", async ({ page }) => {
     const SHORT_TEXT = "The Process of Trilateration";
 
-    await page.addInitScript(() => window.localStorage.clear());
+    await page.addInitScript(() => {
+      if (!window.localStorage.getItem("loom:initialized")) {
+        window.localStorage.clear();
+        window.localStorage.setItem("loom:initialized", "true");
+      }
+    });
     await page.goto("/");
     await expect(page.getByTestId("loom-sidebar")).toBeVisible();
 
@@ -127,25 +120,18 @@ test.describe("[pure-ui-rendering] Fragment chip preview truncation", () => {
           presentationMode: "attached-card",
         };
         const draft = {
-          text: "",
           html: "",
-          references: [link],
+          links: [link],
           attachments: [],
         };
-        const looms = JSON.parse(window.localStorage.getItem("loom:looms-list-v2") ?? "[]");
-        if (!looms.length) {
-          const loomId = "loom-short-test";
-          window.localStorage.setItem(
-            "loom:looms-list-v2",
-            JSON.stringify([{ loomId, title: "Short test loom" }])
-          );
-          window.localStorage.setItem("loom:composer-drafts-v1", JSON.stringify({ [loomId]: draft }));
-        } else {
-          const loomId = looms[0].loomId;
-          const drafts = JSON.parse(window.localStorage.getItem("loom:composer-drafts-v1") ?? "{}");
-          drafts[loomId] = draft;
-          window.localStorage.setItem("loom:composer-drafts-v1", JSON.stringify(drafts));
-        }
+        const loomId = "draft-new-conversation";
+        const drafts = JSON.parse(window.localStorage.getItem("loom:composer-drafts-v1") ?? "{}");
+        drafts[loomId] = draft;
+        window.localStorage.setItem("loom:composer-drafts-v1", JSON.stringify(drafts));
+        window.localStorage.setItem(
+          "loom:last-active-loom-v1",
+          JSON.stringify({ activeLoomId: loomId })
+        );
       },
       SHORT_TEXT
     );
@@ -154,10 +140,7 @@ test.describe("[pure-ui-rendering] Fragment chip preview truncation", () => {
     await expect(page.getByTestId("loom-sidebar")).toBeVisible();
 
     const chip = page.getByTestId("selection-reference-chip").first();
-    if (!(await chip.isVisible())) {
-      test.skip();
-      return;
-    }
+    await expect(chip).toBeVisible();
 
     const visibleLabel = await chip.locator("span").first().innerText();
     const fullText = await chip.getAttribute("data-loom-selected-text");
@@ -197,6 +180,12 @@ async function sendMainPrompt(page: Page, prompt: string) {
   await editor.click();
   await page.keyboard.insertText(prompt);
   await page.getByRole("button", { name: "Send" }).click();
+}
+
+async function waitForMainComposerReady(page: Page) {
+  await expect(page.getByRole("button", { name: "Send" })).toBeEnabled({
+    timeout: 30_000,
+  });
 }
 
 async function selectAssistantText(page: Page, text: string) {
@@ -262,6 +251,94 @@ async function transcriptBottomGap(page: Page) {
   });
 }
 
+async function responseScrollMetrics(page: Page, targetResponseId: string, latestResponseId: string) {
+  return page.locator(".chat-transcript").evaluate(
+    (element, ids) => {
+      const transcript = element as HTMLElement;
+      const target = transcript.querySelector<HTMLElement>(
+        `[data-response-id="${CSS.escape(ids.targetResponseId)}"]`
+      );
+      const latest = transcript.querySelector<HTMLElement>(
+        `[data-response-id="${CSS.escape(ids.latestResponseId)}"]`
+      );
+      if (!target || !latest) return null;
+      const transcriptRect = transcript.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      const latestRect = latest.getBoundingClientRect();
+      return {
+        scrollTop: transcript.scrollTop,
+        transcriptTop: transcriptRect.top,
+        transcriptBottom: transcriptRect.bottom,
+        targetTop: targetRect.top,
+        targetBottom: targetRect.bottom,
+        latestTop: latestRect.top,
+        latestBottom: latestRect.bottom,
+      };
+    },
+    { targetResponseId, latestResponseId }
+  );
+}
+
+async function fragmentScrollMetrics(
+  page: Page,
+  targetResponseId: string,
+  latestResponseId: string,
+  selectedText: string
+) {
+  return page.locator(".chat-transcript").evaluate(
+    (element, input) => {
+      const transcript = element as HTMLElement;
+      const target = transcript.querySelector<HTMLElement>(
+        `[data-response-id="${CSS.escape(input.targetResponseId)}"]`
+      );
+      const latest = transcript.querySelector<HTMLElement>(
+        `[data-response-id="${CSS.escape(input.latestResponseId)}"]`
+      );
+      if (!target || !latest) return null;
+      const content = target.querySelector<HTMLElement>(".assistant-response-content");
+      if (!content) return null;
+      const walker = document.createTreeWalker(content, NodeFilter.SHOW_TEXT, {
+        acceptNode(node) {
+          const parent = node.parentNode instanceof Element ? node.parentNode : null;
+          if (!parent || parent.closest("pre, code, button, .inline-loom-token")) {
+            return NodeFilter.FILTER_REJECT;
+          }
+          return NodeFilter.FILTER_ACCEPT;
+        },
+      });
+      let range: Range | null = null;
+      while (walker.nextNode()) {
+        const node = walker.currentNode as Text;
+        const index = node.data.indexOf(input.selectedText);
+        if (index < 0) continue;
+        range = document.createRange();
+        range.setStart(node, index);
+        range.setEnd(node, index + input.selectedText.length);
+        break;
+      }
+      if (!range) return null;
+      const transcriptRect = transcript.getBoundingClientRect();
+      const targetRect = target.getBoundingClientRect();
+      const latestRect = latest.getBoundingClientRect();
+      const fragmentRect = range.getBoundingClientRect();
+      return {
+        transcriptTop: transcriptRect.top,
+        transcriptBottom: transcriptRect.bottom,
+        targetTop: targetRect.top,
+        targetBottom: targetRect.bottom,
+        fragmentTop: fragmentRect.top,
+        fragmentBottom: fragmentRect.bottom,
+        latestTop: latestRect.top,
+        latestBottom: latestRect.bottom,
+        highlighted: Boolean(
+          target.querySelector(".reference-fragment-scroll-highlight")
+        ),
+      };
+    },
+    { targetResponseId, latestResponseId, selectedText }
+  );
+}
+
 async function tokenOccurrenceMarker(token: Locator) {
   return token.evaluate((element) => {
     const content = window.getComputedStyle(element, "::after").content;
@@ -271,6 +348,105 @@ async function tokenOccurrenceMarker(token: Locator) {
 }
 
 test.describe("[product-service-backed] Reference product proof", () => {
+  test("[product-service-backed] sent response Reference chip scrolls to exact response, not latest", async ({
+    page,
+  }) => {
+    test.setTimeout(150_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(
+        page,
+        "Event Sourcing nedir? nasıl kullanılır? Detaylı olarak anlat"
+      );
+      await expect(page.locator("[data-response-id]")).toHaveCount(1, { timeout: 30_000 });
+      await waitForMainComposerReady(page);
+      await sendMainPrompt(page, "CQRS ile ilişkisini açıkla.");
+      await expect(page.locator("[data-response-id]")).toHaveCount(2, { timeout: 30_000 });
+      await waitForMainComposerReady(page);
+      await sendMainPrompt(page, "Snapshot kullanımı neden önemli?");
+      await expect(page.locator("[data-response-id]")).toHaveCount(3, { timeout: 30_000 });
+      await waitForMainComposerReady(page);
+
+      const initialResponseIds = await page.locator("[data-response-id]").evaluateAll((items) =>
+        items
+          .map((item) => (item as HTMLElement).dataset.responseId)
+          .filter((id): id is string => Boolean(id))
+      );
+      expect(initialResponseIds.length).toBeGreaterThanOrEqual(3);
+      const targetResponseId = initialResponseIds[0];
+      const latestBeforeReferenceId = initialResponseIds[initialResponseIds.length - 1];
+
+      await page.locator(".chat-transcript").evaluate((element) => {
+        const transcript = element as HTMLElement;
+        transcript.scrollTop = transcript.scrollHeight;
+      });
+      await page.getByTestId(`response-link-${targetResponseId}`).click();
+      await expect(page.getByTestId("inline-loom-token").last()).toBeVisible();
+
+      await page.keyboard.insertText(" İlk cevaba referans vererek kısa özetle.");
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(page.locator(".sent-prompt-reference-token").last()).toBeVisible();
+      await expect(page.locator("[data-response-id]")).toHaveCount(4, { timeout: 30_000 });
+
+      await page.locator(".chat-transcript").evaluate((element) => {
+        const transcript = element as HTMLElement;
+        transcript.scrollTop = transcript.scrollHeight;
+      });
+      const beforeClick = await responseScrollMetrics(
+        page,
+        targetResponseId,
+        latestBeforeReferenceId
+      );
+      expect(beforeClick).not.toBeNull();
+      expect(beforeClick!.targetTop).toBeLessThan(beforeClick!.transcriptTop);
+
+      await page.locator(".sent-prompt-reference-token").last().click();
+      await expect
+        .poll(async () => {
+          const metrics = await responseScrollMetrics(
+            page,
+            targetResponseId,
+            latestBeforeReferenceId
+          );
+          if (!metrics) return false;
+          return (
+            metrics.targetTop >= metrics.transcriptTop - 4 &&
+            metrics.targetTop <= metrics.transcriptTop + 180 &&
+            metrics.latestTop > metrics.targetTop + 240
+          );
+        }, {
+          timeout: 5_000,
+        })
+        .toBe(true);
+      const afterClick = await responseScrollMetrics(
+        page,
+        targetResponseId,
+        latestBeforeReferenceId
+      );
+      expect(afterClick).not.toBeNull();
+      expect(afterClick!.targetTop).toBeGreaterThanOrEqual(
+        afterClick!.transcriptTop - 4
+      );
+      expect(afterClick!.targetTop).toBeLessThanOrEqual(afterClick!.transcriptTop + 180);
+      expect(afterClick!.latestTop).toBeGreaterThan(afterClick!.targetTop + 240);
+
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
   test("[product-service-backed] allows repeated Response Link insertions in the active composer", async ({
     page,
   }) => {
@@ -577,18 +753,19 @@ test.describe("[product-service-backed] Reference product proof", () => {
       );
       expect(rootLoom).toBeTruthy();
       const loomId = rootLoom!.loomId;
+      const selectedFragment = "Snapshot stratejisiyle uzun geçmişler yönetilebildiğinde.";
 
-      await selectAssistantText(page, "Event Store");
+      await selectAssistantText(page, selectedFragment);
       await page.getByRole("button", { name: "Add as Reference" }).click();
       await expect(page.getByText("Fragment Reference added")).toBeVisible();
 
       const token = page.getByTestId("inline-loom-token").last();
       await expect(token).toBeVisible();
-      await expect(token).toContainText("[[Event Store]]");
+      await expect(token).toContainText("[[Snapshot stratejisiyle uzun geçmişler yönetilebildiğinde.]]");
       await expect(token).not.toContainText("reference-");
       await expect(token).not.toContainText("Group 1");
       await expect(token).not.toContainText("Group 2");
-      await expect(token).toHaveAttribute("data-loom-selected-text", "Event Store");
+      await expect(token).toHaveAttribute("data-loom-selected-text", selectedFragment);
       await expect(token).toHaveAttribute("data-loom-reference-mention-id", /reference-/);
       await expect(token).toHaveAttribute("data-loom-fragment-hash", /.+/);
 
@@ -600,8 +777,8 @@ test.describe("[product-service-backed] Reference product proof", () => {
       expect(reference).toMatchObject({
         sourceLoomId: loomId,
         targetKind: "fragment",
-        selectedText: "Event Store",
-        label: "Event Store",
+        selectedText: selectedFragment,
+        label: selectedFragment,
       });
       expect(reference.sourceResponseId).toBeTruthy();
       expect(reference.fragmentHash).toBeTruthy();
@@ -632,7 +809,7 @@ test.describe("[product-service-backed] Reference product proof", () => {
       await page.keyboard.insertText(" Bu referansı kullanarak CQRS ilişkisini açıkla.");
       await page.getByRole("button", { name: "Send" }).click();
       await expect(page.locator(".sent-prompt-reference-token").last()).toContainText(
-        "Event Store"
+        "Snapshot stratejisiyle"
       );
       await expect(page.locator(".sent-prompt-reference-token").last()).not.toContainText(
         "reference-"
@@ -642,10 +819,51 @@ test.describe("[product-service-backed] Reference product proof", () => {
         timeout: 30_000,
       });
 
+      const responseIdsAfterReference = await page.locator("[data-response-id]").evaluateAll((items) =>
+        items
+          .map((item) => (item as HTMLElement).dataset.responseId)
+          .filter((id): id is string => Boolean(id))
+      );
+      expect(responseIdsAfterReference.length).toBeGreaterThanOrEqual(2);
+      const latestResponseId = responseIdsAfterReference[responseIdsAfterReference.length - 1];
+
       await page.locator(".chat-transcript").evaluate((element) => {
         const transcript = element as HTMLElement;
         transcript.scrollTop = transcript.scrollHeight;
       });
+      const beforeFragmentClick = await fragmentScrollMetrics(
+        page,
+        reference.sourceResponseId!,
+        latestResponseId,
+        selectedFragment
+      );
+      expect(beforeFragmentClick).not.toBeNull();
+      expect(beforeFragmentClick!.fragmentTop).toBeLessThan(
+        beforeFragmentClick!.transcriptTop
+      );
+
+      await page.locator(".sent-prompt-reference-token").last().click();
+      await expect
+        .poll(async () => {
+          const metrics = await fragmentScrollMetrics(
+            page,
+            reference.sourceResponseId!,
+            latestResponseId,
+            selectedFragment
+          );
+          if (!metrics) return false;
+          return (
+            metrics.fragmentTop >= metrics.transcriptTop - 4 &&
+            metrics.fragmentTop <= metrics.transcriptTop + 220 &&
+            metrics.targetTop < metrics.transcriptTop - 24 &&
+            metrics.latestTop > metrics.fragmentTop + 240 &&
+            metrics.highlighted
+          );
+        }, {
+          timeout: 5_000,
+        })
+        .toBe(true);
+
       const addressInput = page.getByLabel("Loom Address Bar");
       await addressInput.click();
       await addressInput.fill(reference.targetUri!);
@@ -672,7 +890,7 @@ test.describe("[product-service-backed] Reference product proof", () => {
         reference.referenceId
       );
       expect(JSON.stringify(exportedJson.responses)).toContain(reference.referenceId);
-      expect(JSON.stringify(exportedJson.responses)).toContain("Event Store");
+      expect(JSON.stringify(exportedJson.responses)).toContain(selectedFragment);
 
       const graph = await scenario.fetchJson<ServiceGraphProjection>(
         `/looms/${encodeURIComponent(loomId)}/graph?includeReferences=true`
@@ -681,7 +899,7 @@ test.describe("[product-service-backed] Reference product proof", () => {
 
       const suggestions = await scenario.client.suggestReferences({
         loomId,
-        draftText: "Event Store ve CQRS ilişkisi",
+        draftText: `${selectedFragment} ve CQRS ilişkisi`,
         limit: 5,
       });
       expect(suggestions.suggestions.map((suggestion) => suggestion.reference.referenceMentionId))
@@ -796,6 +1014,118 @@ test.describe("[product-service-backed] Reference product proof", () => {
           })
           .first()
       ).toBeVisible();
+
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+      expect(cleanup.warnings).toEqual([]);
+    }
+  });
+
+  test("[product-service-backed] clicking a selected-text fragment reference temporarily highlights the target block, then clears", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    page.on("console", (msg) => {
+      console.log(`[Browser Console] ${msg.type()}: ${msg.text()}`);
+    });
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+
+    try {
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+
+      await sendMainPrompt(
+        page,
+        "Event Sourcing nedir? nasıl kullanılır? Detaylı olarak anlat"
+      );
+      await expect(page.getByText("Event Store").first()).toBeVisible({ timeout: 30_000 });
+
+      const rootLoom = (await scenario.client.listLooms()).find((item) =>
+        item.title.includes("Event Sourcing")
+      );
+      expect(rootLoom).toBeTruthy();
+      const loomId = rootLoom!.loomId;
+      const selectedFragment = "Snapshot stratejisiyle uzun geçmişler yönetilebildiğinde.";
+
+      await selectAssistantText(page, selectedFragment);
+      await page.getByRole("button", { name: "Add as Reference" }).click();
+      await expect(page.getByText("Fragment Reference added")).toBeVisible();
+
+      const token = page.getByTestId("inline-loom-token").last();
+      await expect(token).toBeVisible();
+
+      await page.keyboard.insertText(" Bu referansı kullanarak CQRS ilişkisini açıkla.");
+      await page.getByRole("button", { name: "Send" }).click();
+      await expect(page.locator(".sent-prompt-reference-token").last()).toContainText(
+        "Snapshot stratejisiyle"
+      );
+
+      await expect(page.getByText("CQRS, Event Sourcing").last()).toBeVisible({
+        timeout: 30_000,
+      });
+
+      const responseIdsAfterReference = await page.locator("[data-response-id]").evaluateAll((items) =>
+        items
+          .map((item) => (item as HTMLElement).dataset.responseId)
+          .filter((id): id is string => Boolean(id))
+      );
+      expect(responseIdsAfterReference.length).toBeGreaterThanOrEqual(2);
+      const latestResponseId = responseIdsAfterReference[responseIdsAfterReference.length - 1];
+
+      await page.locator(".chat-transcript").evaluate((element) => {
+        const transcript = element as HTMLElement;
+        transcript.scrollTop = transcript.scrollHeight;
+      });
+
+      const listed = await scenario.fetchJson<ReferenceListResponse>(
+        `/looms/${encodeURIComponent(loomId)}/references`
+      );
+      expect(listed.references).toHaveLength(1);
+      const reference = listed.references[0];
+
+      await page.locator(".sent-prompt-reference-token").last().click();
+
+      // Assert the exact selected text area/source block is visible and highlighted.
+      await expect
+        .poll(async () => {
+          const metrics = await fragmentScrollMetrics(
+            page,
+            reference.sourceResponseId!,
+            latestResponseId,
+            selectedFragment
+          );
+          if (!metrics) return false;
+          return (
+            metrics.fragmentTop >= metrics.transcriptTop - 4 &&
+            metrics.fragmentTop <= metrics.transcriptTop + 220 &&
+            metrics.highlighted
+          );
+        }, {
+          timeout: 15_000,
+        })
+        .toBe(true);
+
+      // Wait for the configured timeout (1800ms) and verify highlight clears.
+      await expect
+        .poll(async () => {
+          const metrics = await fragmentScrollMetrics(
+            page,
+            reference.sourceResponseId!,
+            latestResponseId,
+            selectedFragment
+          );
+          return metrics ? !metrics.highlighted : false;
+        }, {
+          timeout: 15_000,
+        })
+        .toBe(true);
 
       expect(scenario.dbPath).toContain(scenario.tempDir);
     } finally {
@@ -960,7 +1290,10 @@ test.describe("[legacy-typescript-local] Ask to Loom reference chip containment"
   test("surface width is the same before and after chip is inserted", async ({ page }) => {
     // Measure surface width without chip
     await page.addInitScript((loomId) => {
-      window.localStorage.clear();
+      if (!window.localStorage.getItem("loom:initialized")) {
+        window.localStorage.clear();
+        window.localStorage.setItem("loom:initialized", "true");
+      }
       window.localStorage.setItem(
         "loom:last-active-loom-v1",
         JSON.stringify({ activeLoomId: loomId })

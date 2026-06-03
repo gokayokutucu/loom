@@ -124,7 +124,10 @@ export interface LoomNavigationDestination {
   originResponseId?: string;
   preserveOriginScroll?: boolean;
   scrollTargetResponseId?: string;
-  scrollMode?: "origin" | "lastResponse" | "exact" | "top";
+  scrollMode?: "origin" | "lastResponse" | "exact" | "fragment" | "top";
+  fragmentText?: string;
+  fragmentHash?: string;
+  fragmentIncludeCode?: boolean;
   source:
     | "userNavigation"
     | "addressBar"
