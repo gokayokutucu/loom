@@ -1,7 +1,7 @@
 // E2E data authority classification:
 // - PRODUCT_SERVICE_BACKED for the rust-service thinking panel proof.
 // - Uses a temp SQLite DB, temp loom-service, product flow data, and cleanup.
-import { expect, type Page, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 import { createServiceTestHarness } from "./helpers/serviceTestHarness";
 
 async function sendMainPrompt(page: Page, prompt: string) {
@@ -10,6 +10,15 @@ async function sendMainPrompt(page: Page, prompt: string) {
   await editor.click();
   await page.keyboard.insertText(prompt);
   await page.getByRole("button", { name: "Send" }).click();
+}
+
+async function thinkingStreamMetrics(locator: Locator) {
+  return locator.evaluate((element) => ({
+    bottomGap: element.scrollHeight - element.scrollTop - element.clientHeight,
+    clientHeight: element.clientHeight,
+    scrollHeight: element.scrollHeight,
+    scrollTop: element.scrollTop,
+  }));
 }
 
 test.describe("[product-service-backed] thinking panel", () => {
@@ -67,50 +76,64 @@ test.describe("[product-service-backed] thinking panel", () => {
         )
         .toMatchObject({ scrollable: true, maxHeight: 190 });
 
-      // 1. User scrolls up once (simulate manual scroll up)
-      await liveStream.evaluate((element) => {
-        element.scrollTop = 0;
-        element.dispatchEvent(new Event("scroll", { bubbles: true }));
-      });
+      await expect
+        .poll(async () => (await thinkingStreamMetrics(liveStream)).bottomGap, {
+          timeout: 5_000,
+        })
+        .toBeLessThanOrEqual(24);
 
-      // 2. Assert a new chunk arrives during the 2-second lock, and it does not jump to bottom.
+      // 1. User scrolls up once with a real wheel gesture.
+      await liveStream.hover();
+      await page.mouse.wheel(0, -800);
+      await expect
+        .poll(async () => (await thinkingStreamMetrics(liveStream)).bottomGap, {
+          timeout: 5_000,
+        })
+        .toBeGreaterThan(24);
+      const scrollTopAfterWheel = (await thinkingStreamMetrics(liveStream)).scrollTop;
+
+      // 2. Assert a new chunk arrives during the 2-second pause, and it does not jump to bottom.
       await expect(liveStream).toContainText("Rechecking answer outline", {
         timeout: 5_000,
       });
 
-      // scrollTop should remain near the top (less than 24)
-      const scrollTopDuringLock = await liveStream.evaluate((element) => element.scrollTop);
-      expect(scrollTopDuringLock).toBeLessThan(24);
+      const metricsDuringPause = await thinkingStreamMetrics(liveStream);
+      expect(metricsDuringPause.bottomGap).toBeGreaterThan(24);
+      expect(metricsDuringPause.scrollTop).toBeLessThanOrEqual(scrollTopAfterWheel + 8);
 
-      // 3. Wait more than 2 seconds since the scroll up (lock duration is 2000ms)
+      // 3. Wait more than 2 seconds since the scroll up; the next chunk should resume follow.
       await page.waitForTimeout(2200);
 
-      // 4. Assert another chunk (third_thinking_delta) arrives while still away from bottom,
-      // and it still does not jump to bottom.
+      // 4. Assert another chunk arrives after the pause and auto-scrolls back to bottom.
       await expect(liveStream).toContainText("Discarding transient reasoning", {
         timeout: 5_000,
       });
+      await expect
+        .poll(async () => (await thinkingStreamMetrics(liveStream)).bottomGap, {
+          timeout: 5_000,
+        })
+        .toBeLessThanOrEqual(24);
 
-      const scrollTopAfterLockExpired = await liveStream.evaluate((element) => element.scrollTop);
-      expect(scrollTopAfterLockExpired).toBeLessThan(24);
+      // 5. Scrolling up again restarts the pause before the final thinking chunk.
+      await liveStream.hover();
+      await page.mouse.wheel(0, -800);
+      await expect
+        .poll(async () => (await thinkingStreamMetrics(liveStream)).bottomGap, {
+          timeout: 5_000,
+        })
+        .toBeGreaterThan(24);
+      const scrollTopAfterSecondWheel = (await thinkingStreamMetrics(liveStream)).scrollTop;
 
-      // 5. User scrolls back to bottom (simulate manual scroll to bottom)
-      await liveStream.evaluate((element) => {
-        element.scrollTop = element.scrollHeight;
-        element.dispatchEvent(new Event("scroll", { bubbles: true }));
-      });
-
-      // 6. Next chunk (fourth_thinking_delta) auto-scrolls again
       await expect(liveStream).toContainText("Starting the visible answer now", {
         timeout: 5_000,
       });
+      const metricsAfterSecondPauseChunk = await thinkingStreamMetrics(liveStream);
+      expect(metricsAfterSecondPauseChunk.bottomGap).toBeGreaterThan(24);
+      expect(metricsAfterSecondPauseChunk.scrollTop).toBeLessThanOrEqual(
+        scrollTopAfterSecondWheel + 8
+      );
 
-      // Verify it auto-scrolls back to the bottom now that we are near the bottom
-      await page.waitForTimeout(100);
-      const scrollTopAfterScrollDown = await liveStream.evaluate((element) => element.scrollTop);
-      const scrollHeight = await liveStream.evaluate((element) => element.scrollHeight);
-      const clientHeight = await liveStream.evaluate((element) => element.clientHeight);
-      expect(scrollTopAfterScrollDown).toBeGreaterThanOrEqual(scrollHeight - clientHeight - 24);
+      await page.waitForTimeout(2200);
 
       const pageText = await page.locator("body").innerText();
       expect(pageText).not.toContain("raw_thinking");

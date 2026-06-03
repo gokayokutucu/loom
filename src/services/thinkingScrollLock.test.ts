@@ -1,35 +1,86 @@
 import { describe, expect, it } from "vitest";
-import { shouldAutoScrollThinkingStream } from "./thinkingScrollLock";
+import {
+  isThinkingStreamNearBottom,
+  shouldAutoScrollThinkingStream,
+  thinkingScrollPauseUntil,
+  THINKING_SCROLL_USER_PAUSE_MS,
+} from "./thinkingScrollLock";
 
 describe("shouldAutoScrollThinkingStream", () => {
-  it("allows auto-scroll when auto-scroll is enabled and no scroll lock exists", () => {
-    expect(shouldAutoScrollThinkingStream({ now: 1000, manualScrollLockUntil: 0, autoScrollEnabled: true, isNearBottom: true })).toBe(true);
-    expect(shouldAutoScrollThinkingStream({ now: 1000, manualScrollLockUntil: 0, autoScrollEnabled: true, isNearBottom: false })).toBe(true);
-    expect(shouldAutoScrollThinkingStream({ now: 1000, manualScrollLockUntil: 1000, autoScrollEnabled: true, isNearBottom: true })).toBe(true);
+  it("prevents auto-follow while the user pause window is active", () => {
+    expect(
+      shouldAutoScrollThinkingStream({ now: 1000, userPauseUntil: 2999 })
+    ).toBe(false);
   });
 
-  it("allows auto-scroll when user is currently near bottom and lock has expired", () => {
-    expect(shouldAutoScrollThinkingStream({ now: 1000, manualScrollLockUntil: 0, autoScrollEnabled: false, isNearBottom: true })).toBe(true);
-    expect(shouldAutoScrollThinkingStream({ now: 1000, manualScrollLockUntil: 1000, autoScrollEnabled: false, isNearBottom: true })).toBe(true);
+  it("resumes auto-follow when the user pause expires even away from bottom", () => {
+    expect(
+      shouldAutoScrollThinkingStream({ now: 3000, userPauseUntil: 3000 })
+    ).toBe(true);
+    expect(
+      shouldAutoScrollThinkingStream({ now: 3001, userPauseUntil: 3000 })
+    ).toBe(true);
   });
 
-  it("prevents auto-scroll when auto-scroll is disabled and user is away from bottom (not near bottom)", () => {
-    expect(shouldAutoScrollThinkingStream({ now: 1000, manualScrollLockUntil: 0, autoScrollEnabled: false, isNearBottom: false })).toBe(false);
-    expect(shouldAutoScrollThinkingStream({ now: 1000, manualScrollLockUntil: 1000, autoScrollEnabled: false, isNearBottom: false })).toBe(false);
+  it("auto-follows when no user pause has been created", () => {
+    expect(shouldAutoScrollThinkingStream({ now: 1000, userPauseUntil: 0 })).toBe(
+      true
+    );
+  });
+});
+
+describe("thinkingScrollPauseUntil", () => {
+  it("creates a two-second user pause", () => {
+    expect(thinkingScrollPauseUntil(1000)).toBe(
+      1000 + THINKING_SCROLL_USER_PAUSE_MS
+    );
   });
 
-  it("prevents auto-scroll when locked (current time is before lock expiration) even if near bottom", () => {
-    expect(shouldAutoScrollThinkingStream({ now: 1000, manualScrollLockUntil: 1500, autoScrollEnabled: true, isNearBottom: true })).toBe(false);
-    expect(shouldAutoScrollThinkingStream({ now: 1000, manualScrollLockUntil: 1500, autoScrollEnabled: false, isNearBottom: true })).toBe(false);
-    expect(shouldAutoScrollThinkingStream({ now: 1000, manualScrollLockUntil: 1500, autoScrollEnabled: false, isNearBottom: false })).toBe(false);
+  it("extends the pause when the user scrolls up again", () => {
+    const firstPauseUntil = thinkingScrollPauseUntil(1000);
+    const extendedPauseUntil = thinkingScrollPauseUntil(2500);
+
+    expect(extendedPauseUntil).toBeGreaterThan(firstPauseUntil);
+  });
+});
+
+describe("isThinkingStreamNearBottom", () => {
+  it("detects the bottom threshold", () => {
+    expect(
+      isThinkingStreamNearBottom({
+        scrollHeight: 1000,
+        scrollTop: 775,
+        clientHeight: 200,
+      })
+    ).toBe(false);
+
+    expect(
+      isThinkingStreamNearBottom({
+        scrollHeight: 1000,
+        scrollTop: 776,
+        clientHeight: 200,
+      })
+    ).toBe(true);
   });
 
-  it("allows auto-scroll after the lock window expires if user was near bottom or auto-scroll was enabled", () => {
-    expect(shouldAutoScrollThinkingStream({ now: 2000, manualScrollLockUntil: 1500, autoScrollEnabled: true, isNearBottom: false })).toBe(true);
-    expect(shouldAutoScrollThinkingStream({ now: 2000, manualScrollLockUntil: 1500, autoScrollEnabled: false, isNearBottom: true })).toBe(true);
+  it("treats exact bottom as near bottom", () => {
+    expect(
+      isThinkingStreamNearBottom({
+        scrollHeight: 1000,
+        scrollTop: 800,
+        clientHeight: 200,
+      })
+    ).toBe(true);
   });
 
-  it("keeps auto-scroll disabled after lock expires if auto-scroll is disabled and user is not near bottom", () => {
-    expect(shouldAutoScrollThinkingStream({ now: 2000, manualScrollLockUntil: 1500, autoScrollEnabled: false, isNearBottom: false })).toBe(false);
+  it("supports a custom threshold", () => {
+    expect(
+      isThinkingStreamNearBottom({
+        scrollHeight: 1000,
+        scrollTop: 740,
+        clientHeight: 200,
+        thresholdPx: 64,
+      })
+    ).toBe(true);
   });
 });

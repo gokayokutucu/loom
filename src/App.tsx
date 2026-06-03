@@ -265,7 +265,12 @@ import {
   shouldFollowLatestTurnTail,
 } from "./services/latestTurnScroll";
 import { codeToClipboardHtml } from "./services/clipboard";
-import { shouldAutoScrollThinkingStream } from "./services/thinkingScrollLock";
+import {
+  isThinkingStreamNearBottom,
+  shouldAutoScrollThinkingStream,
+  thinkingScrollPauseUntil,
+} from "./services/thinkingScrollLock";
+import { resolveRevisionTarget } from "./services/revisionPaging";
 import { prepareContextArtifactsForGeneration } from "./services/contextReadinessGate";
 import {
   activateVisibleAnswerStage,
@@ -2360,6 +2365,10 @@ function App() {
   const referenceNavigationInProgressRef = useRef(false);
   const referenceNavigationTimerRef = useRef<number | null>(null);
   const referenceFragmentHighlightTimerRef = useRef<number | null>(null);
+  const [highlightedRevisionResponseId, setHighlightedRevisionResponseId] = useState<string | null>(null);
+  const revisionHighlightTimerRef = useRef<number | null>(null);
+  const revisionNavigationInProgressRef = useRef(false);
+  const revisionNavigationTimerRef = useRef<number | null>(null);
   const activeVisitLoomIdRef = useRef<string | null>(null);
   const activeVisitKnownResponseIdsRef = useRef<Set<string>>(new Set());
   const wasWeftSplitVisibleRef = useRef(false);
@@ -10159,14 +10168,15 @@ function App() {
 
   function scrollTranscriptPromptToStart(
     transcript: HTMLElement | null,
-    responseId: string
+    responseId: string,
+    smooth = false
   ) {
     if (!transcript) return false;
     const target = transcript.querySelector<HTMLElement>(
       `[data-prompt-response-id="${CSS.escape(responseId)}"]`
     );
     if (!target) return false;
-    scrollElementIntoViewFromCurrent(transcript, target, "start", true);
+    scrollElementIntoViewFromCurrent(transcript, target, "start", true, smooth);
     return true;
   }
 
@@ -10182,7 +10192,7 @@ function App() {
     // transitions to anchor-geometry mode rather than holding indefinitely.
     pendingLatestTurnAnchorRef.current = false;
     latestTurnAnchorModeRef.current = true;
-    if (!referenceNavigationInProgressRef.current) {
+    if (!referenceNavigationInProgressRef.current && !revisionNavigationInProgressRef.current) {
       pendingScrollDestinationRef.current = null;
       pendingScrollPathRef.current = null;
       pendingScrollHighlightRef.current = false;
@@ -10306,23 +10316,31 @@ function App() {
     transcript: HTMLElement,
     target: HTMLElement,
     block: ScrollLogicalPosition = "center",
-    forceBlock = false
+    forceBlock = false,
+    smooth = false
   ) {
     if (forceBlock && block === "start") {
-      const alignToTranscriptStart = () => {
+      const alignToTranscriptStart = (behavior: ScrollBehavior = "auto") => {
         const transcriptRect = transcript.getBoundingClientRect();
         const targetRect = target.getBoundingClientRect();
         const nextTop = Math.max(
           0,
           transcript.scrollTop + targetRect.top - transcriptRect.top - 16
         );
-        transcript.scrollTop = nextTop;
+        if (behavior === "smooth") {
+          transcript.scrollTo({ top: nextTop, behavior: "smooth" });
+        } else {
+          transcript.scrollTop = nextTop;
+        }
       };
-      alignToTranscriptStart();
-      window.requestAnimationFrame(() => alignToTranscriptStart());
-      window.setTimeout(() => alignToTranscriptStart(), 120);
-      window.setTimeout(() => alignToTranscriptStart(), 320);
-      window.setTimeout(() => alignToTranscriptStart(), 640);
+      alignToTranscriptStart(smooth ? "smooth" : "auto");
+      const delayAdjust = () => {
+        alignToTranscriptStart("auto");
+      };
+      window.requestAnimationFrame(() => delayAdjust());
+      window.setTimeout(() => delayAdjust(), 120);
+      window.setTimeout(() => delayAdjust(), 320);
+      window.setTimeout(() => delayAdjust(), 640);
       return;
     }
     const transcriptRect = transcript.getBoundingClientRect();
@@ -10335,6 +10353,48 @@ function App() {
       behavior: "smooth",
       block: targetAlreadyVisible && !forceBlock ? "nearest" : block,
     });
+  }
+
+  function startRevisionNavigationGuard() {
+    revisionNavigationInProgressRef.current = true;
+    if (revisionNavigationTimerRef.current !== null) {
+      window.clearTimeout(revisionNavigationTimerRef.current);
+    }
+    revisionNavigationTimerRef.current = window.setTimeout(() => {
+      revisionNavigationInProgressRef.current = false;
+      revisionNavigationTimerRef.current = null;
+    }, 800);
+  }
+
+  function triggerRevisionHighlight(responseId: string) {
+    if (revisionHighlightTimerRef.current !== null) {
+      window.clearTimeout(revisionHighlightTimerRef.current);
+    }
+    setHighlightedRevisionResponseId(responseId);
+    revisionHighlightTimerRef.current = window.setTimeout(() => {
+      setHighlightedRevisionResponseId(null);
+      revisionHighlightTimerRef.current = null;
+    }, 1500);
+  }
+
+  function handlePromptRevisionNavigate(responseId: string, revisionIndex: number) {
+    const target = resolveRevisionTarget({
+      revisionIndex,
+      displayResponseId: responseId,
+      originConversationId: originConversation?.id ?? "",
+      revisionRecords: forkRecords.filter(
+        (record) =>
+          record.kind === "revision" &&
+          record.parentConversationId === originConversation?.id &&
+          record.revisionSourceResponseId === responseId
+      ),
+      parentResponses: originResponses,
+      getConversationResponses: (loomId) => conversationResponses[loomId] ?? [],
+    });
+
+    if (!target) return;
+
+    triggerRevisionHighlight(target.targetResponseId);
   }
 
   function anchorBranchCounterNavigation(
@@ -13086,7 +13146,7 @@ function App() {
     }
 
     if (isRunning) {
-      if (referenceNavigationInProgressRef.current) return;
+      if (referenceNavigationInProgressRef.current || revisionNavigationInProgressRef.current) return;
       const anchor = latestUserTurnAnchorRef.current;
       if (anchor && !anchor.cancelled) {
         if (!anchor.anchored) {
@@ -13144,7 +13204,7 @@ function App() {
             // that just appeared at completion) is visible above the composer.
             // Using the response tail here would miss the reference-strip.
             const transcript = transcriptRef.current;
-            if (transcript && !referenceNavigationInProgressRef.current) {
+            if (transcript && !referenceNavigationInProgressRef.current && !revisionNavigationInProgressRef.current) {
               scrollRealContentEndIntoSafeView(transcript);
             }
             latestUserTurnAnchorRef.current = null;
@@ -13166,6 +13226,7 @@ function App() {
         if (
           transcript &&
           !referenceNavigationInProgressRef.current &&
+          !revisionNavigationInProgressRef.current &&
           !scrollRealContentEndIntoSafeView(transcript)
         ) {
           followTranscriptToBottom("smooth");
@@ -13832,6 +13893,9 @@ function App() {
                             onOpenAttachment={(link) => void openSentAttachment(link, originConversation?.id)}
                             onReturnToOrigin={returnToOrigin}
                             highlightedResponseId={recentResponseFeedbackId}
+                            isOriginPanel={true}
+                            onPromptRevisionNavigate={handlePromptRevisionNavigate}
+                            highlightedRevisionResponseId={highlightedRevisionResponseId}
                             onTranscriptScroll={(event) => {
                               markSplitPanelActive("origin");
                               handleTranscriptScroll(event);
@@ -13928,6 +13992,8 @@ function App() {
                             onOpenAttachment={(link) => void openSentAttachment(link, activeConversation?.id)}
                             onReturnToOrigin={returnToOrigin}
                             highlightedResponseId={recentResponseFeedbackId}
+                            onPromptRevisionNavigate={handlePromptRevisionNavigate}
+                            highlightedRevisionResponseId={highlightedRevisionResponseId}
                             onTranscriptScroll={(event) => {
                               markSplitPanelActive("weft");
                               handleTranscriptScroll(event);
@@ -14064,6 +14130,9 @@ function App() {
                     onOpenAttachment={(link) => void openSentAttachment(link, activeConversation?.id)}
                     onReturnToOrigin={activeWeftOrigin ? returnToOrigin : undefined}
                     highlightedResponseId={recentResponseFeedbackId}
+                    isOriginPanel={activeConversationId === originConversation?.id}
+                    onPromptRevisionNavigate={handlePromptRevisionNavigate}
+                    highlightedRevisionResponseId={highlightedRevisionResponseId}
                     onTranscriptScroll={handleTranscriptScroll}
                     onTranscriptUserScrollIntent={markTranscriptUserScrollIntent}
                     onScrollToBottom={resumeTranscriptAutoFollow}
@@ -16252,11 +16321,29 @@ function ThinkingPanel({
 
 function LiveThinkingStream({ text }: { text: string }) {
   const scrollRef = useRef<HTMLDivElement | null>(null);
-  const manualScrollLockUntilRef = useRef<number>(0);
-  const isNearBottomRef = useRef<boolean>(true);
-  const autoScrollEnabledRef = useRef<boolean>(true);
+  const userPauseUntilRef = useRef<number>(0);
   const isProgrammaticScrollRef = useRef<boolean>(false);
+  const lastScrollTopRef = useRef<number>(0);
   const rafRef = useRef<number[]>([]);
+
+  const scrollToBottom = useCallback((element: HTMLDivElement) => {
+    rafRef.current.forEach(cancelAnimationFrame);
+    rafRef.current = [];
+    isProgrammaticScrollRef.current = true;
+
+    const firstId = requestAnimationFrame(() => {
+      const secondId = requestAnimationFrame(() => {
+        element.scrollTop = element.scrollHeight;
+        lastScrollTopRef.current = element.scrollTop;
+        const thirdId = requestAnimationFrame(() => {
+          isProgrammaticScrollRef.current = false;
+        });
+        rafRef.current.push(thirdId);
+      });
+      rafRef.current.push(secondId);
+    });
+    rafRef.current.push(firstId);
+  }, []);
 
   useEffect(() => {
     const element = scrollRef.current;
@@ -16265,27 +16352,12 @@ function LiveThinkingStream({ text }: { text: string }) {
     if (
       shouldAutoScrollThinkingStream({
         now,
-        manualScrollLockUntil: manualScrollLockUntilRef.current,
-        autoScrollEnabled: autoScrollEnabledRef.current,
-        isNearBottom: isNearBottomRef.current,
+        userPauseUntil: userPauseUntilRef.current,
       })
     ) {
-      isProgrammaticScrollRef.current = true;
-      element.scrollTop = element.scrollHeight;
-
-      // Cancel pending frames
-      rafRef.current.forEach(cancelAnimationFrame);
-      rafRef.current = [];
-
-      const firstId = requestAnimationFrame(() => {
-        const secondId = requestAnimationFrame(() => {
-          isProgrammaticScrollRef.current = false;
-        });
-        rafRef.current.push(secondId);
-      });
-      rafRef.current.push(firstId);
+      scrollToBottom(element);
     }
-  }, [text]);
+  }, [scrollToBottom, text]);
 
   useEffect(() => {
     return () => {
@@ -16299,24 +16371,53 @@ function LiveThinkingStream({ text }: { text: string }) {
       ref={scrollRef}
       className="thinking-live-stream"
       data-testid="thinking-live-stream"
+      onWheel={(event) => {
+        if (event.deltaY < 0) {
+          userPauseUntilRef.current = thinkingScrollPauseUntil(Date.now());
+        }
+      }}
       onScroll={(event) => {
         if (isProgrammaticScrollRef.current) {
           return;
         }
 
         const element = event.currentTarget;
-        const distanceToBottom =
-          element.scrollHeight - element.scrollTop - element.clientHeight;
-        const nearBottom = distanceToBottom < 24;
-        if (!nearBottom) {
-          autoScrollEnabledRef.current = false;
-          isNearBottomRef.current = false;
-          manualScrollLockUntilRef.current = Date.now() + 2000;
-        } else {
-          autoScrollEnabledRef.current = true;
-          isNearBottomRef.current = true;
-          manualScrollLockUntilRef.current = 0;
+        const nearBottom = isThinkingStreamNearBottom({
+          scrollHeight: element.scrollHeight,
+          scrollTop: element.scrollTop,
+          clientHeight: element.clientHeight,
+        });
+        const scrolledUp = element.scrollTop < lastScrollTopRef.current;
+        if (nearBottom) {
+          userPauseUntilRef.current = 0;
+        } else if (scrolledUp) {
+          userPauseUntilRef.current = thinkingScrollPauseUntil(Date.now());
         }
+        lastScrollTopRef.current = element.scrollTop;
+      }}
+      onMouseDown={(event) => {
+        const element = event.currentTarget;
+        lastScrollTopRef.current = element.scrollTop;
+      }}
+      onTouchStart={(event) => {
+        const element = event.currentTarget;
+        lastScrollTopRef.current = element.scrollTop;
+      }}
+      onTouchMove={(event) => {
+        const element = event.currentTarget;
+        if (element.scrollTop < lastScrollTopRef.current) {
+          userPauseUntilRef.current = thinkingScrollPauseUntil(Date.now());
+        } else {
+          const nearBottom = isThinkingStreamNearBottom({
+            scrollHeight: element.scrollHeight,
+            scrollTop: element.scrollTop,
+            clientHeight: element.clientHeight,
+          });
+          if (nearBottom) {
+            userPauseUntilRef.current = 0;
+          }
+        }
+        lastScrollTopRef.current = element.scrollTop;
       }}
       aria-label="Live reasoning stream"
     >
@@ -16906,6 +17007,9 @@ function ChatTranscript({
   collapseUserMessages = true,
   collapseResponses = true,
   sentUserTurnIds,
+  isOriginPanel,
+  onPromptRevisionNavigate,
+  highlightedRevisionResponseId,
 }: {
   transcriptRef?: (node: HTMLElement | null) => void;
   conversation?: Conversation;
@@ -16964,6 +17068,9 @@ function ChatTranscript({
   collapseResponses?: boolean;
   /** Response IDs whose user-turn prompt should use the tighter send-collapse clamp. */
   sentUserTurnIds?: ReadonlySet<string>;
+  isOriginPanel?: boolean;
+  onPromptRevisionNavigate?: (responseId: string, revisionIndex: number) => void;
+  highlightedRevisionResponseId?: string | null;
 }) {
   const [sentReferenceHint, setSentReferenceHint] = useState<{
     link: LoomLink;
@@ -17232,7 +17339,7 @@ function ChatTranscript({
             : activePromptRevisionIndex >= 0
             ? promptRevisionRecords[activePromptRevisionIndex]
             : undefined;
-        const displayPromptText = activePromptRevision?.revisionPrompt ?? cleanPromptText;
+        const displayPromptText = (isOriginPanel ? undefined : activePromptRevision?.revisionPrompt) ?? cleanPromptText;
         const normalizedPromptEditDraft = normalizePromptEditText(promptEditDraft);
         const promptEditHasChanges =
           normalizedPromptEditDraft.length > 0 &&
@@ -17268,6 +17375,7 @@ function ChatTranscript({
           preserveTranscriptScrollAfterRevisionAction();
           if (revisionIndex === 0) {
             onPromptRevisionSelect?.(displayResponse.id, null);
+            onPromptRevisionNavigate?.(displayResponse.id, 0);
             return;
           }
           const revisionRecord = promptRevisionRecords[revisionIndex - 1];
@@ -17277,6 +17385,7 @@ function ChatTranscript({
               preserveOriginScroll: true,
               scrollMode: "top",
             });
+            onPromptRevisionNavigate?.(displayResponse.id, revisionIndex);
           }
         };
         const openExplorationWeft = (record?: ForkRecord) => {
@@ -17517,7 +17626,14 @@ function ChatTranscript({
                 </div>
               )}
             </div>
-            <div className="assistant-message">
+            <div
+              className={[
+                "assistant-message",
+                displayResponse.id === highlightedRevisionResponseId ? "revision-focus-highlight--response" : "",
+              ]
+                .filter(Boolean)
+                .join(" ")}
+            >
               {(displayResponse.meta?.code || displayResponse.meta?.displayCode) && !isGeneratingResponse && (
                 <div className="response-metadata-row">
                   <AddressMetadataBadge
