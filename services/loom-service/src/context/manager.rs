@@ -135,8 +135,9 @@ impl ContextManager {
              the current user question. If the current question omits the topic, infer it from the \
              recent conversation when available. Write valid Markdown only: headings must include \
              heading text, and never emit orphan separators or markers such as `--- ###` or \
-             trailing `###`. Never include raw model thinking/internal monologue in context or \
-             output.{fragment_focus_clause}"
+             trailing `###`. Use `- ` bullets. Use `**Label:**`, not `**Label:*`. Never \
+             write inline `* item * item` pseudo-lists. Never include raw model \
+             thinking/internal monologue in context or output.{fragment_focus_clause}"
         );
         let mut messages = vec![ContextMessage::new(
             ContextMessageRole::System,
@@ -1670,6 +1671,44 @@ pub(crate) mod tests {
         assert!(
             !system_message.content.contains("selected fragment"),
             "system prompt should not mention selected fragment when none is attached"
+        );
+    }
+
+    #[test]
+    fn system_prompt_instructs_valid_markdown_emphasis_and_list_formatting() {
+        let manager = ContextManager::default();
+        let built = manager.build_context(minimal_input("Explain Event Sourcing steps."));
+
+        let system_message = built
+            .messages
+            .iter()
+            .find(|m| {
+                m.role == ContextMessageRole::System
+                    && m.source_kind == Some(ContextSourceKind::SystemPolicy)
+            })
+            .expect("system policy message");
+
+        assert!(
+            system_message.content.contains("Write valid Markdown only"),
+            "system prompt should require valid Markdown"
+        );
+        assert!(
+            system_message.content.contains("Use `- ` bullets"),
+            "system prompt should prefer dash bullet lists"
+        );
+        assert!(
+            system_message.content.contains("Use `**Label:**`"),
+            "system prompt should prefer valid bold label syntax"
+        );
+        assert!(
+            system_message
+                .content
+                .contains("Use `**Label:**`, not `**Label:*`"),
+            "system prompt should forbid malformed bold label syntax"
+        );
+        assert!(
+            system_message.content.contains("inline `* item * item`"),
+            "system prompt should forbid inline asterisk pseudo-lists"
         );
     }
 
