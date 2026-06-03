@@ -66,6 +66,7 @@ import type {
   ResolveAddressInput,
   ResolveAddressResult,
   LoomServiceRuntimeConfig,
+  ProviderSecretStatus,
   RuntimeModelDownloadJob,
   RuntimeModelsResult,
   ServiceConfigUpdateResult,
@@ -132,6 +133,22 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
 
   async updateServiceConfig(): Promise<ServiceConfigUpdateResult> {
     throw new Error("Speech-to-text provider configuration requires the Rust service runtime.");
+  }
+
+  async getProviderSecretStatus(): Promise<ProviderSecretStatus> {
+    throw new Error("Provider secret management requires the Rust service runtime.");
+  }
+
+  async setProviderSecret(): Promise<ProviderSecretStatus> {
+    throw new Error("Provider secret management requires the Rust service runtime.");
+  }
+
+  async deleteProviderSecret(): Promise<ProviderSecretStatus> {
+    throw new Error("Provider secret management requires the Rust service runtime.");
+  }
+
+  async testProviderSecret(): Promise<ProviderSecretStatus> {
+    throw new Error("Provider secret management requires the Rust service runtime.");
   }
 
   async getRuntimeModels(): Promise<RuntimeModelsResult> {

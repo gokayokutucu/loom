@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { __rustHttpLoomEngineClientTest } from "./RustHttpLoomEngineClient";
+import { RustHttpLoomEngineClient, __rustHttpLoomEngineClientTest } from "./RustHttpLoomEngineClient";
 import type { AddReferenceInput } from "./LoomEngineTypes";
 import type { LoomLink } from "../types";
 
@@ -144,6 +144,126 @@ describe("RustHttpLoomEngineClient streaming event mapping", () => {
         type: "thinking_delta",
         payload: { delta: "Reviewing context.\n" },
       },
+    ]);
+  });
+});
+
+describe("RustHttpLoomEngineClient provider profile and secret mapping", () => {
+  it("hydrates provider profiles from service config", async () => {
+    const client = new RustHttpLoomEngineClient({
+      serviceUrl: "http://loom-service.test",
+      fetch: async () =>
+        new Response(
+          JSON.stringify({
+            speech: {
+              enabled: false,
+              defaultProviderKind: "disabled",
+              allowCloudStt: false,
+              persistAudio: false,
+              persistTranscript: false,
+              maxAudioBytes: 0,
+              allowedMimeTypes: [],
+              localCommandArgs: [],
+              localCommandTimeoutMs: 0,
+              localCommandOutputMode: "stdout",
+              localCommandTranscriptFileExtension: "txt",
+              warnings: [],
+            },
+            providers: {
+              defaultMainModel: "qwen",
+              defaultQuickModel: "qwen",
+              profiles: [
+                {
+                  id: "nvidia",
+                  providerKind: "openai_compatible",
+                  transportKind: "native_openai_compatible",
+                  vendor: "nvidia",
+                  displayName: "NVIDIA NIM",
+                  enabled: false,
+                  experimental: true,
+                  baseUrl: "https://integrate.api.nvidia.com/v1",
+                  defaultModel: "meta/llama-3.1-70b-instruct",
+                  requiresSecret: true,
+                  secretRef: "env:NVIDIA_API_KEY",
+                  modelDiscovery: {
+                    enabled: true,
+                    endpointPath: "/models",
+                    refreshIntervalSeconds: 3600,
+                  },
+                  requestDefaults: { think: false, stream: true },
+                  security: {
+                    localOnlyRequired: false,
+                    allowRemoteEndpoint: true,
+                    allowInsecureHttpRemote: false,
+                    allowUnsafeModelManagement: false,
+                  },
+                  capabilities: {
+                    supportsStreaming: true,
+                    supportsCancellation: false,
+                    supportsModelListing: true,
+                    supportsThinking: false,
+                    supportsSystemPrompt: true,
+                    supportsJsonMode: true,
+                  },
+                },
+              ],
+            },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        ),
+    });
+
+    const config = await client.getServiceConfig();
+
+    expect(config.providers?.profiles?.[0]).toMatchObject({
+      id: "nvidia",
+      providerKind: "openai_compatible",
+      transportKind: "native_openai_compatible",
+      vendor: "nvidia",
+      requiresSecret: true,
+      secretRef: "env:NVIDIA_API_KEY",
+    });
+  });
+
+  it("uses provider secret endpoints without exposing raw secrets in returned status", async () => {
+    const calls: Array<{ url: string; init?: RequestInit }> = [];
+    const client = new RustHttpLoomEngineClient({
+      serviceUrl: "http://loom-service.test",
+      fetch: async (input, init) => {
+        calls.push({ url: String(input), init });
+        return new Response(
+          JSON.stringify({
+            providerProfileId: "nvidia",
+            secretRef: "env:NVIDIA_API_KEY",
+            present: true,
+            status: "saved",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        );
+      },
+    });
+
+    const status = await client.setProviderSecret(
+      "nvidia",
+      "nvapi-raw-secret",
+      "env:NVIDIA_API_KEY"
+    );
+    await client.getProviderSecretStatus("nvidia");
+    await client.testProviderSecret("nvidia", "env:NVIDIA_API_KEY");
+    await client.deleteProviderSecret("nvidia");
+
+    expect(status).toEqual({
+      providerProfileId: "nvidia",
+      secretRef: "env:NVIDIA_API_KEY",
+      present: true,
+      status: "saved",
+    });
+    expect(JSON.stringify(status)).not.toContain("nvapi-raw-secret");
+    expect(calls.map((call) => [call.url, call.init?.method ?? "GET"])).toEqual([
+      ["http://loom-service.test/providers/secrets/nvidia", "PUT"],
+      ["http://loom-service.test/providers/secrets/nvidia", "GET"],
+      ["http://loom-service.test/providers/secrets/nvidia/test", "POST"],
+      ["http://loom-service.test/providers/secrets/nvidia", "DELETE"],
     ]);
   });
 });

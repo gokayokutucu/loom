@@ -5904,6 +5904,165 @@ kbd {
   gap: 14px;
 }
 
+.settings-inline-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  border-radius: 7px;
+  background: var(--loom-control-bg);
+  color: var(--loom-text-secondary);
+  font-size: 12px;
+}
+
+.settings-inline-button:hover {
+  background: var(--loom-control-active-bg);
+  color: var(--loom-text-primary);
+}
+
+.settings-inline-button:disabled {
+  cursor: default;
+  opacity: 0.52;
+}
+
+.provider-profile-list {
+  display: grid;
+  gap: 10px;
+}
+
+.provider-profile-card {
+  display: grid;
+  gap: 10px;
+  padding: 11px;
+  border: 1px solid var(--loom-border-subtle);
+  border-radius: 8px;
+  background: var(--loom-bg-surface);
+}
+
+.provider-profile-card.disabled {
+  background: color-mix(in srgb, var(--loom-bg-surface) 76%, transparent);
+}
+
+.provider-profile-card-header,
+.provider-profile-actions {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+}
+
+.provider-profile-card-header h4 {
+  margin: 0;
+  overflow: hidden;
+  color: var(--loom-text-primary);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-profile-card-header small,
+.provider-profile-meta dt,
+.provider-profile-actions span,
+.provider-secret-controls small {
+  color: var(--loom-text-muted);
+  font-size: 11px;
+}
+
+.provider-profile-icon {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  background: var(--loom-control-bg);
+  color: var(--loom-text-secondary);
+}
+
+.provider-profile-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.provider-profile-badges span {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: var(--loom-control-bg);
+  color: var(--loom-text-muted);
+  font-size: 10px;
+}
+
+.provider-profile-meta {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px 12px;
+  margin: 0;
+}
+
+.provider-profile-meta div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.provider-profile-meta dd {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  color: var(--loom-text-secondary);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.provider-secret-controls {
+  display: grid;
+  gap: 8px;
+  padding: 9px;
+  border-radius: 8px;
+  background: var(--loom-bg-surface-raised);
+}
+
+.provider-privacy-ack {
+  align-items: start;
+  padding: 9px;
+  border: 1px solid var(--loom-border-subtle);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--warning) 6%, var(--loom-bg-surface-raised));
+}
+
+.provider-profile-actions {
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+
+.provider-profile-actions button {
+  min-height: 30px;
+  padding: 0 12px;
+  border-radius: 7px;
+  background: var(--loom-control-bg);
+  color: var(--loom-text-secondary);
+  font-size: 12px;
+}
+
+.provider-profile-actions button:hover {
+  background: var(--loom-control-active-bg);
+  color: var(--loom-text-primary);
+}
+
+.provider-profile-actions button:disabled {
+  cursor: default;
+  opacity: 0.52;
+}
+
+.provider-profile-actions em {
+  justify-self: end;
+  color: var(--loom-text-muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
 .connection-pill {
   padding: 3px 8px;
   border-radius: 999px;

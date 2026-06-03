@@ -156,6 +156,71 @@ export interface OcrProviderHealth {
   warnings: string[];
 }
 
+export type ProviderKind = "ollama" | "openai_compatible" | "custom_http_later";
+export type ProviderTransportKind =
+  | "ollama"
+  | "native_openai_compatible"
+  | "rig_openai_compatible";
+export type ProviderVendor = "ollama" | "nvidia" | "openai" | "custom";
+export type ProviderSecretStatusKind = "saved" | "missing" | "unavailable" | "invalid";
+
+export interface ProviderModelDiscoveryRuntimeConfig {
+  enabled: boolean;
+  endpointPath?: string | null;
+  refreshIntervalSeconds?: number | null;
+}
+
+export interface ProviderRequestDefaultsRuntimeConfig {
+  temperature?: number | null;
+  topP?: number | null;
+  numCtx?: number | null;
+  numPredict?: number | null;
+  think?: boolean | null;
+  stream?: boolean | null;
+}
+
+export interface ProviderSecurityRuntimeConfig {
+  localOnlyRequired: boolean;
+  allowRemoteEndpoint: boolean;
+  allowInsecureHttpRemote: boolean;
+  allowUnsafeModelManagement: boolean;
+}
+
+export interface ProviderCapabilitiesRuntimeConfig {
+  supportsStreaming: boolean;
+  supportsCancellation: boolean;
+  supportsModelListing: boolean;
+  supportsThinking: boolean;
+  supportsSystemPrompt: boolean;
+  supportsJsonMode?: boolean | null;
+}
+
+export interface ProviderProfileRuntimeConfig {
+  id: string;
+  providerKind: ProviderKind;
+  transportKind: ProviderTransportKind;
+  vendor: ProviderVendor;
+  displayName: string;
+  enabled: boolean;
+  experimental: boolean;
+  baseUrl?: string | null;
+  defaultModel?: string | null;
+  requiresSecret: boolean;
+  secretRef?: string | null;
+  modelDiscovery: ProviderModelDiscoveryRuntimeConfig;
+  requestDefaults: ProviderRequestDefaultsRuntimeConfig;
+  security: ProviderSecurityRuntimeConfig;
+  capabilities: ProviderCapabilitiesRuntimeConfig;
+  metadataJson?: JsonValue | null;
+}
+
+export interface ProviderSecretStatus {
+  providerProfileId: string;
+  secretRef: string;
+  present: boolean;
+  status: ProviderSecretStatusKind;
+}
+
 export interface LoomServiceRuntimeConfig {
   speech: SpeechToTextRuntimeConfig;
   ocr?: OcrRuntimeConfig;
@@ -171,6 +236,7 @@ export interface LoomServiceRuntimeConfig {
   providers?: {
     defaultMainModel?: string;
     defaultQuickModel?: string;
+    profiles?: ProviderProfileRuntimeConfig[];
   };
   database?: { path?: string };
 }
@@ -214,6 +280,7 @@ export interface UpdateServiceConfigInput {
   providers?: {
     defaultMainModel?: string;
     defaultQuickModel?: string;
+    profiles?: ProviderProfileRuntimeConfig[];
   };
 }
 

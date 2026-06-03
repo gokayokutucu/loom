@@ -60,6 +60,7 @@ import type {
   ResolveAddressResult,
   LoomServiceRuntimeConfig,
   OcrProviderHealth,
+  ProviderSecretStatus,
   RuntimeModelDownloadJob,
   RuntimeModelsResult,
   ServiceConfigUpdateResult,
@@ -88,6 +89,14 @@ export interface LoomEngineClient {
   getServiceConfigStatus(): Promise<ServiceConfigStatus>;
   getServiceConfig(): Promise<LoomServiceRuntimeConfig>;
   updateServiceConfig(input: UpdateServiceConfigInput): Promise<ServiceConfigUpdateResult>;
+  getProviderSecretStatus(profileId: string): Promise<ProviderSecretStatus>;
+  setProviderSecret(
+    profileId: string,
+    value: string,
+    secretRef?: string | null
+  ): Promise<ProviderSecretStatus>;
+  deleteProviderSecret(profileId: string): Promise<ProviderSecretStatus>;
+  testProviderSecret(profileId: string, secretRef?: string | null): Promise<ProviderSecretStatus>;
   getRuntimeModels(): Promise<RuntimeModelsResult>;
   startModelDownload(modelName: string): Promise<RuntimeModelDownloadJob>;
   getModelDownload(jobId: string): Promise<RuntimeModelDownloadJob>;

@@ -6,6 +6,7 @@ import {
   Database,
   Download,
   Info,
+  KeyRound,
   Palette,
   ShieldCheck,
   RefreshCw,
@@ -58,6 +59,8 @@ import type {
   LoomServiceRuntimeConfig,
   OcrProviderHealth,
   OcrRuntimeConfig,
+  ProviderProfileRuntimeConfig,
+  ProviderSecretStatus,
   RuntimeModelDownloadJob,
   RuntimeModelsResult,
   ServiceConfigStatus,
@@ -67,6 +70,13 @@ import type {
   SpeechToTextProviderKind,
   SpeechToTextRuntimeConfig,
 } from "../engine";
+import {
+  canEnableProviderProfile,
+  isRemoteProviderProfile,
+  providerProfileBadges,
+  providerProfileAccessLabel,
+  providerSecretStatusLabel,
+} from "../services/providerProfiles";
 
 export type SettingsCategoryId =
   | "runtime"
@@ -99,8 +109,6 @@ const settingsCategories: Array<{
   { id: "shortcuts", label: "Shortcuts", description: "Browser-style keyboard commands", icon: Search },
   { id: "advanced", label: "Advanced", description: "Diagnostics, config, developer plans", icon: Info },
 ];
-
-const futureProviders = ["OpenAI", "Anthropic Claude", "Google Gemini", "OpenAI-compatible"];
 
 const defaultSpeechConfigDraft: SpeechToTextRuntimeConfig = {
   enabled: true,
@@ -295,6 +303,14 @@ export function AIProviderSettingsModal({
   const [downloadJobs, setDownloadJobs] = useState<Record<string, RuntimeModelDownloadJob>>({});
   const [speechSetup, setSpeechSetup] = useState<SpeechSetupStatus | null>(null);
   const [speechSetupWorking, setSpeechSetupWorking] = useState<string | null>(null);
+  const [providerSecretStatuses, setProviderSecretStatuses] = useState<
+    Record<string, ProviderSecretStatus>
+  >({});
+  const [providerSecretDrafts, setProviderSecretDrafts] = useState<Record<string, string>>({});
+  const [providerPrivacyAcknowledged, setProviderPrivacyAcknowledged] = useState<
+    Record<string, boolean>
+  >({});
+  const [providerProfileWorking, setProviderProfileWorking] = useState<string | null>(null);
   const [speechSmoke, setSpeechSmoke] = useState<{
     status: "idle" | "recording" | "transcribing" | "success" | "error";
     message: string;
@@ -356,6 +372,33 @@ export function AIProviderSettingsModal({
     });
   }
 
+  async function refreshProviderSecretStatuses(profiles: ProviderProfileRuntimeConfig[]) {
+    const secretProfiles = profiles.filter((profile) => profile.requiresSecret);
+    if (secretProfiles.length === 0) {
+      setProviderSecretStatuses({});
+      return;
+    }
+    const entries = await Promise.all(
+      secretProfiles.map(async (profile): Promise<[string, ProviderSecretStatus]> => {
+        try {
+          const status = await engineClient.getProviderSecretStatus(profile.id);
+          return [profile.id, status];
+        } catch {
+          return [
+            profile.id,
+            {
+              providerProfileId: profile.id,
+              secretRef: profile.secretRef ?? "",
+              present: false,
+              status: "unavailable",
+            },
+          ];
+        }
+      })
+    );
+    setProviderSecretStatuses(Object.fromEntries(entries));
+  }
+
   async function refreshDesktopRuntimeStatus() {
     if (!desktopRuntimeBridge) {
       setDesktopRuntimeStatus({
@@ -411,13 +454,19 @@ export function AIProviderSettingsModal({
 
   useEffect(() => {
     if (
-      ["runtime", "capability", "advanced"].includes(activeCategory) &&
+      ["runtime", "ai-providers", "capability", "advanced"].includes(activeCategory) &&
       !serviceStatus.health &&
       !serviceStatus.loading
     ) {
       void refreshServiceStatus();
     }
   }, [activeCategory, serviceStatus.health, serviceStatus.loading]);
+
+  useEffect(() => {
+    if (activeCategory !== "ai-providers") return;
+    const profiles = serviceStatus.serviceConfig?.providers?.profiles ?? [];
+    void refreshProviderSecretStatuses(profiles);
+  }, [activeCategory, serviceStatus.serviceConfig?.providers?.profiles]);
 
   useEffect(() => {
     if (activeCategory !== "runtime" && activeCategory !== "advanced") return;
@@ -632,6 +681,108 @@ export function AIProviderSettingsModal({
       setServiceStatus((current) => ({ ...current, serviceConfig: result.config }));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Model assignment could not be saved.");
+    }
+  }
+
+  function updateProviderSecretDraft(profileId: string, value: string) {
+    setProviderSecretDrafts((current) => ({ ...current, [profileId]: value }));
+  }
+
+  async function saveProviderSecret(profile: ProviderProfileRuntimeConfig) {
+    const value = providerSecretDrafts[profile.id]?.trim() ?? "";
+    if (!value) {
+      setMessage("Enter an API key before saving.");
+      return;
+    }
+    setProviderProfileWorking(`${profile.id}:secret-save`);
+    setMessage(null);
+    try {
+      const status = await engineClient.setProviderSecret(profile.id, value, profile.secretRef);
+      setProviderSecretStatuses((current) => ({ ...current, [profile.id]: status }));
+      setProviderSecretDrafts((current) => ({ ...current, [profile.id]: "" }));
+      setMessage(`${profile.displayName} API key saved.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "API key could not be saved.");
+    } finally {
+      setProviderProfileWorking(null);
+    }
+  }
+
+  async function removeProviderSecret(profile: ProviderProfileRuntimeConfig) {
+    setProviderProfileWorking(`${profile.id}:secret-remove`);
+    setMessage(null);
+    try {
+      const status = await engineClient.deleteProviderSecret(profile.id);
+      setProviderSecretStatuses((current) => ({ ...current, [profile.id]: status }));
+      setProviderSecretDrafts((current) => ({ ...current, [profile.id]: "" }));
+      setMessage(`${profile.displayName} API key removed.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "API key could not be removed.");
+    } finally {
+      setProviderProfileWorking(null);
+    }
+  }
+
+  async function testProviderSecret(profile: ProviderProfileRuntimeConfig) {
+    setProviderProfileWorking(`${profile.id}:secret-test`);
+    setMessage(null);
+    try {
+      const status = await engineClient.testProviderSecret(profile.id, profile.secretRef);
+      setProviderSecretStatuses((current) => ({ ...current, [profile.id]: status }));
+      setMessage(`${profile.displayName} key status: ${providerSecretStatusLabel(profile, status)}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "API key status could not be tested.");
+    } finally {
+      setProviderProfileWorking(null);
+    }
+  }
+
+  async function setProviderProfileEnabled(
+    profile: ProviderProfileRuntimeConfig,
+    enabled: boolean
+  ) {
+    const profiles = serviceStatus.serviceConfig?.providers?.profiles ?? [];
+    const status = providerSecretStatuses[profile.id];
+    if (enabled) {
+      const gate = canEnableProviderProfile(
+        profile,
+        status,
+        providerPrivacyAcknowledged[profile.id] ?? false
+      );
+      if (!gate.allowed) {
+        setMessage(gate.reason ?? "This provider cannot be enabled yet.");
+        return;
+      }
+    }
+    setProviderProfileWorking(`${profile.id}:enabled`);
+    setMessage(null);
+    try {
+      const result = await engineClient.updateServiceConfig({
+        providers: {
+          defaultQuickModel: serviceStatus.serviceConfig?.providers?.defaultQuickModel,
+          defaultMainModel: serviceStatus.serviceConfig?.providers?.defaultMainModel,
+          profiles: profiles.map((item) =>
+            item.id === profile.id ? { ...item, enabled } : item
+          ),
+        },
+      });
+      setServiceStatus((current) => ({
+        ...current,
+        serviceConfig: result.config,
+        configError: undefined,
+        config: current.config
+          ? {
+              ...current.config,
+              restartRequired: result.restartStatus?.restartRequired,
+              pendingRestart: result.restartStatus?.pendingRestart,
+            }
+          : current.config,
+      }));
+      setMessage(`${profile.displayName} ${enabled ? "enabled" : "disabled"}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Provider profile could not be updated.");
+    } finally {
+      setProviderProfileWorking(null);
     }
   }
 
@@ -1144,6 +1295,7 @@ export function AIProviderSettingsModal({
   }
 
   function renderAIProvidersSettings() {
+    const providerProfiles = serviceStatus.serviceConfig?.providers?.profiles ?? [];
     const providerOffline = runtimeHealth.status === "not_running";
     const providerInvalid = runtimeHealth.status === "degraded";
     const providerConnected = runtimeHealth.status === "ready" && runtimeHealth.ollama_running;
@@ -1268,18 +1420,182 @@ export function AIProviderSettingsModal({
         <section className="provider-section">
           <div className="provider-section-heading">
             <div>
-              <span>Security</span>
-              <h3>Provider secrets</h3>
+              <span>Profiles</span>
+              <h3>Provider connections</h3>
             </div>
-            <span className="settings-planned-pill">Planned</span>
+            <button
+              className="settings-inline-button"
+              onClick={() => void refreshServiceStatus()}
+              disabled={serviceStatus.loading}
+            >
+              <RefreshCw size={14} />
+              Refresh
+            </button>
           </div>
-          <div className="settings-placeholder settings-placeholder-disabled">
-            <strong>Secure native storage required</strong>
+          <div className="settings-placeholder">
+            <strong>Local-first provider policy</strong>
             <span>
-              API keys and provider secrets are not stored in this Settings screen. Secret entry is
-              deferred until a secure native storage flow exists.
+              Local providers keep prompts on this machine. Remote providers send prompts,
+              references, and selected context to the configured provider. API keys are stored
+              through the loom-service secret store and are never shown again.
             </span>
           </div>
+          {serviceStatus.configError && (
+            <p className="settings-status">{serviceStatus.configError}</p>
+          )}
+          {providerProfiles.length === 0 ? (
+            <div className="settings-placeholder settings-placeholder-disabled">
+              <strong>No provider profiles reported</strong>
+              <span>Refresh service status after loom-service is ready.</span>
+            </div>
+          ) : (
+            <div className="provider-profile-list">
+              {providerProfiles.map((profile) => {
+                const secretStatus = providerSecretStatuses[profile.id];
+                const secretLabel = providerSecretStatusLabel(profile, secretStatus);
+                const remote = isRemoteProviderProfile(profile);
+                const gate = canEnableProviderProfile(
+                  profile,
+                  secretStatus,
+                  providerPrivacyAcknowledged[profile.id] ?? false
+                );
+                const enableWorking = providerProfileWorking === `${profile.id}:enabled`;
+                const secretWorking =
+                  providerProfileWorking === `${profile.id}:secret-save` ||
+                  providerProfileWorking === `${profile.id}:secret-remove` ||
+                  providerProfileWorking === `${profile.id}:secret-test`;
+                return (
+                  <article
+                    className={`provider-profile-card ${profile.enabled ? "enabled" : "disabled"}`}
+                    key={profile.id}
+                  >
+                    <div className="provider-profile-card-header">
+                      <span className="provider-profile-icon">
+                        {profile.requiresSecret ? <KeyRound size={15} /> : <Server size={15} />}
+                      </span>
+                      <div>
+                        <h4>{profile.displayName}</h4>
+                        <small>{profile.id}</small>
+                      </div>
+                      <span className={`connection-pill ${profile.enabled ? "connected" : ""}`}>
+                        {profile.enabled ? "Enabled" : "Disabled"}
+                      </span>
+                    </div>
+
+                    <div className="provider-profile-badges">
+                      {providerProfileBadges(profile).map((badge) => (
+                        <span key={badge}>{badge}</span>
+                      ))}
+                    </div>
+
+                    <dl className="provider-profile-meta">
+                      <div>
+                        <dt>Kind</dt>
+                        <dd>{profile.providerKind}</dd>
+                      </div>
+                      <div>
+                        <dt>Vendor</dt>
+                        <dd>{profile.vendor}</dd>
+                      </div>
+                      <div>
+                        <dt>Transport</dt>
+                        <dd>{profile.transportKind}</dd>
+                      </div>
+                      <div>
+                        <dt>Endpoint</dt>
+                        <dd>{profile.baseUrl ?? "Not configured"}</dd>
+                      </div>
+                      <div>
+                        <dt>Default model</dt>
+                        <dd>{profile.defaultModel ?? "Not configured"}</dd>
+                      </div>
+                      <div>
+                        <dt>Secret</dt>
+                        <dd>{secretLabel}</dd>
+                      </div>
+                    </dl>
+
+                    {profile.requiresSecret && (
+                      <div className="provider-secret-controls">
+                        <label className="settings-field">
+                          <span>API key</span>
+                          <input
+                            type="password"
+                            autoComplete="new-password"
+                            spellCheck={false}
+                            placeholder={
+                              secretStatus?.present ? "Paste replacement key" : "Paste API key"
+                            }
+                            value={providerSecretDrafts[profile.id] ?? ""}
+                            onChange={(event) =>
+                              updateProviderSecretDraft(profile.id, event.target.value)
+                            }
+                          />
+                          <small>
+                            Write-only. Saved keys are not displayed after submission.
+                          </small>
+                        </label>
+                        <div className="settings-actions">
+                          <button
+                            onClick={() => void saveProviderSecret(profile)}
+                            disabled={secretWorking}
+                          >
+                            {secretStatus?.present ? "Replace key" : "Set key"}
+                          </button>
+                          <button
+                            onClick={() => void testProviderSecret(profile)}
+                            disabled={secretWorking}
+                          >
+                            Test key
+                          </button>
+                          <button
+                            onClick={() => void removeProviderSecret(profile)}
+                            disabled={secretWorking || !secretStatus?.present}
+                          >
+                            Remove key
+                          </button>
+                        </div>
+                      </div>
+                    )}
+
+                    {remote && (
+                      <label className="settings-toggle provider-privacy-ack">
+                        <input
+                          type="checkbox"
+                          checked={providerPrivacyAcknowledged[profile.id] ?? false}
+                          onChange={(event) =>
+                            setProviderPrivacyAcknowledged((current) => ({
+                              ...current,
+                              [profile.id]: event.target.checked,
+                            }))
+                          }
+                        />
+                        <span>
+                          I understand prompts and selected context may leave this device when
+                          using {profile.displayName}.
+                        </span>
+                      </label>
+                    )}
+
+                    <div className="provider-profile-actions">
+                      <span>{providerProfileAccessLabel(profile)} provider</span>
+                      {remote ? (
+                        <button
+                          onClick={() => void setProviderProfileEnabled(profile, !profile.enabled)}
+                          disabled={enableWorking || (!profile.enabled && !gate.allowed)}
+                          title={!profile.enabled && gate.reason ? gate.reason : undefined}
+                        >
+                          {profile.enabled ? "Disable" : "Enable"}
+                        </button>
+                      ) : (
+                        <em>Always enabled</em>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
+            </div>
+          )}
         </section>
 
         {demoResponsesAvailable && (
@@ -1304,27 +1620,6 @@ export function AIProviderSettingsModal({
             <small>Use mock model responses for UI testing.</small>
           </section>
         )}
-
-        <section className="provider-section">
-          <div className="provider-section-heading">
-            <div>
-              <span>Future providers</span>
-              <h3>Provider connections</h3>
-            </div>
-          </div>
-          <div className="settings-provider-card-grid">
-            {futureProviders.map((item) => (
-              <div className="settings-provider-card disabled" key={item}>
-                <Server size={15} />
-                <span>
-                  <strong>{item}</strong>
-                  <small>Connection controls will appear here.</small>
-                </span>
-                <em>Future</em>
-              </div>
-            ))}
-          </div>
-        </section>
       </>
     );
   }

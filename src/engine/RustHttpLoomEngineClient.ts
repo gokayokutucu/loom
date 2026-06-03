@@ -68,6 +68,16 @@ import type {
   RustHttpLoomEngineClientOptions,
   LoomServiceRuntimeConfig,
   OcrProviderHealth,
+  ProviderCapabilitiesRuntimeConfig,
+  ProviderKind,
+  ProviderModelDiscoveryRuntimeConfig,
+  ProviderProfileRuntimeConfig,
+  ProviderRequestDefaultsRuntimeConfig,
+  ProviderSecretStatus,
+  ProviderSecretStatusKind,
+  ProviderSecurityRuntimeConfig,
+  ProviderTransportKind,
+  ProviderVendor,
   RuntimeModelDownloadJob,
   RuntimeModelItem,
   RuntimeModelProviderStatus,
@@ -1420,6 +1430,126 @@ function validateRuntimeModelDownloadJob(value: unknown): RuntimeModelDownloadJo
   };
 }
 
+function providerKindValue(value: string | undefined): ProviderKind {
+  if (value === "openai_compatible" || value === "custom_http_later") return value;
+  return "ollama";
+}
+
+function providerTransportKindValue(value: string | undefined): ProviderTransportKind {
+  if (value === "native_openai_compatible" || value === "rig_openai_compatible") return value;
+  return "ollama";
+}
+
+function providerVendorValue(value: string | undefined): ProviderVendor {
+  if (value === "nvidia" || value === "openai" || value === "custom") return value;
+  return "ollama";
+}
+
+function providerSecretStatusKindValue(value: string | undefined): ProviderSecretStatusKind {
+  if (value === "saved" || value === "missing" || value === "invalid") return value;
+  return "unavailable";
+}
+
+function validateProviderModelDiscovery(
+  value: unknown
+): ProviderModelDiscoveryRuntimeConfig {
+  if (!isRecord(value)) return { enabled: false };
+  return {
+    enabled: booleanValue(value, "enabled") ?? false,
+    endpointPath: nullableStringValue(value, "endpointPath"),
+    refreshIntervalSeconds: numberValue(value, "refreshIntervalSeconds"),
+  };
+}
+
+function validateProviderRequestDefaults(
+  value: unknown
+): ProviderRequestDefaultsRuntimeConfig {
+  if (!isRecord(value)) return {};
+  return {
+    temperature: numberValue(value, "temperature"),
+    topP: numberValue(value, "topP"),
+    numCtx: numberValue(value, "numCtx"),
+    numPredict: numberValue(value, "numPredict"),
+    think: booleanValue(value, "think"),
+    stream: booleanValue(value, "stream"),
+  };
+}
+
+function validateProviderSecurity(value: unknown): ProviderSecurityRuntimeConfig {
+  if (!isRecord(value)) {
+    return {
+      localOnlyRequired: true,
+      allowRemoteEndpoint: false,
+      allowInsecureHttpRemote: false,
+      allowUnsafeModelManagement: false,
+    };
+  }
+  return {
+    localOnlyRequired: booleanValue(value, "localOnlyRequired") ?? true,
+    allowRemoteEndpoint: booleanValue(value, "allowRemoteEndpoint") ?? false,
+    allowInsecureHttpRemote: booleanValue(value, "allowInsecureHttpRemote") ?? false,
+    allowUnsafeModelManagement: booleanValue(value, "allowUnsafeModelManagement") ?? false,
+  };
+}
+
+function validateProviderCapabilities(value: unknown): ProviderCapabilitiesRuntimeConfig {
+  if (!isRecord(value)) {
+    return {
+      supportsStreaming: false,
+      supportsCancellation: false,
+      supportsModelListing: false,
+      supportsThinking: false,
+      supportsSystemPrompt: false,
+    };
+  }
+  return {
+    supportsStreaming: booleanValue(value, "supportsStreaming") ?? false,
+    supportsCancellation: booleanValue(value, "supportsCancellation") ?? false,
+    supportsModelListing: booleanValue(value, "supportsModelListing") ?? false,
+    supportsThinking: booleanValue(value, "supportsThinking") ?? false,
+    supportsSystemPrompt: booleanValue(value, "supportsSystemPrompt") ?? false,
+    supportsJsonMode: booleanValue(value, "supportsJsonMode"),
+  };
+}
+
+function validateProviderProfile(value: unknown): ProviderProfileRuntimeConfig | null {
+  if (!isRecord(value)) return null;
+  const id = stringValue(value, "id");
+  if (!id) return null;
+  return {
+    id,
+    providerKind: providerKindValue(stringValue(value, "providerKind")),
+    transportKind: providerTransportKindValue(stringValue(value, "transportKind")),
+    vendor: providerVendorValue(stringValue(value, "vendor")),
+    displayName: stringValue(value, "displayName") ?? id,
+    enabled: booleanValue(value, "enabled") ?? false,
+    experimental: booleanValue(value, "experimental") ?? false,
+    baseUrl: nullableStringValue(value, "baseUrl"),
+    defaultModel: nullableStringValue(value, "defaultModel"),
+    requiresSecret: booleanValue(value, "requiresSecret") ?? false,
+    secretRef: nullableStringValue(value, "secretRef"),
+    modelDiscovery: validateProviderModelDiscovery(value.modelDiscovery),
+    requestDefaults: validateProviderRequestDefaults(value.requestDefaults),
+    security: validateProviderSecurity(value.security),
+    capabilities: validateProviderCapabilities(value.capabilities),
+    metadataJson: isJsonValue(value.metadataJson) ? value.metadataJson : undefined,
+  };
+}
+
+function validateProviderSecretStatus(value: unknown): ProviderSecretStatus {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid provider secret status.", {
+      endpoint: "/providers/secrets/:profile_id",
+    });
+  }
+  return {
+    providerProfileId: stringValue(value, "providerProfileId") ?? "",
+    secretRef: stringValue(value, "secretRef") ?? "",
+    present: booleanValue(value, "present") ?? false,
+    status: providerSecretStatusKindValue(stringValue(value, "status")),
+  };
+}
+
 function validateServiceConfig(value: unknown): LoomServiceRuntimeConfig {
   if (!isRecord(value)) {
     throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid config.", {
@@ -1444,6 +1574,11 @@ function validateServiceConfig(value: unknown): LoomServiceRuntimeConfig {
     ? {
         defaultMainModel: stringValue(value.providers, "defaultMainModel"),
         defaultQuickModel: stringValue(value.providers, "defaultQuickModel"),
+        profiles: Array.isArray(value.providers.profiles)
+          ? value.providers.profiles
+              .map(validateProviderProfile)
+              .filter((profile): profile is ProviderProfileRuntimeConfig => profile !== null)
+          : undefined,
       }
     : undefined;
   const ocr = isRecord(value.ocr)
@@ -2770,6 +2905,53 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
       body: JSON.stringify(input),
     });
     return validateConfigUpdateResult(response);
+  }
+
+  async getProviderSecretStatus(profileId: string): Promise<ProviderSecretStatus> {
+    const response = await this.requestJson<unknown>(
+      `/providers/secrets/${encodeURIComponent(profileId)}`
+    );
+    return validateProviderSecretStatus(response);
+  }
+
+  async setProviderSecret(
+    profileId: string,
+    value: string,
+    secretRef?: string | null
+  ): Promise<ProviderSecretStatus> {
+    const response = await this.requestJson<unknown>(
+      `/providers/secrets/${encodeURIComponent(profileId)}`,
+      {
+        method: "PUT",
+        body: JSON.stringify({
+          value,
+          ...(secretRef ? { secretRef } : {}),
+        }),
+      }
+    );
+    return validateProviderSecretStatus(response);
+  }
+
+  async deleteProviderSecret(profileId: string): Promise<ProviderSecretStatus> {
+    const response = await this.requestJson<unknown>(
+      `/providers/secrets/${encodeURIComponent(profileId)}`,
+      { method: "DELETE" }
+    );
+    return validateProviderSecretStatus(response);
+  }
+
+  async testProviderSecret(
+    profileId: string,
+    secretRef?: string | null
+  ): Promise<ProviderSecretStatus> {
+    const response = await this.requestJson<unknown>(
+      `/providers/secrets/${encodeURIComponent(profileId)}/test`,
+      {
+        method: "POST",
+        body: JSON.stringify(secretRef ? { secretRef } : {}),
+      }
+    );
+    return validateProviderSecretStatus(response);
   }
 
   async getRuntimeModels(): Promise<RuntimeModelsResult> {
