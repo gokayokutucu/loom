@@ -2898,6 +2898,17 @@ test.describe("[engine-contract] Loom engine client selection", () => {
                   },
                 },
               },
+              fingerprint: {
+                packageVersion: "0.1.0",
+                serviceStartTime: "2026-06-04T12:00:00Z",
+                processId: 1234,
+                runtimeOwnerKind: "dev",
+                binaryPath: "/path/to/binary",
+                binarySizeBytes: 987654,
+                binaryModifiedAt: "2026-06-04T11:59:00Z",
+                binaryInode: 112233,
+                buildProfile: "debug",
+              },
             }),
             { status: 200 }
           );
@@ -2979,6 +2990,17 @@ test.describe("[engine-contract] Loom engine client selection", () => {
             minimumRecommendedVersion: "0.17.1",
           },
         },
+      },
+      fingerprint: {
+        packageVersion: "0.1.0",
+        serviceStartTime: "2026-06-04T12:00:00Z",
+        processId: 1234,
+        runtimeOwnerKind: "dev",
+        binaryPath: "/path/to/binary",
+        binarySizeBytes: 987654,
+        binaryModifiedAt: "2026-06-04T11:59:00Z",
+        binaryInode: 112233,
+        buildProfile: "debug",
       },
     });
     const health = await client.getServiceHealth();

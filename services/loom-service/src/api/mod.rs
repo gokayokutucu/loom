@@ -9,7 +9,7 @@ mod dev;
 mod events;
 pub(crate) mod exports;
 pub(crate) mod graph;
-mod health;
+pub(crate) mod health;
 mod history;
 mod looms;
 mod memory;

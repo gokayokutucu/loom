@@ -100,6 +100,34 @@ if [[ "$RUN_PUBLISH" == true ]]; then
 fi
 
 if [[ "$RUN_TEST" == true ]]; then
+  echo "Checking running service diagnostics..."
+  if curl -s -f http://127.0.0.1:17633/health >/dev/null 2>&1; then
+    echo "Running loom-service detected on port 17633."
+    curl -s http://127.0.0.1:17633/health | python3 -c '
+import json, sys
+try:
+    data = json.load(sys.stdin)
+    fp = data.get("fingerprint")
+    if fp:
+        print("Running service fingerprint:")
+        print("  PID:             {}".format(fp.get("processId")))
+        print("  Binary Path:     {}".format(fp.get("binaryPath")))
+        print("  Modification:    {}".format(fp.get("binaryModifiedAt")))
+        print("  Inode:           {}".format(fp.get("binaryInode")))
+        print("  Started:         {}".format(fp.get("serviceStartTime")))
+        print("  Owner:           {}".format(fp.get("runtimeOwnerKind")))
+        print("  Build Profile:   {}".format(fp.get("buildProfile")))
+        print("  Package Version: {}".format(fp.get("packageVersion")))
+    else:
+        print("  No fingerprint found in health response.")
+except Exception as e:
+    print("  Failed to parse fingerprint:", e)
+'
+  else
+    echo "No running loom-service detected on port 17633."
+  fi
+  echo
+
   run_cmd "Rust service format check" \
     cargo fmt --manifest-path services/loom-service/Cargo.toml --check
   run_cmd "Rust service check" \

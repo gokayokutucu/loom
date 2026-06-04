@@ -24,6 +24,18 @@ export interface EngineHealth {
   message?: string;
 }
 
+export interface LoomServiceFingerprint {
+  packageVersion: string;
+  serviceStartTime: string;
+  processId: number;
+  runtimeOwnerKind: string;
+  binaryPath: string | null;
+  binarySizeBytes: number | null;
+  binaryModifiedAt: string | null;
+  binaryInode: number | null;
+  buildProfile: string;
+}
+
 export interface ServiceHealthStatus {
   status: "ready" | "degraded" | "unavailable";
   runtime: "typescript-local" | "rust-service";
@@ -45,6 +57,7 @@ export interface ServiceHealthStatus {
       };
     };
   };
+  fingerprint?: LoomServiceFingerprint;
   serviceUrl?: string;
   lastCheckedAt?: string;
   error?: string;

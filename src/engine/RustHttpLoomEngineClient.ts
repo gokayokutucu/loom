@@ -2915,6 +2915,20 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
                 : undefined,
             }
           : undefined;
+      const fingerprint = isRecord(health.fingerprint)
+        ? {
+            packageVersion: stringValue(health.fingerprint, "packageVersion") ?? "",
+            serviceStartTime: stringValue(health.fingerprint, "serviceStartTime") ?? "",
+            processId: numberValue(health.fingerprint, "processId") ?? 0,
+            runtimeOwnerKind: stringValue(health.fingerprint, "runtimeOwnerKind") ?? "",
+            binaryPath: stringValue(health.fingerprint, "binaryPath") ?? null,
+            binarySizeBytes: numberValue(health.fingerprint, "binarySizeBytes") ?? null,
+            binaryModifiedAt: stringValue(health.fingerprint, "binaryModifiedAt") ?? null,
+            binaryInode: numberValue(health.fingerprint, "binaryInode") ?? null,
+            buildProfile: stringValue(health.fingerprint, "buildProfile") ?? "",
+          }
+        : undefined;
+
       return {
         status: statusFromHealth(health.status),
         runtime: "rust-service",
@@ -2931,6 +2945,7 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
               },
             }
           : undefined,
+        fingerprint,
         serviceUrl: this.serviceUrl,
         lastCheckedAt: new Date().toISOString(),
       };

@@ -27,6 +27,7 @@ use tracing_subscriber::EnvFilter;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    let _ = api::health::service_start_time();
     let config = ServiceConfig::from_env()?;
 
     tracing_subscriber::fmt()
