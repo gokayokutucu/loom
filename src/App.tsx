@@ -93,6 +93,10 @@ import {
   type ContextMenuItem,
   type ContextMenuPayload,
 } from "./services/contextMenu";
+import {
+  ConversationScrollMinimap,
+  responseMinimapItems,
+} from "./components/ConversationScrollMinimap";
 import { browserHostShell } from "./services/hostShell";
 import {
   isAttachmentLink as isAttachmentReferenceLink,
@@ -17571,9 +17575,25 @@ function ChatTranscript({
   const isGeneratingInTranscript = Boolean(
     generatingResponseId && responses.some((response) => response.id === generatingResponseId)
   );
+  const minimapItems = useMemo(
+    () =>
+      responseMinimapItems(
+        responses.map((response) => ({
+          id: response.id,
+          title: response.title,
+          question: response.question,
+        })),
+        highlightedResponseId ?? generatingResponseId
+      ),
+    [generatingResponseId, highlightedResponseId, responses]
+  );
 
   return (
     <div className="chat-transcript-shell">
+      <ConversationScrollMinimap
+        items={minimapItems}
+        scrollContainerRef={transcriptNodeRef}
+      />
       <section
         className={isGeneratingInTranscript ? "chat-transcript is-generating-response" : "chat-transcript"}
         ref={setTranscriptNode}
