@@ -1801,8 +1801,50 @@ where
     if let Some(value) = lookup("LOOM_OLLAMA_ENFORCE_LOCAL") {
         config.security.enforce_local_ollama = parse_env_bool("LOOM_OLLAMA_ENFORCE_LOCAL", &value)?;
     }
+    if lookup("LOOM_SERVICE_E2E_PROVIDER_PROFILE").as_deref() == Some("nvidia") {
+        apply_e2e_nvidia_openai_compatible_profile(config, &lookup)?;
+    }
 
     Ok(())
+}
+
+fn apply_e2e_nvidia_openai_compatible_profile<F>(
+    config: &mut LoomServiceConfig,
+    lookup: &F,
+) -> Result<(), ServiceError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut profile = ProviderProfileConfig::nvidia_openai_compatible_example();
+    profile.enabled = true;
+    if let Some(value) = lookup("LOOM_SERVICE_E2E_OPENAI_BASE_URL") {
+        profile.base_url = Some(value.trim_end_matches('/').to_string());
+        profile.security.allow_insecure_http_remote = true;
+    }
+    if let Some(value) = lookup("LOOM_SERVICE_E2E_OPENAI_MODEL") {
+        profile.default_model = Some(value);
+        config.providers.default_main_model = profile
+            .default_model
+            .clone()
+            .unwrap_or_else(|| config.providers.default_main_model.clone());
+    }
+    profile.secret_ref = Some("env:NVIDIA_API_KEY".to_string());
+    upsert_provider_profile(&mut config.providers.profiles, profile);
+    Ok(())
+}
+
+fn upsert_provider_profile(
+    profiles: &mut Vec<ProviderProfileConfig>,
+    profile: ProviderProfileConfig,
+) {
+    if let Some(existing) = profiles
+        .iter_mut()
+        .find(|existing| existing.id == profile.id)
+    {
+        *existing = profile;
+    } else {
+        profiles.push(profile);
+    }
 }
 
 fn parse_env_u64(name: &str, value: &str) -> Result<u64, ServiceError> {
@@ -2243,6 +2285,36 @@ mod tests {
         assert_eq!(config.service.port, 18_000);
         assert_eq!(config.database.path, "/tmp/loom-test.db");
         assert_eq!(config.ollama.base_url, "http://127.0.0.1:11500");
+    }
+
+    #[test]
+    fn e2e_nvidia_profile_override_adds_enabled_non_secret_profile() {
+        let mut config = LoomServiceConfig::default();
+
+        apply_env_overrides_from(&mut config, |name| match name {
+            "LOOM_SERVICE_E2E_PROVIDER_PROFILE" => Some("nvidia".to_string()),
+            "LOOM_SERVICE_E2E_OPENAI_BASE_URL" => Some("http://127.0.0.1:9999/v1".to_string()),
+            "LOOM_SERVICE_E2E_OPENAI_MODEL" => Some("nvidia/e2e-openai-compatible".to_string()),
+            _ => None,
+        })
+        .expect("apply env");
+
+        let nvidia = config
+            .providers
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "nvidia")
+            .expect("nvidia profile");
+        assert!(nvidia.enabled);
+        assert_eq!(nvidia.secret_ref.as_deref(), Some("env:NVIDIA_API_KEY"));
+        assert_eq!(nvidia.base_url.as_deref(), Some("http://127.0.0.1:9999/v1"));
+        assert_eq!(
+            config.providers.default_main_model,
+            "nvidia/e2e-openai-compatible"
+        );
+        let serialized = serialize_config(&config);
+        assert!(!serialized.contains("nvapi-"));
+        validate_config(&config).expect("valid e2e profile");
     }
 
     #[test]

@@ -195,6 +195,13 @@ pub struct OpenAiCompatibleChatResponse {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpenAiCompatibleSseEvent {
+    pub deltas: Vec<String>,
+    pub done: bool,
+    pub done_reason: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize)]
 struct OpenAiModelsEnvelope {
     data: Vec<OpenAiModelRecord>,
@@ -361,6 +368,44 @@ impl OpenAiCompatibleRuntime {
             )
         })?;
         parse_chat_response_value(value)
+    }
+
+    pub async fn post_chat_stream(
+        &self,
+        input: OpenAiCompatibleChatInput,
+    ) -> Result<reqwest::Response, OpenAiCompatibleRuntimeError> {
+        self.ensure_secret_available()?;
+        let client = self.client()?;
+        let normalized = normalize_provider_request_options(
+            &self.profile,
+            ProviderRequestNormalizationInput {
+                model: input.model,
+                output_budget: input.output_budget,
+                context_budget: input.context_budget,
+                temperature: input.temperature,
+                top_p: input.top_p,
+                think: Some(false),
+                stream: input.stream.or(Some(true)),
+                quick_ask: input.quick_ask,
+            },
+        )
+        .map_err(config_to_runtime_error)?;
+        let body = build_chat_body(&normalized, &input.messages, true);
+        let response = client
+            .post(self.chat_url()?)
+            .headers(self.auth_headers())
+            .json(&body)
+            .send()
+            .await
+            .map_err(map_reqwest_error)?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(classify_status(
+                status,
+                "OpenAI-compatible chat request failed.",
+            ));
+        }
+        Ok(response)
     }
 
     fn health_response(
@@ -547,6 +592,58 @@ pub fn parse_openai_compatible_sse(
         "OpenAI-compatible stream ended without a done marker.",
         true,
     ))
+}
+
+pub fn parse_openai_compatible_sse_event(
+    payload: &str,
+) -> Result<OpenAiCompatibleSseEvent, OpenAiCompatibleRuntimeError> {
+    let mut deltas = Vec::new();
+    let mut done = false;
+    let mut done_reason = None;
+    for line in payload
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+    {
+        let Some(data) = line.strip_prefix("data:") else {
+            continue;
+        };
+        let data = data.trim();
+        if data == "[DONE]" {
+            done = true;
+            continue;
+        }
+        let value: Value = serde_json::from_str(data).map_err(|_| {
+            OpenAiCompatibleRuntimeError::new(
+                OpenAiCompatibleRuntimeErrorKind::StreamParseError,
+                "OpenAI-compatible stream chunk was malformed.",
+                true,
+            )
+        })?;
+        if contains_forbidden_reasoning_key(&value) {
+            continue;
+        }
+        let envelope: OpenAiChatEnvelope = serde_json::from_value(value).map_err(|_| {
+            OpenAiCompatibleRuntimeError::new(
+                OpenAiCompatibleRuntimeErrorKind::StreamParseError,
+                "OpenAI-compatible stream chunk shape was unsupported.",
+                true,
+            )
+        })?;
+        for choice in envelope.choices {
+            if let Some(content) = choice.delta.and_then(|message| message.content) {
+                deltas.push(content);
+            }
+            if done_reason.is_none() {
+                done_reason = choice.finish_reason;
+            }
+        }
+    }
+    Ok(OpenAiCompatibleSseEvent {
+        deltas,
+        done,
+        done_reason,
+    })
 }
 
 fn parse_chat_response_value(

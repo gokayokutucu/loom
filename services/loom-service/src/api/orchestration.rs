@@ -3404,7 +3404,7 @@ fn execute_stream(
             }
         };
         let context_repository = crate::storage::repositories::context_artifacts::ContextArtifactsRepository::new(&state.database);
-        let context_manager = ContextManager::with_repository(Some(service_config.context), context_repository);
+        let context_manager = ContextManager::with_repository(Some(service_config.context.clone()), context_repository);
         let built_context = match context_manager
             .build_context_with_repositories_and_strategy(context_input, strategy_decision.as_ref())
             .await
@@ -3637,13 +3637,21 @@ fn execute_stream(
             return;
         }
 
-        let provider_pipeline = ProviderPipeline::new(state.ollama.clone());
+        let provider_pipeline = ProviderPipeline::new_for_main_generation(
+            state.ollama.clone(),
+            &service_config,
+            &state.secret_store,
+        );
         let provider_profile = provider_pipeline.default_generation_profile();
         let provider_capabilities = provider_pipeline.default_generation_capabilities();
+        let provider_model_id = provider_profile
+            .default_model
+            .clone()
+            .unwrap_or_else(|| execution_input.model.clone());
         let provider_request = ProviderContractRequest {
             provider_kind: provider_profile.provider_kind,
             provider_profile_id: provider_profile.provider_profile_id,
-            model_id: execution_input.model.clone(),
+            model_id: provider_model_id,
             messages: built_context
                 .messages
                 .into_iter()

@@ -1,12 +1,18 @@
 #[cfg(feature = "experimental-rig")]
 use crate::providers::rig_openai_compatible::RigOpenAiCompatibleProviderAdapter;
 use crate::providers::{
-    config::ProviderKind,
+    config::{ProviderKind, ProviderProfileConfig, ProviderTransportKind},
     contract::{
         ProviderContractCapabilities, ProviderContractEvent, ProviderContractMessageRole,
         ProviderContractOptions, ProviderContractRequest, ProviderUsageMetadata,
     },
     ollama::OllamaRuntime,
+    openai_compatible::{
+        parse_openai_compatible_sse_event, OpenAiCompatibleChatInput, OpenAiCompatibleMessage,
+        OpenAiCompatibleMessageRole, OpenAiCompatibleRuntime, OpenAiCompatibleRuntimeErrorKind,
+        OpenAiCompatibleSecret,
+    },
+    secret_store::{ProviderSecretStore, SecretStore},
     types::{
         done_reason_is_length, OllamaChatRequest, OllamaMessage, OllamaOptions, OllamaRuntimeError,
         OllamaRuntimeErrorKind, OllamaStreamChunk, OllamaWireChunk, ProviderError,
@@ -23,6 +29,9 @@ pub type ProviderEventStream = Pin<Box<dyn Stream<Item = ProviderContractEvent> 
 pub trait ProviderAdapter: Clone + Send + Sync + 'static {
     fn provider_kind(&self) -> ProviderKind;
     fn provider_profile_id(&self) -> &str;
+    fn default_model(&self) -> Option<&str> {
+        None
+    }
     fn capabilities(&self) -> ProviderContractCapabilities;
     fn stream_chat(&self, request: ProviderContractRequest) -> ProviderEventStream;
     fn cancel(&self, request_id: &str) -> bool;
@@ -46,6 +55,19 @@ impl ProviderRegistry {
         }
     }
 
+    pub fn new_for_main_generation(
+        ollama: OllamaRuntime,
+        config: &crate::config::LoomServiceConfig,
+        secret_store: &ProviderSecretStore,
+    ) -> Self {
+        if let Some(adapter) = openai_compatible_adapter_from_e2e_profile(config, secret_store) {
+            return Self {
+                default_generation: ProviderRegistryAdapter::OpenAiCompatible(adapter),
+            };
+        }
+        Self::new(ollama)
+    }
+
     pub fn default_generation_adapter(&self) -> &ProviderRegistryAdapter {
         &self.default_generation
     }
@@ -58,6 +80,7 @@ impl ProviderRegistry {
 #[derive(Debug, Clone)]
 pub enum ProviderRegistryAdapter {
     Ollama(OllamaProviderAdapter),
+    OpenAiCompatible(OpenAiCompatibleProviderAdapter),
     #[cfg(feature = "experimental-rig")]
     RigOpenAiCompatible(RigOpenAiCompatibleProviderAdapter),
 }
@@ -66,6 +89,7 @@ impl ProviderAdapter for ProviderRegistryAdapter {
     fn provider_kind(&self) -> ProviderKind {
         match self {
             Self::Ollama(adapter) => adapter.provider_kind(),
+            Self::OpenAiCompatible(adapter) => adapter.provider_kind(),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.provider_kind(),
         }
@@ -74,14 +98,25 @@ impl ProviderAdapter for ProviderRegistryAdapter {
     fn provider_profile_id(&self) -> &str {
         match self {
             Self::Ollama(adapter) => adapter.provider_profile_id(),
+            Self::OpenAiCompatible(adapter) => adapter.provider_profile_id(),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.provider_profile_id(),
+        }
+    }
+
+    fn default_model(&self) -> Option<&str> {
+        match self {
+            Self::Ollama(adapter) => adapter.default_model(),
+            Self::OpenAiCompatible(adapter) => adapter.default_model(),
+            #[cfg(feature = "experimental-rig")]
+            Self::RigOpenAiCompatible(adapter) => adapter.default_model(),
         }
     }
 
     fn capabilities(&self) -> ProviderContractCapabilities {
         match self {
             Self::Ollama(adapter) => adapter.capabilities(),
+            Self::OpenAiCompatible(adapter) => adapter.capabilities(),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.capabilities(),
         }
@@ -90,6 +125,7 @@ impl ProviderAdapter for ProviderRegistryAdapter {
     fn stream_chat(&self, request: ProviderContractRequest) -> ProviderEventStream {
         match self {
             Self::Ollama(adapter) => adapter.stream_chat(request),
+            Self::OpenAiCompatible(adapter) => adapter.stream_chat(request),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.stream_chat(request),
         }
@@ -98,9 +134,198 @@ impl ProviderAdapter for ProviderRegistryAdapter {
     fn cancel(&self, request_id: &str) -> bool {
         match self {
             Self::Ollama(adapter) => adapter.cancel(request_id),
+            Self::OpenAiCompatible(adapter) => adapter.cancel(request_id),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.cancel(request_id),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct OpenAiCompatibleProviderAdapter {
+    runtime: OpenAiCompatibleRuntime,
+    provider_profile_id: String,
+}
+
+impl OpenAiCompatibleProviderAdapter {
+    fn new(profile: ProviderProfileConfig, secret: Option<String>) -> Self {
+        let provider_profile_id = profile.id.clone();
+        Self {
+            runtime: OpenAiCompatibleRuntime::new(
+                profile,
+                secret.map(OpenAiCompatibleSecret::bearer),
+            ),
+            provider_profile_id,
+        }
+    }
+}
+
+impl ProviderAdapter for OpenAiCompatibleProviderAdapter {
+    fn provider_kind(&self) -> ProviderKind {
+        ProviderKind::OpenAiCompatible
+    }
+
+    fn provider_profile_id(&self) -> &str {
+        &self.provider_profile_id
+    }
+
+    fn default_model(&self) -> Option<&str> {
+        self.runtime.profile().default_model.as_deref()
+    }
+
+    fn capabilities(&self) -> ProviderContractCapabilities {
+        let profile = self.runtime.profile();
+        ProviderContractCapabilities {
+            supports_streaming: profile.capabilities.supports_streaming,
+            supports_cancellation: false,
+            supports_usage_metadata: false,
+            supports_temperature: true,
+            supports_top_p: true,
+            supports_max_tokens: true,
+            supports_system_prompt: profile.capabilities.supports_system_prompt,
+            supports_thinking_status: false,
+        }
+    }
+
+    fn stream_chat(&self, request: ProviderContractRequest) -> ProviderEventStream {
+        let adapter = self.clone();
+        Box::pin(stream! {
+            let model_id = request.model_id.clone();
+            let response = match adapter.runtime.post_chat_stream(openai_chat_input_from_contract(&request)).await {
+                Ok(response) => response,
+                Err(error) => {
+                    yield ProviderContractEvent::Error {
+                        error: error.to_provider_error(Some(&adapter.provider_profile_id), Some(&model_id)),
+                    };
+                    return;
+                }
+            };
+            let mut bytes_stream = response.bytes_stream();
+            let mut buffer = String::new();
+
+            while let Some(chunk) = bytes_stream.next().await {
+                let bytes = match chunk {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        let error = crate::providers::openai_compatible::OpenAiCompatibleRuntimeError::new(
+                            OpenAiCompatibleRuntimeErrorKind::ProviderError,
+                            "OpenAI-compatible provider stream failed.",
+                            true,
+                        );
+                        yield ProviderContractEvent::Error {
+                            error: error.to_provider_error(Some(&adapter.provider_profile_id), Some(&model_id)),
+                        };
+                        return;
+                    }
+                };
+                let text = match std::str::from_utf8(&bytes) {
+                    Ok(text) => text,
+                    Err(_) => {
+                        let error = crate::providers::openai_compatible::OpenAiCompatibleRuntimeError::new(
+                            OpenAiCompatibleRuntimeErrorKind::StreamParseError,
+                            "OpenAI-compatible provider returned non-UTF8 stream data.",
+                            true,
+                        );
+                        yield ProviderContractEvent::Error {
+                            error: error.to_provider_error(Some(&adapter.provider_profile_id), Some(&model_id)),
+                        };
+                        return;
+                    }
+                };
+                buffer.push_str(text);
+
+                while let Some(index) = buffer.find("\n\n") {
+                    let event_payload = buffer[..index].to_string();
+                    buffer.replace_range(..index + 2, "");
+                    if event_payload.trim().is_empty() {
+                        continue;
+                    }
+                    let event = match parse_openai_compatible_sse_event(&event_payload) {
+                        Ok(event) => event,
+                        Err(error) => {
+                            yield ProviderContractEvent::Error {
+                                error: error.to_provider_error(Some(&adapter.provider_profile_id), Some(&model_id)),
+                            };
+                            return;
+                        }
+                    };
+                    for delta in event.deltas {
+                        if !delta.is_empty() {
+                            yield ProviderContractEvent::Delta { text: delta };
+                        }
+                    }
+                    if event.done {
+                        yield ProviderContractEvent::Completed {
+                            done_reason: event.done_reason,
+                            usage: ProviderUsageMetadata::unavailable("provider_did_not_report_usage"),
+                        };
+                        return;
+                    }
+                }
+            }
+
+            yield ProviderContractEvent::Error {
+                error: ProviderError::new(
+                    crate::providers::types::ProviderErrorKind::StreamParseError,
+                    ProviderKind::OpenAiCompatible,
+                )
+                .with_provider_id(&adapter.provider_profile_id)
+                .with_model(Some(model_id))
+                .with_technical_message("OpenAI-compatible stream closed without a done marker."),
+            };
+        })
+    }
+
+    fn cancel(&self, _request_id: &str) -> bool {
+        false
+    }
+}
+
+fn openai_compatible_adapter_from_e2e_profile(
+    config: &crate::config::LoomServiceConfig,
+    secret_store: &ProviderSecretStore,
+) -> Option<OpenAiCompatibleProviderAdapter> {
+    let profile_id = std::env::var("LOOM_SERVICE_E2E_PROVIDER_PROFILE").ok()?;
+    let profile = config.providers.profiles.iter().find(|profile| {
+        profile.id == profile_id
+            && profile.enabled
+            && profile.provider_kind == ProviderKind::OpenAiCompatible
+            && profile.transport_kind == ProviderTransportKind::NativeOpenAiCompatible
+    })?;
+    let secret = profile
+        .secret_ref
+        .as_deref()
+        .and_then(|secret_ref| secret_store.resolve_secret(secret_ref).ok().flatten())
+        .map(|secret| secret.expose_for_provider_runtime().to_string());
+    Some(OpenAiCompatibleProviderAdapter::new(
+        profile.clone(),
+        secret,
+    ))
+}
+
+fn openai_chat_input_from_contract(request: &ProviderContractRequest) -> OpenAiCompatibleChatInput {
+    OpenAiCompatibleChatInput {
+        model: Some(request.model_id.clone()),
+        messages: request
+            .messages
+            .iter()
+            .map(|message| OpenAiCompatibleMessage {
+                role: match message.role {
+                    ProviderContractMessageRole::System => OpenAiCompatibleMessageRole::System,
+                    ProviderContractMessageRole::User => OpenAiCompatibleMessageRole::User,
+                    ProviderContractMessageRole::Assistant => {
+                        OpenAiCompatibleMessageRole::Assistant
+                    }
+                },
+                content: message.content.clone(),
+            })
+            .collect(),
+        output_budget: request.options.max_tokens,
+        context_budget: request.options.context_tokens,
+        temperature: request.options.temperature,
+        top_p: request.options.top_p,
+        stream: Some(request.stream),
+        quick_ask: false,
     }
 }
 
@@ -490,6 +715,21 @@ fn ollama_error_to_provider_error(
 mod tests {
     use super::*;
     use crate::providers::types::ProviderErrorKind;
+    use crate::{
+        config::{LoomServiceConfig, ServiceConfig},
+        providers::{config::ProviderProfileConfig, secret_store::ProviderSecretStore},
+    };
+    use std::{
+        path::PathBuf,
+        sync::{Mutex, OnceLock},
+    };
+
+    fn e2e_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("e2e env lock")
+    }
 
     fn contract_request() -> ProviderContractRequest {
         ProviderContractRequest {
@@ -522,6 +762,84 @@ mod tests {
             runtime_metadata: json!({ "safe": true }),
             loom_context_metadata: json!({ "source": "context_manager" }),
         }
+    }
+
+    fn nvidia_config(enabled: bool) -> LoomServiceConfig {
+        let mut config = LoomServiceConfig::default();
+        let mut profile = ProviderProfileConfig::nvidia_openai_compatible_example();
+        profile.enabled = enabled;
+        profile.base_url = Some("http://127.0.0.1:8080/v1".to_string());
+        profile.security.allow_insecure_http_remote = true;
+        profile.secret_ref = Some("env:LOOM_TEST_NVIDIA_ADAPTER_API_KEY".to_string());
+        config.providers.profiles.push(profile);
+        config
+    }
+
+    fn test_ollama_runtime() -> OllamaRuntime {
+        let service_config = ServiceConfig::from_config(
+            PathBuf::from("/tmp/loom-provider-adapter-test.toml"),
+            LoomServiceConfig::default(),
+        )
+        .expect("service config");
+        OllamaRuntime::new(service_config.ollama)
+    }
+
+    #[test]
+    fn registry_keeps_ollama_as_default_without_explicit_profile_override() {
+        let _lock = e2e_env_lock();
+        std::env::remove_var("LOOM_SERVICE_E2E_PROVIDER_PROFILE");
+        let registry = ProviderRegistry::new_for_main_generation(
+            test_ollama_runtime(),
+            &nvidia_config(true),
+            &ProviderSecretStore::default(),
+        );
+
+        assert_eq!(
+            registry.default_generation_adapter().provider_kind(),
+            ProviderKind::Ollama
+        );
+        assert_eq!(
+            registry.default_generation_adapter().provider_profile_id(),
+            "ollama-local"
+        );
+    }
+
+    #[test]
+    fn registry_does_not_select_disabled_nvidia_profile() {
+        let _lock = e2e_env_lock();
+        std::env::set_var("LOOM_SERVICE_E2E_PROVIDER_PROFILE", "nvidia");
+        let registry = ProviderRegistry::new_for_main_generation(
+            test_ollama_runtime(),
+            &nvidia_config(false),
+            &ProviderSecretStore::default(),
+        );
+        std::env::remove_var("LOOM_SERVICE_E2E_PROVIDER_PROFILE");
+
+        assert_eq!(
+            registry.default_generation_adapter().provider_kind(),
+            ProviderKind::Ollama
+        );
+    }
+
+    #[test]
+    fn registry_selects_enabled_native_nvidia_profile_without_exposing_secret() {
+        let _lock = e2e_env_lock();
+        std::env::set_var("LOOM_SERVICE_E2E_PROVIDER_PROFILE", "nvidia");
+        std::env::set_var("LOOM_TEST_NVIDIA_ADAPTER_API_KEY", "nvapi-adapter-secret");
+        let secret_store = ProviderSecretStore::default();
+        let registry = ProviderRegistry::new_for_main_generation(
+            test_ollama_runtime(),
+            &nvidia_config(true),
+            &secret_store,
+        );
+        std::env::remove_var("LOOM_SERVICE_E2E_PROVIDER_PROFILE");
+        std::env::remove_var("LOOM_TEST_NVIDIA_ADAPTER_API_KEY");
+
+        let adapter = registry.default_generation_adapter();
+        let debug = format!("{adapter:?}");
+        assert_eq!(adapter.provider_kind(), ProviderKind::OpenAiCompatible);
+        assert_eq!(adapter.provider_profile_id(), "nvidia");
+        assert!(!debug.contains("nvapi-adapter-secret"));
     }
 
     #[test]

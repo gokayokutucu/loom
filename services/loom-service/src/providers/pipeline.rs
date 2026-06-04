@@ -30,6 +30,7 @@ impl ProviderPipelineRegistry for ProviderRegistry {
 pub struct ProviderPipelineProfile {
     pub provider_kind: ProviderKind,
     pub provider_profile_id: String,
+    pub default_model: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -40,6 +41,18 @@ pub struct ProviderPipeline<R = ProviderRegistry> {
 impl ProviderPipeline<ProviderRegistry> {
     pub fn new(ollama: OllamaRuntime) -> Self {
         Self::from_registry(ProviderRegistry::new(ollama))
+    }
+
+    pub fn new_for_main_generation(
+        ollama: OllamaRuntime,
+        config: &crate::config::LoomServiceConfig,
+        secret_store: &crate::providers::secret_store::ProviderSecretStore,
+    ) -> Self {
+        Self::from_registry(ProviderRegistry::new_for_main_generation(
+            ollama,
+            config,
+            secret_store,
+        ))
     }
 }
 
@@ -56,6 +69,7 @@ where
         ProviderPipelineProfile {
             provider_kind: adapter.provider_kind(),
             provider_profile_id: adapter.provider_profile_id().to_string(),
+            default_model: adapter.default_model().map(ToString::to_string),
         }
     }
 

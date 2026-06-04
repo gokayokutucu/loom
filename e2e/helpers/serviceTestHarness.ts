@@ -6,7 +6,10 @@ import { join, resolve } from "node:path";
 import { RustHttpLoomEngineClient } from "../../src/engine";
 import type { EngineResponseEvent } from "../../src/engine/LoomEngineTypes";
 
-export type DeterministicProviderMode = "event-sourcing" | "rig-openai-compatible";
+export type DeterministicProviderMode =
+  | "event-sourcing"
+  | "rig-openai-compatible"
+  | "nvidia-openai-compatible";
 export type DeterministicResponseMode = "long-streaming-scroll";
 export type DeterministicChunkMode = "word" | "phrase";
 
@@ -112,6 +115,13 @@ export async function createServiceTestHarness(
         : {}),
       ...(options.openAiCompatibleApiKey
         ? { LOOM_SERVICE_E2E_OPENAI_API_KEY: options.openAiCompatibleApiKey }
+        : {}),
+      ...(options.deterministicProvider === "nvidia-openai-compatible"
+        ? {
+            LOOM_SERVICE_E2E_PROVIDER_PROFILE: "nvidia",
+            LOOM_SERVICE_E2E_OPENAI_MODEL: "nvidia/e2e-openai-compatible",
+            NVIDIA_API_KEY: options.openAiCompatibleApiKey ?? "nvapi-fake-secret-e2e",
+          }
         : {}),
       ...(options.deterministicProvider
         ? { LOOM_SERVICE_E2E_PROVIDER: options.deterministicProvider }

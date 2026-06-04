@@ -3,6 +3,7 @@ import { createServer as createNetServer } from "node:net";
 
 export type FakeOpenAiCompatibleScenario =
   | "normal"
+  | "nvidia-normal"
   | "missing-usage"
   | "long-running"
   | "auth-error"
@@ -29,6 +30,8 @@ export interface FakeOpenAiCompatibleRequestRecord {
   maxTokens?: number;
   promptText: string;
   apiKeyLeakedInPrompt: boolean;
+  authorizationHeaderPresent: boolean;
+  rawAuthorizationHeaderStored: false;
   closedBeforeDone: boolean;
   completed: boolean;
 }
@@ -56,6 +59,7 @@ export async function startFakeOpenAiCompatibleServer(
 
     const body = await readJsonBody<FakeOpenAiCompatibleChatRequest>(request);
     const promptText = (body.messages ?? []).map((message) => message.content ?? "").join("\n");
+    const authorizationHeader = request.headers.authorization;
     const record: FakeOpenAiCompatibleRequestRecord = {
       model: body.model,
       stream: body.stream,
@@ -64,7 +68,10 @@ export async function startFakeOpenAiCompatibleServer(
       topP: body.top_p,
       maxTokens: body.max_tokens,
       promptText,
-      apiKeyLeakedInPrompt: promptText.includes("sk-rig-secret-e2e"),
+      apiKeyLeakedInPrompt: secretLeakedInText(promptText),
+      authorizationHeaderPresent:
+        typeof authorizationHeader === "string" && authorizationHeader.trim().length > 0,
+      rawAuthorizationHeaderStored: false,
       closedBeforeDone: false,
       completed: false,
     };
@@ -155,6 +162,8 @@ export interface FakeOpenAiCompatibleScript {
 
 function scriptForScenario(scenario: FakeOpenAiCompatibleScenario): FakeOpenAiCompatibleScript {
   switch (scenario) {
+    case "nvidia-normal":
+      return { chunks: nvidiaNormalChunks(), includeUsage: true };
     case "missing-usage":
       return { chunks: normalChunks(false), includeUsage: false };
     case "long-running":
@@ -213,6 +222,12 @@ function scriptForScenario(scenario: FakeOpenAiCompatibleScenario): FakeOpenAiCo
   }
 }
 
+function secretLeakedInText(value: string) {
+  return ["sk-rig-secret-e2e", "nvapi-fake-secret-e2e"].some((secret) =>
+    value.includes(secret)
+  );
+}
+
 function normalChunks(includeUsage: boolean) {
   return [
     {
@@ -263,6 +278,61 @@ function normalChunks(includeUsage: boolean) {
         model: "fake-rig-openai-compatible:e2e",
         choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
         usage: includeUsage ? { prompt_tokens: 13, total_tokens: 20 } : undefined,
+      },
+      delayMs: 0,
+    },
+  ];
+}
+
+function nvidiaNormalChunks() {
+  return [
+    {
+      data: {
+        id: "chatcmpl-nvidia-e2e",
+        model: "nvidia/e2e-openai-compatible",
+        choices: [
+          {
+            index: 0,
+            delta: { reasoning_content: "raw_thinking hidden_reasoning nvapi-fake-secret-e2e" },
+            finish_reason: null,
+          },
+        ],
+      },
+      delayMs: 80,
+    },
+    {
+      data: {
+        id: "chatcmpl-nvidia-e2e",
+        model: "nvidia/e2e-openai-compatible",
+        choices: [
+          {
+            index: 0,
+            delta: { content: "NVIDIA OpenAI-compatible visible stream persisted. " },
+            finish_reason: null,
+          },
+        ],
+      },
+      delayMs: 60,
+    },
+    {
+      data: {
+        id: "chatcmpl-nvidia-e2e",
+        model: "nvidia/e2e-openai-compatible",
+        choices: [
+          {
+            index: 0,
+            delta: { content: "Final visible NVIDIA delta." },
+            finish_reason: null,
+          },
+        ],
+      },
+      delayMs: 40,
+    },
+    {
+      data: {
+        id: "chatcmpl-nvidia-e2e",
+        model: "nvidia/e2e-openai-compatible",
+        choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
       },
       delayMs: 0,
     },
