@@ -48,6 +48,18 @@ async function startNvidiaScenario() {
   return { fakeProvider, serviceScenario };
 }
 
+async function startNvidiaSettingsSelectionScenario() {
+  const fakeProvider = await startFakeOpenAiCompatibleServer("nvidia-normal");
+  const serviceScenario = await createServiceTestHarness({
+    enabledRemoteProviderProfile: "nvidia",
+    openAiCompatibleBaseUrl: fakeProvider.baseUrl,
+    openAiCompatibleApiKey: "nvapi-fake-secret-e2e",
+    requestTimeoutMs: 60_000,
+    startApp: true,
+  });
+  return { fakeProvider, serviceScenario };
+}
+
 async function cleanupNvidiaScenario(input: {
   fakeProvider: FakeOpenAiCompatibleServer;
   serviceScenario: Awaited<ReturnType<typeof createServiceTestHarness>>;
@@ -69,6 +81,14 @@ async function openStrictRustApp(page: Page, appUrl: string) {
   });
   await page.goto(appUrl);
   await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+}
+
+async function openProviderSettings(page: Page) {
+  await page.getByTestId("profile-menu-trigger").click();
+  await page.getByTestId("open-app-settings").click();
+  await expect(page.getByRole("dialog", { name: /Runtime/ })).toBeVisible();
+  await page.getByRole("button", { name: /^Providers/ }).click();
+  await expect(page.getByRole("dialog", { name: /Providers/ })).toBeVisible();
 }
 
 function responseStatus(metadata: unknown) {
@@ -135,6 +155,65 @@ test.describe("[product-service-backed] NVIDIA OpenAI-compatible ProviderPipelin
       const mapped = await scenario.serviceScenario.client.getLoom(loom.loomId);
       expect(mapped.responses[0].serviceGenerationStatus).toBe("completed");
       assertNoForbiddenMarkers(mapped);
+    } finally {
+      await cleanupNvidiaScenario(scenario);
+    }
+  });
+
+  test("selects enabled NVIDIA profile for Main through Settings without changing the default automatically", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await startNvidiaSettingsSelectionScenario();
+
+    try {
+      await openStrictRustApp(page, scenario.serviceScenario.appUrl!);
+      const initialConfig = await scenario.serviceScenario.client.getServiceConfig();
+      expect(initialConfig.providers?.mainProviderProfileId ?? undefined).toBeUndefined();
+      expect(initialConfig.providers?.mainModelId ?? undefined).toBeUndefined();
+
+      await openProviderSettings(page);
+      const nvidiaCard = page
+        .locator(".provider-profile-card")
+        .filter({ hasText: "NVIDIA NIM" });
+      await expect(nvidiaCard).toContainText("Enabled");
+      await expect(nvidiaCard).toContainText("Saved");
+      await expect(nvidiaCard).toContainText("Not selected");
+      await nvidiaCard
+        .getByLabel(/prompts and selected context may leave this device/i)
+        .check();
+      await nvidiaCard.getByRole("button", { name: "Use for Main" }).click();
+      await expect(nvidiaCard).toContainText("Selected for Main", { timeout: 10_000 });
+      await page.getByRole("button", { name: "Close settings" }).click();
+
+      const selectedConfig = await scenario.serviceScenario.client.getServiceConfig();
+      expect(selectedConfig.providers).toMatchObject({
+        mainProviderProfileId: "nvidia",
+        mainModelId: "nvidia/e2e-openai-compatible",
+      });
+
+      const prompt = `Settings selected NVIDIA provider proof ${Date.now()}`;
+      await fillPrompt(page, prompt);
+      await page.getByRole("button", { name: "Send" }).click();
+
+      await expect(page.locator(".assistant-message").last()).toContainText(
+        "NVIDIA OpenAI-compatible visible stream persisted.",
+        { timeout: 30_000 }
+      );
+      await expect(page.locator(".chat-transcript")).not.toHaveClass(/is-generating-response/, {
+        timeout: 20_000,
+      });
+      assertNoForbiddenMarkers(await page.locator("body").textContent());
+
+      expect(scenario.fakeProvider.requests).toHaveLength(1);
+      expect(scenario.fakeProvider.requests[0]).toMatchObject({
+        model: "nvidia/e2e-openai-compatible",
+        stream: true,
+        completed: true,
+        authorizationHeaderPresent: true,
+        rawAuthorizationHeaderStored: false,
+      });
+      expect(scenario.fakeProvider.requests[0].promptText).toContain(prompt);
     } finally {
       await cleanupNvidiaScenario(scenario);
     }

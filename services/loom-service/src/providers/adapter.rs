@@ -60,7 +60,7 @@ impl ProviderRegistry {
         config: &crate::config::LoomServiceConfig,
         secret_store: &ProviderSecretStore,
     ) -> Self {
-        if let Some(adapter) = openai_compatible_adapter_from_e2e_profile(config, secret_store) {
+        if let Some(adapter) = openai_compatible_adapter_from_main_profile(config, secret_store) {
             return Self {
                 default_generation: ProviderRegistryAdapter::OpenAiCompatible(adapter),
             };
@@ -281,11 +281,11 @@ impl ProviderAdapter for OpenAiCompatibleProviderAdapter {
     }
 }
 
-fn openai_compatible_adapter_from_e2e_profile(
+fn openai_compatible_adapter_from_main_profile(
     config: &crate::config::LoomServiceConfig,
     secret_store: &ProviderSecretStore,
 ) -> Option<OpenAiCompatibleProviderAdapter> {
-    let profile_id = std::env::var("LOOM_SERVICE_E2E_PROVIDER_PROFILE").ok()?;
+    let profile_id = config.providers.main_provider_profile_id.as_deref()?;
     let profile = config.providers.profiles.iter().find(|profile| {
         profile.id == profile_id
             && profile.enabled
@@ -769,8 +769,11 @@ mod tests {
         let mut profile = ProviderProfileConfig::nvidia_openai_compatible_example();
         profile.enabled = enabled;
         profile.base_url = Some("http://127.0.0.1:8080/v1".to_string());
+        profile.default_model = Some("nvidia/e2e-openai-compatible".to_string());
         profile.security.allow_insecure_http_remote = true;
         profile.secret_ref = Some("env:LOOM_TEST_NVIDIA_ADAPTER_API_KEY".to_string());
+        config.providers.main_provider_profile_id = Some("nvidia".to_string());
+        config.providers.main_model_id = Some("nvidia/e2e-openai-compatible".to_string());
         config.providers.profiles.push(profile);
         config
     }
@@ -786,11 +789,12 @@ mod tests {
 
     #[test]
     fn registry_keeps_ollama_as_default_without_explicit_profile_override() {
-        let _lock = e2e_env_lock();
-        std::env::remove_var("LOOM_SERVICE_E2E_PROVIDER_PROFILE");
+        let mut config = nvidia_config(true);
+        config.providers.main_provider_profile_id = None;
+        config.providers.main_model_id = None;
         let registry = ProviderRegistry::new_for_main_generation(
             test_ollama_runtime(),
-            &nvidia_config(true),
+            &config,
             &ProviderSecretStore::default(),
         );
 
@@ -806,14 +810,11 @@ mod tests {
 
     #[test]
     fn registry_does_not_select_disabled_nvidia_profile() {
-        let _lock = e2e_env_lock();
-        std::env::set_var("LOOM_SERVICE_E2E_PROVIDER_PROFILE", "nvidia");
         let registry = ProviderRegistry::new_for_main_generation(
             test_ollama_runtime(),
             &nvidia_config(false),
             &ProviderSecretStore::default(),
         );
-        std::env::remove_var("LOOM_SERVICE_E2E_PROVIDER_PROFILE");
 
         assert_eq!(
             registry.default_generation_adapter().provider_kind(),
@@ -824,7 +825,6 @@ mod tests {
     #[test]
     fn registry_selects_enabled_native_nvidia_profile_without_exposing_secret() {
         let _lock = e2e_env_lock();
-        std::env::set_var("LOOM_SERVICE_E2E_PROVIDER_PROFILE", "nvidia");
         std::env::set_var("LOOM_TEST_NVIDIA_ADAPTER_API_KEY", "nvapi-adapter-secret");
         let secret_store = ProviderSecretStore::default();
         let registry = ProviderRegistry::new_for_main_generation(
@@ -832,7 +832,6 @@ mod tests {
             &nvidia_config(true),
             &secret_store,
         );
-        std::env::remove_var("LOOM_SERVICE_E2E_PROVIDER_PROFILE");
         std::env::remove_var("LOOM_TEST_NVIDIA_ADAPTER_API_KEY");
 
         let adapter = registry.default_generation_adapter();

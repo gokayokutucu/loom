@@ -3645,8 +3645,11 @@ fn execute_stream(
         let provider_profile = provider_pipeline.default_generation_profile();
         let provider_capabilities = provider_pipeline.default_generation_capabilities();
         let provider_model_id = provider_profile
-            .default_model
-            .clone()
+            .provider_profile_id
+            .eq(service_config.providers.main_provider_profile_id.as_deref().unwrap_or(""))
+            .then(|| service_config.providers.main_model_id.clone())
+            .flatten()
+            .or(provider_profile.default_model.clone())
             .unwrap_or_else(|| execution_input.model.clone());
         let provider_request = ProviderContractRequest {
             provider_kind: provider_profile.provider_kind,

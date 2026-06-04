@@ -15,6 +15,7 @@ export type DeterministicChunkMode = "word" | "phrase";
 
 export interface ServiceTestHarnessOptions {
   deterministicProvider?: DeterministicProviderMode;
+  enabledRemoteProviderProfile?: "nvidia";
   deterministicResponseMode?: DeterministicResponseMode;
   deterministicChunkMode?: DeterministicChunkMode;
   deterministicFailInitialPrompt?: string;
@@ -119,6 +120,13 @@ export async function createServiceTestHarness(
       ...(options.deterministicProvider === "nvidia-openai-compatible"
         ? {
             LOOM_SERVICE_E2E_PROVIDER_PROFILE: "nvidia",
+            LOOM_SERVICE_E2E_OPENAI_MODEL: "nvidia/e2e-openai-compatible",
+            NVIDIA_API_KEY: options.openAiCompatibleApiKey ?? "nvapi-fake-secret-e2e",
+          }
+        : {}),
+      ...(options.enabledRemoteProviderProfile === "nvidia"
+        ? {
+            LOOM_SERVICE_E2E_ENABLE_PROVIDER_PROFILE: "nvidia",
             LOOM_SERVICE_E2E_OPENAI_MODEL: "nvidia/e2e-openai-compatible",
             NVIDIA_API_KEY: options.openAiCompatibleApiKey ?? "nvapi-fake-secret-e2e",
           }

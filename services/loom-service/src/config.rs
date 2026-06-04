@@ -104,6 +104,8 @@ pub struct OllamaSection {
 pub struct ProviderSection {
     pub default_main_model: String,
     pub default_quick_model: String,
+    pub main_provider_profile_id: Option<String>,
+    pub main_model_id: Option<String>,
     pub response_mode_default: String,
     pub profiles: Vec<ProviderProfileConfig>,
 }
@@ -216,6 +218,8 @@ pub struct OllamaPatch {
 pub struct ProviderPatch {
     pub default_main_model: Option<String>,
     pub default_quick_model: Option<String>,
+    pub main_provider_profile_id: Option<Option<String>>,
+    pub main_model_id: Option<Option<String>>,
     pub response_mode_default: Option<String>,
     pub profiles: Option<Vec<ProviderProfileConfig>>,
 }
@@ -333,6 +337,8 @@ impl Default for LoomServiceConfig {
             providers: ProviderSection {
                 default_main_model: "qwen3.5:9b".to_string(),
                 default_quick_model: "llama3.2:latest".to_string(),
+                main_provider_profile_id: None,
+                main_model_id: None,
                 response_mode_default: "auto".to_string(),
                 profiles: vec![ProviderProfileConfig::default_ollama(
                     "qwen3.5:9b".to_string(),
@@ -642,6 +648,22 @@ fn serialize_config(config: &LoomServiceConfig) -> String {
         escape_toml_string(&config.providers.default_quick_model)
     )
     .expect("write default quick model");
+    if let Some(profile_id) = &config.providers.main_provider_profile_id {
+        writeln!(
+            &mut output,
+            "mainProviderProfileId = \"{}\"",
+            escape_toml_string(profile_id)
+        )
+        .expect("write main provider profile id");
+    }
+    if let Some(model_id) = &config.providers.main_model_id {
+        writeln!(
+            &mut output,
+            "mainModelId = \"{}\"",
+            escape_toml_string(model_id)
+        )
+        .expect("write main model id");
+    }
     writeln!(
         &mut output,
         "responseModeDefault = \"{}\"",
@@ -1204,6 +1226,13 @@ fn set_config_value(
         ("providers", "defaultQuickModel") => {
             config.providers.default_quick_model = parse_toml_string(value, line_number)?;
         }
+        ("providers", "mainProviderProfileId") => {
+            config.providers.main_provider_profile_id =
+                Some(parse_toml_string(value, line_number)?);
+        }
+        ("providers", "mainModelId") => {
+            config.providers.main_model_id = Some(parse_toml_string(value, line_number)?);
+        }
         ("providers", "responseModeDefault") => {
             config.providers.response_mode_default = parse_toml_string(value, line_number)?;
         }
@@ -1704,9 +1733,51 @@ pub fn validate_config(config: &LoomServiceConfig) -> Result<(), ServiceError> {
         ))
     })?)?;
     validate_provider_profiles(&config.providers.profiles)?;
+    validate_main_provider_assignment(&config.providers)?;
     validate_speech_config(&config.speech)?;
     validate_ocr_config(&config.ocr)?;
 
+    Ok(())
+}
+
+fn validate_main_provider_assignment(providers: &ProviderSection) -> Result<(), ServiceError> {
+    let Some(profile_id) = providers.main_provider_profile_id.as_deref() else {
+        if providers.main_model_id.is_some() {
+            return Err(ServiceError::config(
+                "providers.mainProviderProfileId is required when providers.mainModelId is set",
+            ));
+        }
+        return Ok(());
+    };
+    if profile_id.trim().is_empty() {
+        return Err(ServiceError::config(
+            "providers.mainProviderProfileId must not be empty when set",
+        ));
+    }
+    let model_id = providers.main_model_id.as_deref().ok_or_else(|| {
+        ServiceError::config(
+            "providers.mainModelId is required when providers.mainProviderProfileId is set",
+        )
+    })?;
+    if model_id.trim().is_empty() {
+        return Err(ServiceError::config(
+            "providers.mainModelId must not be empty when set",
+        ));
+    }
+    let Some(profile) = providers
+        .profiles
+        .iter()
+        .find(|profile| profile.id == profile_id)
+    else {
+        return Err(ServiceError::config(format!(
+            "providers.mainProviderProfileId '{profile_id}' does not match a provider profile",
+        )));
+    };
+    if !profile.enabled {
+        return Err(ServiceError::config(format!(
+            "providers.mainProviderProfileId '{profile_id}' must be enabled before selection",
+        )));
+    }
     Ok(())
 }
 
@@ -1802,7 +1873,9 @@ where
         config.security.enforce_local_ollama = parse_env_bool("LOOM_OLLAMA_ENFORCE_LOCAL", &value)?;
     }
     if lookup("LOOM_SERVICE_E2E_PROVIDER_PROFILE").as_deref() == Some("nvidia") {
-        apply_e2e_nvidia_openai_compatible_profile(config, &lookup)?;
+        apply_e2e_nvidia_openai_compatible_profile(config, &lookup, true)?;
+    } else if lookup("LOOM_SERVICE_E2E_ENABLE_PROVIDER_PROFILE").as_deref() == Some("nvidia") {
+        apply_e2e_nvidia_openai_compatible_profile(config, &lookup, false)?;
     }
 
     Ok(())
@@ -1811,6 +1884,7 @@ where
 fn apply_e2e_nvidia_openai_compatible_profile<F>(
     config: &mut LoomServiceConfig,
     lookup: &F,
+    select_for_main: bool,
 ) -> Result<(), ServiceError>
 where
     F: Fn(&str) -> Option<String>,
@@ -1823,10 +1897,14 @@ where
     }
     if let Some(value) = lookup("LOOM_SERVICE_E2E_OPENAI_MODEL") {
         profile.default_model = Some(value);
+    }
+    if select_for_main {
         config.providers.default_main_model = profile
             .default_model
             .clone()
             .unwrap_or_else(|| config.providers.default_main_model.clone());
+        config.providers.main_model_id = profile.default_model.clone();
+        config.providers.main_provider_profile_id = Some(profile.id.clone());
     }
     profile.secret_ref = Some("env:NVIDIA_API_KEY".to_string());
     upsert_provider_profile(&mut config.providers.profiles, profile);
@@ -1901,6 +1979,12 @@ fn apply_patch(config: &mut LoomServiceConfig, patch: ConfigPatch) {
         }
         if let Some(value) = providers.default_quick_model {
             config.providers.default_quick_model = value;
+        }
+        if let Some(value) = providers.main_provider_profile_id {
+            config.providers.main_provider_profile_id = value;
+        }
+        if let Some(value) = providers.main_model_id {
+            config.providers.main_model_id = value;
         }
         if let Some(value) = providers.response_mode_default {
             config.providers.response_mode_default = value;
@@ -2111,6 +2195,18 @@ pub fn classify_restart_requirement(
         false
     );
     check!(
+        "providers.mainProviderProfileId",
+        current.providers.main_provider_profile_id,
+        candidate.providers.main_provider_profile_id,
+        false
+    );
+    check!(
+        "providers.mainModelId",
+        current.providers.main_model_id,
+        candidate.providers.main_model_id,
+        false
+    );
+    check!(
         "providers.responseModeDefault",
         current.providers.response_mode_default,
         candidate.providers.response_mode_default,
@@ -2312,9 +2408,44 @@ mod tests {
             config.providers.default_main_model,
             "nvidia/e2e-openai-compatible"
         );
+        assert_eq!(
+            config.providers.main_provider_profile_id.as_deref(),
+            Some("nvidia")
+        );
+        assert_eq!(
+            config.providers.main_model_id.as_deref(),
+            Some("nvidia/e2e-openai-compatible")
+        );
         let serialized = serialize_config(&config);
         assert!(!serialized.contains("nvapi-"));
         validate_config(&config).expect("valid e2e profile");
+    }
+
+    #[test]
+    fn e2e_nvidia_enable_override_does_not_select_remote_main() {
+        let mut config = LoomServiceConfig::default();
+
+        apply_env_overrides_from(&mut config, |name| match name {
+            "LOOM_SERVICE_E2E_ENABLE_PROVIDER_PROFILE" => Some("nvidia".to_string()),
+            "LOOM_SERVICE_E2E_OPENAI_BASE_URL" => Some("http://127.0.0.1:9999/v1".to_string()),
+            "LOOM_SERVICE_E2E_OPENAI_MODEL" => Some("nvidia/e2e-openai-compatible".to_string()),
+            _ => None,
+        })
+        .expect("apply env");
+
+        let nvidia = config
+            .providers
+            .profiles
+            .iter()
+            .find(|profile| profile.id == "nvidia")
+            .expect("nvidia profile");
+        assert!(nvidia.enabled);
+        assert_eq!(config.providers.main_provider_profile_id, None);
+        assert_eq!(config.providers.main_model_id, None);
+        assert_eq!(config.providers.default_main_model, "qwen3.5:9b");
+        let serialized = serialize_config(&config);
+        assert!(!serialized.contains("nvapi-"));
+        validate_config(&config).expect("enabled profile without Main assignment is valid");
     }
 
     #[test]
@@ -2402,14 +2533,17 @@ mod tests {
     #[test]
     fn remote_provider_profile_toml_round_trip_preserves_non_secret_fields() {
         let mut config = LoomServiceConfig::default();
-        config
-            .providers
-            .profiles
-            .push(ProviderProfileConfig::nvidia_openai_compatible_example());
+        let mut nvidia = ProviderProfileConfig::nvidia_openai_compatible_example();
+        nvidia.enabled = true;
+        config.providers.main_provider_profile_id = Some("nvidia".to_string());
+        config.providers.main_model_id = nvidia.default_model.clone();
+        config.providers.profiles.push(nvidia);
         let path = test_path("remote-provider-profile");
         write_config_atomic(&path, &config).expect("write config");
 
         let serialized = std::fs::read_to_string(&path).expect("read config");
+        assert!(serialized.contains("mainProviderProfileId = \"nvidia\""));
+        assert!(serialized.contains("mainModelId = \"meta/llama-3.1-70b-instruct\""));
         assert!(serialized.contains("id = \"nvidia\""));
         assert!(serialized.contains("providerKind = \"openai_compatible\""));
         assert!(serialized.contains("transportKind = \"native_openai_compatible\""));
@@ -2437,13 +2571,46 @@ mod tests {
             profile.vendor,
             crate::providers::config::ProviderVendor::Nvidia
         );
-        assert!(!profile.enabled);
+        assert!(profile.enabled);
         assert!(profile.experimental);
         assert_eq!(profile.secret_ref.as_deref(), Some("env:NVIDIA_API_KEY"));
         assert_eq!(
             profile.base_url.as_deref(),
             Some("https://integrate.api.nvidia.com/v1")
         );
+        assert_eq!(
+            loaded.providers.main_provider_profile_id.as_deref(),
+            Some("nvidia")
+        );
+        assert_eq!(
+            loaded.providers.main_model_id.as_deref(),
+            Some("meta/llama-3.1-70b-instruct")
+        );
+    }
+
+    #[test]
+    fn selected_main_provider_requires_enabled_profile_and_model() {
+        let mut config = LoomServiceConfig::default();
+        let mut nvidia = ProviderProfileConfig::nvidia_openai_compatible_example();
+        nvidia.enabled = false;
+        config.providers.main_provider_profile_id = Some("nvidia".to_string());
+        config.providers.main_model_id = nvidia.default_model.clone();
+        config.providers.profiles.push(nvidia.clone());
+
+        assert!(validate_config(&config).is_err());
+
+        nvidia.enabled = true;
+        config
+            .providers
+            .profiles
+            .retain(|profile| profile.id != "nvidia");
+        config.providers.profiles.push(nvidia);
+        config.providers.main_model_id = None;
+
+        assert!(validate_config(&config).is_err());
+
+        config.providers.main_model_id = Some("meta/llama-3.1-70b-instruct".to_string());
+        validate_config(&config).expect("enabled selected provider with model is valid");
     }
 
     #[test]
