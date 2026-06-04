@@ -482,11 +482,11 @@ export function AskPopup({
           onChange={(event) => onUpdate({ ...state, question: event.target.value })}
         onKeyDown={(event) => {
           if (event.key === "Enter" && !event.shiftKey) {
-            if (state.running) return;
+            if (state.running || submitBlockedReason) return;
             event.preventDefault();
             onSubmit();
           }
-          }}
+        }}
           placeholder="Ask a focused follow-up about this selection..."
           aria-label="Ask question"
           tabIndex={0}

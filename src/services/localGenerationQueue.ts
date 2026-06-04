@@ -62,3 +62,45 @@ export function removeQueuedLocalMainGeneration<TPayload>(
   });
   return { removed, remaining };
 }
+
+export interface ActiveMainGenerationInfo {
+  loomId: string;
+  providerProfileId: string;
+  providerKind: MainGenerationProviderKind;
+  modelId: string;
+  startedAt: string;
+  responseId?: string;
+}
+
+export type ConcurrencyDecision = "allow" | "queue" | "block_same_loom" | "block_limit_exceeded";
+
+export function computeMainGenerationConcurrencyDecision(input: {
+  providerProfileId: string;
+  providerKind: MainGenerationProviderKind;
+  modelId: string;
+  targetLoomId: string;
+  activeRuns: ActiveMainGenerationInfo[];
+}): ConcurrencyDecision {
+  const isSameLoomActive = input.activeRuns.some((run) => run.loomId === input.targetLoomId);
+  if (isSameLoomActive) {
+    return "block_same_loom";
+  }
+
+  if (input.providerKind === "ollama") {
+    const hasActiveLocal = input.activeRuns.some((run) => run.providerKind === "ollama");
+    if (hasActiveLocal) {
+      return "queue";
+    }
+    return "allow";
+  }
+
+  const activeRunsForProvider = input.activeRuns.filter(
+    (run) => run.providerProfileId === input.providerProfileId
+  ).length;
+
+  if (activeRunsForProvider >= 2) {
+    return "block_limit_exceeded";
+  }
+
+  return "allow";
+}

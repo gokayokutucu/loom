@@ -4,6 +4,7 @@ import {
   dequeueNextLocalMainGeneration,
   removeQueuedLocalMainGeneration,
   shouldBlockSameLoomMainGeneration,
+  computeMainGenerationConcurrencyDecision,
   type LocalMainGenerationQueueItem,
 } from "./localGenerationQueue";
 
@@ -93,5 +94,101 @@ describe("local generation queue operations", () => {
     const result = removeQueuedLocalMainGeneration([first, second], "queue-2");
     expect(result.removed).toEqual(second);
     expect(result.remaining).toEqual([first]);
+  });
+});
+
+describe("computeMainGenerationConcurrencyDecision", () => {
+  it("allows local Main when no active runs", () => {
+    const decision = computeMainGenerationConcurrencyDecision({
+      providerProfileId: "ollama-local",
+      providerKind: "ollama",
+      modelId: "qwen",
+      targetLoomId: "loom-a",
+      activeRuns: [],
+    });
+    expect(decision).toBe("allow");
+  });
+
+  it("queues local Main when active local run is on a different Loom", () => {
+    const decision = computeMainGenerationConcurrencyDecision({
+      providerProfileId: "ollama-local",
+      providerKind: "ollama",
+      modelId: "qwen",
+      targetLoomId: "loom-b",
+      activeRuns: [
+        {
+          loomId: "loom-a",
+          providerProfileId: "ollama-local",
+          providerKind: "ollama",
+          modelId: "qwen",
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    expect(decision).toBe("queue");
+  });
+
+  it("blocks local/remote Main on same Loom when that Loom is already active", () => {
+    const decision = computeMainGenerationConcurrencyDecision({
+      providerProfileId: "nvidia",
+      providerKind: "openai_compatible",
+      modelId: "meta/llama-3",
+      targetLoomId: "loom-a",
+      activeRuns: [
+        {
+          loomId: "loom-a",
+          providerProfileId: "nvidia",
+          providerKind: "openai_compatible",
+          modelId: "meta/llama-3",
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    expect(decision).toBe("block_same_loom");
+  });
+
+  it("allows remote Main when active count for same provider profile < 2", () => {
+    const decision = computeMainGenerationConcurrencyDecision({
+      providerProfileId: "nvidia",
+      providerKind: "openai_compatible",
+      modelId: "meta/llama-3",
+      targetLoomId: "loom-b",
+      activeRuns: [
+        {
+          loomId: "loom-a",
+          providerProfileId: "nvidia",
+          providerKind: "openai_compatible",
+          modelId: "meta/llama-3",
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    expect(decision).toBe("allow");
+  });
+
+  it("blocks remote Main when active count for same provider profile >= 2", () => {
+    const decision = computeMainGenerationConcurrencyDecision({
+      providerProfileId: "nvidia",
+      providerKind: "openai_compatible",
+      modelId: "meta/llama-3",
+      targetLoomId: "loom-c",
+      activeRuns: [
+        {
+          loomId: "loom-a",
+          providerProfileId: "nvidia",
+          providerKind: "openai_compatible",
+          modelId: "meta/llama-3",
+          startedAt: new Date().toISOString(),
+        },
+        {
+          loomId: "loom-b",
+          providerProfileId: "nvidia",
+          providerKind: "openai_compatible",
+          modelId: "meta/llama-3",
+          startedAt: new Date().toISOString(),
+        },
+      ],
+    });
+    expect(decision).toBe("block_limit_exceeded");
   });
 });

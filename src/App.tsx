@@ -319,7 +319,10 @@ import {
 import {
   canQueueLocalMainGeneration,
   removeQueuedLocalMainGeneration,
+  computeMainGenerationConcurrencyDecision,
   type LocalMainGenerationQueueItem,
+  type MainGenerationProviderKind,
+  type ActiveMainGenerationInfo,
 } from "./services/localGenerationQueue";
 import { isSimpleAutoAnswerCandidate } from "./services/thinkingGuard";
 import { checkPromptGuard } from "./services/promptGuard";
@@ -2559,12 +2562,100 @@ function App() {
     message: string | null;
   }>({ running: false, message: null });
   const [composerRuntimeTargetKey, setComposerRuntimeTargetKey] = useState<string | null>(null);
+  const [activeMainLoomStates, setActiveMainLoomStates] = useState<Record<string, {
+    responseId: string;
+    message: string | null;
+    providerProfileId: string;
+    providerKind: MainGenerationProviderKind;
+    modelId: string;
+    startedAt: string;
+  }>>({});
+
+  const mainAbortsRef = useRef<globalThis.Map<string, AbortController>>(new globalThis.Map());
+  const mainRevealTargetsRef = useRef<globalThis.Map<string, { loomId: string; responseId: string }>>(new globalThis.Map());
+  const mainServiceCancellationsRef = useRef<globalThis.Map<string, {
+    loomId: string;
+    responseId: string;
+    workflowRunId?: string;
+    cancelRequested: boolean;
+  }>>(new globalThis.Map());
+  const currentMainRequestsRef = useRef<globalThis.Map<string, any>>(new globalThis.Map());
+  const mainGenerationsRef = useRef<globalThis.Map<string, number>>(new globalThis.Map());
+
+  function updateMainRunState(
+    loomId: string,
+    responseId: string,
+    message: string | null,
+    providerProfileId: string,
+    providerKind: MainGenerationProviderKind,
+    modelId: string
+  ) {
+    setActiveMainLoomStates((current) => ({
+      ...current,
+      [loomId]: {
+        responseId,
+        message,
+        providerProfileId,
+        providerKind,
+        modelId,
+        startedAt: current[loomId]?.startedAt ?? new Date().toISOString(),
+      },
+    }));
+  }
+
+  function startMainRun(
+    loomId: string,
+    responseId: string,
+    controller: AbortController,
+    providerProfileId: string,
+    providerKind: MainGenerationProviderKind,
+    modelId: string,
+    generationId: number
+  ) {
+    mainAbortsRef.current.set(loomId, controller);
+    mainGenerationsRef.current.set(loomId, generationId);
+    mainRevealTargetsRef.current.set(loomId, { loomId, responseId });
+    updateMainRunState(loomId, responseId, "Understanding question...", providerProfileId, providerKind, modelId);
+  }
+
+  function removeMainRunState(loomId: string) {
+    setActiveMainLoomStates((current) => {
+      const { [loomId]: _discard, ...rest } = current;
+      return rest;
+    });
+  }
+
+  function cleanupMainRun(loomId: string) {
+    mainAbortsRef.current.delete(loomId);
+    mainRevealTargetsRef.current.delete(loomId);
+    mainServiceCancellationsRef.current.delete(loomId);
+    currentMainRequestsRef.current.delete(loomId);
+    removeMainRunState(loomId);
+  }
+
+  useEffect(() => {
+    const activeLoomIds = Object.keys(activeMainLoomStates);
+    const running = activeLoomIds.length > 0;
+    const targetKey = activeLoomIds.includes(activeConversationId)
+      ? activeConversationId
+      : (activeLoomIds[0] ?? null);
+    const message = targetKey ? activeMainLoomStates[targetKey].message : null;
+
+    setComposerRuntimeState({ running, message });
+    setComposerRuntimeTargetKey(targetKey);
+  }, [activeMainLoomStates, activeConversationId]);
+
+  useEffect(() => {
+    const activeState = activeMainLoomStates[activeConversationId];
+    setGeneratingResponseId(activeState ? activeState.responseId : null);
+  }, [activeMainLoomStates, activeConversationId]);
+
   const [queuedMainGenerationByLoom, setQueuedMainGenerationByLoom] = useState<
     Record<string, { id: string; responseId: string; message: string }>
   >({});
   const queuedMainGenerationQueueRef = useRef<QueuedMainGenerationItem[]>([]);
   const mainGenerationRef = useRef(0);
-  const mainComposerSubmissionInFlightRef = useRef(false);
+  const mainComposerSubmissionInFlightRef = useRef<Set<string>>(new Set());
   const mainAbortRef = useRef<AbortController | null>(null);
   /**
    * Tracks reload-recovery poll attempts per workflowRunId.
@@ -4406,8 +4497,146 @@ function App() {
     return true;
   }
 
-  function stopMainResponse() {
+  function stopMainResponse(loomId?: string) {
+    if (loomId) {
+      const controller = mainAbortsRef.current.get(loomId);
+      controller?.abort();
+      mainAbortsRef.current.delete(loomId);
+
+      const serviceCancellation = mainServiceCancellationsRef.current.get(loomId);
+      if (
+        serviceCancellation?.workflowRunId &&
+        !serviceCancellation.cancelRequested
+      ) {
+        serviceCancellation.cancelRequested = true;
+        void loomEngineClient
+          .cancelMessage({
+            loomId: serviceCancellation.loomId,
+            responseId: serviceCancellation.responseId,
+            workflowRunId: serviceCancellation.workflowRunId,
+            reason: "user_stopped_main_composer",
+          })
+          .catch((error) => {
+            if (import.meta.env.DEV) {
+              console.warn("[LoomEngine] Service generation cancel request failed.", error);
+            }
+          });
+      }
+
+      const revealTarget = mainRevealTargetsRef.current.get(loomId);
+      const cancelTarget = revealTarget ?? (serviceCancellation
+        ? { loomId: serviceCancellation.loomId, responseId: serviceCancellation.responseId }
+        : null);
+      if (cancelTarget) {
+        setConversationResponses((current) => ({
+          ...current,
+          [cancelTarget.loomId]: (current[cancelTarget.loomId] ?? []).map((response) =>
+            response.id === cancelTarget.responseId
+              ? {
+                  ...response,
+                  answer: answerParagraphs(
+                    completeOpenMarkdownCodeFence(response.answer.join("\n\n"))
+                  ),
+                  thinkingEndedAt:
+                    response.thinkingStartedAt && !response.thinkingEndedAt
+                      ? new Date().toISOString()
+                      : response.thinkingEndedAt,
+                  visiblePlan: undefined,
+                  visibleProgress: undefined,
+                  serviceGenerationStatus:
+                    response.serviceGenerationStatus === "streaming" ||
+                    response.serviceGenerationStatus === "pending" ||
+                    response.serviceGenerationStatus === "running"
+                      ? ("cancelled" as const)
+                      : response.serviceGenerationStatus,
+                }
+              : response
+          ),
+        }));
+      }
+
+      mainServiceCancellationsRef.current.delete(loomId);
+      mainRevealTargetsRef.current.delete(loomId);
+      mainGenerationsRef.current.delete(loomId);
+      cleanupMainRun(loomId);
+
+      if (loomId === activeConversationId) {
+        mainServiceCancellationRef.current = null;
+        mainRevealTargetRef.current = null;
+        setComposerRuntimeTargetKey(null);
+        setComposerRuntimeState({ running: false, message: "Response stopped." });
+      }
+      startNextQueuedMainGeneration();
+      return;
+    }
+
     mainGenerationRef.current += 1;
+    const activeLoomIds = Object.keys(activeMainLoomStates);
+    for (const lId of activeLoomIds) {
+      const controller = mainAbortsRef.current.get(lId);
+      controller?.abort();
+      mainAbortsRef.current.delete(lId);
+
+      const serviceCancellation = mainServiceCancellationsRef.current.get(lId);
+      if (
+        serviceCancellation?.workflowRunId &&
+        !serviceCancellation.cancelRequested
+      ) {
+        serviceCancellation.cancelRequested = true;
+        void loomEngineClient
+          .cancelMessage({
+            loomId: serviceCancellation.loomId,
+            responseId: serviceCancellation.responseId,
+            workflowRunId: serviceCancellation.workflowRunId,
+            reason: "user_stopped_main_composer",
+          })
+          .catch((error) => {
+            if (import.meta.env.DEV) {
+              console.warn("[LoomEngine] Service generation cancel request failed.", error);
+            }
+          });
+      }
+
+      const revealTarget = mainRevealTargetsRef.current.get(lId);
+      const cancelTarget = revealTarget ?? (serviceCancellation
+        ? { loomId: serviceCancellation.loomId, responseId: serviceCancellation.responseId }
+        : null);
+      if (cancelTarget) {
+        setConversationResponses((current) => ({
+          ...current,
+          [cancelTarget.loomId]: (current[cancelTarget.loomId] ?? []).map((response) =>
+            response.id === cancelTarget.responseId
+              ? {
+                  ...response,
+                  answer: answerParagraphs(
+                    completeOpenMarkdownCodeFence(response.answer.join("\n\n"))
+                  ),
+                  thinkingEndedAt:
+                    response.thinkingStartedAt && !response.thinkingEndedAt
+                      ? new Date().toISOString()
+                      : response.thinkingEndedAt,
+                  visiblePlan: undefined,
+                  visibleProgress: undefined,
+                  serviceGenerationStatus:
+                    response.serviceGenerationStatus === "streaming" ||
+                    response.serviceGenerationStatus === "pending" ||
+                    response.serviceGenerationStatus === "running"
+                      ? ("cancelled" as const)
+                      : response.serviceGenerationStatus,
+                }
+              : response
+          ),
+        }));
+      }
+
+      mainServiceCancellationsRef.current.delete(lId);
+      mainRevealTargetsRef.current.delete(lId);
+      mainGenerationsRef.current.delete(lId);
+      cleanupMainRun(lId);
+    }
+
+    mainAbortRef.current?.abort();
+    mainAbortRef.current = null;
     const serviceCancellation = mainServiceCancellationRef.current;
     if (
       serviceCancellation?.workflowRunId &&
@@ -4420,58 +4649,14 @@ function App() {
           responseId: serviceCancellation.responseId,
           workflowRunId: serviceCancellation.workflowRunId,
           reason: "user_stopped_main_composer",
-        })
-        .catch((error) => {
-          if (import.meta.env.DEV) {
-            console.warn("[LoomEngine] Service generation cancel request failed.", error);
-          }
         });
-    }
-    mainAbortRef.current?.abort();
-    mainAbortRef.current = null;
-    const revealTarget = mainRevealTargetRef.current;
-    // Optimistically mark the response as cancelled so that if the app is
-    // closed before the service confirms cancellation, the response will not
-    // be picked up as "streaming" on the next app open and trigger the reload
-    // recovery path.  The service confirmation (response_cancelled event) will
-    // overwrite this if it arrives while the app is still running.
-    const cancelTarget = revealTarget ?? (serviceCancellation
-      ? { loomId: serviceCancellation.loomId, responseId: serviceCancellation.responseId }
-      : null);
-    if (cancelTarget) {
-      setConversationResponses((current) => ({
-        ...current,
-        [cancelTarget.loomId]: (current[cancelTarget.loomId] ?? []).map((response) =>
-          response.id === cancelTarget.responseId
-            ? {
-                ...response,
-                answer: answerParagraphs(
-                  completeOpenMarkdownCodeFence(response.answer.join("\n\n"))
-                ),
-                thinkingEndedAt:
-                  response.thinkingStartedAt && !response.thinkingEndedAt
-                    ? new Date().toISOString()
-                    : response.thinkingEndedAt,
-                visiblePlan: undefined,
-                visibleProgress: undefined,
-                // Optimistic cancel: clear live status so the response is not
-                // treated as streaming on the next app open.
-                serviceGenerationStatus:
-                  response.serviceGenerationStatus === "streaming" ||
-                  response.serviceGenerationStatus === "pending" ||
-                  response.serviceGenerationStatus === "running"
-                    ? ("cancelled" as const)
-                    : response.serviceGenerationStatus,
-              }
-            : response
-        ),
-      }));
     }
     mainServiceCancellationRef.current = null;
     mainRevealTargetRef.current = null;
     currentMainRequestRef.current = null;
     thinkingAutoAnswerResponseRef.current = null;
-    if (revealTarget) showResponseCompletionActions(revealTarget.responseId);
+
+    setComposerRuntimeTargetKey(null);
     setComposerRuntimeState({ running: false, message: "Response stopped." });
     startNextQueuedMainGeneration();
   }
@@ -4508,7 +4693,12 @@ function App() {
   }
 
   function startNextQueuedMainGeneration() {
-    if (mainAbortRef.current || queuedMainGenerationQueueRef.current.length === 0) return;
+    if (queuedMainGenerationQueueRef.current.length === 0) return;
+    const isLocalMainActive = Object.values(activeMainLoomStates).some(
+      (run) => run.providerKind === "ollama"
+    );
+    if (isLocalMainActive) return;
+
     const [next, ...remaining] = queuedMainGenerationQueueRef.current;
     queuedMainGenerationQueueRef.current = remaining;
     setQueuedMainGenerationByLoom((current) => {
@@ -4522,8 +4712,8 @@ function App() {
     const queued = queuedMainGenerationByLoom[loomId];
     if (!queued) return false;
     const { removed, remaining } = removeQueuedLocalMainGeneration(
-      queuedMainGenerationQueueRef.current,
-      queued.id
+        queuedMainGenerationQueueRef.current,
+        queued.id
     );
     queuedMainGenerationQueueRef.current = remaining;
     setQueuedMainGenerationByLoom((current) => {
@@ -4551,7 +4741,7 @@ function App() {
 
   function stopMainResponseForComposer(draftKey: string) {
     if (cancelQueuedMainGenerationForLoom(draftKey)) return;
-    stopMainResponse();
+    stopMainResponse(draftKey);
   }
 
   function runtimeStateForComposer(draftKey: string) {
@@ -4564,32 +4754,66 @@ function App() {
       };
     }
     const mainModel = getProfileModel(providerSettings, "main");
-    const mainSelectionIsLocal = isMainModelSelectionLocal(providerSettings);
-    const ollamaSecurity = validateOllamaBaseUrlSecurity(providerSettings.ollama.baseUrl);
-    if (
-      getConfiguredLoomEngineMode() === "rust-service" &&
-      draftKey !== EPHEMERAL_DRAFT_ID &&
-      !temporaryWefts[draftKey] &&
-      canQueueLocalMainGeneration({
-        active: composerRuntimeState.running,
-        activeLoomId: composerRuntimeTargetKey,
-        targetLoomId: draftKey,
-        providerKind: mainSelectionIsLocal &&
-          ollamaSecurity.allowed &&
-          ollamaSecurity.localOnly
-          ? "ollama"
-          : "unknown",
-        generationType: "main",
-        modelId: mainModel.id,
-      })
-    ) {
+    const providerProfileId = providerSettings.profiles.mainProviderProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+    const providerKind = isMainModelSelectionLocal(providerSettings)
+      ? "ollama"
+      : (mainModel.provider as MainGenerationProviderKind ?? "unknown");
+
+    const activeRuns = Object.entries(activeMainLoomStates).map(([lId, s]) => ({
+      loomId: lId,
+      providerProfileId: s.providerProfileId,
+      providerKind: s.providerKind,
+      modelId: s.modelId,
+      startedAt: s.startedAt,
+      responseId: s.responseId,
+    }));
+
+    const activeRunOnLoom = activeMainLoomStates[draftKey];
+    if (activeRunOnLoom) {
+      return {
+        running: true,
+        message: activeRunOnLoom.message || "Generating...",
+        blockedByOtherGeneration: false,
+      };
+    }
+
+    const decision = computeMainGenerationConcurrencyDecision({
+      providerProfileId,
+      providerKind,
+      modelId: mainModel.id,
+      targetLoomId: draftKey,
+      activeRuns,
+    });
+
+    if (decision === "block_same_loom") {
+      return {
+        running: true,
+        message: "Generating response...",
+        blockedByOtherGeneration: false,
+      };
+    }
+
+    if (decision === "queue") {
       return {
         running: false,
         message: "Local model is busy. This prompt will queue.",
         blockedByOtherGeneration: false,
       };
     }
-    return computeComposerRunState(draftKey, composerRuntimeTargetKey, composerRuntimeState);
+
+    if (decision === "block_limit_exceeded") {
+      return {
+        running: false,
+        message: "Limit exceeded. Remote provider has reached its maximum parallel limit of 2.",
+        blockedByOtherGeneration: true,
+      };
+    }
+
+    return {
+      running: false,
+      message: null,
+      blockedByOtherGeneration: false,
+    };
   }
 
   function maybeAutoAnswerNow(responseId: string, progress: ModelExecutionProgress) {
@@ -8112,23 +8336,44 @@ function App() {
     const mainModelForQueue = getProfileModel(providerSettings, "main");
     const mainSelectionForQueueIsLocal = isMainModelSelectionLocal(providerSettings);
     const ollamaSecurityForQueue = validateOllamaBaseUrlSecurity(providerSettings.ollama.baseUrl);
-    const queueableLocalMainGeneration =
-      useRustServiceGeneration &&
-      originalDraftKey !== EPHEMERAL_DRAFT_ID &&
-      !temporaryWefts[originalDraftKey] &&
-      canQueueLocalMainGeneration({
-        active: composerRuntimeState.running,
-        activeLoomId: composerRuntimeTargetKey,
-        targetLoomId: originalDraftKey,
-        providerKind: mainSelectionForQueueIsLocal &&
-          ollamaSecurityForQueue.allowed &&
-          ollamaSecurityForQueue.localOnly
-          ? "ollama"
-          : "unknown",
-        generationType: "main",
-        modelId: mainModelForQueue.id,
+
+    const activeRuns = Object.entries(activeMainLoomStates).map(([lId, s]) => ({
+      loomId: lId,
+      providerProfileId: s.providerProfileId,
+      providerKind: s.providerKind,
+      modelId: s.modelId,
+      startedAt: s.startedAt,
+      responseId: s.responseId,
+    }));
+    const providerProfileId = providerSettings.profiles.mainProviderProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+    const providerKind = mainSelectionForQueueIsLocal &&
+      ollamaSecurityForQueue.allowed &&
+      ollamaSecurityForQueue.localOnly
+      ? "ollama"
+      : (mainModelForQueue.provider as MainGenerationProviderKind ?? "unknown");
+
+    const decision = computeMainGenerationConcurrencyDecision({
+      providerProfileId,
+      providerKind,
+      modelId: mainModelForQueue.id,
+      targetLoomId: originalDraftKey,
+      activeRuns,
+    });
+
+    if (decision === "block_limit_exceeded") {
+      setComposerRuntimeTargetKey(originalDraftKey);
+      setComposerRuntimeState({
+        running: false,
+        message: "This remote provider already has 2 active responses.",
       });
-    if (!meaningful || (composerRuntimeState.running && !queueableLocalMainGeneration)) {
+      return false;
+    }
+    if (decision === "block_same_loom") {
+      return false;
+    }
+    const queueableLocalMainGeneration = decision === "queue";
+
+    if (!meaningful) {
       return false;
     }
 
@@ -8161,9 +8406,9 @@ function App() {
       return false;
     }
 
-    if (mainComposerSubmissionInFlightRef.current && !queueableLocalMainGeneration) return false;
+    if (mainComposerSubmissionInFlightRef.current.has(originalDraftKey) && !queueableLocalMainGeneration) return false;
     const ownsSubmissionInFlightFlag = !queueableLocalMainGeneration;
-    if (ownsSubmissionInFlightFlag) mainComposerSubmissionInFlightRef.current = true;
+    if (ownsSubmissionInFlightFlag) mainComposerSubmissionInFlightRef.current.add(originalDraftKey);
     try {
     let generationId = queueableLocalMainGeneration ? 0 : mainGenerationRef.current + 1;
     if (!queueableLocalMainGeneration) mainGenerationRef.current = generationId;
@@ -8488,6 +8733,9 @@ function App() {
         }),
       }),
     };
+    if (!queueableLocalMainGeneration) {
+      startMainRun(targetConversation.id, response.id, controller, providerProfileId, providerKind, mainModelForQueue.id, generationId);
+    }
     const materializingNewLoom = targetLoomId === EPHEMERAL_DRAFT_ID || !existingTargetConversation;
 
     if (materializingNewLoom) {
@@ -8633,6 +8881,7 @@ function App() {
         loomId: targetConversation.id,
         responseId: response.id,
       };
+      startMainRun(targetConversation.id, response.id, controller, providerProfileId, providerKind, mainModelForQueue.id, generationId);
       setComposerRuntimeTargetKey(targetConversation.id);
       setGeneratingResponseId(response.id);
       pendingLatestTurnAnchorRef.current = true;
@@ -8685,12 +8934,14 @@ function App() {
       const mainModelName = mainModel.name;
       const retainServiceWorkflowRunId = (workflowRunId?: string) => {
         if (!workflowRunId) return;
-        mainServiceCancellationRef.current = {
+        const cancellation = {
           loomId: targetConversation.id,
           responseId: serviceResponseId,
           workflowRunId,
           cancelRequested: mainServiceCancellationRef.current?.cancelRequested ?? false,
         };
+        mainServiceCancellationRef.current = cancellation;
+        mainServiceCancellationsRef.current.set(targetConversation.id, cancellation);
         setConversationResponses((current) => ({
           ...current,
           [targetConversation.id]: (current[targetConversation.id] ?? []).map((item) =>
@@ -8712,17 +8963,25 @@ function App() {
           next.add(nextResponseId);
           return next;
         });
-        if (mainServiceCancellationRef.current) {
+        const cancellation = mainServiceCancellationsRef.current.get(targetConversation.id);
+        if (cancellation) {
+          const nextCancellation = { ...cancellation, responseId: nextResponseId };
+          mainServiceCancellationsRef.current.set(targetConversation.id, nextCancellation);
+          mainServiceCancellationRef.current = nextCancellation;
+        } else if (mainServiceCancellationRef.current) {
           mainServiceCancellationRef.current = {
             ...mainServiceCancellationRef.current,
             responseId: nextResponseId,
           };
         }
+        updateMainRunState(targetConversation.id, nextResponseId, "Streaming response...", providerProfileId, providerKind, mainModelForQueue.id);
         setGeneratingResponseId(nextResponseId);
-        mainRevealTargetRef.current = {
+        const reveal = {
           loomId: targetConversation.id,
           responseId: nextResponseId,
         };
+        mainRevealTargetRef.current = reveal;
+        mainRevealTargetsRef.current.set(targetConversation.id, reveal);
         setConversationResponses((current) => ({
           ...current,
           [targetConversation.id]: (current[targetConversation.id] ?? []).map((item) =>
@@ -9003,6 +9262,7 @@ function App() {
               currentMainRequestRef.current = null;
             }
             queueResponseMetadataGeneration(targetConversation.id, completedResponse);
+            cleanupMainRun(targetConversation.id);
             startNextQueuedMainGeneration();
             return true;
           }
@@ -9036,6 +9296,7 @@ function App() {
             if (mainAbortRef.current === controller) mainAbortRef.current = null;
             mainServiceCancellationRef.current = null;
             mainRevealTargetRef.current = null;
+            cleanupMainRun(targetConversation.id);
             startNextQueuedMainGeneration();
             return true;
           }
@@ -9057,6 +9318,7 @@ function App() {
             if (mainAbortRef.current === controller) mainAbortRef.current = null;
             mainServiceCancellationRef.current = null;
             mainRevealTargetRef.current = null;
+            cleanupMainRun(targetConversation.id);
             startNextQueuedMainGeneration();
             return true;
           }
@@ -9067,6 +9329,7 @@ function App() {
           if (mainAbortRef.current === controller) mainAbortRef.current = null;
           mainServiceCancellationRef.current = null;
           mainRevealTargetRef.current = null;
+          cleanupMainRun(targetConversation.id);
           startNextQueuedMainGeneration();
           return false;
         }
@@ -9082,6 +9345,7 @@ function App() {
           if (mainAbortRef.current === controller) mainAbortRef.current = null;
           mainServiceCancellationRef.current = null;
           mainRevealTargetRef.current = null;
+          cleanupMainRun(targetConversation.id);
           startNextQueuedMainGeneration();
           return false;
         }
@@ -9545,7 +9809,7 @@ function App() {
       return false;
     }
     } finally {
-      if (ownsSubmissionInFlightFlag) mainComposerSubmissionInFlightRef.current = false;
+      if (ownsSubmissionInFlightFlag) mainComposerSubmissionInFlightRef.current.delete(originalDraftKey);
     }
   }
 
@@ -11603,6 +11867,49 @@ function App() {
       });
       return;
     }
+
+    const activeRuns = Object.entries(activeMainLoomStates).map(([lId, s]) => ({
+      loomId: lId,
+      providerProfileId: s.providerProfileId,
+      providerKind: s.providerKind,
+      modelId: s.modelId,
+      startedAt: s.startedAt,
+      responseId: s.responseId,
+    }));
+    const mainModel = getProfileModel(providerSettings, "main");
+    const providerProfileId = providerSettings.profiles.mainProviderProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+    const providerKind = isMainModelSelectionLocal(providerSettings)
+      ? "ollama"
+      : (mainModel.provider as MainGenerationProviderKind ?? "unknown");
+
+    const decision = computeMainGenerationConcurrencyDecision({
+      providerProfileId,
+      providerKind,
+      modelId: mainModel.id,
+      targetLoomId: loomId,
+      activeRuns,
+    });
+
+    if (decision === "block_limit_exceeded") {
+      showToast({
+        title: "Limit exceeded",
+        message: "This remote provider already has 2 active responses.",
+        color: "sunset",
+      });
+      return;
+    }
+    if (decision === "block_same_loom") {
+      return;
+    }
+    if (decision === "queue") {
+      showToast({
+        title: "Local model busy",
+        message: "Wait for the active local response to finish.",
+        color: "neutral",
+      });
+      return;
+    }
+
     const generationId = mainGenerationRef.current + 1;
     mainGenerationRef.current = generationId;
     const controller = new AbortController();
@@ -11620,7 +11927,6 @@ function App() {
       updateResponseVisibleProgress(loomId, activeResponseId, visible ? nextProgress : undefined);
       return nextProgress;
     };
-    const mainModel = getProfileModel(providerSettings, "main");
     const mainModelName = mainModel.name;
     const regeneratedResponse: ResponseItem = {
       ...sourceResponse,
@@ -11645,23 +11951,32 @@ function App() {
       running: true,
       message: `Regenerating through loom-service with ${mainModelName}...`,
     });
-    mainServiceCancellationRef.current = {
+    const cancellation = {
       loomId,
       responseId: localResponseId,
       cancelRequested: false,
     };
+    mainServiceCancellationRef.current = cancellation;
+    mainServiceCancellationsRef.current.set(loomId, cancellation);
+    startMainRun(loomId, localResponseId, controller, providerProfileId, providerKind, mainModel.id, generationId);
 
     const replaceActiveResponseId = (nextResponseId: string) => {
       if (nextResponseId === activeResponseId) return;
       const previousResponseId = activeResponseId;
       activeResponseId = nextResponseId;
       setGeneratingResponseId(nextResponseId);
-      if (mainServiceCancellationRef.current) {
+      const cancellation = mainServiceCancellationsRef.current.get(loomId);
+      if (cancellation) {
+        const nextCancellation = { ...cancellation, responseId: nextResponseId };
+        mainServiceCancellationsRef.current.set(loomId, nextCancellation);
+        mainServiceCancellationRef.current = nextCancellation;
+      } else if (mainServiceCancellationRef.current) {
         mainServiceCancellationRef.current = {
           ...mainServiceCancellationRef.current,
           responseId: nextResponseId,
         };
       }
+      updateMainRunState(loomId, nextResponseId, `Regenerating through loom-service with ${mainModelName}...`, providerProfileId, providerKind, mainModel.id);
       setConversationResponses((current) => ({
         ...current,
         [loomId]: (current[loomId] ?? []).map((item) =>
@@ -11793,6 +12108,7 @@ function App() {
           queueResponseMetadataGeneration(loomId, completedResponse);
           mainAbortRef.current = null;
           mainServiceCancellationRef.current = null;
+          cleanupMainRun(loomId);
           return;
         }
         if (event.type === "response_error") {
@@ -11807,6 +12123,7 @@ function App() {
           showResponseCompletionActions(activeResponseId);
           mainAbortRef.current = null;
           mainServiceCancellationRef.current = null;
+          cleanupMainRun(loomId);
           return;
         }
         if (event.type === "response_cancelled") {
@@ -11817,6 +12134,7 @@ function App() {
           showResponseCompletionActions(activeResponseId);
           mainAbortRef.current = null;
           mainServiceCancellationRef.current = null;
+          cleanupMainRun(loomId);
           return;
         }
       }
@@ -11846,6 +12164,7 @@ function App() {
       setComposerRuntimeState({ running: false, message });
       mainAbortRef.current = null;
       mainServiceCancellationRef.current = null;
+      cleanupMainRun(loomId);
     }
   }
 
@@ -12479,6 +12798,16 @@ function App() {
 
   async function submitQuickQuestion() {
     if (!askState || askState.running) return;
+    const activeLocalRun = Object.values(activeMainLoomStates).find((r) => r.providerKind === "ollama");
+    const quickAskSubmitBlockedReason = computeQuickAskBlockedReason(
+      Boolean(activeLocalRun),
+      getProfileModel(providerSettings, "quick").id,
+      activeLocalRun ? activeLocalRun.modelId : getProfileModel(providerSettings, "main").id
+    );
+    if (quickAskSubmitBlockedReason) {
+      setAskState({ ...askState, error: quickAskSubmitBlockedReason });
+      return;
+    }
     const prompt = askState.question.trim();
     if (!prompt) {
       setAskState({ ...askState, error: "Write a quick question first." });
@@ -14298,10 +14627,11 @@ function App() {
       )}
 
       {askState && (() => {
+        const activeLocalRun = Object.values(activeMainLoomStates).find((r) => r.providerKind === "ollama");
         const quickAskSubmitBlockedReason = computeQuickAskBlockedReason(
-          composerRuntimeState.running,
+          Boolean(activeLocalRun),
           getProfileModel(providerSettings, "quick").id,
-          getProfileModel(providerSettings, "main").id
+          activeLocalRun ? activeLocalRun.modelId : getProfileModel(providerSettings, "main").id
         );
         return (
         <AskPopup
