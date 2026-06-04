@@ -153,6 +153,7 @@ describe("conversation minimap geometry", () => {
         id: "response-a:revision:fork-1",
         type: "revision",
         label: "Revise tone",
+        fullLabel: "Revise tone",
         responseId: "response-a",
         revisionIndex: 1,
         childConversationId: "revision-loom-1",
@@ -161,6 +162,7 @@ describe("conversation minimap geometry", () => {
         id: "response-a:revision:fork-2",
         type: "revision",
         label: "Revision 3",
+        fullLabel: "Revision 3",
         responseId: "response-a",
         revisionIndex: 2,
         childConversationId: "revision-loom-2",
@@ -220,5 +222,42 @@ describe("conversation minimap geometry", () => {
     expect(bottomWindow).toHaveLength(MAX_VISIBLE_MINIMAP_RULER_TICKS);
     expect(bottomWindow[0].id).toBe("item-14");
     expect(bottomWindow[MAX_VISIBLE_MINIMAP_RULER_TICKS - 1].id).toBe("item-29");
+  });
+
+  it("returns non-truncated normalized labels when truncate option is false", () => {
+    const longText = "x".repeat(200);
+    const label = conversationMinimapLabel({
+      type: "response",
+      title: longText,
+      truncate: false,
+    });
+    expect(label).toBe(longText);
+    expect(label.endsWith("…")).toBe(false);
+  });
+
+  it("populates fullLabel in responseMinimapItems", () => {
+    const longText = "y".repeat(150);
+    const items = responseMinimapItems([
+      {
+        id: "res-1",
+        title: longText,
+        revisions: [
+          {
+            id: "rev-1",
+            childConversationId: "child-1",
+            revisionPrompt: "z".repeat(130),
+          },
+        ],
+      },
+    ]);
+    expect(items[0].label.length).toBeLessThan(150);
+    expect(items[0].label.endsWith("…")).toBe(true);
+    expect(items[0].fullLabel).toBe(longText);
+
+    const child = items[0].outlineChildren?.[0];
+    expect(child).toBeDefined();
+    expect(child!.label.length).toBeLessThan(130);
+    expect(child!.label.endsWith("…")).toBe(true);
+    expect(child!.fullLabel).toBe("z".repeat(130));
   });
 });

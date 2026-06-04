@@ -16,6 +16,7 @@ export interface ConversationMinimapLabelInput {
   title?: string | null;
   promptText?: string | null;
   responseText?: string | null;
+  truncate?: boolean;
 }
 
 export interface ConversationMinimapRevisionLabelInput {
@@ -94,22 +95,26 @@ export function conversationMinimapLabel({
   title,
   promptText,
   responseText,
+  truncate = true,
 }: ConversationMinimapLabelInput) {
   const fallback = type === "user" ? "User message" : type === "weft" ? "Weft" : "Response";
   const candidate = title ?? promptText ?? responseText ?? fallback;
   const normalized =
     cleanMarkdownDisplayText(candidate).replace(/\s+/g, " ").trim() || fallback;
+  if (!truncate) return normalized;
   if (normalized.length <= MAX_MINIMAP_LABEL_LENGTH) return normalized;
   return `${normalized.slice(0, MAX_MINIMAP_LABEL_LENGTH - 1).trimEnd()}…`;
 }
 
 export function conversationMinimapRevisionLabel(
   revision: ConversationMinimapRevisionLabelInput,
-  revisionNumber: number
+  revisionNumber: number,
+  truncate = true
 ) {
   const candidate = revision.revisionPrompt ?? revision.title ?? "";
   const normalized = cleanMarkdownDisplayText(candidate).replace(/\s+/g, " ").trim();
   if (normalized) {
+    if (!truncate) return normalized;
     return normalized.length <= MAX_MINIMAP_LABEL_LENGTH
       ? normalized
       : `${normalized.slice(0, MAX_MINIMAP_LABEL_LENGTH - 1).trimEnd()}…`;

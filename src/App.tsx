@@ -14288,6 +14288,7 @@ function App() {
                             conversation={activeConversation}
                             responses={activeResponses}
                             activeLoomId={activeConversation.id}
+                            showMinimap={false}
                             onLink={(link) => {
                               markSplitPanelActive("weft");
                               linkObjectForDraft(link, activeConversation.id);
@@ -17355,6 +17356,7 @@ function ChatTranscript({
   isOriginPanel,
   onPromptRevisionNavigate,
   highlightedRevisionResponseId,
+  showMinimap = true,
 }: {
   transcriptRef?: (node: HTMLElement | null) => void;
   conversation?: Conversation;
@@ -17416,6 +17418,7 @@ function ChatTranscript({
   isOriginPanel?: boolean;
   onPromptRevisionNavigate?: (responseId: string, revisionIndex: number) => void;
   highlightedRevisionResponseId?: string | null;
+  showMinimap?: boolean;
 }) {
   const [sentReferenceHint, setSentReferenceHint] = useState<{
     link: LoomLink;
@@ -17628,13 +17631,23 @@ function ChatTranscript({
     ]
   );
 
+  const isMinimapActive = showMinimap && minimapItems.length >= 2;
+
   return (
-    <div className="chat-transcript-shell">
-      <ConversationScrollMinimap
-        items={minimapItems}
-        onRevisionSelect={handleMinimapRevisionSelect}
-        scrollContainerRef={transcriptNodeRef}
-      />
+    <div
+      className={
+        isMinimapActive
+          ? "chat-transcript-shell chat-transcript-shell--with-minimap"
+          : "chat-transcript-shell"
+      }
+    >
+      {showMinimap && (
+        <ConversationScrollMinimap
+          items={minimapItems}
+          onRevisionSelect={handleMinimapRevisionSelect}
+          scrollContainerRef={transcriptNodeRef}
+        />
+      )}
       <section
         className={isGeneratingInTranscript ? "chat-transcript is-generating-response" : "chat-transcript"}
         ref={setTranscriptNode}

@@ -110,7 +110,14 @@ async function expectMinimapOnTranscriptRight(transcript: Locator, minimap: Loca
         const minimapCenterX = minimapBox.x + minimapBox.width / 2;
         const distanceToRight = Math.abs(transcriptBox.x + transcriptBox.width - minimapCenterX);
         const distanceToLeft = Math.abs(minimapCenterX - transcriptBox.x);
-        return distanceToRight < 48 && distanceToRight < distanceToLeft;
+        const isRightAligned = distanceToRight < 48 && distanceToRight < distanceToLeft;
+
+        // Verify the top of the minimap is shifted lower (at least 48px below transcript top)
+        // to avoid visual collision with the kebab/action menu area.
+        const topOffset = minimapBox.y - transcriptBox.y;
+        const isBelowKebabArea = topOffset >= 48;
+
+        return isRightAligned && isBelowKebabArea;
       },
       { timeout: 5_000 }
     )
@@ -303,8 +310,37 @@ test.describe("[product-service-backed] Conversation minimap", () => {
         )
         .toBe(1);
 
-      await minimap.hover();
+      const firstTick = minimap.locator(".conversation-minimap__tick").first();
+      await firstTick.hover();
       await expectOutlineOpen(outline);
+
+      // Verify title tooltips exist on ticks and parent outline rows
+      await expect(firstTick).toHaveAttribute("title");
+      const tickTitle = await firstTick.getAttribute("title");
+      expect(tickTitle).toBeTruthy();
+      expect(tickTitle!.length).toBeGreaterThan(0);
+
+      await expect(outlineRows.first()).toHaveAttribute("title");
+      const outlineTitle = await outlineRows.first().getAttribute("title");
+      expect(outlineTitle).toBeTruthy();
+      expect(outlineTitle!.length).toBeGreaterThan(0);
+
+      // Move mouse through the bridge to verify stability
+      const tickBox = await firstTick.boundingBox();
+      const outlineBox = await outline.boundingBox();
+      expect(tickBox).not.toBeNull();
+      expect(outlineBox).not.toBeNull();
+
+      const bridgeX = (tickBox!.x + outlineBox!.x + outlineBox!.width) / 2;
+      const bridgeY = tickBox!.y + tickBox!.height / 2;
+      await page.mouse.move(bridgeX, bridgeY);
+      await expectOutlineOpen(outline);
+
+      const insideOutlineX = outlineBox!.x + outlineBox!.width / 2;
+      const insideOutlineY = outlineBox!.y + outlineBox!.height / 2;
+      await page.mouse.move(insideOutlineX, insideOutlineY);
+      await expectOutlineOpen(outline);
+
       await expect(outlineRows.first()).toContainText("Long Streaming Scroll Fixture");
       await expect(outlineRows.first()).not.toContainText("#");
       await expect(outlineRows.locator(".conversation-minimap__outline-type")).toHaveCount(0);
@@ -329,7 +365,7 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       await expectPromptAnchorNearTranscriptTop(fifteenthPromptAnchor);
 
       const twentyFirstPromptAnchor = page.locator("[data-prompt-response-id]").nth(20);
-      await minimap.hover();
+      await minimap.locator(".conversation-minimap__tick").first().hover();
       await expectOutlineOpen(outline);
       await outlineRows.nth(20).click();
 
@@ -358,7 +394,7 @@ test.describe("[product-service-backed] Conversation minimap", () => {
     }
   });
 
-  test("keeps origin and Weft minimap outlines isolated in split panes", async ({
+  test("hides minimap in Weft split pane and preserves origin minimap navigation", async ({
     page,
   }) => {
     test.setTimeout(180_000);
@@ -403,55 +439,31 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       const weftTranscript = weftPanel.locator(".chat-transcript");
       const originMinimap = originPanel.locator(".conversation-minimap");
       const weftMinimap = weftPanel.locator(".conversation-minimap");
-      const originOutline = originMinimap.locator(".conversation-minimap__outline");
-      const weftOutline = weftMinimap.locator(".conversation-minimap__outline");
-      const originRows = originMinimap.locator(".conversation-minimap__outline-row");
-      const weftRows = weftMinimap.locator(".conversation-minimap__outline-row");
 
       await expect(originTranscript).toBeVisible();
       await expect(weftTranscript).toBeVisible();
+
+      // Assert split-view state: origin split-panel has minimap, weft split-panel does not.
       await expect(originMinimap).toBeVisible();
-      await expect(weftMinimap).toBeVisible();
+      await expect(weftMinimap).toHaveCount(0);
+
+      const originOutline = originMinimap.locator(".conversation-minimap__outline");
+      const originRows = originMinimap.locator(".conversation-minimap__outline-row");
+
       await expect(originRows).toHaveCount(4);
-      await expect(weftRows).toHaveCount(4);
       await expectMinimapOnTranscriptRight(originTranscript, originMinimap);
-      await expectMinimapOnTranscriptRight(weftTranscript, weftMinimap);
 
       await scrollPaneToTop(originTranscript);
       await stableScrollTop(weftTranscript);
 
-      await originMinimap.hover();
+      await originMinimap.locator(".conversation-minimap__tick").first().hover();
       await expect(originOutline).toHaveCSS("opacity", "1");
-      await expect(weftOutline).toHaveCSS("opacity", "0");
 
       const weftBeforeOriginClick = await stableScrollTop(weftTranscript);
       await originRows.nth(3).click();
       await expect.poll(() => scrollTop(originTranscript), { timeout: 8_000 }).toBeGreaterThan(20);
       await expect.poll(() => scrollTop(weftTranscript), { timeout: 3_000 }).toBeLessThanOrEqual(
         weftBeforeOriginClick + 2
-      );
-
-      await page.evaluate(() => {
-        const activeElement = document.activeElement;
-        if (activeElement instanceof HTMLElement) activeElement.blur();
-      });
-      await page.mouse.move(80, 80);
-      await expect(originOutline).toHaveCSS("opacity", "0");
-
-      await scrollPaneToTop(originTranscript);
-      const weftBeforeWeftClick = await stableScrollTop(weftTranscript);
-
-      await weftMinimap.hover();
-      await expect(weftOutline).toHaveCSS("opacity", "1");
-      await expect(originOutline).toHaveCSS("opacity", "0");
-
-      const originBeforeWeftClick = await scrollTop(originTranscript);
-      await weftRows.nth(0).click();
-      await expect
-        .poll(() => scrollTop(weftTranscript), { timeout: 8_000 })
-        .toBeLessThan(weftBeforeWeftClick - 20);
-      await expect.poll(() => scrollTop(originTranscript), { timeout: 3_000 }).toBeLessThanOrEqual(
-        originBeforeWeftClick + 2
       );
 
       expect(scenario.dbPath).toContain(scenario.tempDir);
@@ -508,10 +520,11 @@ test.describe("[product-service-backed] Conversation minimap", () => {
 
       await expect(originMinimap).toBeVisible();
       await expect(originTicks).toHaveCount(2);
-      await originMinimap.hover();
+      await originMinimap.locator(".conversation-minimap__tick").first().hover();
       await expectOutlineOpen(originMinimap.locator(".conversation-minimap__outline"));
       await expect(parentRows).toHaveCount(2);
       await expect(revisionRow).toBeVisible();
+      await expect(revisionRow).toHaveAttribute("title", revisionPrompt);
 
       const [parentBox, revisionBox] = await Promise.all([
         parentRows.first().boundingBox(),
