@@ -2286,6 +2286,185 @@ kbd {
   scrollbar-width: thin;
 }
 
+.conversation-minimap {
+  position: absolute;
+  top: 18px;
+  bottom: 18px;
+  left: 8px;
+  z-index: 8;
+  width: 28px;
+  pointer-events: none;
+}
+
+.conversation-minimap__track {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  border-radius: 999px;
+  pointer-events: auto;
+}
+
+.conversation-minimap:focus-within {
+  z-index: 14;
+}
+
+.conversation-minimap__track::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 13px;
+  width: 2px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--loom-border-strong) 42%, transparent);
+}
+
+.conversation-minimap__viewport {
+  position: absolute;
+  left: 9px;
+  width: 10px;
+  min-height: 22px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--loom-text-primary) 24%, transparent);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--loom-text-primary) 12%, transparent);
+}
+
+.conversation-minimap__tick {
+  position: absolute;
+  left: 5px;
+  width: 18px;
+  height: 7px;
+  margin-top: -3px;
+  padding: 0;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+}
+
+.conversation-minimap__tick::before {
+  content: "";
+  display: block;
+  width: 12px;
+  height: 2px;
+  margin: 3px auto 0;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--loom-text-muted) 62%, transparent);
+  transition:
+    width 120ms ease,
+    background 120ms ease,
+    opacity 120ms ease;
+}
+
+.conversation-minimap__tick--user::before {
+  width: 8px;
+  background: color-mix(in srgb, var(--loom-text-muted) 46%, transparent);
+}
+
+.conversation-minimap__tick:hover::before,
+.conversation-minimap__tick:focus-visible::before {
+  width: 18px;
+  background: color-mix(in srgb, var(--loom-text-primary) 70%, transparent);
+}
+
+.conversation-minimap__tick--active::before {
+  width: 18px;
+  height: 3px;
+  background: var(--loom-accent);
+}
+
+.conversation-minimap__tick--running::before,
+.conversation-minimap__tick--queued::before {
+  background: color-mix(in srgb, var(--loom-accent) 72%, transparent);
+}
+
+.conversation-minimap__outline {
+  position: absolute;
+  top: 50%;
+  left: 30px;
+  display: flex;
+  flex-direction: column;
+  width: min(300px, calc(100vw - 96px));
+  max-height: min(68vh, 520px);
+  padding: 8px;
+  border: 1px solid color-mix(in srgb, var(--loom-border-strong) 54%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--loom-bg-elevated) 92%, black 8%);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.34);
+  opacity: 0;
+  overflow-y: auto;
+  pointer-events: none;
+  transform: translateY(-50%) translateX(-6px);
+  transition:
+    opacity 140ms ease,
+    transform 140ms ease;
+}
+
+.conversation-minimap:hover .conversation-minimap__outline,
+.conversation-minimap:focus-within .conversation-minimap__outline {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateY(-50%) translateX(0);
+}
+
+.conversation-minimap__outline-row {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  min-height: 28px;
+  padding: 5px 7px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--loom-text-secondary);
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.conversation-minimap__outline-row:hover,
+.conversation-minimap__outline-row:focus-visible {
+  background: var(--loom-bg-hover);
+  color: var(--loom-text-primary);
+  outline: none;
+}
+
+.conversation-minimap__outline-row--active {
+  background: color-mix(in srgb, var(--loom-accent) 13%, transparent);
+  color: var(--loom-text-primary);
+}
+
+.conversation-minimap__outline-marker {
+  width: 11px;
+  height: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--loom-text-muted) 68%, transparent);
+}
+
+.conversation-minimap__outline-marker--user {
+  width: 8px;
+  background: color-mix(in srgb, var(--loom-text-muted) 50%, transparent);
+}
+
+.conversation-minimap__outline-row--active .conversation-minimap__outline-marker {
+  width: 12px;
+  background: var(--loom-accent);
+}
+
+.conversation-minimap__outline-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.conversation-minimap__outline-type {
+  color: var(--loom-text-muted);
+  font-size: 11px;
+  text-transform: capitalize;
+}
+
 .chat-transcript.is-generating-response {
   padding-bottom: clamp(320px, 52vh, 560px);
 }
