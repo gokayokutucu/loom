@@ -78,6 +78,9 @@ export interface RuntimeHealthState {
 export interface ModelProfileSettings {
   quickModelId: string;
   mainModelId: string;
+  mainProviderProfileId?: string;
+  mainProviderDisplayName?: string;
+  mainProviderKind?: ModelProviderKind;
 }
 
 export interface DemoProviderSettings {
@@ -190,6 +193,7 @@ export class ModelProviderError extends Error {
 const SETTINGS_KEY = "loom-ai-provider-settings-v1";
 
 export const OLLAMA_DEFAULT_BASE_URL = "http://localhost:11434";
+export const OLLAMA_LOCAL_PROVIDER_PROFILE_ID = "ollama-local";
 export const OLLAMA_MAIN_DEFAULT_MODEL_ID = "qwen3.5:9b";
 export const OLLAMA_QUICK_DEFAULT_MODEL_ID = OLLAMA_MAIN_DEFAULT_MODEL_ID;
 const OLLAMA_MODEL_EXECUTION_TIMEOUT_MS = 300000;
@@ -237,6 +241,9 @@ export const defaultAIProviderSettings: AIProviderSettings = {
   profiles: {
     quickModelId: OLLAMA_QUICK_DEFAULT_MODEL_ID,
     mainModelId: OLLAMA_MAIN_DEFAULT_MODEL_ID,
+    mainProviderProfileId: OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
+    mainProviderDisplayName: "Ollama Local",
+    mainProviderKind: "ollama",
   },
   demo: {
     mockResponsesEnabled: false,
@@ -266,6 +273,18 @@ function profileDefaultModelId(profile: ModelProfileId) {
   return profile === "quick"
     ? OLLAMA_QUICK_DEFAULT_MODEL_ID
     : OLLAMA_MAIN_DEFAULT_MODEL_ID;
+}
+
+function normalizedMainProviderProfileId(settings: AIProviderSettings) {
+  return settings.profiles.mainProviderProfileId || OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+}
+
+export function getMainProviderProfileId(settings: AIProviderSettings) {
+  return normalizedMainProviderProfileId(settings);
+}
+
+export function isMainModelSelectionLocal(settings: AIProviderSettings) {
+  return normalizedMainProviderProfileId(settings) === OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
 }
 
 function resolveProfileModelId(
@@ -326,6 +345,20 @@ function mergeSettings(value: Partial<AIProviderSettings>): AIProviderSettings {
     profiles: {
       ...defaultAIProviderSettings.profiles,
       ...value.profiles,
+      mainProviderProfileId:
+        value.profiles?.mainProviderProfileId || OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
+      mainProviderDisplayName:
+        value.profiles?.mainProviderDisplayName ||
+        (value.profiles?.mainProviderProfileId &&
+        value.profiles.mainProviderProfileId !== OLLAMA_LOCAL_PROVIDER_PROFILE_ID
+          ? value.profiles.mainProviderProfileId
+          : "Ollama Local"),
+      mainProviderKind:
+        value.profiles?.mainProviderKind ||
+        (value.profiles?.mainProviderProfileId &&
+        value.profiles.mainProviderProfileId !== OLLAMA_LOCAL_PROVIDER_PROFILE_ID
+          ? "openai-compatible"
+          : "ollama"),
     },
     demo: {
       ...defaultAIProviderSettings.demo,
@@ -746,6 +779,19 @@ export function getProfileModel(settings: AIProviderSettings, profile: ModelProf
     profile === "quick"
       ? settings.profiles.quickModelId
       : settings.profiles.mainModelId;
+  if (profile === "main" && !isMainModelSelectionLocal(settings)) {
+    const displayName =
+      settings.profiles.mainProviderDisplayName ??
+      settings.profiles.mainProviderProfileId ??
+      "Remote provider";
+    return {
+      id: modelId,
+      name: `${displayName} · ${modelId}`,
+      provider: settings.profiles.mainProviderKind ?? "openai-compatible",
+      installed: true,
+      location: displayName,
+    };
+  }
   return (
     settings.ollama.models.find((model) => model.id === modelId) ?? {
       id: modelId,

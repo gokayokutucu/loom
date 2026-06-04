@@ -18,6 +18,7 @@ const FORBIDDEN_MARKERS = [
   "Authorization: Bearer",
   "Bearer nvapi",
 ];
+const PROVIDER_SETTINGS_KEY = "loom-ai-provider-settings-v1";
 
 interface RawLoomDetail {
   loom: {
@@ -77,6 +78,36 @@ async function openStrictRustApp(page: Page, appUrl: string) {
     window.localStorage.setItem(
       "loom-ai-app-settings-v1",
       JSON.stringify({ mockDataEnabled: false, modelResponseMode: "instant" })
+    );
+    window.localStorage.setItem(
+      PROVIDER_SETTINGS_KEY,
+      JSON.stringify({
+        activeProvider: "ollama",
+        ollama: {
+          enabled: true,
+          baseUrl: "http://localhost:11434",
+          exposeToNetwork: false,
+          contextLength: 8192,
+          modelLocation: "~/.ollama/models",
+          models: [
+            {
+              id: "qwen3.5:9b",
+              name: "Qwen 3.5 9B",
+              provider: "ollama",
+              installed: true,
+            },
+          ],
+          lastConnectionStatus: "connected",
+        },
+        profiles: {
+          quickModelId: "qwen3.5:9b",
+          mainModelId: "qwen3.5:9b",
+          mainProviderProfileId: "ollama-local",
+          mainProviderDisplayName: "Ollama Local",
+          mainProviderKind: "ollama",
+        },
+        demo: { mockResponsesEnabled: false },
+      })
     );
   });
   await page.goto(appUrl);
@@ -185,6 +216,10 @@ test.describe("[product-service-backed] NVIDIA OpenAI-compatible ProviderPipelin
       await nvidiaCard.getByRole("button", { name: "Use for Main" }).click();
       await expect(nvidiaCard).toContainText("Selected for Main", { timeout: 10_000 });
       await page.getByRole("button", { name: "Close settings" }).click();
+      await expect(page.getByRole("button", { name: "Select model" })).toContainText(
+        "NVIDIA NIM · nvidia/e2e-openai-compatible",
+        { timeout: 10_000 }
+      );
 
       const selectedConfig = await scenario.serviceScenario.client.getServiceConfig();
       expect(selectedConfig.providers).toMatchObject({
@@ -214,6 +249,27 @@ test.describe("[product-service-backed] NVIDIA OpenAI-compatible ProviderPipelin
         rawAuthorizationHeaderStored: false,
       });
       expect(scenario.fakeProvider.requests[0].promptText).toContain(prompt);
+
+      await openProviderSettings(page);
+      const ollamaCard = page
+        .locator(".provider-profile-card")
+        .filter({ hasText: "Ollama Local" });
+      await ollamaCard.getByRole("button", { name: "Use for Main" }).click();
+      await expect(ollamaCard).toContainText("Selected for Main", { timeout: 10_000 });
+      await page.getByRole("button", { name: "Close settings" }).click();
+      await expect(page.getByRole("button", { name: "Select model" })).toContainText(
+        "Qwen 3.5 9B"
+      );
+      const localConfig = await scenario.serviceScenario.client.getServiceConfig();
+      expect(localConfig.providers).toMatchObject({
+        mainProviderProfileId: "ollama-local",
+        mainModelId: "qwen3.5:9b",
+      });
+
+      await fillPrompt(page, `Switch back to local proof ${Date.now()}`);
+      await page.getByRole("button", { name: "Send" }).click();
+      await page.waitForTimeout(1000);
+      expect(scenario.fakeProvider.requests).toHaveLength(1);
     } finally {
       await cleanupNvidiaScenario(scenario);
     }

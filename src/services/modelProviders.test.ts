@@ -6,10 +6,13 @@ import {
   defaultAIProviderSettings,
   displayNameForOllamaModel,
   getInstalledModels,
+  getMainProviderProfileId,
   getProfileModel,
+  isMainModelSelectionLocal,
   mergeOllamaModels,
   modelPickerStatusText,
   normalizeOllamaModelId,
+  OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
   type AIProviderSettings,
   type ModelDescriptor,
 } from "./modelProviders";
@@ -336,6 +339,58 @@ describe("model picker selection → providerSettings.profiles.mainModelId", () 
     };
     const roundTripped = JSON.parse(JSON.stringify(settings)) as AIProviderSettings;
     expect(roundTripped.profiles.mainModelId).toBe("llama3.2");
+  });
+
+  test("old mainModelId-only settings map to the Ollama provider profile", () => {
+    const settings: AIProviderSettings = {
+      ...defaultAIProviderSettings,
+      profiles: {
+        quickModelId: "qwen3.5:9b",
+        mainModelId: "llama3.2",
+      },
+    };
+
+    expect(getMainProviderProfileId(settings)).toBe(OLLAMA_LOCAL_PROVIDER_PROFILE_ID);
+    expect(isMainModelSelectionLocal(settings)).toBe(true);
+  });
+
+  test("explicit remote Main selection keeps provider profile and label", () => {
+    const settings: AIProviderSettings = {
+      ...defaultAIProviderSettings,
+      profiles: {
+        ...defaultAIProviderSettings.profiles,
+        mainProviderProfileId: "nvidia",
+        mainProviderDisplayName: "NVIDIA NIM",
+        mainProviderKind: "openai-compatible",
+        mainModelId: "nvidia/e2e-openai-compatible",
+      },
+    };
+
+    const mainModel = getProfileModel(settings, "main");
+    expect(getMainProviderProfileId(settings)).toBe("nvidia");
+    expect(isMainModelSelectionLocal(settings)).toBe(false);
+    expect(mainModel).toMatchObject({
+      id: "nvidia/e2e-openai-compatible",
+      name: "NVIDIA NIM · nvidia/e2e-openai-compatible",
+      provider: "openai-compatible",
+      installed: true,
+    });
+  });
+
+  test("Quick Ask model selection remains Ollama string based", () => {
+    const settings: AIProviderSettings = {
+      ...defaultAIProviderSettings,
+      profiles: {
+        ...defaultAIProviderSettings.profiles,
+        quickModelId: "llama3.2:3b",
+        mainProviderProfileId: "nvidia",
+        mainProviderDisplayName: "NVIDIA NIM",
+        mainProviderKind: "openai-compatible",
+        mainModelId: "nvidia/e2e-openai-compatible",
+      },
+    };
+
+    expect(getProfileModel(settings, "quick").id).toBe("llama3.2:3b");
   });
 
   test("missing/unavailable model is NOT in installed list and should not be selected", () => {

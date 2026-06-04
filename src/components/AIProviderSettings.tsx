@@ -23,9 +23,11 @@ import {
   getProfileModel,
   isMockResponseModeEnabled,
   mergeOllamaModels,
+  OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
   validateOllamaBaseUrlSecurity,
   type AIProviderSettings,
   type ModelDescriptor,
+  type ModelProviderKind,
   type ModelProfileId,
   type RuntimeHealthState,
 } from "../services/modelProviders";
@@ -468,6 +470,11 @@ export function AIProviderSettingsModal({
     }
     if (serviceStatus.serviceConfig?.providers) {
       const serviceProviders = serviceStatus.serviceConfig.providers;
+      const mainProviderProfileId =
+        serviceProviders.mainProviderProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+      const mainProviderProfile = serviceProviders.profiles?.find(
+        (profile) => profile.id === mainProviderProfileId
+      );
       setDraft((current) => ({
         ...current,
         profiles: {
@@ -477,6 +484,17 @@ export function AIProviderSettingsModal({
             serviceProviders.mainModelId ??
             serviceProviders.defaultMainModel ??
             current.profiles.mainModelId,
+          mainProviderProfileId,
+          mainProviderDisplayName:
+            mainProviderProfile?.displayName ??
+            (mainProviderProfileId === OLLAMA_LOCAL_PROVIDER_PROFILE_ID
+              ? "Ollama Local"
+              : mainProviderProfileId),
+          mainProviderKind: mainProviderProfile
+            ? modelProviderKindForProfile(mainProviderProfile)
+            : mainProviderProfileId === OLLAMA_LOCAL_PROVIDER_PROFILE_ID
+              ? "ollama"
+              : "openai-compatible",
         },
       }));
     }
@@ -550,6 +568,14 @@ export function AIProviderSettingsModal({
 
   function updateMessageCollapseSettings(next: MessageCollapseSettings) {
     updateAppSettings({ ...appSettings, messageCollapse: next });
+  }
+
+  function modelProviderKindForProfile(
+    profile: ProviderProfileRuntimeConfig
+  ): ModelProviderKind {
+    if (profile.providerKind === "ollama") return "ollama";
+    if (profile.providerKind === "openai_compatible") return "openai-compatible";
+    return "openai-compatible";
   }
 
   function updateMemoryDraft(patch: Partial<MemorySettings>) {
@@ -694,6 +720,13 @@ export function AIProviderSettingsModal({
       profiles: {
         ...draft.profiles,
         [profile === "quick" ? "quickModelId" : "mainModelId"]: modelId,
+        ...(profile === "main"
+          ? {
+              mainProviderProfileId: OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
+              mainProviderDisplayName: "Ollama Local",
+              mainProviderKind: "ollama" as const,
+            }
+          : {}),
       },
     };
     update(next);
@@ -706,7 +739,7 @@ export function AIProviderSettingsModal({
         providers: {
           defaultQuickModel: next.profiles.quickModelId,
           defaultMainModel: next.profiles.mainModelId,
-          mainProviderProfileId: "ollama-local",
+          mainProviderProfileId: OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
           mainModelId: next.profiles.mainModelId,
         },
       });
@@ -752,8 +785,21 @@ export function AIProviderSettingsModal({
         profiles: {
           ...current.profiles,
           mainModelId: modelId,
+          mainProviderProfileId: profile.id,
+          mainProviderDisplayName: profile.displayName,
+          mainProviderKind: modelProviderKindForProfile(profile),
         },
       }));
+      onSave({
+        ...draft,
+        profiles: {
+          ...draft.profiles,
+          mainModelId: modelId,
+          mainProviderProfileId: profile.id,
+          mainProviderDisplayName: profile.displayName,
+          mainProviderKind: modelProviderKindForProfile(profile),
+        },
+      });
       setServiceStatus((current) => ({
         ...current,
         serviceConfig: result.config,
@@ -860,7 +906,7 @@ export function AIProviderSettingsModal({
             ? localMainModelId
             : serviceStatus.serviceConfig?.providers?.defaultMainModel,
           mainProviderProfileId: disablingSelectedMain
-            ? "ollama-local"
+            ? OLLAMA_LOCAL_PROVIDER_PROFILE_ID
             : serviceStatus.serviceConfig?.providers?.mainProviderProfileId,
           mainModelId: disablingSelectedMain
             ? localMainModelId
@@ -888,8 +934,21 @@ export function AIProviderSettingsModal({
           profiles: {
             ...current.profiles,
             mainModelId: localMainModelId,
+            mainProviderProfileId: OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
+            mainProviderDisplayName: "Ollama Local",
+            mainProviderKind: "ollama",
           },
         }));
+        onSave({
+          ...draft,
+          profiles: {
+            ...draft.profiles,
+            mainModelId: localMainModelId,
+            mainProviderProfileId: OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
+            mainProviderDisplayName: "Ollama Local",
+            mainProviderKind: "ollama",
+          },
+        });
       }
       setMessage(`${profile.displayName} ${enabled ? "enabled" : "disabled"}.`);
     } catch (error) {
@@ -1242,7 +1301,8 @@ export function AIProviderSettingsModal({
   const quickModel = getProfileModel(draft, "quick");
   const mainModel = getProfileModel(draft, "main");
   const currentMainProviderProfileId =
-    serviceStatus.serviceConfig?.providers?.mainProviderProfileId ?? "ollama-local";
+    serviceStatus.serviceConfig?.providers?.mainProviderProfileId ??
+    OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
   const currentMainModelId =
     serviceStatus.serviceConfig?.providers?.mainModelId ??
     serviceStatus.serviceConfig?.providers?.defaultMainModel ??
@@ -1254,7 +1314,11 @@ export function AIProviderSettingsModal({
   const demoResponsesForced = import.meta.env.VITE_ENABLE_MOCK_RESPONSES === "true";
   const demoResponsesEnabled = isMockResponseModeEnabled(draft);
   const quickModelOptions = demoResponsesEnabled ? [quickModel] : draft.ollama.models;
-  const mainModelOptions = demoResponsesEnabled ? [mainModel] : draft.ollama.models;
+  const mainModelOptions = demoResponsesEnabled
+    ? [mainModel]
+    : currentMainProviderProfileId === OLLAMA_LOCAL_PROVIDER_PROFILE_ID
+      ? draft.ollama.models
+      : [mainModel, ...draft.ollama.models];
 
   function renderSegment<TValue extends string>({
     label,

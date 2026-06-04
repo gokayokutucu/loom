@@ -295,10 +295,12 @@ import {
   computeModelPickerInstalledState,
   computeQuickAskBlockedReason,
   getProfileModel,
+  isMainModelSelectionLocal,
   getInstalledModels,
   isMockResponseModeEnabled,
   mergeOllamaModels,
   modelPickerStatusText,
+  OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
   ModelProviderError,
   readAIProviderSettings,
   resolveOllamaContextLength,
@@ -4562,6 +4564,7 @@ function App() {
       };
     }
     const mainModel = getProfileModel(providerSettings, "main");
+    const mainSelectionIsLocal = isMainModelSelectionLocal(providerSettings);
     const ollamaSecurity = validateOllamaBaseUrlSecurity(providerSettings.ollama.baseUrl);
     if (
       getConfiguredLoomEngineMode() === "rust-service" &&
@@ -4571,7 +4574,11 @@ function App() {
         active: composerRuntimeState.running,
         activeLoomId: composerRuntimeTargetKey,
         targetLoomId: draftKey,
-        providerKind: ollamaSecurity.allowed && ollamaSecurity.localOnly ? "ollama" : "unknown",
+        providerKind: mainSelectionIsLocal &&
+          ollamaSecurity.allowed &&
+          ollamaSecurity.localOnly
+          ? "ollama"
+          : "unknown",
         generationType: "main",
         modelId: mainModel.id,
       })
@@ -5063,6 +5070,7 @@ function App() {
 
   function modelReadinessMessage(profile: ModelProfileId) {
     if (mockResponsesEnabled) return null;
+    if (profile === "main" && !isMainModelSelectionLocal(providerSettings)) return null;
     const model = getProfileModel(providerSettings, profile);
     if (providerSettings.ollama.lastConnectionStatus !== "connected") {
       return "Ollama is not ready. Open AI Providers and test the runtime.";
@@ -8102,6 +8110,7 @@ function App() {
     const originalDraftKey = options.loomId ?? activeConversationId;
     const useRustServiceGeneration = getConfiguredLoomEngineMode() === "rust-service";
     const mainModelForQueue = getProfileModel(providerSettings, "main");
+    const mainSelectionForQueueIsLocal = isMainModelSelectionLocal(providerSettings);
     const ollamaSecurityForQueue = validateOllamaBaseUrlSecurity(providerSettings.ollama.baseUrl);
     const queueableLocalMainGeneration =
       useRustServiceGeneration &&
@@ -8111,7 +8120,9 @@ function App() {
         active: composerRuntimeState.running,
         activeLoomId: composerRuntimeTargetKey,
         targetLoomId: originalDraftKey,
-        providerKind: ollamaSecurityForQueue.allowed && ollamaSecurityForQueue.localOnly
+        providerKind: mainSelectionForQueueIsLocal &&
+          ollamaSecurityForQueue.allowed &&
+          ollamaSecurityForQueue.localOnly
           ? "ollama"
           : "unknown",
         generationType: "main",
@@ -18079,14 +18090,19 @@ function PromptComposer({
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const lastTextInsertionRequestRef = useRef(0);
   const mainModel = getProfileModel(providerSettings, "main");
+  const mainSelectionIsLocal = isMainModelSelectionLocal(providerSettings);
   const installedModels = getInstalledModels(providerSettings);
   const selectedModelMissing =
-    mainModel.provider !== "mock" && !installedModels.some((model) => model.id === mainModel.id);
+    mainSelectionIsLocal &&
+    mainModel.provider !== "mock" &&
+    !installedModels.some((model) => model.id === mainModel.id);
   const selectableModels =
     mainModel.provider === "mock"
       ? [mainModel]
-      : installedModels;
-  const selectedModelId = mainModel.id;
+      : mainSelectionIsLocal
+        ? installedModels
+        : [mainModel, ...installedModels];
+  const selectedModelKey = `${providerSettings.profiles.mainProviderProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID}:${mainModel.id}`;
   const providerStatus = providerSettings.ollama.lastConnectionStatus;
   const modelPickerInstalledState: ModelPickerInstalledState = computeModelPickerInstalledState({
     isMockProvider: mainModel.provider === "mock",
@@ -18098,6 +18114,8 @@ function PromptComposer({
   const runtimeWarning =
     getConfiguredLoomEngineMode() === "rust-service"
       ? null
+      : !mainSelectionIsLocal
+        ? null
       : !runtimeHealth.ollama_running
         ? "Ollama is not running. Test Runtime in AI Providers."
         : !runtimeHealth.models_available
@@ -18116,6 +18134,9 @@ function PromptComposer({
       profiles: {
         ...providerSettings.profiles,
         mainModelId: modelId,
+        mainProviderProfileId: OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
+        mainProviderDisplayName: "Ollama Local",
+        mainProviderKind: "ollama",
       },
     });
     // Persist to service config so that Settings / AI Providers reflects the
@@ -18123,7 +18144,13 @@ function PromptComposer({
     // updateServiceConfig throws in typescript-local/test mode.
     if (getConfiguredLoomEngineMode() === "rust-service") {
       void engineClient
-        .updateServiceConfig({ providers: { defaultMainModel: modelId } })
+        .updateServiceConfig({
+          providers: {
+            defaultMainModel: modelId,
+            mainProviderProfileId: OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
+            mainModelId: modelId,
+          },
+        })
         .catch(() => {
           // Service update failed — local state already updated; the selection
           // will hold until Settings overrides it from the service config.
@@ -21271,10 +21298,15 @@ function PromptComposer({
                 </div>
               )}
               {selectableModels.map((model) => {
-                const selected = model.id === selectedModelId;
+                const modelProviderProfileId =
+                  !mainSelectionIsLocal && model.id === mainModel.id && model.provider === mainModel.provider
+                    ? providerSettings.profiles.mainProviderProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID
+                    : OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+                const modelKey = `${modelProviderProfileId}:${model.id}`;
+                const selected = modelKey === selectedModelKey;
                 return (
                   <button
-                    key={model.id}
+                    key={modelKey}
                     type="button"
                     role="menuitemradio"
                     aria-checked={selected}
