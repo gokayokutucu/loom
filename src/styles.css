@@ -6017,6 +6017,12 @@ kbd {
   white-space: nowrap;
 }
 
+.provider-profile-warning {
+  color: var(--loom-text-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
 .provider-secret-controls {
   display: grid;
   gap: 8px;

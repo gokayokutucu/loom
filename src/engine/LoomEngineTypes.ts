@@ -320,8 +320,17 @@ export interface CapabilitySummary {
 export interface RuntimeModelProviderStatus {
   providerKind: string;
   providerProfileId: string;
+  displayName?: string;
+  transportKind?: string;
+  vendor?: string;
+  enabled?: boolean;
+  experimental?: boolean;
+  requiresSecret?: boolean;
+  secretStatus?: string;
+  runtimeStatus?: string;
   status: string;
   baseUrl?: string;
+  defaultModel?: string | null;
   version?: string;
   modelsEndpointReachable?: boolean;
   runtimeOwnedBy: string;

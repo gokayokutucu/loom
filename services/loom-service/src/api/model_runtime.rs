@@ -1,6 +1,12 @@
 use crate::{
     api::state::AppState,
-    providers::types::OllamaRuntimeError,
+    providers::{
+        config::{
+            validate_provider_profiles, ProviderKind, ProviderProfileConfig, ProviderTransportKind,
+        },
+        secret_store::{default_provider_secret_ref, SecretStore},
+        types::OllamaRuntimeError,
+    },
     storage::repositories::model_runtime::{
         timestamp, NewRuntimeModelDownloadJob, RuntimeModelDownloadJobRecord,
         RuntimeModelDownloadJobUpdate, RuntimeModelRepository, UpsertRuntimeModelAsset,
@@ -31,8 +37,17 @@ const CURATED_OLLAMA_MODELS: &[(&str, &str, bool)] = &[
 pub struct RuntimeProviderStatus {
     pub provider_kind: String,
     pub provider_profile_id: String,
+    pub display_name: String,
+    pub transport_kind: String,
+    pub vendor: String,
+    pub enabled: bool,
+    pub experimental: bool,
+    pub requires_secret: bool,
+    pub secret_status: String,
+    pub runtime_status: String,
     pub status: String,
     pub base_url: String,
+    pub default_model: Option<String>,
     pub version: Option<String>,
     pub models_endpoint_reachable: bool,
     pub runtime_owned_by: String,
@@ -98,7 +113,30 @@ pub struct RuntimeApiError {
 pub async fn providers(
     State(state): State<AppState>,
 ) -> Result<Json<Vec<RuntimeProviderStatus>>, (StatusCode, Json<RuntimeApiError>)> {
-    Ok(Json(vec![ollama_provider_status(&state).await]))
+    let config = state.config.current();
+    let mut statuses = Vec::new();
+    let mut saw_ollama = false;
+    for profile in &config.providers.profiles {
+        if profile.provider_kind == ProviderKind::Ollama && profile.id == "ollama-local" {
+            saw_ollama = true;
+            statuses.push(ollama_provider_status(&state, profile).await);
+        } else {
+            statuses.push(provider_profile_status(profile, &state.secret_store));
+        }
+    }
+    if !saw_ollama {
+        statuses.push(
+            ollama_provider_status(
+                &state,
+                &ProviderProfileConfig::default_ollama(
+                    config.providers.default_main_model,
+                    config.ollama.base_url,
+                ),
+            )
+            .await,
+        );
+    }
+    Ok(Json(statuses))
 }
 
 pub async fn models(
@@ -108,7 +146,20 @@ pub async fn models(
     sync_ollama_assets(&state, &repo).await?;
     let assets = repo.list_assets().await.map_err(storage_error)?;
     let jobs = repo.list_jobs().await.map_err(storage_error)?;
-    let provider = ollama_provider_status(&state).await;
+    let config = state.config.current();
+    let ollama_profile = config
+        .providers
+        .profiles
+        .iter()
+        .find(|profile| profile.provider_kind == ProviderKind::Ollama)
+        .cloned()
+        .unwrap_or_else(|| {
+            ProviderProfileConfig::default_ollama(
+                config.providers.default_main_model,
+                config.ollama.base_url,
+            )
+        });
+    let provider = ollama_provider_status(&state, &ollama_profile).await;
     Ok(Json(RuntimeModelsResponse {
         provider,
         models: assets.into_iter().map(asset_to_item).collect(),
@@ -518,21 +569,122 @@ async fn sync_ollama_assets(
     Ok(())
 }
 
-async fn ollama_provider_status(state: &AppState) -> RuntimeProviderStatus {
+async fn ollama_provider_status(
+    state: &AppState,
+    profile: &ProviderProfileConfig,
+) -> RuntimeProviderStatus {
     let health = state.ollama.health().await;
     RuntimeProviderStatus {
         provider_kind: "ollama".to_string(),
-        provider_profile_id: "ollama-local".to_string(),
-        status: health.status,
-        base_url: health.base_url,
+        provider_profile_id: profile.id.clone(),
+        display_name: profile.display_name.clone(),
+        transport_kind: profile.transport_kind.as_config_str().to_string(),
+        vendor: profile.vendor.as_config_str().to_string(),
+        enabled: profile.enabled,
+        experimental: profile.experimental,
+        requires_secret: profile.requires_secret,
+        secret_status: "not_required".to_string(),
+        runtime_status: if profile.enabled {
+            health.status.clone()
+        } else {
+            "disabled".to_string()
+        },
+        status: if profile.enabled {
+            health.status.clone()
+        } else {
+            "disabled".to_string()
+        },
+        base_url: profile
+            .base_url
+            .clone()
+            .unwrap_or_else(|| health.base_url.clone()),
+        default_model: profile.default_model.clone(),
         version: health.version,
-        models_endpoint_reachable: health.models_endpoint_reachable,
+        models_endpoint_reachable: profile.enabled && health.models_endpoint_reachable,
         runtime_owned_by: "external_ollama".to_string(),
         model_store_path: "~/.ollama/models".to_string(),
         supports_downloads: true,
         supports_start: false,
         supports_stop: false,
         warnings: health.security.warnings,
+    }
+}
+
+fn provider_profile_status(
+    profile: &ProviderProfileConfig,
+    secret_store: &impl SecretStore,
+) -> RuntimeProviderStatus {
+    let mut warnings = Vec::new();
+    let mut status = if profile.enabled { "ready" } else { "disabled" }.to_string();
+    let mut secret_status = if profile.requires_secret {
+        "missing".to_string()
+    } else {
+        "not_required".to_string()
+    };
+
+    if validate_provider_profiles(std::slice::from_ref(profile)).is_err() {
+        status = if profile.transport_kind == ProviderTransportKind::RigOpenAiCompatible
+            && !cfg!(feature = "experimental-rig")
+        {
+            "feature_gated".to_string()
+        } else {
+            "invalid_config".to_string()
+        };
+    } else if profile.transport_kind == ProviderTransportKind::RigOpenAiCompatible
+        && !cfg!(feature = "experimental-rig")
+    {
+        status = "feature_gated".to_string();
+    } else if !profile.enabled {
+        status = "disabled".to_string();
+    } else if profile.requires_secret {
+        let secret_ref = profile
+            .secret_ref
+            .clone()
+            .unwrap_or_else(|| default_provider_secret_ref(&profile.id));
+        match secret_store.status(&secret_ref) {
+            Ok(secret) if secret.present => {
+                secret_status = "saved".to_string();
+            }
+            Ok(_) => {
+                secret_status = "missing".to_string();
+                status = "missing_secret".to_string();
+            }
+            Err(_) => {
+                secret_status = "unavailable".to_string();
+                status = "invalid_config".to_string();
+            }
+        }
+    }
+
+    if profile.provider_kind == ProviderKind::OpenAiCompatible && status == "ready" {
+        warnings.push("remote_endpoint_not_probed_without_explicit_discovery".to_string());
+    }
+    if profile.provider_kind == ProviderKind::CustomHttpLater {
+        status = "feature_gated".to_string();
+    }
+
+    RuntimeProviderStatus {
+        provider_kind: profile.provider_kind.as_config_str().to_string(),
+        provider_profile_id: profile.id.clone(),
+        display_name: profile.display_name.clone(),
+        transport_kind: profile.transport_kind.as_config_str().to_string(),
+        vendor: profile.vendor.as_config_str().to_string(),
+        enabled: profile.enabled,
+        experimental: profile.experimental,
+        requires_secret: profile.requires_secret,
+        secret_status,
+        runtime_status: status.clone(),
+        status,
+        base_url: profile.base_url.clone().unwrap_or_default(),
+        default_model: profile.default_model.clone(),
+        version: None,
+        models_endpoint_reachable: false,
+        runtime_owned_by: "external_provider".to_string(),
+        model_store_path: String::new(),
+        supports_downloads: false,
+        supports_start: false,
+        supports_stop: false,
+        warnings,
     }
 }
 
@@ -650,7 +802,13 @@ fn not_found(code: &str, message: &str) -> (StatusCode, Json<RuntimeApiError>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::storage::repositories::model_runtime::runtime_asset_id;
+    use crate::{
+        providers::{
+            config::{ProviderSecurityPolicyConfig, ProviderVendor},
+            secret_store::ProviderSecretStore,
+        },
+        storage::repositories::model_runtime::runtime_asset_id,
+    };
 
     #[test]
     fn model_download_policy_accepts_only_curated_models() {
@@ -666,6 +824,89 @@ mod tests {
             runtime_asset_id("ollama", Some("ollama-local"), "qwen3.5:9b"),
             "ollama:ollama-local:qwen3.5:9b"
         );
+    }
+
+    #[test]
+    fn disabled_remote_profile_reports_disabled_without_secret_probe() {
+        let mut profile = ProviderProfileConfig::nvidia_openai_compatible_example();
+        profile.enabled = false;
+        let status = provider_profile_status(&profile, &ProviderSecretStore::default());
+
+        assert_eq!(status.status, "disabled");
+        assert_eq!(status.runtime_status, "disabled");
+        assert_eq!(status.provider_profile_id, "nvidia");
+        assert_eq!(status.secret_status, "missing");
+        assert!(!status.models_endpoint_reachable);
+    }
+
+    #[test]
+    fn enabled_remote_profile_with_missing_secret_reports_missing_secret_safely() {
+        let mut profile = ProviderProfileConfig::nvidia_openai_compatible_example();
+        profile.enabled = true;
+        profile.secret_ref = Some("provider:nvidia:apiKey".to_string());
+        let status = provider_profile_status(&profile, &ProviderSecretStore::default());
+        let serialized = serde_json::to_string(&status).expect("runtime provider status json");
+
+        assert_eq!(status.status, "missing_secret");
+        assert_eq!(status.runtime_status, "missing_secret");
+        assert_eq!(status.secret_status, "missing");
+        assert!(!serialized.contains("nvapi-raw-secret"));
+        assert!(!serialized.contains("Authorization"));
+    }
+
+    #[test]
+    fn enabled_remote_profile_with_saved_secret_reports_configured_without_leaking_secret() {
+        let mut profile = ProviderProfileConfig::nvidia_openai_compatible_example();
+        profile.enabled = true;
+        profile.secret_ref = Some("provider:nvidia:apiKey".to_string());
+        let store = ProviderSecretStore::default();
+        store
+            .set_secret("provider:nvidia:apiKey", "nvapi-raw-secret")
+            .expect("set secret");
+
+        let status = provider_profile_status(&profile, &store);
+        let serialized = serde_json::to_string(&status).expect("runtime provider status json");
+
+        assert_eq!(status.status, "ready");
+        assert_eq!(status.secret_status, "saved");
+        assert!(status
+            .warnings
+            .contains(&"remote_endpoint_not_probed_without_explicit_discovery".to_string()));
+        assert!(!serialized.contains("nvapi-raw-secret"));
+    }
+
+    #[test]
+    fn invalid_profile_reports_invalid_config_safely() {
+        let mut profile = ProviderProfileConfig::nvidia_openai_compatible_example();
+        profile.enabled = true;
+        profile.base_url = Some("https://0.0.0.0/v1".to_string());
+        profile.secret_ref = Some("provider:nvidia:apiKey".to_string());
+        let status = provider_profile_status(&profile, &ProviderSecretStore::default());
+
+        assert_eq!(status.status, "invalid_config");
+        assert_eq!(status.secret_status, "missing");
+    }
+
+    #[test]
+    fn rig_transport_reports_feature_gated_when_feature_is_disabled() {
+        let mut profile = ProviderProfileConfig::nvidia_openai_compatible_example();
+        profile.enabled = true;
+        profile.transport_kind = ProviderTransportKind::RigOpenAiCompatible;
+        profile.vendor = ProviderVendor::Nvidia;
+        profile.security = ProviderSecurityPolicyConfig {
+            local_only_required: false,
+            allow_remote_endpoint: true,
+            allow_insecure_http_remote: false,
+            allow_unsafe_model_management: false,
+        };
+        profile.secret_ref = Some("provider:nvidia:apiKey".to_string());
+        let status = provider_profile_status(&profile, &ProviderSecretStore::default());
+
+        if cfg!(feature = "experimental-rig") {
+            assert_ne!(status.status, "feature_gated");
+        } else {
+            assert_eq!(status.status, "feature_gated");
+        }
     }
 
     // ── sync_ollama_assets logic unit-tests ────────────────────────────────────

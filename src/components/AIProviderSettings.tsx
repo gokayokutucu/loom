@@ -62,6 +62,7 @@ import type {
   ProviderProfileRuntimeConfig,
   ProviderSecretStatus,
   RuntimeModelDownloadJob,
+  RuntimeModelProviderStatus,
   RuntimeModelsResult,
   ServiceConfigStatus,
   ServiceHealthStatus,
@@ -300,6 +301,9 @@ export function AIProviderSettingsModal({
   const [ocrDraft, setOcrDraft] = useState<OcrRuntimeConfig>(defaultOcrConfigDraft);
   const [memoryDraft, setMemoryDraft] = useState<MemorySettings>(appSettings.memory);
   const [runtimeModels, setRuntimeModels] = useState<RuntimeModelsResult | null>(null);
+  const [runtimeProviderStatuses, setRuntimeProviderStatuses] = useState<
+    Record<string, RuntimeModelProviderStatus>
+  >({});
   const [downloadJobs, setDownloadJobs] = useState<Record<string, RuntimeModelDownloadJob>>({});
   const [speechSetup, setSpeechSetup] = useState<SpeechSetupStatus | null>(null);
   const [speechSetupWorking, setSpeechSetupWorking] = useState<string | null>(null);
@@ -330,7 +334,15 @@ export function AIProviderSettingsModal({
 
   async function refreshServiceStatus() {
     setServiceStatus((current) => ({ ...current, loading: true }));
-    const [health, config, capability, speechHealthResult, ocrHealthResult, serviceConfigResult] = await Promise.all([
+    const [
+      health,
+      config,
+      capability,
+      speechHealthResult,
+      ocrHealthResult,
+      serviceConfigResult,
+      runtimeProvidersResult,
+    ] = await Promise.all([
       engineClient.getServiceHealth(),
       engineClient.getServiceConfigStatus(),
       engineClient.getCapabilitySummary(),
@@ -355,7 +367,24 @@ export function AIProviderSettingsModal({
           configError:
             error instanceof Error ? error.message : "loom-service config is unavailable.",
         })),
+      engineClient
+        .getRuntimeProviders()
+        .then((runtimeProviders) => ({ runtimeProviders }))
+        .catch((error: unknown) => ({
+          runtimeProvidersError:
+            error instanceof Error ? error.message : "provider runtime status is unavailable.",
+        })),
     ]);
+    if ("runtimeProviders" in runtimeProvidersResult) {
+      setRuntimeProviderStatuses(
+        Object.fromEntries(
+          runtimeProvidersResult.runtimeProviders.map((provider) => [
+            provider.providerProfileId,
+            provider,
+          ])
+        )
+      );
+    }
     setServiceStatus({
       health,
       config,
@@ -1452,6 +1481,7 @@ export function AIProviderSettingsModal({
             <div className="provider-profile-list">
               {providerProfiles.map((profile) => {
                 const secretStatus = providerSecretStatuses[profile.id];
+                const runtimeProviderStatus = runtimeProviderStatuses[profile.id];
                 const secretLabel = providerSecretStatusLabel(profile, secretStatus);
                 const remote = isRemoteProviderProfile(profile);
                 const gate = canEnableProviderProfile(
@@ -1513,7 +1543,17 @@ export function AIProviderSettingsModal({
                         <dt>Secret</dt>
                         <dd>{secretLabel}</dd>
                       </div>
+                      <div>
+                        <dt>Runtime</dt>
+                        <dd>{runtimeProviderStatus?.runtimeStatus ?? runtimeProviderStatus?.status ?? "Unknown"}</dd>
+                      </div>
                     </dl>
+
+                    {runtimeProviderStatus?.warnings && runtimeProviderStatus.warnings.length > 0 && (
+                      <small className="provider-profile-warning">
+                        {runtimeProviderStatus.warnings[0]}
+                      </small>
+                    )}
 
                     {profile.requiresSecret && (
                       <div className="provider-secret-controls">

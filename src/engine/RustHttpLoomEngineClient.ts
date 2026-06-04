@@ -1368,8 +1368,17 @@ function validateRuntimeModelProviderStatus(value: unknown): RuntimeModelProvide
   return {
     providerKind: stringValue(value, "providerKind") ?? "unknown",
     providerProfileId: stringValue(value, "providerProfileId") ?? "unknown",
+    displayName: stringValue(value, "displayName"),
+    transportKind: stringValue(value, "transportKind"),
+    vendor: stringValue(value, "vendor"),
+    enabled: booleanValue(value, "enabled"),
+    experimental: booleanValue(value, "experimental"),
+    requiresSecret: booleanValue(value, "requiresSecret"),
+    secretStatus: stringValue(value, "secretStatus"),
+    runtimeStatus: stringValue(value, "runtimeStatus"),
     status: stringValue(value, "status") ?? "unknown",
     baseUrl: stringValue(value, "baseUrl"),
+    defaultModel: nullableStringValue(value, "defaultModel"),
     version: stringValue(value, "version"),
     modelsEndpointReachable: booleanValue(value, "modelsEndpointReachable"),
     runtimeOwnedBy: stringValue(value, "runtimeOwnedBy") ?? "unknown",
@@ -2952,6 +2961,16 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
       }
     );
     return validateProviderSecretStatus(response);
+  }
+
+  async getRuntimeProviders(): Promise<RuntimeModelProviderStatus[]> {
+    const response = await this.requestJson<unknown>("/runtime/providers");
+    if (!Array.isArray(response)) {
+      throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid runtime providers.", {
+        endpoint: "/runtime/providers",
+      });
+    }
+    return response.map(validateRuntimeModelProviderStatus);
   }
 
   async getRuntimeModels(): Promise<RuntimeModelsResult> {

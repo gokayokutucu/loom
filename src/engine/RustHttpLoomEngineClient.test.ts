@@ -266,4 +266,47 @@ describe("RustHttpLoomEngineClient provider profile and secret mapping", () => {
       ["http://loom-service.test/providers/secrets/nvidia", "DELETE"],
     ]);
   });
+
+  it("maps safe per-profile runtime provider statuses", async () => {
+    const client = new RustHttpLoomEngineClient({
+      serviceUrl: "http://loom-service.test",
+      fetch: async () =>
+        new Response(
+          JSON.stringify([
+            {
+              providerKind: "openai_compatible",
+              providerProfileId: "nvidia",
+              displayName: "NVIDIA NIM",
+              transportKind: "native_openai_compatible",
+              vendor: "nvidia",
+              enabled: true,
+              experimental: true,
+              requiresSecret: true,
+              secretStatus: "missing",
+              runtimeStatus: "missing_secret",
+              status: "missing_secret",
+              baseUrl: "https://integrate.api.nvidia.com/v1",
+              defaultModel: "meta/llama-3.1-70b-instruct",
+              modelsEndpointReachable: false,
+              runtimeOwnedBy: "external_provider",
+              supportsDownloads: false,
+              supportsStart: false,
+              supportsStop: false,
+              warnings: [],
+            },
+          ]),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        ),
+    });
+
+    await expect(client.getRuntimeProviders()).resolves.toEqual([
+      expect.objectContaining({
+        providerKind: "openai_compatible",
+        providerProfileId: "nvidia",
+        runtimeStatus: "missing_secret",
+        secretStatus: "missing",
+        requiresSecret: true,
+      }),
+    ]);
+  });
 });
