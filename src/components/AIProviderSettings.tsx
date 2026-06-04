@@ -324,8 +324,168 @@ export function AIProviderSettingsModal({
     transcript?: string;
   }>({ status: "idle", message: "Record a short sample after setup is ready." });
 
+  const [localDiscoveryState, setLocalDiscoveryState] = useState<Record<string, {
+    status: "idle" | "discovering" | "success" | "disabled" | "missing_secret" | "unauthorized" | "rate_limited" | "unavailable" | "invalid_response" | "invalid_config" | "feature_gated" | "provider_error" | "error";
+    models: string[];
+    message?: string;
+  }>>({});
+
+  function getDiscoveredModelsForProfile(
+    profileId: string,
+    capabilityModels?: Array<{ source?: string; modelId?: string; modelName: string }>
+  ): string[] {
+    if (!capabilityModels) return [];
+    const list: string[] = [];
+    for (const model of capabilityModels) {
+      if (model.source === "provider_discovery" && model.modelId?.startsWith("provider_discovery:")) {
+        const parts = model.modelId.split(":");
+        if (parts[2] === profileId && parts[3]) {
+          const modelName = parts.slice(3).join(":");
+          list.push(modelName);
+        }
+      }
+    }
+    return list;
+  }
+
+  async function discoverModelsForProfile(profile: ProviderProfileRuntimeConfig) {
+    if (!profile.enabled) {
+      setLocalDiscoveryState((current) => ({
+        ...current,
+        [profile.id]: { status: "disabled", models: [] },
+      }));
+      return;
+    }
+    const secretStatus = providerSecretStatuses[profile.id];
+    if (profile.requiresSecret && !secretStatus?.present) {
+      setLocalDiscoveryState((current) => ({
+        ...current,
+        [profile.id]: { status: "missing_secret", models: [] },
+      }));
+      return;
+    }
+
+    setLocalDiscoveryState((current) => ({
+      ...current,
+      [profile.id]: { status: "discovering", models: [] },
+    }));
+
+    try {
+      const response = await engineClient.discoverModels({
+        providerProfileId: profile.id,
+        persist: true,
+      });
+
+      const profileError = response.errors.find((err) => err.providerProfileId === profile.id);
+      if (profileError) {
+        const validKinds = [
+          "disabled",
+          "missing_secret",
+          "unauthorized",
+          "rate_limited",
+          "unavailable",
+          "invalid_response",
+          "invalid_config",
+          "feature_gated",
+          "provider_error",
+        ];
+        const status = validKinds.includes(profileError.kind)
+          ? (profileError.kind as any)
+          : "provider_error";
+        setLocalDiscoveryState((current) => ({
+          ...current,
+          [profile.id]: {
+            status,
+            models: [],
+            message: profileError.message,
+          },
+        }));
+        return;
+      }
+
+      const models = response.discovered
+        .filter((item) => item.providerProfileId === profile.id)
+        .map((item) => item.modelName);
+
+      setLocalDiscoveryState((current) => ({
+        ...current,
+        [profile.id]: {
+          status: "success",
+          models,
+        },
+      }));
+
+      await refreshServiceStatus();
+    } catch (error) {
+      setLocalDiscoveryState((current) => ({
+        ...current,
+        [profile.id]: {
+          status: "error",
+          models: [],
+          message: error instanceof Error ? error.message : "Discovery request failed.",
+        },
+      }));
+    }
+  }
+
+  async function selectDiscoveredModel(profile: ProviderProfileRuntimeConfig, modelName: string) {
+    const secretStatus = providerSecretStatuses[profile.id];
+    const runtimeProviderStatus = runtimeProviderStatuses[profile.id];
+    const gate = canSelectProviderProfileForMain(
+      profile,
+      secretStatus,
+      runtimeProviderStatus,
+      providerPrivacyAcknowledged[profile.id] ?? false
+    );
+    if (!gate.allowed) {
+      setMessage(gate.reason ?? "This provider cannot be used for Main yet.");
+      return;
+    }
+    setProviderProfileWorking(`${profile.id}:main`);
+    setMessage(null);
+    try {
+      const result = await engineClient.updateServiceConfig({
+        providers: {
+          defaultQuickModel:
+            serviceStatus.serviceConfig?.providers?.defaultQuickModel ??
+            draft.profiles.quickModelId,
+          defaultMainModel: modelName,
+          mainProviderProfileId: profile.id,
+          mainModelId: modelName,
+        },
+      });
+      setServiceStatus((current) => ({ ...current, serviceConfig: result.config }));
+      setDraft((current) => ({
+        ...current,
+        profiles: {
+          ...current.profiles,
+          mainModelId: modelName,
+          mainProviderProfileId: profile.id,
+          mainProviderDisplayName: profile.displayName,
+          mainProviderKind: modelProviderKindForProfile(profile),
+        },
+      }));
+      onSave({
+        ...draft,
+        profiles: {
+          ...draft.profiles,
+          mainModelId: modelName,
+          mainProviderProfileId: profile.id,
+          mainProviderDisplayName: profile.displayName,
+          mainProviderKind: modelProviderKindForProfile(profile),
+        },
+      });
+      setMessage(`Selected model ${modelName} for ${profile.displayName}.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Model selection could not be saved.");
+    } finally {
+      setProviderProfileWorking(null);
+    }
+  }
+
   const desktopRuntimeInfo = getElectronRuntimeInfo();
   const desktopRuntimeBridge = getElectronRuntimeBridge();
+
 
   useEffect(() => {
     setDraft(settings);
@@ -715,18 +875,45 @@ export function AIProviderSettingsModal({
   }
 
   function setProfile(profile: ModelProfileId, modelId: string) {
+    if (profile === "quick") {
+      const next = {
+        ...draft,
+        profiles: {
+          ...draft.profiles,
+          quickModelId: modelId,
+        },
+      };
+      update(next);
+      void persistModelProfiles(next);
+      return;
+    }
+
+    const isOllamaModel = draft.ollama.models.some((m) => m.id === modelId);
+    const newProviderProfileId = isOllamaModel
+      ? OLLAMA_LOCAL_PROVIDER_PROFILE_ID
+      : (currentMainProviderProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID);
+
+    const isOllama = newProviderProfileId === OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+    const activeProfile = isOllama
+      ? null
+      : serviceStatus.serviceConfig?.providers?.profiles?.find(
+          (p) => p.id === newProviderProfileId
+        );
+
     const next = {
       ...draft,
       profiles: {
         ...draft.profiles,
-        [profile === "quick" ? "quickModelId" : "mainModelId"]: modelId,
-        ...(profile === "main"
-          ? {
-              mainProviderProfileId: OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
-              mainProviderDisplayName: "Ollama Local",
-              mainProviderKind: "ollama" as const,
-            }
-          : {}),
+        mainModelId: modelId,
+        mainProviderProfileId: newProviderProfileId,
+        mainProviderDisplayName: isOllama
+          ? "Ollama Local"
+          : activeProfile?.displayName ?? newProviderProfileId,
+        mainProviderKind: isOllama
+          ? ("ollama" as const)
+          : activeProfile
+            ? modelProviderKindForProfile(activeProfile)
+            : ("openai-compatible" as const),
       },
     };
     update(next);
@@ -739,7 +926,7 @@ export function AIProviderSettingsModal({
         providers: {
           defaultQuickModel: next.profiles.quickModelId,
           defaultMainModel: next.profiles.mainModelId,
-          mainProviderProfileId: OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
+          mainProviderProfileId: next.profiles.mainProviderProfileId,
           mainModelId: next.profiles.mainModelId,
         },
       });
@@ -1314,11 +1501,54 @@ export function AIProviderSettingsModal({
   const demoResponsesForced = import.meta.env.VITE_ENABLE_MOCK_RESPONSES === "true";
   const demoResponsesEnabled = isMockResponseModeEnabled(draft);
   const quickModelOptions = demoResponsesEnabled ? [quickModel] : draft.ollama.models;
-  const mainModelOptions = demoResponsesEnabled
-    ? [mainModel]
-    : currentMainProviderProfileId === OLLAMA_LOCAL_PROVIDER_PROFILE_ID
-      ? draft.ollama.models
-      : [mainModel, ...draft.ollama.models];
+  const activeRemoteDiscoveredModels = useMemo(() => {
+    if (currentMainProviderProfileId === OLLAMA_LOCAL_PROVIDER_PROFILE_ID) return [];
+    return getDiscoveredModelsForProfile(
+      currentMainProviderProfileId,
+      serviceStatus.capability?.models
+    );
+  }, [currentMainProviderProfileId, serviceStatus.capability?.models]);
+
+  const mainModelOptions = useMemo(() => {
+    if (demoResponsesEnabled) return [mainModel];
+    if (currentMainProviderProfileId === OLLAMA_LOCAL_PROVIDER_PROFILE_ID) {
+      return draft.ollama.models;
+    }
+
+    const providerName = draft.profiles.mainProviderDisplayName ?? "Remote";
+    const remoteOptions = [
+      {
+        id: mainModel.id,
+        name: mainModel.name.includes("·") ? mainModel.name : `${providerName} · ${mainModel.name}`,
+        provider: currentMainProviderProfileId,
+        installed: true,
+      },
+      ...activeRemoteDiscoveredModels
+        .filter((modelName) => modelName !== mainModel.id)
+        .map((modelName) => ({
+          id: modelName,
+          name: `${providerName} · ${modelName}`,
+          provider: currentMainProviderProfileId,
+          installed: true,
+        })),
+    ];
+
+    const ollamaOptions = draft.ollama.models.map((model) => ({
+      id: model.id,
+      name: `Ollama · ${model.name}`,
+      provider: OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
+      installed: model.installed,
+    }));
+
+    return [...remoteOptions, ...ollamaOptions];
+  }, [
+    demoResponsesEnabled,
+    currentMainProviderProfileId,
+    mainModel,
+    activeRemoteDiscoveredModels,
+    draft.ollama.models,
+    draft.profiles.mainProviderDisplayName,
+  ]);
 
   function renderSegment<TValue extends string>({
     label,
@@ -1783,6 +2013,170 @@ export function AIProviderSettingsModal({
                           using {profile.displayName}.
                         </span>
                       </label>
+                    )}
+
+                    {remote && (
+                      <div className="provider-discovery-section">
+                        <h5>Model Discovery</h5>
+                        <div className="discovery-controls">
+                          <button
+                            type="button"
+                            onClick={() => void discoverModelsForProfile(profile)}
+                            disabled={
+                              !profile.enabled ||
+                              (profile.requiresSecret && !secretStatus?.present) ||
+                              localDiscoveryState[profile.id]?.status === "discovering"
+                            }
+                          >
+                            <RefreshCw
+                              size={12}
+                              className={
+                                localDiscoveryState[profile.id]?.status === "discovering"
+                                  ? "spin"
+                                  : ""
+                              }
+                            />
+                            {getDiscoveredModelsForProfile(
+                              profile.id,
+                              serviceStatus.capability?.models
+                            ).length > 0 || (localDiscoveryState[profile.id]?.models?.length ?? 0) > 0
+                              ? "Refresh models"
+                              : "Discover models"}
+                          </button>
+                          {(() => {
+                            const status =
+                              localDiscoveryState[profile.id]?.status ||
+                              (!profile.enabled
+                                ? "disabled"
+                                : profile.requiresSecret && !secretStatus?.present
+                                  ? "missing_secret"
+                                  : "idle");
+                            const msg = localDiscoveryState[profile.id]?.message;
+                            switch (status) {
+                              case "discovering":
+                                return (
+                                  <span className="discovery-status-label discovering">
+                                    Discovering...
+                                  </span>
+                                );
+                              case "success":
+                                return (
+                                  <span className="discovery-status-label success">
+                                    Success
+                                  </span>
+                                );
+                              case "disabled":
+                                return (
+                                  <span className="discovery-status-label disabled">
+                                    Disabled
+                                  </span>
+                                );
+                              case "missing_secret":
+                                return (
+                                  <span className="discovery-status-label missing_secret">
+                                    Key required
+                                  </span>
+                                );
+                              case "unauthorized":
+                                return (
+                                  <span className="discovery-status-label unauthorized">
+                                    Unauthorized (401)
+                                  </span>
+                                );
+                              case "rate_limited":
+                                return (
+                                  <span className="discovery-status-label rate_limited">
+                                    Rate limited (429)
+                                  </span>
+                                );
+                              case "unavailable":
+                                return (
+                                  <span className="discovery-status-label unavailable">
+                                    Unavailable
+                                  </span>
+                                );
+                              case "invalid_response":
+                                return (
+                                  <span className="discovery-status-label invalid_response">
+                                    Invalid response
+                                  </span>
+                                );
+                              case "invalid_config":
+                                return (
+                                  <span className="discovery-status-label invalid_config">
+                                    Invalid config
+                                  </span>
+                                );
+                              case "feature_gated":
+                                return (
+                                  <span className="discovery-status-label feature_gated">
+                                    Feature gated
+                                  </span>
+                                );
+                              case "provider_error":
+                                return (
+                                  <span
+                                    className="discovery-status-label provider_error"
+                                    title={msg}
+                                  >
+                                    Provider error
+                                  </span>
+                                );
+                              case "error":
+                                return (
+                                  <span className="discovery-status-label error" title={msg}>
+                                    Request failed
+                                  </span>
+                                );
+                              default:
+                                return (
+                                  <span className="discovery-status-label idle">Idle</span>
+                                );
+                            }
+                          })()}
+                        </div>
+                        {localDiscoveryState[profile.id]?.message && (
+                          <p className="discovery-error-message">
+                            {localDiscoveryState[profile.id]?.message}
+                          </p>
+                        )}
+                        {(() => {
+                          const capModels = getDiscoveredModelsForProfile(
+                            profile.id,
+                            serviceStatus.capability?.models
+                          );
+                          const locModels = localDiscoveryState[profile.id]?.models ?? [];
+                          const modelsList = Array.from(new Set([...capModels, ...locModels]));
+                          if (modelsList.length === 0) return null;
+                          return (
+                            <div className="discovered-models-list">
+                              <h6>Available Models</h6>
+                              <ul>
+                                {modelsList.map((modelName) => {
+                                  const isSelected =
+                                    selectedForMain && currentMainModelId === modelName;
+                                  return (
+                                    <li key={modelName} className={isSelected ? "selected" : ""}>
+                                      <span>
+                                        {profile.displayName} · {modelName}
+                                      </span>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          void selectDiscoveredModel(profile, modelName)
+                                        }
+                                        disabled={isSelected}
+                                      >
+                                        {isSelected ? "Selected" : "Select"}
+                                      </button>
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            </div>
+                          );
+                        })()}
+                      </div>
                     )}
 
                     <div className="provider-profile-actions">

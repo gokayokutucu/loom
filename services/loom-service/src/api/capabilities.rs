@@ -10,7 +10,11 @@ use crate::{
         CompatibilityEstimateInput, ModelCatalogEntry, ProviderModelDiscoveryRequest,
         ProviderModelDiscoveryResponse, ResolveExecutionStrategyInput, SystemResourceSnapshot,
     },
-    providers::{openai_compatible::OpenAiCompatibleRuntime, types::ProviderErrorKind},
+    providers::{
+        openai_compatible::{OpenAiCompatibleRuntime, OpenAiCompatibleSecret},
+        secret_store::{default_provider_secret_ref, SecretStore},
+        types::ProviderErrorKind,
+    },
 };
 use axum::{extract::State, http::StatusCode, Json};
 use serde::{Deserialize, Serialize};
@@ -54,26 +58,40 @@ pub async fn discover_models(
     let config = state.config.current();
     let mut discovered = Vec::new();
     let mut errors = Vec::new();
-    let profiles = config
-        .providers
-        .profiles
-        .into_iter()
-        .filter(|profile| profile.enabled)
-        .filter(|profile| {
-            input
-                .provider_profile_id
-                .as_deref()
-                .map_or(true, |id| profile.id == id)
-        })
-        .filter(|profile| {
-            input
-                .provider_kind
-                .as_ref()
-                .map_or(true, |kind| &profile.provider_kind == kind)
-        })
-        .collect::<Vec<_>>();
+    let profiles = if let Some(ref requested_id) = input.provider_profile_id {
+        config
+            .providers
+            .profiles
+            .into_iter()
+            .filter(|profile| &profile.id == requested_id)
+            .filter(|profile| {
+                input
+                    .provider_kind
+                    .as_ref()
+                    .map_or(true, |kind| &profile.provider_kind == kind)
+            })
+            .collect::<Vec<_>>()
+    } else {
+        config
+            .providers
+            .profiles
+            .into_iter()
+            .filter(|profile| profile.enabled)
+            .filter(|profile| {
+                input
+                    .provider_kind
+                    .as_ref()
+                    .map_or(true, |kind| &profile.provider_kind == kind)
+            })
+            .collect::<Vec<_>>()
+    };
 
     for profile in profiles {
+        if !profile.enabled {
+            errors.push(discovery_error(&profile, ProviderErrorKind::Disabled));
+            continue;
+        }
+
         match profile.provider_kind {
             crate::providers::config::ProviderKind::Ollama => match state.ollama.models().await {
                 Ok(response) => {
@@ -91,11 +109,27 @@ pub async fn discover_models(
                 }
             },
             crate::providers::config::ProviderKind::OpenAiCompatible => {
+                let mut secret = None;
                 if profile.requires_secret {
-                    errors.push(discovery_error(&profile, ProviderErrorKind::MissingSecret));
-                    continue;
+                    let secret_ref = profile
+                        .secret_ref
+                        .clone()
+                        .unwrap_or_else(|| default_provider_secret_ref(&profile.id));
+                    match state.secret_store.resolve_secret(&secret_ref) {
+                        Ok(Some(resolved)) => {
+                            secret = Some(OpenAiCompatibleSecret::bearer(
+                                resolved.expose_for_provider_runtime().to_string(),
+                            ));
+                        }
+                        _ => {
+                            errors
+                                .push(discovery_error(&profile, ProviderErrorKind::MissingSecret));
+                            continue;
+                        }
+                    }
                 }
-                let runtime = OpenAiCompatibleRuntime::new(profile.clone(), None);
+
+                let runtime = OpenAiCompatibleRuntime::new(profile.clone(), secret);
                 match runtime.models().await {
                     Ok(response) => {
                         discovered.extend(

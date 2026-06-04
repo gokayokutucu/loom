@@ -82,6 +82,7 @@ pub struct OllamaModelsResponse {
 #[serde(rename_all = "snake_case")]
 #[allow(dead_code)]
 pub enum ProviderErrorKind {
+    Disabled,
     InvalidConfig,
     UnsafeEndpoint,
     RemoteEndpointBlocked,
@@ -121,6 +122,7 @@ pub enum ProviderErrorKind {
 impl ProviderErrorKind {
     pub fn user_message(self) -> &'static str {
         match self {
+            Self::Disabled => "This provider is disabled.",
             Self::InvalidConfig => "Provider configuration is invalid.",
             Self::UnsafeEndpoint
             | Self::RemoteEndpointBlocked

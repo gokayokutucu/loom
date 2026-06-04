@@ -61,6 +61,8 @@ import type {
   LoomServiceRuntimeConfig,
   OcrProviderHealth,
   ProviderSecretStatus,
+  ProviderModelDiscoveryRequest,
+  ProviderModelDiscoveryResponse,
   RuntimeModelDownloadJob,
   RuntimeModelProviderStatus,
   RuntimeModelsResult,
@@ -98,6 +100,7 @@ export interface LoomEngineClient {
   ): Promise<ProviderSecretStatus>;
   deleteProviderSecret(profileId: string): Promise<ProviderSecretStatus>;
   testProviderSecret(profileId: string, secretRef?: string | null): Promise<ProviderSecretStatus>;
+  discoverModels(input: ProviderModelDiscoveryRequest): Promise<ProviderModelDiscoveryResponse>;
   getRuntimeProviders(): Promise<RuntimeModelProviderStatus[]>;
   getRuntimeModels(): Promise<RuntimeModelsResult>;
   startModelDownload(modelName: string): Promise<RuntimeModelDownloadJob>;

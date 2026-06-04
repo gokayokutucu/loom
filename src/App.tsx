@@ -2540,9 +2540,9 @@ function App() {
   } | null>(null);
   const [iconPickerTarget, setIconPickerTarget] = useState<Conversation | null>(null);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
-  const [providerSettings, setProviderSettings] = useState<AIProviderSettings>(() =>
-    readAIProviderSettings()
-  );
+  const [providerSettings, setProviderSettings] = useState<AIProviderSettings>(() => {
+    return readAIProviderSettings();
+  });
   const [providerSettingsOpen, setProviderSettingsOpen] = useState(false);
   const [providerSettingsInitialCategory, setProviderSettingsInitialCategory] =
     useState<SettingsCategoryId>("runtime");
@@ -18127,17 +18127,29 @@ function PromptComposer({
   const speechActive = speechRecorder.status !== "idle";
   const electronPermissions = getElectronPermissionsBridge();
 
-  function setMainModel(modelId: string) {
+  function setMainModel(modelId: string, providerProfileId?: string) {
+    const isOllama = !providerProfileId || providerProfileId === OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+
+    const displayName = isOllama
+      ? "Ollama Local"
+      : (providerProfileId === providerSettings.profiles.mainProviderProfileId
+          ? providerSettings.profiles.mainProviderDisplayName
+          : providerProfileId) ?? "Remote provider";
+
+    const nextProfiles = {
+      ...providerSettings.profiles,
+      mainModelId: modelId,
+      mainProviderProfileId: isOllama ? OLLAMA_LOCAL_PROVIDER_PROFILE_ID : providerProfileId,
+      mainProviderDisplayName: displayName,
+      mainProviderKind: isOllama
+        ? ("ollama" as const)
+        : ("openai-compatible" as const),
+    };
+
     // Optimistic local update — writes to localStorage immediately.
     onProviderSettingsChange({
       ...providerSettings,
-      profiles: {
-        ...providerSettings.profiles,
-        mainModelId: modelId,
-        mainProviderProfileId: OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
-        mainProviderDisplayName: "Ollama Local",
-        mainProviderKind: "ollama",
-      },
+      profiles: nextProfiles,
     });
     // Persist to service config so that Settings / AI Providers reflects the
     // selection and so the choice survives app restart.  Guard is intentional:
@@ -18146,8 +18158,9 @@ function PromptComposer({
       void engineClient
         .updateServiceConfig({
           providers: {
+            defaultQuickModel: providerSettings.profiles.quickModelId,
             defaultMainModel: modelId,
-            mainProviderProfileId: OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
+            mainProviderProfileId: isOllama ? OLLAMA_LOCAL_PROVIDER_PROFILE_ID : providerProfileId,
             mainModelId: modelId,
           },
         })
@@ -21312,7 +21325,7 @@ function PromptComposer({
                     aria-checked={selected}
                     className={selected ? "selected" : ""}
                     onClick={() => {
-                      setMainModel(model.id);
+                      setMainModel(model.id, modelProviderProfileId);
                       setModelPickerOpen(false);
                       setModelPopoverStyle(null);
                     }}

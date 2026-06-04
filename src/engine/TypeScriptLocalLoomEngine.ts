@@ -67,6 +67,8 @@ import type {
   ResolveAddressResult,
   LoomServiceRuntimeConfig,
   ProviderSecretStatus,
+  ProviderModelDiscoveryRequest,
+  ProviderModelDiscoveryResponse,
   RuntimeModelDownloadJob,
   RuntimeModelProviderStatus,
   RuntimeModelsResult,
@@ -151,6 +153,11 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
   async testProviderSecret(): Promise<ProviderSecretStatus> {
     throw new Error("Provider secret management requires the Rust service runtime.");
   }
+
+  async discoverModels(): Promise<ProviderModelDiscoveryResponse> {
+    throw new Error("Provider model discovery requires the Rust service runtime.");
+  }
+
 
   async getRuntimeProviders(): Promise<RuntimeModelProviderStatus[]> {
     throw new Error("Provider runtime management requires the Rust service runtime.");

@@ -315,6 +315,7 @@ export interface CapabilitySummary {
     modelName: string;
     confidence?: string;
     source?: string;
+    modelId?: string;
   }>;
   strategyAvailable?: boolean;
   lastCheckedAt?: string;
@@ -1103,4 +1104,38 @@ export interface CreateLoomEngineClientOptions {
   serviceExportStoreAuthoritative?: boolean;
   rustClient?: LoomEngineClient;
   localDependencies?: TypeScriptLocalLoomEngineDependencies;
+}
+
+export interface ProviderModelDiscoveryRequest {
+  providerProfileId?: string;
+  providerKind?: ProviderKind;
+  persist?: boolean;
+}
+
+export interface ProviderModelDiscoveryItem {
+  providerProfileId: string;
+  providerKind: ProviderKind;
+  modelName: string;
+  source: string;
+  persisted: boolean;
+  warnings: string[];
+}
+
+export interface ProviderModelDiscoveryError {
+  providerProfileId: string;
+  providerKind: ProviderKind;
+  kind: string; // serialized snake_case ProviderErrorKind, e.g. "disabled"
+  message: string;
+}
+
+export interface ProviderModelDiscoverySummary {
+  discoveredCount: number;
+  persistedCount: number;
+  errorCount: number;
+}
+
+export interface ProviderModelDiscoveryResponse {
+  discovered: ProviderModelDiscoveryItem[];
+  errors: ProviderModelDiscoveryError[];
+  summary: ProviderModelDiscoverySummary;
 }

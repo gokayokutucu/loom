@@ -51,6 +51,55 @@ export async function startFakeOpenAiCompatibleServer(
   const requests: FakeOpenAiCompatibleRequestRecord[] = [];
 
   const server = createServer(async (request, response) => {
+    const authorizationHeader = request.headers.authorization;
+    const authorizationHeaderPresent =
+      typeof authorizationHeader === "string" && authorizationHeader.trim().length > 0;
+
+    if (request.method === "GET" && request.url === "/v1/models") {
+      const record: FakeOpenAiCompatibleRequestRecord = {
+        promptText: "GET /v1/models",
+        apiKeyLeakedInPrompt: false,
+        authorizationHeaderPresent,
+        rawAuthorizationHeaderStored: false,
+        closedBeforeDone: false,
+        completed: false,
+      };
+      requests.push(record);
+
+      if (script.error) {
+        writeJson(response, script.error.status, errorBody(script.error));
+        record.completed = true;
+        return;
+      }
+
+      if (typeof scenarioOrScript === "string" && scenarioOrScript === "malformed") {
+        response.writeHead(200, { "Content-Type": "application/json" });
+        response.end("{malformed-json-models-list");
+        record.completed = true;
+        return;
+      }
+
+      writeJson(response, 200, {
+        object: "list",
+        data: [
+          {
+            id: "fake-model-1",
+            object: "model",
+            created: 1686935002,
+            owned_by: "organization",
+          },
+          {
+            id: "fake-model-2",
+            object: "model",
+            created: 1686935003,
+            owned_by: "organization",
+          },
+        ],
+      });
+      record.completed = true;
+      return;
+    }
+
     if (request.method !== "POST" || request.url !== "/v1/chat/completions") {
       response.writeHead(404);
       response.end();
@@ -59,7 +108,6 @@ export async function startFakeOpenAiCompatibleServer(
 
     const body = await readJsonBody<FakeOpenAiCompatibleChatRequest>(request);
     const promptText = (body.messages ?? []).map((message) => message.content ?? "").join("\n");
-    const authorizationHeader = request.headers.authorization;
     const record: FakeOpenAiCompatibleRequestRecord = {
       model: body.model,
       stream: body.stream,
@@ -69,8 +117,7 @@ export async function startFakeOpenAiCompatibleServer(
       maxTokens: body.max_tokens,
       promptText,
       apiKeyLeakedInPrompt: secretLeakedInText(promptText),
-      authorizationHeaderPresent:
-        typeof authorizationHeader === "string" && authorizationHeader.trim().length > 0,
+      authorizationHeaderPresent,
       rawAuthorizationHeaderStored: false,
       closedBeforeDone: false,
       completed: false,

@@ -74,6 +74,8 @@ import type {
   ProviderProfileRuntimeConfig,
   ProviderRequestDefaultsRuntimeConfig,
   ProviderSecretStatus,
+  ProviderModelDiscoveryRequest,
+  ProviderModelDiscoveryResponse,
   ProviderSecretStatusKind,
   ProviderSecurityRuntimeConfig,
   ProviderTransportKind,
@@ -1559,6 +1561,62 @@ function validateProviderSecretStatus(value: unknown): ProviderSecretStatus {
   };
 }
 
+function validateProviderModelDiscoveryResponse(value: unknown): ProviderModelDiscoveryResponse {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid provider model discovery response.", {
+      endpoint: "/capabilities/models/discover",
+    });
+  }
+  const discovered = Array.isArray(value.discovered)
+    ? value.discovered.map((item) => {
+        if (!isRecord(item)) {
+          throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid discovery item.", {
+            endpoint: "/capabilities/models/discover",
+          });
+        }
+        return {
+          providerProfileId: stringValue(item, "providerProfileId") ?? "",
+          providerKind: (stringValue(item, "providerKind") ?? "") as ProviderKind,
+          modelName: stringValue(item, "modelName") ?? "",
+          source: stringValue(item, "source") ?? "",
+          persisted: booleanValue(item, "persisted") ?? false,
+          warnings: arrayOfStrings(item.warnings),
+        };
+      })
+    : [];
+
+  const errors = Array.isArray(value.errors)
+    ? value.errors.map((err) => {
+        if (!isRecord(err)) {
+          throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid discovery error.", {
+            endpoint: "/capabilities/models/discover",
+          });
+        }
+        return {
+          providerProfileId: stringValue(err, "providerProfileId") ?? "",
+          providerKind: (stringValue(err, "providerKind") ?? "") as ProviderKind,
+          kind: stringValue(err, "kind") ?? "",
+          message: stringValue(err, "message") ?? "",
+        };
+      })
+    : [];
+
+  const summary = isRecord(value.summary)
+    ? {
+        discoveredCount: numberValue(value.summary, "discoveredCount") ?? 0,
+        persistedCount: numberValue(value.summary, "persistedCount") ?? 0,
+        errorCount: numberValue(value.summary, "errorCount") ?? 0,
+      }
+    : { discoveredCount: 0, persistedCount: 0, errorCount: 0 };
+
+  return {
+    discovered,
+    errors,
+    summary,
+  };
+}
+
+
 function validateServiceConfig(value: unknown): LoomServiceRuntimeConfig {
   if (!isRecord(value)) {
     throw new RustHttpLoomEngineError("invalid_response", "loom-service returned invalid config.", {
@@ -2965,6 +3023,20 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     return validateProviderSecretStatus(response);
   }
 
+  async discoverModels(
+    input: ProviderModelDiscoveryRequest
+  ): Promise<ProviderModelDiscoveryResponse> {
+    const response = await this.requestJson<unknown>(
+      "/capabilities/models/discover",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      }
+    );
+    return validateProviderModelDiscoveryResponse(response);
+  }
+
+
   async getRuntimeProviders(): Promise<RuntimeModelProviderStatus[]> {
     const response = await this.requestJson<unknown>("/runtime/providers");
     if (!Array.isArray(response)) {
@@ -3068,6 +3140,7 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
           modelName: stringValue(model, "modelName") ?? "unknown",
           confidence: stringValue(model, "confidence"),
           source: stringValue(model, "source"),
+          modelId: stringValue(model, "modelId"),
         })),
         strategyAvailable: true,
         lastCheckedAt: new Date().toISOString(),

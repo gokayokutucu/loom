@@ -74,42 +74,70 @@ async function cleanupNvidiaScenario(input: {
 }
 
 async function openStrictRustApp(page: Page, appUrl: string) {
-  await page.addInitScript(() => {
-    window.localStorage.setItem(
-      "loom-ai-app-settings-v1",
-      JSON.stringify({ mockDataEnabled: false, modelResponseMode: "instant" })
-    );
-    window.localStorage.setItem(
-      PROVIDER_SETTINGS_KEY,
-      JSON.stringify({
-        activeProvider: "ollama",
-        ollama: {
-          enabled: true,
-          baseUrl: "http://localhost:11434",
+
+  await page.route("**/runtime/models", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        provider: {
+          providerProfileId: "ollama-local",
           exposeToNetwork: false,
-          contextLength: 8192,
-          modelLocation: "~/.ollama/models",
-          models: [
-            {
-              id: "qwen3.5:9b",
-              name: "Qwen 3.5 9B",
-              provider: "ollama",
-              installed: true,
-            },
-          ],
+          modelStorePath: "~/.ollama/models",
           lastConnectionStatus: "connected",
         },
-        profiles: {
-          quickModelId: "qwen3.5:9b",
-          mainModelId: "qwen3.5:9b",
-          mainProviderProfileId: "ollama-local",
-          mainProviderDisplayName: "Ollama Local",
-          mainProviderKind: "ollama",
-        },
-        demo: { mockResponsesEnabled: false },
-      })
-    );
+        models: [
+          {
+            modelName: "qwen3.5:9b",
+            displayName: "Qwen 3.5 9B",
+            installed: true,
+            sizeBytes: 5400000000,
+            modifiedAt: "2026-06-02T12:00:00Z",
+          },
+        ],
+        jobs: [],
+      }),
+    });
   });
+  await page.addInitScript(
+    ({ key }) => {
+      window.localStorage.setItem(
+        "loom-ai-app-settings-v1",
+        JSON.stringify({ mockDataEnabled: false, modelResponseMode: "instant" })
+      );
+      window.localStorage.setItem(
+        key,
+        JSON.stringify({
+          activeProvider: "ollama",
+          ollama: {
+            enabled: true,
+            baseUrl: "http://localhost:11434",
+            exposeToNetwork: false,
+            contextLength: 8192,
+            modelLocation: "~/.ollama/models",
+            models: [
+              {
+                "id": "qwen3.5:9b",
+                "name": "Qwen 3.5 9B",
+                "provider": "ollama",
+                "installed": true,
+              },
+            ],
+            lastConnectionStatus: "connected",
+          },
+          profiles: {
+            quickModelId: "qwen3.5:9b",
+            mainModelId: "qwen3.5:9b",
+            mainProviderProfileId: "ollama-local",
+            mainProviderDisplayName: "Ollama Local",
+            mainProviderKind: "ollama",
+          },
+          demo: { mockResponsesEnabled: false },
+        })
+      );
+    },
+    { key: PROVIDER_SETTINGS_KEY }
+  );
   await page.goto(appUrl);
   await expect(page.getByTestId("loom-sidebar")).toBeVisible();
 }
@@ -270,6 +298,85 @@ test.describe("[product-service-backed] NVIDIA OpenAI-compatible ProviderPipelin
       await page.getByRole("button", { name: "Send" }).click();
       await page.waitForTimeout(1000);
       expect(scenario.fakeProvider.requests).toHaveLength(1);
+    } finally {
+      await cleanupNvidiaScenario(scenario);
+    }
+  });
+
+  test("discovers models for remote profile and allows selection", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await startNvidiaSettingsSelectionScenario();
+
+    try {
+      await openStrictRustApp(page, scenario.serviceScenario.appUrl!);
+
+      await openProviderSettings(page);
+      const nvidiaCard = page
+        .locator(".provider-profile-card")
+        .filter({ hasText: "NVIDIA NIM" });
+      await expect(nvidiaCard).toContainText("Enabled");
+      await expect(nvidiaCard).toContainText("Saved");
+
+      // Verify discovery controls
+      const discoverBtn = nvidiaCard.getByRole("button", { name: /Discover models/i });
+      await expect(discoverBtn).toBeVisible();
+      await discoverBtn.click();
+
+      // Wait for success status and list of models
+      await expect(nvidiaCard.locator(".discovery-status-label.success")).toBeVisible({ timeout: 10_000 });
+      await expect(nvidiaCard.locator(".discovered-models-list")).toBeVisible();
+      await expect(nvidiaCard.locator(".discovered-models-list")).toContainText("fake-model-1");
+      await expect(nvidiaCard.locator(".discovered-models-list")).toContainText("fake-model-2");
+
+      // Acknowledge privacy warning so we can select for Main
+      await nvidiaCard
+        .getByLabel(/prompts and selected context may leave this device/i)
+        .check();
+
+      // Select fake-model-2
+      const selectBtn = nvidiaCard.locator("li").filter({ hasText: "fake-model-2" }).getByRole("button", { name: "Select" });
+      await selectBtn.click();
+
+      // Verify the list updates to Selected for fake-model-2
+      await expect(nvidiaCard.locator("li").filter({ hasText: "fake-model-2" }).getByRole("button")).toContainText("Selected");
+      await expect(nvidiaCard).toContainText("Selected (fake-model-2)");
+
+      // Close settings
+      await page.getByRole("button", { name: "Close settings" }).click();
+
+      // Check localStorage or window state
+      const providerSettingsValue = await page.evaluate(() => {
+        const raw = localStorage.getItem("loom-ai-provider-settings-v1");
+        return raw ? JSON.parse(raw) : null;
+      });
+
+
+      // Verify composer model picker displays selected remote model
+      const modelPickerBtn = page.getByRole("button", { name: "Select model" });
+      await expect(modelPickerBtn).toContainText("NVIDIA NIM · fake-model-2");
+
+      // Open composer picker
+      await modelPickerBtn.click();
+      const pickerPopover = page.locator(".model-picker-menu");
+
+      // Verify remote model is shown in active selection and Ollama is available
+      const activeItem = pickerPopover.locator("button.selected:not(.model-picker-mode-option)");
+      await expect(activeItem).toContainText("NVIDIA NIM · fake-model-2");
+
+      // Verify we can switch back to local Ollama from picker
+      const localItem = pickerPopover.locator("button").filter({ hasText: "Qwen 3.5 9B" });
+      await localItem.click();
+
+      // Verify composer model picker changes to local Ollama
+      await expect(modelPickerBtn).toContainText("Qwen 3.5 9B");
+
+      const localConfig = await scenario.serviceScenario.client.getServiceConfig();
+      expect(localConfig.providers).toMatchObject({
+        mainProviderProfileId: "ollama-local",
+        mainModelId: "qwen3.5:9b",
+      });
     } finally {
       await cleanupNvidiaScenario(scenario);
     }
