@@ -1,11 +1,23 @@
 // E2E data authority classification:
 // - PRODUCT_SERVICE_BACKED: temp SQLite DB, fresh loom-service binary, rust-service Vite app.
 // - Test data is created through loom-service product flows and cleaned up by the harness.
-import { expect, type Locator, test } from "@playwright/test";
+import { expect, type Locator, type Page, test } from "@playwright/test";
 import { createServiceTestHarness } from "./helpers/serviceTestHarness";
 
+interface ExportedResponse {
+  responseId: string;
+  role: "user" | "assistant";
+  content: string;
+  sequenceIndex: number;
+}
+
+interface LoomExportJson {
+  responses: ExportedResponse[];
+}
+
 async function createMinimapLoom(
-  scenario: Awaited<ReturnType<typeof createServiceTestHarness>>
+  scenario: Awaited<ReturnType<typeof createServiceTestHarness>>,
+  turnCount = 4
 ) {
   const loomId = `minimap-${Date.now()}`;
   const { loom } = await scenario.client.createLoom({
@@ -17,7 +29,7 @@ async function createMinimapLoom(
     metadata: { source: "e2e_service_backed_flow" },
   });
 
-  for (let index = 1; index <= 4; index += 1) {
+  for (let index = 1; index <= turnCount; index += 1) {
     const answer = await scenario.sendPrompt(
       loom.loomId,
       `Create minimap proof turn ${index} with enough structure to make the transcript scroll.`
@@ -37,8 +49,95 @@ async function sendPanelPrompt(panel: Locator, prompt: string) {
   await panel.getByRole("button", { name: "Send" }).click();
 }
 
+async function editPrompt(page: Page, responseId: string, nextPrompt: string) {
+  await page.getByTestId(`edit-prompt-${responseId}`).evaluate((button) => {
+    if (!(button instanceof HTMLButtonElement)) {
+      throw new Error("Prompt edit trigger is not a button.");
+    }
+    button.click();
+  });
+  const editor = page.getByLabel("Edit prompt text");
+  await expect(editor).toBeVisible();
+  await editor.fill(nextPrompt);
+  await page.getByRole("button", { name: "Save" }).click();
+}
+
+async function exportedLoomResponses(
+  scenario: Awaited<ReturnType<typeof createServiceTestHarness>>,
+  loomId: string
+) {
+  const exported = await scenario.client.exportLoom({
+    loomId,
+    format: "json",
+    includeMetadata: true,
+    includeReferences: true,
+    includeGraph: true,
+  });
+  return (JSON.parse(Buffer.from(exported.contentBase64, "base64").toString("utf8")) as LoomExportJson)
+    .responses;
+}
+
+async function waitForPersistedResponses(
+  scenario: Awaited<ReturnType<typeof createServiceTestHarness>>,
+  loomId: string,
+  expectedCount: number
+) {
+  const started = Date.now();
+  while (Date.now() - started < 30_000) {
+    const responses = await exportedLoomResponses(scenario, loomId);
+    const assistantResponsesComplete = responses
+      .filter((response) => response.role === "assistant")
+      .every((response) => response.content.trim().length > 0);
+    if (responses.length >= expectedCount && assistantResponsesComplete) return responses;
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error(`Timed out waiting for ${expectedCount} persisted responses in ${loomId}.`);
+}
+
 async function scrollTop(locator: Locator) {
   return locator.evaluate((element) => (element as HTMLElement).scrollTop);
+}
+
+async function expectMinimapOnTranscriptRight(transcript: Locator, minimap: Locator) {
+  await expect
+    .poll(
+      async () => {
+        const [transcriptBox, minimapBox] = await Promise.all([
+          transcript.boundingBox(),
+          minimap.boundingBox(),
+        ]);
+        if (!transcriptBox || !minimapBox) return false;
+        const minimapCenterX = minimapBox.x + minimapBox.width / 2;
+        const distanceToRight = Math.abs(transcriptBox.x + transcriptBox.width - minimapCenterX);
+        const distanceToLeft = Math.abs(minimapCenterX - transcriptBox.x);
+        return distanceToRight < 48 && distanceToRight < distanceToLeft;
+      },
+      { timeout: 5_000 }
+    )
+    .toBe(true);
+}
+
+async function expectRulerTicksEvenlySpaced(ticks: Locator) {
+  const tops = await ticks.evaluateAll((elements) =>
+    elements.map((element) => Math.round(element.getBoundingClientRect().top))
+  );
+  expect(tops.length).toBeGreaterThanOrEqual(2);
+  const gaps = tops.slice(1).map((top, index) => top - tops[index]);
+  expect(Math.min(...gaps)).toBeGreaterThan(0);
+  expect(Math.max(...gaps) - Math.min(...gaps)).toBeLessThanOrEqual(4);
+}
+
+async function expectFixedRulerHeight(minimap: Locator) {
+  const box = await minimap.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box!.height).toBeGreaterThanOrEqual(180);
+  expect(box!.height).toBeLessThanOrEqual(240);
+}
+
+async function expectOutlineOpen(outline: Locator) {
+  await expect(outline).toHaveCSS("opacity", "1");
+  await expect(outline).toHaveCSS("visibility", "visible");
+  await expect(outline).toHaveCSS("pointer-events", "auto");
 }
 
 async function scrollPaneToTop(locator: Locator) {
@@ -63,11 +162,49 @@ async function stableScrollTop(locator: Locator) {
   return scrollTop(locator);
 }
 
+async function expectPromptAnchorNearTranscriptTop(promptAnchor: Locator) {
+  await expect
+    .poll(
+      async () =>
+        promptAnchor.evaluate((element) => {
+          const transcriptElement = element.closest(".chat-transcript");
+          if (!transcriptElement) return false;
+          const transcriptRect = transcriptElement.getBoundingClientRect();
+          const promptRect = element.getBoundingClientRect();
+          return (
+            promptRect.top >= transcriptRect.top + 8 &&
+            promptRect.top <= transcriptRect.top + 120
+          );
+        }),
+      { timeout: 8_000 }
+    )
+    .toBe(true);
+}
+
+async function expectOutlineRowNearTop(row: Locator) {
+  await expect
+    .poll(
+      async () =>
+        row.evaluate((element) => {
+          const outline = element.closest(".conversation-minimap__outline");
+          if (!outline) return false;
+          if (outline.scrollHeight <= outline.clientHeight) return true;
+          const rowRect = element.getBoundingClientRect();
+          const outlineRect = outline.getBoundingClientRect();
+          const canScrollFurther = outline.scrollTop < outline.scrollHeight - outline.clientHeight - 2;
+          if (!canScrollFurther) return rowRect.bottom <= outlineRect.bottom + 2;
+          return rowRect.top >= outlineRect.top + 4 && rowRect.top <= outlineRect.top + 32;
+        }),
+      { timeout: 8_000 }
+    )
+    .toBe(true);
+}
+
 test.describe("[product-service-backed] Conversation minimap", () => {
-  test("shows transcript ruler, hover outline, and pane-local response jumps", async ({
+  test("shows the ruler once a conversation has two response items", async ({
     page,
   }) => {
-    test.setTimeout(150_000);
+    test.setTimeout(120_000);
     const scenario = await createServiceTestHarness({
       deterministicProvider: "event-sourcing",
       deterministicResponseMode: "long-streaming-scroll",
@@ -78,7 +215,7 @@ test.describe("[product-service-backed] Conversation minimap", () => {
     });
 
     try {
-      const loom = await createMinimapLoom(scenario);
+      const loom = await createMinimapLoom(scenario, 2);
 
       await page.setViewportSize({ width: 900, height: 720 });
       await page.goto(scenario.appUrl!);
@@ -87,17 +224,63 @@ test.describe("[product-service-backed] Conversation minimap", () => {
 
       const transcript = page.locator(".chat-transcript").first();
       const minimap = page.locator(".conversation-minimap").first();
-      const viewport = minimap.locator(".conversation-minimap__viewport");
+      const ticks = minimap.locator(".conversation-minimap__tick");
+
+      await expect(transcript).toBeVisible();
+      await expect(minimap).toBeVisible();
+      await expectMinimapOnTranscriptRight(transcript, minimap);
+      await expect(ticks).toHaveCount(2);
+      await expect(minimap.locator(".conversation-minimap__viewport")).toHaveCount(0);
+      await expectRulerTicksEvenlySpaced(ticks);
+      await expectFixedRulerHeight(minimap);
+
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+      expect(scenario.configPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+    }
+  });
+
+  test("shows transcript ruler, hover outline, and pane-local response jumps", async ({
+    page,
+  }) => {
+    test.setTimeout(240_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      deterministicResponseMode: "long-streaming-scroll",
+      deterministicChunkMode: "phrase",
+      deterministicThinkingDelayMs: 50,
+      deterministicStreamChunkDelayMs: 1,
+      startApp: true,
+    });
+
+    try {
+      const loom = await createMinimapLoom(scenario, 21);
+
+      await page.setViewportSize({ width: 900, height: 720 });
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+      await page.getByTestId(`sidebar-loom-${loom.loomId}`).click();
+
+      const transcript = page.locator(".chat-transcript").first();
+      const minimap = page.locator(".conversation-minimap").first();
       const responseTicks = minimap.locator(".conversation-minimap__tick--response");
+      const allTicks = minimap.locator(".conversation-minimap__tick");
       const outline = minimap.locator(".conversation-minimap__outline");
       const outlineRows = minimap.locator(".conversation-minimap__outline-row");
 
       await expect(transcript).toBeVisible();
       await expect(minimap).toBeVisible();
-      await expect(viewport).toBeVisible();
-      await expect(responseTicks).toHaveCount(4);
-      await expect(outlineRows).toHaveCount(8);
+      await expect(minimap.locator(".conversation-minimap__viewport")).toHaveCount(0);
+      await expect(responseTicks).toHaveCount(16);
+      await expect(outlineRows).toHaveCount(21);
       await expect(outline).toHaveCSS("opacity", "0");
+      await expectMinimapOnTranscriptRight(transcript, minimap);
+      await expectRulerTicksEvenlySpaced(allTicks);
+      await expectFixedRulerHeight(minimap);
 
       await expect
         .poll(
@@ -109,73 +292,61 @@ test.describe("[product-service-backed] Conversation minimap", () => {
         )
         .toBe(true);
 
-      const initialViewportTop = await viewport.evaluate(
-        (element) => element.getBoundingClientRect().top
-      );
-
       await transcript.evaluate((element) => {
         element.scrollTop = Math.floor(element.scrollHeight / 2);
       });
 
       await expect
         .poll(
-          async () =>
-            viewport.evaluate((element) => element.getBoundingClientRect().top),
+          () => minimap.locator(".conversation-minimap__tick--active").count(),
           { timeout: 5_000 }
         )
-        .toBeGreaterThan(initialViewportTop + 8);
+        .toBe(1);
 
       await minimap.hover();
-      await expect(outline).toHaveCSS("opacity", "1");
-      await expect(outlineRows.filter({ hasText: "Create minimap proof turn 3" })).toHaveCount(1);
+      await expectOutlineOpen(outline);
+      await expect(outlineRows.first()).toContainText("Long Streaming Scroll Fixture");
+      await expect(outlineRows.first()).not.toContainText("#");
+      await expect(outlineRows.locator(".conversation-minimap__outline-type")).toHaveCount(0);
       await expect(minimap.locator(".conversation-minimap__outline-row--active")).toHaveCount(1);
 
-      const fourthResponse = page.locator(".qa-item").nth(3);
-      await outlineRows.nth(7).click();
+      const outlineMetrics = await outline.evaluate((element) => {
+        const style = window.getComputedStyle(element);
+        return {
+          clientHeight: element.clientHeight,
+          overflowY: style.overflowY,
+          scrollHeight: element.scrollHeight,
+          scrollbarWidth: style.scrollbarWidth,
+        };
+      });
+      expect(outlineMetrics.scrollHeight).toBeGreaterThan(outlineMetrics.clientHeight);
+      expect(outlineMetrics.overflowY).toBe("auto");
+      expect(outlineMetrics.scrollbarWidth).toBe("none");
 
-      await expect
-        .poll(
-          async () =>
-            fourthResponse.evaluate((element) => {
-              const transcriptElement = element.closest(".chat-transcript");
-              if (!transcriptElement) return false;
-              const transcriptRect = transcriptElement.getBoundingClientRect();
-              const responseRect = element.getBoundingClientRect();
-              return (
-                responseRect.top >= transcriptRect.top + 8 &&
-                responseRect.top <= transcriptRect.top + 120
-              );
-            }),
-          { timeout: 8_000 }
-        )
-        .toBe(true);
+      const fifteenthPromptAnchor = page.locator("[data-prompt-response-id]").nth(14);
+      await outlineRows.nth(14).click();
+      await expectOutlineRowNearTop(outlineRows.nth(14));
+      await expectPromptAnchorNearTranscriptTop(fifteenthPromptAnchor);
+
+      const twentyFirstPromptAnchor = page.locator("[data-prompt-response-id]").nth(20);
+      await minimap.hover();
+      await expectOutlineOpen(outline);
+      await outlineRows.nth(20).click();
+
+      await expectPromptAnchorNearTranscriptTop(twentyFirstPromptAnchor);
 
       await page.evaluate(() => {
         const activeElement = document.activeElement;
         if (activeElement instanceof HTMLElement) activeElement.blur();
       });
-      await page.mouse.move(860, 120);
+      await page.mouse.move(100, 120);
       await expect(outline).toHaveCSS("opacity", "0");
 
-      const thirdResponse = page.locator(".qa-item").nth(2);
+      await scrollPaneToTop(transcript);
+      const thirdPromptAnchor = page.locator("[data-prompt-response-id]").nth(2);
       await responseTicks.nth(2).click();
 
-      await expect
-        .poll(
-          async () =>
-            thirdResponse.evaluate((element) => {
-              const transcriptElement = element.closest(".chat-transcript");
-              if (!transcriptElement) return false;
-              const transcriptRect = transcriptElement.getBoundingClientRect();
-              const responseRect = element.getBoundingClientRect();
-              return (
-                responseRect.top >= transcriptRect.top + 8 &&
-                responseRect.top <= transcriptRect.top + 120
-              );
-            }),
-          { timeout: 8_000 }
-        )
-        .toBe(true);
+      await expectPromptAnchorNearTranscriptTop(thirdPromptAnchor);
 
       expect(scenario.dbPath).toContain(scenario.tempDir);
       expect(scenario.configPath).toContain(scenario.tempDir);
@@ -241,8 +412,10 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       await expect(weftTranscript).toBeVisible();
       await expect(originMinimap).toBeVisible();
       await expect(weftMinimap).toBeVisible();
-      await expect(originRows).toHaveCount(8);
-      await expect(weftRows).toHaveCount(8);
+      await expect(originRows).toHaveCount(4);
+      await expect(weftRows).toHaveCount(4);
+      await expectMinimapOnTranscriptRight(originTranscript, originMinimap);
+      await expectMinimapOnTranscriptRight(weftTranscript, weftMinimap);
 
       await scrollPaneToTop(originTranscript);
       await stableScrollTop(weftTranscript);
@@ -252,7 +425,7 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       await expect(weftOutline).toHaveCSS("opacity", "0");
 
       const weftBeforeOriginClick = await stableScrollTop(weftTranscript);
-      await originRows.nth(7).click();
+      await originRows.nth(3).click();
       await expect.poll(() => scrollTop(originTranscript), { timeout: 8_000 }).toBeGreaterThan(20);
       await expect.poll(() => scrollTop(weftTranscript), { timeout: 3_000 }).toBeLessThanOrEqual(
         weftBeforeOriginClick + 2
@@ -262,7 +435,7 @@ test.describe("[product-service-backed] Conversation minimap", () => {
         const activeElement = document.activeElement;
         if (activeElement instanceof HTMLElement) activeElement.blur();
       });
-      await page.mouse.move(1120, 80);
+      await page.mouse.move(80, 80);
       await expect(originOutline).toHaveCSS("opacity", "0");
 
       await scrollPaneToTop(originTranscript);
@@ -280,6 +453,77 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       await expect.poll(() => scrollTop(originTranscript), { timeout: 3_000 }).toBeLessThanOrEqual(
         originBeforeWeftClick + 2
       );
+
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+      expect(scenario.configPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+    }
+  });
+
+  test("shows revision child rows in the hover outline without adding ruler ticks", async ({
+    page,
+  }) => {
+    test.setTimeout(180_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+
+    try {
+      const loom = await createMinimapLoom(scenario, 2);
+
+      await page.setViewportSize({ width: 1180, height: 760 });
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+      await page.getByTestId(`sidebar-loom-${loom.loomId}`).click();
+      await expect(page.locator(".chat-transcript").first()).toBeVisible();
+
+      const persisted = await waitForPersistedResponses(scenario, loom.loomId, 4);
+      const assistantResponse = persisted.find(
+        (response) => response.role === "assistant" && response.sequenceIndex === 1
+      );
+      expect(assistantResponse).toBeTruthy();
+
+      const revisionPrompt = "Revision outline minimap child row proof";
+      await editPrompt(page, assistantResponse!.responseId, revisionPrompt);
+      await expect(page.locator(".weft-split-view")).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator(".weft-split-panel")).toContainText(revisionPrompt, {
+        timeout: 30_000,
+      });
+
+      const originPanel = page.locator(".origin-split-panel");
+      const originMinimap = originPanel.locator(".conversation-minimap");
+      const originTicks = originMinimap.locator(".conversation-minimap__tick");
+      const parentRows = originMinimap.locator(
+        ".conversation-minimap__outline-row:not(.conversation-minimap__outline-row--child)"
+      );
+      const revisionRow = originMinimap.locator(
+        ".conversation-minimap__outline-row--revision",
+        { hasText: revisionPrompt }
+      );
+
+      await expect(originMinimap).toBeVisible();
+      await expect(originTicks).toHaveCount(2);
+      await originMinimap.hover();
+      await expectOutlineOpen(originMinimap.locator(".conversation-minimap__outline"));
+      await expect(parentRows).toHaveCount(2);
+      await expect(revisionRow).toBeVisible();
+
+      const [parentBox, revisionBox] = await Promise.all([
+        parentRows.first().boundingBox(),
+        revisionRow.boundingBox(),
+      ]);
+      expect(parentBox).not.toBeNull();
+      expect(revisionBox).not.toBeNull();
+      expect(revisionBox!.x).toBeGreaterThan(parentBox!.x + 10);
+
+      await revisionRow.click();
+      await expect(page.locator(".weft-split-view")).toBeVisible();
+      await expect(page.locator(".weft-split-panel")).toContainText(revisionPrompt);
 
       expect(scenario.dbPath).toContain(scenario.tempDir);
       expect(scenario.configPath).toContain(scenario.tempDir);

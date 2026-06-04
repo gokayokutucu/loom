@@ -1,3 +1,5 @@
+import { cleanMarkdownDisplayText } from "./assistantMarkdown";
+
 export interface MinimapViewportInput {
   scrollTop: number;
   clientHeight: number;
@@ -16,12 +18,23 @@ export interface ConversationMinimapLabelInput {
   responseText?: string | null;
 }
 
+export interface ConversationMinimapRevisionLabelInput {
+  title?: string | null;
+  revisionPrompt?: string | null;
+}
+
 export interface ConversationMinimapNearestInput {
   id: string;
   anchorTop: number;
 }
 
 const MAX_MINIMAP_LABEL_LENGTH = 120;
+export const MINIMAP_RULER_TICK_GAP_PX = 16;
+export const MINIMAP_RULER_HEIGHT_PX = 240;
+export const MAX_VISIBLE_MINIMAP_RULER_TICKS = Math.min(
+  20,
+  Math.floor(MINIMAP_RULER_HEIGHT_PX / MINIMAP_RULER_TICK_GAP_PX) + 1
+);
 
 export function clampPercent(value: number) {
   if (!Number.isFinite(value)) return 0;
@@ -31,6 +44,32 @@ export function clampPercent(value: number) {
 export function minimapAnchorPercent(offsetTop: number, scrollHeight: number) {
   if (!Number.isFinite(offsetTop) || scrollHeight <= 0) return 0;
   return clampPercent((offsetTop / scrollHeight) * 100);
+}
+
+export function minimapRulerTickPercent(index: number, itemCount: number) {
+  if (itemCount <= 1 || index <= 0) return 0;
+  return clampPercent((index / (itemCount - 1)) * 100);
+}
+
+export function minimapRulerTickTopPx(index: number) {
+  if (index <= 0) return 0;
+  return index * MINIMAP_RULER_TICK_GAP_PX;
+}
+
+export function visibleMinimapRulerWindow<T extends { id: string }>(
+  items: T[],
+  activeItemId: string | null,
+  maxVisible = MAX_VISIBLE_MINIMAP_RULER_TICKS
+) {
+  if (maxVisible <= 0 || items.length <= maxVisible) return items;
+  const activeIndex = Math.max(
+    0,
+    activeItemId ? items.findIndex((item) => item.id === activeItemId) : 0
+  );
+  const halfWindow = Math.floor(maxVisible / 2);
+  const maxStart = items.length - maxVisible;
+  const startIndex = Math.max(0, Math.min(maxStart, activeIndex - halfWindow));
+  return items.slice(startIndex, startIndex + maxVisible);
 }
 
 export function minimapViewportGeometry({
@@ -58,9 +97,26 @@ export function conversationMinimapLabel({
 }: ConversationMinimapLabelInput) {
   const fallback = type === "user" ? "User message" : type === "weft" ? "Weft" : "Response";
   const candidate = title ?? promptText ?? responseText ?? fallback;
-  const normalized = candidate.replace(/\s+/g, " ").trim() || fallback;
+  const normalized =
+    cleanMarkdownDisplayText(candidate).replace(/\s+/g, " ").trim() || fallback;
   if (normalized.length <= MAX_MINIMAP_LABEL_LENGTH) return normalized;
   return `${normalized.slice(0, MAX_MINIMAP_LABEL_LENGTH - 1).trimEnd()}…`;
+}
+
+export function conversationMinimapRevisionLabel(
+  revision: ConversationMinimapRevisionLabelInput,
+  revisionNumber: number
+) {
+  const candidate = revision.revisionPrompt ?? revision.title ?? "";
+  const normalized = cleanMarkdownDisplayText(candidate).replace(/\s+/g, " ").trim();
+  if (normalized) {
+    return normalized.length <= MAX_MINIMAP_LABEL_LENGTH
+      ? normalized
+      : `${normalized.slice(0, MAX_MINIMAP_LABEL_LENGTH - 1).trimEnd()}…`;
+  }
+  return Number.isFinite(revisionNumber) && revisionNumber > 1
+    ? `Revision ${revisionNumber}`
+    : "Revision";
 }
 
 export function nearestConversationMinimapItemId(

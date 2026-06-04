@@ -1,10 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type MouseEvent, type RefObject } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
   conversationMinimapLabel,
-  minimapAnchorPercent,
-  minimapViewportGeometry,
+  conversationMinimapRevisionLabel,
+  MINIMAP_RULER_HEIGHT_PX,
+  minimapRulerTickTopPx,
   nearestConversationMinimapItemId,
-  type MinimapViewportGeometry,
+  visibleMinimapRulerWindow,
 } from "../services/conversationMinimap";
 
 export type ConversationMinimapItemType =
@@ -22,71 +23,86 @@ export interface ConversationMinimapItem {
   anchorSelector: string;
   active?: boolean;
   highlighted?: boolean;
+  outlineChildren?: ConversationMinimapOutlineChild[];
+}
+
+export interface ConversationMinimapOutlineChild {
+  id: string;
+  type: "revision";
+  label: string;
+  responseId: string;
+  revisionIndex: number;
+  childConversationId: string;
 }
 
 interface ConversationScrollMinimapProps {
   scrollContainerRef: RefObject<HTMLElement | null>;
   items: ConversationMinimapItem[];
+  onRevisionSelect?: (
+    responseId: string,
+    revisionIndex: number,
+    childConversationId: string
+  ) => void;
 }
 
 interface MeasuredMinimapItem extends ConversationMinimapItem {
-  topPercent: number;
   anchorTop: number;
 }
 
-const MIN_ITEM_COUNT = 3;
+const MIN_ITEM_COUNT = 2;
 
 function cssEscape(value: string) {
   return globalThis.CSS?.escape ? globalThis.CSS.escape(value) : value.replace(/"/g, '\\"');
 }
 
 export function responseMinimapItems(
-  responses: Array<{ id: string; title?: string; question?: string; answerText?: string }>,
+  responses: Array<{
+    id: string;
+    title?: string;
+    question?: string;
+    answerText?: string;
+    revisions?: Array<{
+      id: string;
+      childConversationId: string;
+      title?: string | null;
+      revisionPrompt?: string | null;
+    }>;
+  }>,
   activeResponseId?: string | null
 ): ConversationMinimapItem[] {
-  return responses.flatMap((response) => {
+  return responses.map((response) => {
     const escapedId = cssEscape(response.id);
-    const promptLabel = conversationMinimapLabel({
-      type: "user",
-      promptText: response.question,
-    });
-    const responseLabel = conversationMinimapLabel({
+    const label = conversationMinimapLabel({
       type: "response",
-      title: response.title,
-      promptText: response.question,
-      responseText: response.answerText,
+      title: response.title || response.question || response.answerText,
     });
-    return [
-      {
-        id: `${response.id}:user`,
-        type: "user" as const,
-        label: promptLabel,
-        anchorSelector: `[data-prompt-response-id="${escapedId}"]`,
-        active: activeResponseId === response.id,
-      },
-      {
-        id: `${response.id}:response`,
-        type: "response" as const,
-        label: responseLabel,
-        anchorSelector: `[data-response-id="${escapedId}"]`,
-        active: activeResponseId === response.id,
-      },
-    ];
+    return {
+      id: `${response.id}:response`,
+      type: "response" as const,
+      label,
+      anchorSelector: `[data-prompt-response-id="${escapedId}"]`,
+      active: activeResponseId === response.id,
+      outlineChildren: (response.revisions ?? []).map((revision, index) => ({
+        id: `${response.id}:revision:${revision.id}`,
+        type: "revision" as const,
+        label: conversationMinimapRevisionLabel(revision, index + 2),
+        responseId: response.id,
+        revisionIndex: index + 1,
+        childConversationId: revision.childConversationId,
+      })),
+    };
   });
 }
 
 export function ConversationScrollMinimap({
   scrollContainerRef,
   items,
+  onRevisionSelect,
 }: ConversationScrollMinimapProps) {
   const [measuredItems, setMeasuredItems] = useState<MeasuredMinimapItem[]>([]);
-  const [viewport, setViewport] = useState<MinimapViewportGeometry>({
-    topPercent: 0,
-    heightPercent: 100,
-  });
   const [nearestItemId, setNearestItemId] = useState<string | null>(null);
   const rafRef = useRef<number | null>(null);
-  const trackRef = useRef<HTMLDivElement | null>(null);
+  const outlineRef = useRef<HTMLDivElement | null>(null);
   const visible = items.length >= MIN_ITEM_COUNT;
 
   const itemSignature = useMemo(
@@ -98,33 +114,25 @@ export function ConversationScrollMinimap({
     const container = scrollContainerRef.current;
     if (!container || !visible) {
       setMeasuredItems([]);
-      setViewport({ topPercent: 0, heightPercent: 100 });
+      setNearestItemId(null);
       return;
     }
 
     const measure = () => {
       rafRef.current = null;
-      const nextItems = items
+      const anchorItems = items
         .map((item) => {
           const anchor = container.querySelector<HTMLElement>(item.anchorSelector);
           if (!anchor) return null;
           return {
             ...item,
             anchorTop: anchor.offsetTop,
-            topPercent: minimapAnchorPercent(anchor.offsetTop, container.scrollHeight),
           };
         })
         .filter((item): item is MeasuredMinimapItem => item !== null);
-      setMeasuredItems(nextItems);
-      setViewport(
-        minimapViewportGeometry({
-          scrollTop: container.scrollTop,
-          clientHeight: container.clientHeight,
-          scrollHeight: container.scrollHeight,
-        })
-      );
+      setMeasuredItems(anchorItems);
       setNearestItemId(
-        nearestConversationMinimapItemId(nextItems, container.scrollTop)
+        nearestConversationMinimapItemId(anchorItems, container.scrollTop)
       );
     };
 
@@ -157,7 +165,41 @@ export function ConversationScrollMinimap({
     };
   }, [itemSignature, items, scrollContainerRef, visible]);
 
+  function alignOutlineRowNearTop(row: HTMLElement | null) {
+    const outline = outlineRef.current;
+    if (!outline || !row || outline.scrollHeight <= outline.clientHeight) return;
+    outline.scrollTo({
+      top: Math.max(0, row.offsetTop - 8),
+      behavior: "smooth",
+    });
+  }
+
+  function alignActiveOutlineRowIfOpen() {
+    const outline = outlineRef.current;
+    if (!outline) return;
+    const active = outline.querySelector<HTMLElement>(
+      ".conversation-minimap__outline-row--active"
+    );
+    alignOutlineRowNearTop(active);
+  }
+
+  useEffect(() => {
+    const outline = outlineRef.current;
+    if (!outline) return;
+    if (!outline.matches(":hover") && !outline.closest(".conversation-minimap:focus-within")) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(alignActiveOutlineRowIfOpen);
+    return () => window.cancelAnimationFrame(frame);
+  }, [nearestItemId, measuredItems]);
+
   if (!visible || measuredItems.length === 0) return null;
+  const rulerItems = visibleMinimapRulerWindow(measuredItems, nearestItemId).map(
+    (item, index) => ({
+      ...item,
+      topPx: minimapRulerTickTopPx(index),
+    })
+  );
 
   function scrollToAnchor(anchorTop: number) {
     const container = scrollContainerRef.current;
@@ -168,34 +210,14 @@ export function ConversationScrollMinimap({
     });
   }
 
-  function scrollTrackTo(event: MouseEvent<HTMLDivElement>) {
-    const container = scrollContainerRef.current;
-    const track = trackRef.current;
-    if (!container || !track || event.target !== track) return;
-    const rect = track.getBoundingClientRect();
-    const ratio = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
-    container.scrollTo({
-      top: ratio * Math.max(0, container.scrollHeight - container.clientHeight),
-      behavior: "smooth",
-    });
-  }
-
   return (
-    <nav className="conversation-minimap" aria-label="Conversation scroll map">
-      <div
-        className="conversation-minimap__track"
-        ref={trackRef}
-        onClick={scrollTrackTo}
-        aria-hidden="false"
-      >
-        <div
-          className="conversation-minimap__viewport"
-          style={{
-            top: `${viewport.topPercent}%`,
-            height: `${viewport.heightPercent}%`,
-          }}
-        />
-        {measuredItems.map((item) => (
+    <nav
+      className="conversation-minimap"
+      aria-label="Conversation scroll map"
+      style={{ height: `${MINIMAP_RULER_HEIGHT_PX}px` }}
+    >
+      <div className="conversation-minimap__track" aria-hidden="false">
+        {rulerItems.map((item) => (
           <button
             aria-label={`Jump to ${item.type}: ${item.label}`}
             className={[
@@ -212,39 +234,69 @@ export function ConversationScrollMinimap({
               event.stopPropagation();
               scrollToAnchor(item.anchorTop);
             }}
-            style={{ top: `${item.topPercent}%` }}
+            style={{ top: `${item.topPx}px` }}
             type="button"
           />
         ))}
-        <div className="conversation-minimap__outline">
+        <div
+          className="conversation-minimap__outline"
+          onMouseEnter={() => {
+            window.requestAnimationFrame(alignActiveOutlineRowIfOpen);
+          }}
+          ref={outlineRef}
+        >
           {measuredItems.map((item) => {
             const active = item.active || item.highlighted || item.id === nearestItemId;
             return (
-              <button
-                aria-label={`Jump to ${item.type}: ${item.label}`}
-                className={[
-                  "conversation-minimap__outline-row",
-                  active ? "conversation-minimap__outline-row--active" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-                key={`${item.id}:outline`}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  scrollToAnchor(item.anchorTop);
-                }}
-                type="button"
-              >
-                <span
-                  aria-hidden="true"
+              <div className="conversation-minimap__outline-group" key={`${item.id}:outline`}>
+                <button
+                  aria-label={`Jump to ${item.type}: ${item.label}`}
                   className={[
-                    "conversation-minimap__outline-marker",
-                    `conversation-minimap__outline-marker--${item.type}`,
-                  ].join(" ")}
-                />
-                <span className="conversation-minimap__outline-label">{item.label}</span>
-                <span className="conversation-minimap__outline-type">{item.type}</span>
-              </button>
+                    "conversation-minimap__outline-row",
+                    active ? "conversation-minimap__outline-row--active" : "",
+                  ]
+                    .filter(Boolean)
+                    .join(" ")}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    alignOutlineRowNearTop(event.currentTarget);
+                    scrollToAnchor(item.anchorTop);
+                  }}
+                  type="button"
+                >
+                  <span
+                    aria-hidden="true"
+                    className={[
+                      "conversation-minimap__outline-marker",
+                      `conversation-minimap__outline-marker--${item.type}`,
+                    ].join(" ")}
+                  />
+                  <span className="conversation-minimap__outline-label">{item.label}</span>
+                </button>
+                {item.outlineChildren?.map((child) => (
+                  <button
+                    aria-label={`Open revision: ${child.label}`}
+                    className="conversation-minimap__outline-row conversation-minimap__outline-row--child conversation-minimap__outline-row--revision"
+                    key={child.id}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      alignOutlineRowNearTop(event.currentTarget);
+                      onRevisionSelect?.(
+                        child.responseId,
+                        child.revisionIndex,
+                        child.childConversationId
+                      );
+                    }}
+                    type="button"
+                  >
+                    <span
+                      aria-hidden="true"
+                      className="conversation-minimap__outline-marker conversation-minimap__outline-marker--revision"
+                    />
+                    <span className="conversation-minimap__outline-label">{child.label}</span>
+                  </button>
+                ))}
+              </div>
             );
           })}
         </div>

@@ -17582,16 +17582,57 @@ function ChatTranscript({
           id: response.id,
           title: response.title,
           question: response.question,
+          revisions: forkRecords
+            .filter(
+              (record) =>
+                record.kind === "revision" &&
+                record.parentConversationId === conversation.id &&
+                record.revisionSourceResponseId === response.id
+            )
+            .map((record) => ({
+              id: record.id,
+              childConversationId: record.childConversationId,
+              title: record.title,
+              revisionPrompt: record.revisionPrompt,
+            })),
         })),
         highlightedResponseId ?? generatingResponseId
       ),
-    [generatingResponseId, highlightedResponseId, responses]
+    [conversation.id, forkRecords, generatingResponseId, highlightedResponseId, responses]
+  );
+
+  const handleMinimapRevisionSelect = useCallback(
+    (responseId: string, revisionIndex: number, childConversationId: string) => {
+      preserveTranscriptScrollAfterRevisionAction();
+      const revisionRecord = forkRecords.find(
+        (record) =>
+          record.kind === "revision" &&
+          record.parentConversationId === conversation.id &&
+          record.revisionSourceResponseId === responseId &&
+          record.childConversationId === childConversationId
+      );
+      if (!revisionRecord) return;
+      onPromptRevisionSelect?.(responseId, childConversationId);
+      onSelectWeft(revisionRecord, {
+        preserveOriginScroll: true,
+        scrollMode: "top",
+      });
+      onPromptRevisionNavigate?.(responseId, revisionIndex);
+    },
+    [
+      conversation.id,
+      forkRecords,
+      onPromptRevisionNavigate,
+      onPromptRevisionSelect,
+      onSelectWeft,
+    ]
   );
 
   return (
     <div className="chat-transcript-shell">
       <ConversationScrollMinimap
         items={minimapItems}
+        onRevisionSelect={handleMinimapRevisionSelect}
         scrollContainerRef={transcriptNodeRef}
       />
       <section

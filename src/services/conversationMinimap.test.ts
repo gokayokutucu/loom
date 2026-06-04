@@ -1,10 +1,18 @@
 import { describe, expect, it } from "vitest";
+import { responseMinimapItems } from "../components/ConversationScrollMinimap";
 import {
   clampPercent,
   conversationMinimapLabel,
+  conversationMinimapRevisionLabel,
+  MAX_VISIBLE_MINIMAP_RULER_TICKS,
+  MINIMAP_RULER_HEIGHT_PX,
+  MINIMAP_RULER_TICK_GAP_PX,
   minimapAnchorPercent,
+  minimapRulerTickPercent,
+  minimapRulerTickTopPx,
   minimapViewportGeometry,
   nearestConversationMinimapItemId,
+  visibleMinimapRulerWindow,
 } from "./conversationMinimap";
 
 describe("conversation minimap geometry", () => {
@@ -43,6 +51,25 @@ describe("conversation minimap geometry", () => {
     expect(values[49]).toBe(98);
   });
 
+  it("spaces ruler ticks evenly by item index", () => {
+    expect([0, 1, 2, 3].map((index) => minimapRulerTickPercent(index, 4))).toEqual([
+      0,
+      33.33333333333333,
+      66.66666666666666,
+      100,
+    ]);
+    expect(minimapRulerTickPercent(0, 1)).toBe(0);
+    expect(minimapRulerTickPercent(10, 4)).toBe(100);
+  });
+
+  it("locks compact ruler tick spacing to sixteen pixels", () => {
+    expect(MINIMAP_RULER_TICK_GAP_PX).toBe(16);
+    expect(MINIMAP_RULER_HEIGHT_PX).toBe(240);
+    expect(minimapRulerTickTopPx(0)).toBe(0);
+    expect(minimapRulerTickTopPx(1)).toBe(16);
+    expect(minimapRulerTickTopPx(10)).toBe(160);
+  });
+
   it("derives labels from title, prompt, text, and fallback", () => {
     expect(
       conversationMinimapLabel({
@@ -63,6 +90,82 @@ describe("conversation minimap geometry", () => {
     expect(conversationMinimapLabel({ type: "response", responseText: "Answer" })).toBe(
       "Answer"
     );
+  });
+
+  it("normalizes markdown markers before using outline labels", () => {
+    expect(
+      conversationMinimapLabel({
+        type: "response",
+        title: ["####", "", "Satellite Requirements"].join("\n"),
+      })
+    ).toBe("Satellite Requirements");
+    expect(
+      conversationMinimapLabel({
+        type: "user",
+        promptText: "**Important** `context`",
+      })
+    ).toBe("Important context");
+  });
+
+  it("derives revision outline labels from prompt, title, and fallback number", () => {
+    expect(
+      conversationMinimapRevisionLabel(
+        { revisionPrompt: ["###", "", "Tighter answer"].join("\n") },
+        2
+      )
+    ).toBe("Tighter answer");
+    expect(conversationMinimapRevisionLabel({ title: "**Revision title**" }, 3)).toBe(
+      "Revision title"
+    );
+    expect(conversationMinimapRevisionLabel({}, 2)).toBe("Revision 2");
+    expect(conversationMinimapRevisionLabel({}, 1)).toBe("Revision");
+  });
+
+  it("derives no revision child rows for responses without revisions", () => {
+    expect(
+      responseMinimapItems([{ id: "response-a", title: "Answer A", question: "Prompt A" }])[0]
+        .outlineChildren
+    ).toEqual([]);
+  });
+
+  it("derives indented revision child metadata for response revisions", () => {
+    const item = responseMinimapItems([
+      {
+        id: "response-a",
+        title: "Answer A",
+        question: "Prompt A",
+        revisions: [
+          {
+            id: "fork-1",
+            childConversationId: "revision-loom-1",
+            revisionPrompt: "Revise tone",
+          },
+          {
+            id: "fork-2",
+            childConversationId: "revision-loom-2",
+          },
+        ],
+      },
+    ])[0];
+
+    expect(item.outlineChildren).toEqual([
+      {
+        id: "response-a:revision:fork-1",
+        type: "revision",
+        label: "Revise tone",
+        responseId: "response-a",
+        revisionIndex: 1,
+        childConversationId: "revision-loom-1",
+      },
+      {
+        id: "response-a:revision:fork-2",
+        type: "revision",
+        label: "Revision 3",
+        responseId: "response-a",
+        revisionIndex: 2,
+        childConversationId: "revision-loom-2",
+      },
+    ]);
   });
 
   it("keeps long labels bounded for outline rows", () => {
@@ -86,5 +189,36 @@ describe("conversation minimap geometry", () => {
       )
     ).toBe("b");
     expect(nearestConversationMinimapItemId([], 200)).toBeNull();
+  });
+
+  it("shows all ruler items when the list fits the sixteen pixel window", () => {
+    const items = Array.from({ length: MAX_VISIBLE_MINIMAP_RULER_TICKS }, (_, index) => ({
+      id: `item-${index}`,
+    }));
+    expect(visibleMinimapRulerWindow(items, "item-9").map((item) => item.id)).toEqual(
+      items.map((item) => item.id)
+    );
+  });
+
+  it("limits dense ruler items to a centered sixteen pixel window", () => {
+    const items = Array.from({ length: 30 }, (_, index) => ({ id: `item-${index}` }));
+    const visible = visibleMinimapRulerWindow(items, "item-15");
+    expect(visible).toHaveLength(MAX_VISIBLE_MINIMAP_RULER_TICKS);
+    expect(visible[0].id).toBe("item-7");
+    expect(visible[MAX_VISIBLE_MINIMAP_RULER_TICKS - 1].id).toBe("item-22");
+    expect(visible.some((item) => item.id === "item-15")).toBe(true);
+  });
+
+  it("clamps dense ruler windows to the start and end", () => {
+    const items = Array.from({ length: 30 }, (_, index) => ({ id: `item-${index}` }));
+    const topWindow = visibleMinimapRulerWindow(items, "item-2");
+    const bottomWindow = visibleMinimapRulerWindow(items, "item-29");
+
+    expect(topWindow).toHaveLength(MAX_VISIBLE_MINIMAP_RULER_TICKS);
+    expect(topWindow[0].id).toBe("item-0");
+    expect(topWindow[MAX_VISIBLE_MINIMAP_RULER_TICKS - 1].id).toBe("item-15");
+    expect(bottomWindow).toHaveLength(MAX_VISIBLE_MINIMAP_RULER_TICKS);
+    expect(bottomWindow[0].id).toBe("item-14");
+    expect(bottomWindow[MAX_VISIBLE_MINIMAP_RULER_TICKS - 1].id).toBe("item-29");
   });
 });
