@@ -1583,6 +1583,8 @@ function validateServiceConfig(value: unknown): LoomServiceRuntimeConfig {
     ? {
         defaultMainModel: stringValue(value.providers, "defaultMainModel"),
         defaultQuickModel: stringValue(value.providers, "defaultQuickModel"),
+        mainProviderProfileId: nullableStringValue(value.providers, "mainProviderProfileId"),
+        mainModelId: nullableStringValue(value.providers, "mainModelId"),
         profiles: Array.isArray(value.providers.profiles)
           ? value.providers.profiles
               .map(validateProviderProfile)

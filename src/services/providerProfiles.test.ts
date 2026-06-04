@@ -1,7 +1,12 @@
 import { describe, expect, it } from "vitest";
-import type { ProviderProfileRuntimeConfig, ProviderSecretStatus } from "../engine";
+import type {
+  ProviderProfileRuntimeConfig,
+  ProviderSecretStatus,
+  RuntimeModelProviderStatus,
+} from "../engine";
 import {
   canEnableProviderProfile,
+  canSelectProviderProfileForMain,
   isRemoteProviderProfile,
   providerProfileBadges,
   providerSecretStatusLabel,
@@ -50,6 +55,30 @@ function secretStatus(overrides: Partial<ProviderSecretStatus> = {}): ProviderSe
     status: "missing",
     ...overrides,
   };
+}
+
+function runtimeStatus(
+  overrides: Partial<RuntimeModelProviderStatus> = {}
+): RuntimeModelProviderStatus {
+  const base: RuntimeModelProviderStatus = {
+    providerProfileId: "nvidia",
+    displayName: "NVIDIA NIM",
+    providerKind: "openai_compatible",
+    transportKind: "native_openai_compatible",
+    vendor: "nvidia",
+    enabled: true,
+    experimental: true,
+    requiresSecret: true,
+    secretStatus: "saved",
+    runtimeStatus: "ready",
+    status: "ready",
+    runtimeOwnedBy: "loom-service",
+    supportsDownloads: false,
+    supportsStart: false,
+    supportsStop: false,
+    warnings: [],
+  };
+  return Object.assign(base, overrides);
 }
 
 describe("provider profile Settings helpers", () => {
@@ -120,5 +149,49 @@ describe("provider profile Settings helpers", () => {
     expect(
       canEnableProviderProfile(remote, secretStatus({ present: true, status: "saved" }), true)
     ).toEqual({ allowed: true });
+  });
+
+  it("allows Main selection only for enabled configured profiles", () => {
+    const remote = profile({
+      id: "nvidia",
+      providerKind: "openai_compatible",
+      transportKind: "native_openai_compatible",
+      requiresSecret: true,
+      defaultModel: "nvidia/e2e-openai-compatible",
+      security: {
+        localOnlyRequired: false,
+        allowRemoteEndpoint: true,
+        allowInsecureHttpRemote: false,
+        allowUnsafeModelManagement: false,
+      },
+    });
+
+    expect(
+      canSelectProviderProfileForMain(
+        remote,
+        secretStatus({ present: true, status: "saved" }),
+        runtimeStatus(),
+        true
+      )
+    ).toEqual({ allowed: true });
+    expect(
+      canSelectProviderProfileForMain(
+        { ...remote, enabled: false },
+        secretStatus({ present: true, status: "saved" }),
+        runtimeStatus({ runtimeStatus: "disabled", status: "disabled" }),
+        true
+      )
+    ).toMatchObject({ allowed: false });
+    expect(
+      canSelectProviderProfileForMain(remote, secretStatus(), runtimeStatus(), true)
+    ).toMatchObject({ allowed: false });
+    expect(
+      canSelectProviderProfileForMain(
+        remote,
+        secretStatus({ present: true, status: "saved" }),
+        runtimeStatus({ runtimeStatus: "invalid_config", status: "invalid_config" }),
+        true
+      )
+    ).toMatchObject({ allowed: false });
   });
 });

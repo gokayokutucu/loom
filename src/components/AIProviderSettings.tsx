@@ -73,6 +73,7 @@ import type {
 } from "../engine";
 import {
   canEnableProviderProfile,
+  canSelectProviderProfileForMain,
   isRemoteProviderProfile,
   providerProfileBadges,
   providerProfileAccessLabel,
@@ -466,15 +467,15 @@ export function AIProviderSettingsModal({
       setOcrDraft(serviceStatus.serviceConfig.ocr);
     }
     if (serviceStatus.serviceConfig?.providers) {
+      const serviceProviders = serviceStatus.serviceConfig.providers;
       setDraft((current) => ({
         ...current,
         profiles: {
           ...current.profiles,
-          quickModelId:
-            serviceStatus.serviceConfig?.providers?.defaultQuickModel ??
-            current.profiles.quickModelId,
+          quickModelId: serviceProviders.defaultQuickModel ?? current.profiles.quickModelId,
           mainModelId:
-            serviceStatus.serviceConfig?.providers?.defaultMainModel ??
+            serviceProviders.mainModelId ??
+            serviceProviders.defaultMainModel ??
             current.profiles.mainModelId,
         },
       }));
@@ -705,11 +706,71 @@ export function AIProviderSettingsModal({
         providers: {
           defaultQuickModel: next.profiles.quickModelId,
           defaultMainModel: next.profiles.mainModelId,
+          mainProviderProfileId: "ollama-local",
+          mainModelId: next.profiles.mainModelId,
         },
       });
       setServiceStatus((current) => ({ ...current, serviceConfig: result.config }));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Model assignment could not be saved.");
+    }
+  }
+
+  async function selectProviderProfileForMain(profile: ProviderProfileRuntimeConfig) {
+    const secretStatus = providerSecretStatuses[profile.id];
+    const runtimeProviderStatus = runtimeProviderStatuses[profile.id];
+    const gate = canSelectProviderProfileForMain(
+      profile,
+      secretStatus,
+      runtimeProviderStatus,
+      providerPrivacyAcknowledged[profile.id] ?? false
+    );
+    if (!gate.allowed) {
+      setMessage(gate.reason ?? "This provider cannot be used for Main yet.");
+      return;
+    }
+    const modelId = profile.defaultModel;
+    if (!modelId) {
+      setMessage("This provider does not have a default model configured.");
+      return;
+    }
+    setProviderProfileWorking(`${profile.id}:main`);
+    setMessage(null);
+    try {
+      const result = await engineClient.updateServiceConfig({
+        providers: {
+          defaultQuickModel:
+            serviceStatus.serviceConfig?.providers?.defaultQuickModel ??
+            draft.profiles.quickModelId,
+          defaultMainModel: modelId,
+          mainProviderProfileId: profile.id,
+          mainModelId: modelId,
+        },
+      });
+      setDraft((current) => ({
+        ...current,
+        profiles: {
+          ...current.profiles,
+          mainModelId: modelId,
+        },
+      }));
+      setServiceStatus((current) => ({
+        ...current,
+        serviceConfig: result.config,
+        configError: undefined,
+        config: current.config
+          ? {
+              ...current.config,
+              restartRequired: result.restartStatus?.restartRequired,
+              pendingRestart: result.restartStatus?.pendingRestart,
+            }
+          : current.config,
+      }));
+      setMessage(`${profile.displayName} selected for Main.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Main provider could not be selected.");
+    } finally {
+      setProviderProfileWorking(null);
     }
   }
 
@@ -786,10 +847,24 @@ export function AIProviderSettingsModal({
     setProviderProfileWorking(`${profile.id}:enabled`);
     setMessage(null);
     try {
+      const disablingSelectedMain =
+        !enabled && serviceStatus.serviceConfig?.providers?.mainProviderProfileId === profile.id;
+      const localMainModelId =
+        draft.ollama.models.find((model) => model.installed)?.id ??
+        draft.ollama.models[0]?.id ??
+        defaultAIProviderSettings.profiles.mainModelId;
       const result = await engineClient.updateServiceConfig({
         providers: {
           defaultQuickModel: serviceStatus.serviceConfig?.providers?.defaultQuickModel,
-          defaultMainModel: serviceStatus.serviceConfig?.providers?.defaultMainModel,
+          defaultMainModel: disablingSelectedMain
+            ? localMainModelId
+            : serviceStatus.serviceConfig?.providers?.defaultMainModel,
+          mainProviderProfileId: disablingSelectedMain
+            ? "ollama-local"
+            : serviceStatus.serviceConfig?.providers?.mainProviderProfileId,
+          mainModelId: disablingSelectedMain
+            ? localMainModelId
+            : serviceStatus.serviceConfig?.providers?.mainModelId,
           profiles: profiles.map((item) =>
             item.id === profile.id ? { ...item, enabled } : item
           ),
@@ -805,8 +880,17 @@ export function AIProviderSettingsModal({
               restartRequired: result.restartStatus?.restartRequired,
               pendingRestart: result.restartStatus?.pendingRestart,
             }
-          : current.config,
+            : current.config,
       }));
+      if (disablingSelectedMain) {
+        setDraft((current) => ({
+          ...current,
+          profiles: {
+            ...current.profiles,
+            mainModelId: localMainModelId,
+          },
+        }));
+      }
       setMessage(`${profile.displayName} ${enabled ? "enabled" : "disabled"}.`);
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "Provider profile could not be updated.");
@@ -1157,7 +1241,15 @@ export function AIProviderSettingsModal({
     settingsCategories.find((category) => category.id === activeCategory)?.label ?? "Settings";
   const quickModel = getProfileModel(draft, "quick");
   const mainModel = getProfileModel(draft, "main");
-  const selectedModelsReady = quickModel.installed && mainModel.installed;
+  const currentMainProviderProfileId =
+    serviceStatus.serviceConfig?.providers?.mainProviderProfileId ?? "ollama-local";
+  const currentMainModelId =
+    serviceStatus.serviceConfig?.providers?.mainModelId ??
+    serviceStatus.serviceConfig?.providers?.defaultMainModel ??
+    draft.profiles.mainModelId;
+  const selectedMainModelReady =
+    currentMainProviderProfileId === "ollama-local" ? mainModel.installed : true;
+  const selectedModelsReady = quickModel.installed && selectedMainModelReady;
   const demoResponsesAvailable = canUseMockResponseMode();
   const demoResponsesForced = import.meta.env.VITE_ENABLE_MOCK_RESPONSES === "true";
   const demoResponsesEnabled = isMockResponseModeEnabled(draft);
@@ -1489,7 +1581,15 @@ export function AIProviderSettingsModal({
                   secretStatus,
                   providerPrivacyAcknowledged[profile.id] ?? false
                 );
+                const mainSelectionGate = canSelectProviderProfileForMain(
+                  profile,
+                  secretStatus,
+                  runtimeProviderStatus,
+                  providerPrivacyAcknowledged[profile.id] ?? false
+                );
+                const selectedForMain = currentMainProviderProfileId === profile.id;
                 const enableWorking = providerProfileWorking === `${profile.id}:enabled`;
+                const mainWorking = providerProfileWorking === `${profile.id}:main`;
                 const secretWorking =
                   providerProfileWorking === `${profile.id}:secret-save` ||
                   providerProfileWorking === `${profile.id}:secret-remove` ||
@@ -1508,7 +1608,7 @@ export function AIProviderSettingsModal({
                         <small>{profile.id}</small>
                       </div>
                       <span className={`connection-pill ${profile.enabled ? "connected" : ""}`}>
-                        {profile.enabled ? "Enabled" : "Disabled"}
+                        {selectedForMain ? "Main" : profile.enabled ? "Enabled" : "Disabled"}
                       </span>
                     </div>
 
@@ -1538,6 +1638,10 @@ export function AIProviderSettingsModal({
                       <div>
                         <dt>Default model</dt>
                         <dd>{profile.defaultModel ?? "Not configured"}</dd>
+                      </div>
+                      <div>
+                        <dt>Main selection</dt>
+                        <dd>{selectedForMain ? `Selected (${currentMainModelId})` : "Not selected"}</dd>
                       </div>
                       <div>
                         <dt>Secret</dt>
@@ -1619,6 +1723,20 @@ export function AIProviderSettingsModal({
 
                     <div className="provider-profile-actions">
                       <span>{providerProfileAccessLabel(profile)} provider</span>
+                      <button
+                        onClick={() => void selectProviderProfileForMain(profile)}
+                        disabled={
+                          mainWorking ||
+                          selectedForMain ||
+                          demoResponsesEnabled ||
+                          !mainSelectionGate.allowed
+                        }
+                        title={
+                          !mainSelectionGate.allowed ? mainSelectionGate.reason : undefined
+                        }
+                      >
+                        {selectedForMain ? "Selected for Main" : "Use for Main"}
+                      </button>
                       {remote ? (
                         <button
                           onClick={() => void setProviderProfileEnabled(profile, !profile.enabled)}

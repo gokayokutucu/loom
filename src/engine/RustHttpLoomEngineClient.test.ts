@@ -172,6 +172,8 @@ describe("RustHttpLoomEngineClient provider profile and secret mapping", () => {
             providers: {
               defaultMainModel: "qwen",
               defaultQuickModel: "qwen",
+              mainProviderProfileId: "nvidia",
+              mainModelId: "meta/llama-3.1-70b-instruct",
               profiles: [
                 {
                   id: "nvidia",
@@ -215,6 +217,12 @@ describe("RustHttpLoomEngineClient provider profile and secret mapping", () => {
 
     const config = await client.getServiceConfig();
 
+    expect(config.providers).toMatchObject({
+      defaultMainModel: "qwen",
+      defaultQuickModel: "qwen",
+      mainProviderProfileId: "nvidia",
+      mainModelId: "meta/llama-3.1-70b-instruct",
+    });
     expect(config.providers?.profiles?.[0]).toMatchObject({
       id: "nvidia",
       providerKind: "openai_compatible",

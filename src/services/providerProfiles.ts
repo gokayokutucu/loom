@@ -1,6 +1,7 @@
 import type {
   ProviderProfileRuntimeConfig,
   ProviderSecretStatus,
+  RuntimeModelProviderStatus,
 } from "../engine";
 
 export type ProviderAccessKind = "local" | "remote";
@@ -69,6 +70,56 @@ export function canEnableProviderProfile(
     return {
       allowed: false,
       reason: "Save an API key before enabling this provider.",
+    };
+  }
+  return { allowed: true };
+}
+
+export function canSelectProviderProfileForMain(
+  profile: ProviderProfileRuntimeConfig,
+  secretStatus: ProviderSecretStatus | undefined,
+  runtimeStatus: RuntimeModelProviderStatus | undefined,
+  privacyAcknowledged: boolean
+): { allowed: boolean; reason?: string } {
+  if (!profile.enabled) {
+    return {
+      allowed: false,
+      reason: "Enable this provider before using it for Main.",
+    };
+  }
+  if (!profile.defaultModel) {
+    return {
+      allowed: false,
+      reason: "This provider does not have a default model configured.",
+    };
+  }
+  if (isRemoteProviderProfile(profile)) {
+    const enableGate = canEnableProviderProfile(profile, secretStatus, privacyAcknowledged);
+    if (!enableGate.allowed) return enableGate;
+  }
+  const status = runtimeStatus?.runtimeStatus ?? runtimeStatus?.status;
+  if (status === "disabled") {
+    return {
+      allowed: false,
+      reason: "Enable this provider before using it for Main.",
+    };
+  }
+  if (status === "missing_secret") {
+    return {
+      allowed: false,
+      reason: "Save an API key before using this provider for Main.",
+    };
+  }
+  if (status === "invalid_config") {
+    return {
+      allowed: false,
+      reason: "Fix this provider's configuration before using it for Main.",
+    };
+  }
+  if (status === "feature_gated") {
+    return {
+      allowed: false,
+      reason: "This provider transport is not available in the current build.",
     };
   }
   return { allowed: true };

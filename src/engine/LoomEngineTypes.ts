@@ -236,6 +236,8 @@ export interface LoomServiceRuntimeConfig {
   providers?: {
     defaultMainModel?: string;
     defaultQuickModel?: string;
+    mainProviderProfileId?: string | null;
+    mainModelId?: string | null;
     profiles?: ProviderProfileRuntimeConfig[];
   };
   database?: { path?: string };
@@ -280,6 +282,8 @@ export interface UpdateServiceConfigInput {
   providers?: {
     defaultMainModel?: string;
     defaultQuickModel?: string;
+    mainProviderProfileId?: string | null;
+    mainModelId?: string | null;
     profiles?: ProviderProfileRuntimeConfig[];
   };
 }
