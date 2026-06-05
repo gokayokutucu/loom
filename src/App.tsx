@@ -2376,6 +2376,7 @@ function App() {
   const referenceFragmentHighlightTimerRef = useRef<number | null>(null);
   const [highlightedRevisionResponseId, setHighlightedRevisionResponseId] = useState<string | null>(null);
   const revisionHighlightTimerRef = useRef<number | null>(null);
+  const revisionHighlightedElementRef = useRef<HTMLElement | null>(null);
   const pendingRevisionHighlightRef = useRef<{
     pane: "origin" | "weft";
     loomId: string;
@@ -10660,11 +10661,36 @@ function App() {
     if (revisionHighlightTimerRef.current !== null) {
       window.clearTimeout(revisionHighlightTimerRef.current);
     }
+    revisionHighlightedElementRef.current?.classList.remove("revision-focus-highlight--response");
+    revisionHighlightedElementRef.current = null;
     setHighlightedRevisionResponseId(responseId);
     revisionHighlightTimerRef.current = window.setTimeout(() => {
+      revisionHighlightedElementRef.current?.classList.remove("revision-focus-highlight--response");
+      revisionHighlightedElementRef.current = null;
       setHighlightedRevisionResponseId(null);
       revisionHighlightTimerRef.current = null;
     }, 1500);
+  }
+
+  function triggerRevisionHighlightForElement(responseId: string, responseElement: HTMLElement) {
+    const assistantMessage = responseElement.querySelector<HTMLElement>(".assistant-message");
+    if (!assistantMessage) return false;
+    if (revisionHighlightTimerRef.current !== null) {
+      window.clearTimeout(revisionHighlightTimerRef.current);
+    }
+    document
+      .querySelectorAll<HTMLElement>(".revision-focus-highlight--response")
+      .forEach((element) => element.classList.remove("revision-focus-highlight--response"));
+    revisionHighlightedElementRef.current = assistantMessage;
+    setHighlightedRevisionResponseId(responseId);
+    assistantMessage.classList.add("revision-focus-highlight--response");
+    revisionHighlightTimerRef.current = window.setTimeout(() => {
+      assistantMessage.classList.remove("revision-focus-highlight--response");
+      revisionHighlightedElementRef.current = null;
+      setHighlightedRevisionResponseId(null);
+      revisionHighlightTimerRef.current = null;
+    }, 1500);
+    return true;
   }
 
   function handlePromptRevisionNavigate(responseId: string, revisionIndex: number) {
@@ -10723,38 +10749,55 @@ function App() {
         return;
       }
 
-      if (Date.now() - pending.createdAt > 3000) {
+      if (Date.now() - pending.createdAt > 5000) {
         pendingRevisionHighlightRef.current = null;
         return;
       }
 
+      let pane = currentPending.pane;
+      let loomId = currentPending.loomId;
       let targetResponseId = currentPending.targetResponseId;
-      if (!targetResponseId) {
-        const revisionRecords = forkRecords.filter(
-          (record) =>
-            record.kind === "revision" &&
-            record.parentConversationId === originConversation?.id &&
-            record.revisionSourceResponseId === currentPending.displayResponseId
-        );
-        const resolved = resolveRevisionTarget({
-          revisionIndex: currentPending.revisionIndex,
-          displayResponseId: currentPending.displayResponseId,
-          originConversationId: originConversation?.id ?? "",
-          revisionRecords,
-          parentResponses: originResponses,
-          getConversationResponses: (loomId) => conversationResponses[loomId] ?? [],
-        });
-        if (resolved) {
-          targetResponseId = resolved.targetResponseId;
-          currentPending.targetResponseId = targetResponseId;
-        }
+      const revisionRecords = forkRecords.filter(
+        (record) =>
+          record.kind === "revision" &&
+          record.parentConversationId === originConversation?.id &&
+          record.revisionSourceResponseId === currentPending.displayResponseId
+      );
+      const resolved = resolveRevisionTarget({
+        revisionIndex: currentPending.revisionIndex,
+        displayResponseId: currentPending.displayResponseId,
+        originConversationId: originConversation?.id ?? "",
+        revisionRecords,
+        parentResponses: originResponses,
+        getConversationResponses: (candidateLoomId) => conversationResponses[candidateLoomId] ?? [],
+      });
+      if (resolved) {
+        pane = resolved.pane;
+        loomId = resolved.loomId;
+        targetResponseId = resolved.targetResponseId;
+        currentPending.pane = pane;
+        currentPending.loomId = loomId;
+        currentPending.targetResponseId = targetResponseId;
       }
 
       if (!targetResponseId) {
         return;
       }
 
-      const pane = currentPending.pane;
+      if (
+        pane === "weft" &&
+        (!showWeftSplit || activeConversationId !== loomId)
+      ) {
+        frameId = requestAnimationFrame(checkAndApply);
+        return;
+      }
+      if (
+        pane === "origin" &&
+        originConversation?.id !== loomId
+      ) {
+        frameId = requestAnimationFrame(checkAndApply);
+        return;
+      }
       const transcript = pane === "origin" ? originTranscriptRef.current : transcriptRef.current;
 
       if (!transcript) {
@@ -10766,8 +10809,7 @@ function App() {
         `[data-response-id="${CSS.escape(targetResponseId)}"]`
       );
 
-      if (targetEl) {
-        triggerRevisionHighlight(targetResponseId);
+      if (targetEl && triggerRevisionHighlightForElement(targetResponseId, targetEl)) {
         pendingRevisionHighlightRef.current = null;
       } else {
         frameId = requestAnimationFrame(checkAndApply);

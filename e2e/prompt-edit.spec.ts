@@ -92,6 +92,26 @@ async function waitForPersistedResponses(
   throw new Error(`Timed out waiting for ${expectedCount} persisted responses in ${loomId}.`);
 }
 
+function cssAttrValue(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function highlightedAssistantResponse(page: Page, paneSelector: string, responseId: string) {
+  return page.locator(
+    `${paneSelector} .chat-transcript [data-response-id="${cssAttrValue(
+      responseId
+    )}"] > .assistant-message.revision-focus-highlight--response`
+  );
+}
+
+function assistantResponseCard(page: Page, paneSelector: string, responseId: string) {
+  return page.locator(
+    `${paneSelector} .chat-transcript [data-response-id="${cssAttrValue(
+      responseId
+    )}"] > .assistant-message`
+  );
+}
+
 async function permanentDeleteSidebarLoom(page: Page, loomId: string) {
   const tab = page.getByTestId(`sidebar-loom-${loomId}`);
   await expect(tab).toBeVisible();
@@ -452,6 +472,32 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         "3/3"
       );
       await expect(page.locator(".weft-split-panel")).toContainText("GCP");
+      const revisionWeftsAfterSecondEdit = (await scenario.client.listLooms())
+        .filter(
+          (loom) =>
+            loom.kind === "weft" &&
+            loom.originLoomId === loomId &&
+            loom.originResponseId === assistantA!.responseId &&
+            loom.weftKind === "revision"
+        )
+        .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
+      expect(revisionWeftsAfterSecondEdit).toHaveLength(2);
+      const firstRevisionWeft = revisionWeftsAfterSecondEdit[0];
+      const secondRevisionWeft = revisionWeftsAfterSecondEdit[1];
+      expect(firstRevisionWeft.loomId).toBe(revisionWeft!.loomId);
+      const firstRevisionAssistantId = revisionResponses.find(
+        (response) => response.role === "assistant"
+      )?.responseId;
+      const secondRevisionResponses = await waitForPersistedResponses(
+        scenario,
+        secondRevisionWeft.loomId,
+        2
+      );
+      const secondRevisionAssistantId = secondRevisionResponses.find(
+        (response) => response.role === "assistant"
+      )?.responseId;
+      expect(firstRevisionAssistantId).toBeTruthy();
+      expect(secondRevisionAssistantId).toBeTruthy();
 
       // No highlight check here because it was just edited (not paged to).
       // Wait for any initial generated/edit state to settle down.
@@ -466,11 +512,15 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         "2/3"
       );
 
-      // Verify highlights are applied immediately on 2/3 in weft panel target
+      // Verify highlights are applied only to the exact 2/3 assistant response in the split pane.
       await expect(page.locator(".weft-split-panel .revision-focus-highlight--user")).toHaveCount(0);
-      const highlight2 = page.locator(".weft-split-panel .revision-focus-highlight--response");
-      await expect(highlight2).toBeVisible();
-      await expect(highlight2).toContainText("Deterministic E2E provider");
+      await expect(
+        assistantResponseCard(page, ".weft-split-panel", firstRevisionAssistantId!)
+      ).toBeVisible();
+      await expect(
+        highlightedAssistantResponse(page, ".weft-split-panel", firstRevisionAssistantId!)
+      ).toBeVisible();
+      await expect(page.locator(".origin-split-panel .revision-focus-highlight--response")).toHaveCount(0);
       // Verify weft panel displays the 2/3 text (editedPrompt)
       await expect(page.locator(".weft-split-panel")).toContainText(editedPrompt);
       // Verify it does NOT contain the 3/3 text (editedPrompt2)
@@ -489,10 +539,12 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         "1/3"
       );
 
-      // Verify highlights are applied immediately on 1/3 in origin panel
+      // Verify highlights are applied only to the exact 1/3 origin assistant response.
       await expect(page.locator(".origin-split-panel .revision-focus-highlight--user")).toHaveCount(0);
-      const highlight1 = page.locator(".origin-split-panel .revision-focus-highlight--response");
-      await expect(highlight1).toBeVisible();
+      await expect(
+        highlightedAssistantResponse(page, ".origin-split-panel", assistantB!.responseId)
+      ).toBeVisible();
+      await expect(page.locator(".weft-split-panel .revision-focus-highlight--response")).toHaveCount(0);
 
       // Wait for highlight duration to expire
       await page.waitForTimeout(1800);
@@ -511,7 +563,10 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
       await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
         "2/3"
       );
-      await expect(page.locator(".weft-split-panel .revision-focus-highlight--response")).toBeVisible();
+      await expect(
+        highlightedAssistantResponse(page, ".weft-split-panel", firstRevisionAssistantId!)
+      ).toBeVisible();
+      await expect(page.locator(".origin-split-panel .revision-focus-highlight--response")).toHaveCount(0);
 
       // Wait for highlight duration to expire
       await page.waitForTimeout(1800);
@@ -524,7 +579,16 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
       await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
         "3/3"
       );
-      await expect(page.locator(".weft-split-panel .revision-focus-highlight--response")).toBeVisible();
+      await expect(
+        assistantResponseCard(page, ".weft-split-panel", secondRevisionAssistantId!)
+      ).toBeVisible();
+      await expect(
+        highlightedAssistantResponse(page, ".weft-split-panel", secondRevisionAssistantId!)
+      ).toBeVisible();
+      await expect(
+        highlightedAssistantResponse(page, ".weft-split-panel", firstRevisionAssistantId!)
+      ).toHaveCount(0);
+      await expect(page.locator(".origin-split-panel .revision-focus-highlight--response")).toHaveCount(0);
 
       await expect(page.locator(".weft-split-panel")).toContainText(editedPrompt2);
       await expect
@@ -543,6 +607,27 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
             })
         )
         .toBe(true);
+
+      await page.waitForTimeout(1800);
+      const revisionCounter = page.locator(".origin-split-panel .prompt-revision-action-counter");
+      const previousRevisionButton = revisionCounter.getByRole("button", {
+        name: "Previous message revision",
+      });
+      const nextRevisionButton = revisionCounter.getByRole("button", {
+        name: "Next message revision",
+      });
+      await previousRevisionButton.click({ force: true });
+      await expect(revisionCounter).toContainText("2/3");
+      await nextRevisionButton.click({ force: true });
+      await expect(revisionCounter).toContainText("3/3");
+      await previousRevisionButton.click({ force: true });
+      await expect(revisionCounter).toContainText("2/3");
+      await previousRevisionButton.click({ force: true });
+      await expect(revisionCounter).toContainText("1/3");
+      await expect(
+        highlightedAssistantResponse(page, ".origin-split-panel", assistantB!.responseId)
+      ).toBeVisible();
+      await expect(page.locator(".weft-split-panel .revision-focus-highlight--response")).toHaveCount(0);
 
       await page
         .locator(".weft-split-panel")
