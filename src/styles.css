@@ -2444,12 +2444,10 @@ kbd {
 }
 
 .conversation-minimap__outline-row {
-  display: grid;
-  grid-template-columns: 14px minmax(0, 1fr);
+  display: flex;
   align-items: center;
-  gap: 8px;
   min-height: 28px;
-  padding: 5px 7px;
+  padding: 5px 10px;
   border: 0;
   border-radius: 7px;
   background: transparent;
@@ -2474,12 +2472,19 @@ kbd {
 
 .conversation-minimap__outline-row--active {
   background: color-mix(in srgb, var(--loom-accent) 13%, transparent);
-  color: var(--loom-text-primary);
+  color: var(--loom-accent);
+  box-shadow: inset 2px 0 0 var(--loom-accent);
+  font-weight: 500;
 }
 
 .conversation-minimap__outline-row--child {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
   margin-left: 18px;
   min-height: 26px;
+  padding: 4px 7px;
   color: color-mix(in srgb, var(--loom-text-secondary) 78%, transparent);
   font-size: 12px;
 }
@@ -2497,12 +2502,33 @@ kbd {
 }
 
 .conversation-minimap__outline-marker--revision {
-  width: 8px;
-  height: 8px;
-  border: 1px solid color-mix(in srgb, var(--loom-accent) 70%, transparent);
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--loom-accent) 16%, transparent);
-  transform: rotate(-8deg);
+  position: relative;
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  transform: none;
+}
+
+.conversation-minimap__outline-marker--revision::before {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 0;
+  height: 6px;
+  width: 1px;
+  background: color-mix(in srgb, var(--loom-text-muted) 60%, transparent);
+}
+
+.conversation-minimap__outline-marker--revision::after {
+  content: "";
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  right: 0;
+  height: 1px;
+  background: color-mix(in srgb, var(--loom-text-muted) 60%, transparent);
 }
 
 .conversation-minimap__outline-row--active .conversation-minimap__outline-marker {
@@ -2510,7 +2536,12 @@ kbd {
   background: var(--loom-accent);
 }
 
+.conversation-minimap__outline-row--active .conversation-minimap__outline-marker--revision {
+  background: transparent;
+}
+
 .conversation-minimap__outline-label {
+  flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;

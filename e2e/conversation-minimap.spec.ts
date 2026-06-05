@@ -344,6 +344,11 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       await expect(outlineRows.first()).toContainText("Long Streaming Scroll Fixture");
       await expect(outlineRows.first()).not.toContainText("#");
       await expect(outlineRows.locator(".conversation-minimap__outline-type")).toHaveCount(0);
+      await expect(
+        minimap.locator(
+          ".conversation-minimap__outline-row:not(.conversation-minimap__outline-row--child) .conversation-minimap__outline-marker"
+        )
+      ).toHaveCount(0);
       await expect(minimap.locator(".conversation-minimap__outline-row--active")).toHaveCount(1);
 
       const outlineMetrics = await outline.evaluate((element) => {
@@ -530,6 +535,21 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       await expect(parentRows).toHaveCount(2);
       await expect(revisionRow).toBeVisible();
       await expect(revisionRow).toHaveAttribute("title", revisionPrompt);
+
+      // Assert parent outline rows do not have markers in Variant B
+      await expect(
+        parentRows.locator(".conversation-minimap__outline-marker")
+      ).toHaveCount(0);
+
+      // Assert revision child rows do contain revision marker
+      await expect(
+        revisionRow.locator(".conversation-minimap__outline-marker--revision")
+      ).toHaveCount(1);
+
+      // Assert active parent row exists
+      await expect(
+        originMinimap.locator(".conversation-minimap__outline-row--active")
+      ).toHaveCount(1);
 
       const [parentBox, revisionBox] = await Promise.all([
         parentRows.first().boundingBox(),
