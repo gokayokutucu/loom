@@ -93,6 +93,10 @@ import {
   type ContextMenuItem,
   type ContextMenuPayload,
 } from "./services/contextMenu";
+import {
+  ConversationScrollMinimap,
+  responseMinimapItems,
+} from "./components/ConversationScrollMinimap";
 import { browserHostShell } from "./services/hostShell";
 import {
   isAttachmentLink as isAttachmentReferenceLink,
@@ -2372,6 +2376,18 @@ function App() {
   const referenceFragmentHighlightTimerRef = useRef<number | null>(null);
   const [highlightedRevisionResponseId, setHighlightedRevisionResponseId] = useState<string | null>(null);
   const revisionHighlightTimerRef = useRef<number | null>(null);
+  const revisionHighlightedElementRef = useRef<HTMLElement | null>(null);
+  const pendingRevisionHighlightRef = useRef<{
+    pane: "origin" | "weft";
+    loomId: string;
+    displayResponseId: string;
+    revisionIndex: number;
+    targetResponseId: string | null;
+    token: number;
+    createdAt: number;
+  } | null>(null);
+  const pendingHighlightTokenRef = useRef<number>(0);
+  const [pendingHighlightTrigger, setPendingHighlightTrigger] = useState(0);
   const revisionNavigationInProgressRef = useRef(false);
   const revisionNavigationTimerRef = useRef<number | null>(null);
   const activeVisitLoomIdRef = useRef<string | null>(null);
@@ -10645,32 +10661,168 @@ function App() {
     if (revisionHighlightTimerRef.current !== null) {
       window.clearTimeout(revisionHighlightTimerRef.current);
     }
+    revisionHighlightedElementRef.current?.classList.remove("revision-focus-highlight--response");
+    revisionHighlightedElementRef.current = null;
     setHighlightedRevisionResponseId(responseId);
     revisionHighlightTimerRef.current = window.setTimeout(() => {
+      revisionHighlightedElementRef.current?.classList.remove("revision-focus-highlight--response");
+      revisionHighlightedElementRef.current = null;
       setHighlightedRevisionResponseId(null);
       revisionHighlightTimerRef.current = null;
     }, 1500);
   }
 
+  function triggerRevisionHighlightForElement(responseId: string, responseElement: HTMLElement) {
+    const assistantMessage = responseElement.querySelector<HTMLElement>(".assistant-message");
+    if (!assistantMessage) return false;
+    if (revisionHighlightTimerRef.current !== null) {
+      window.clearTimeout(revisionHighlightTimerRef.current);
+    }
+    document
+      .querySelectorAll<HTMLElement>(".revision-focus-highlight--response")
+      .forEach((element) => element.classList.remove("revision-focus-highlight--response"));
+    revisionHighlightedElementRef.current = assistantMessage;
+    setHighlightedRevisionResponseId(responseId);
+    assistantMessage.classList.add("revision-focus-highlight--response");
+    revisionHighlightTimerRef.current = window.setTimeout(() => {
+      assistantMessage.classList.remove("revision-focus-highlight--response");
+      revisionHighlightedElementRef.current = null;
+      setHighlightedRevisionResponseId(null);
+      revisionHighlightTimerRef.current = null;
+    }, 1500);
+    return true;
+  }
+
   function handlePromptRevisionNavigate(responseId: string, revisionIndex: number) {
+    const token = ++pendingHighlightTokenRef.current;
+
+    const revisionRecords = forkRecords.filter(
+      (record) =>
+        record.kind === "revision" &&
+        record.parentConversationId === originConversation?.id &&
+        record.revisionSourceResponseId === responseId
+    );
+
     const target = resolveRevisionTarget({
       revisionIndex,
       displayResponseId: responseId,
       originConversationId: originConversation?.id ?? "",
-      revisionRecords: forkRecords.filter(
-        (record) =>
-          record.kind === "revision" &&
-          record.parentConversationId === originConversation?.id &&
-          record.revisionSourceResponseId === responseId
-      ),
+      revisionRecords,
       parentResponses: originResponses,
       getConversationResponses: (loomId) => conversationResponses[loomId] ?? [],
     });
 
-    if (!target) return;
+    const pane = revisionIndex === 0 ? "origin" : "weft";
+    const loomId = revisionIndex === 0
+      ? (originConversation?.id ?? "")
+      : (revisionRecords[revisionIndex - 1]?.childConversationId ?? "");
 
-    triggerRevisionHighlight(target.targetResponseId);
+    pendingRevisionHighlightRef.current = {
+      pane,
+      loomId,
+      displayResponseId: responseId,
+      revisionIndex,
+      targetResponseId: target?.targetResponseId ?? null,
+      token,
+      createdAt: Date.now(),
+    };
+    setPendingHighlightTrigger((c) => c + 1);
   }
+
+  useEffect(() => {
+    const pending = pendingRevisionHighlightRef.current;
+    if (!pending) return;
+
+    if (Date.now() - pending.createdAt > 5000) {
+      pendingRevisionHighlightRef.current = null;
+      return;
+    }
+
+    let active = true;
+    let frameId: number;
+
+    const checkAndApply = () => {
+      if (!active) return;
+
+      const currentPending = pendingRevisionHighlightRef.current;
+      if (!currentPending || currentPending.token !== pending.token) {
+        return;
+      }
+
+      if (Date.now() - pending.createdAt > 5000) {
+        pendingRevisionHighlightRef.current = null;
+        return;
+      }
+
+      let pane = currentPending.pane;
+      let loomId = currentPending.loomId;
+      let targetResponseId = currentPending.targetResponseId;
+      const revisionRecords = forkRecords.filter(
+        (record) =>
+          record.kind === "revision" &&
+          record.parentConversationId === originConversation?.id &&
+          record.revisionSourceResponseId === currentPending.displayResponseId
+      );
+      const resolved = resolveRevisionTarget({
+        revisionIndex: currentPending.revisionIndex,
+        displayResponseId: currentPending.displayResponseId,
+        originConversationId: originConversation?.id ?? "",
+        revisionRecords,
+        parentResponses: originResponses,
+        getConversationResponses: (candidateLoomId) => conversationResponses[candidateLoomId] ?? [],
+      });
+      if (resolved) {
+        pane = resolved.pane;
+        loomId = resolved.loomId;
+        targetResponseId = resolved.targetResponseId;
+        currentPending.pane = pane;
+        currentPending.loomId = loomId;
+        currentPending.targetResponseId = targetResponseId;
+      }
+
+      if (!targetResponseId) {
+        return;
+      }
+
+      if (
+        pane === "weft" &&
+        (!showWeftSplit || activeConversationId !== loomId)
+      ) {
+        frameId = requestAnimationFrame(checkAndApply);
+        return;
+      }
+      if (
+        pane === "origin" &&
+        originConversation?.id !== loomId
+      ) {
+        frameId = requestAnimationFrame(checkAndApply);
+        return;
+      }
+      const transcript = pane === "origin" ? originTranscriptRef.current : transcriptRef.current;
+
+      if (!transcript) {
+        frameId = requestAnimationFrame(checkAndApply);
+        return;
+      }
+
+      const targetEl = transcript.querySelector<HTMLElement>(
+        `[data-response-id="${CSS.escape(targetResponseId)}"]`
+      );
+
+      if (targetEl && triggerRevisionHighlightForElement(targetResponseId, targetEl)) {
+        pendingRevisionHighlightRef.current = null;
+      } else {
+        frameId = requestAnimationFrame(checkAndApply);
+      }
+    };
+
+    checkAndApply();
+
+    return () => {
+      active = false;
+      cancelAnimationFrame(frameId);
+    };
+  }, [conversationResponses, originConversation, originResponses, forkRecords, showWeftSplit, activeConversationId, pendingHighlightTrigger]);
 
   function anchorBranchCounterNavigation(
     loomId: string,
@@ -14231,7 +14383,7 @@ function App() {
                             onAddCodeReference={addCodeBlockAsReference}
                             onOpenReference={openComposerReference}
                             onOpenAttachment={(link) => void openSentAttachment(link, originConversation?.id)}
-                            onReturnToOrigin={returnToOrigin}
+                            onReturnToOrigin={undefined}
                             highlightedResponseId={recentResponseFeedbackId}
                             isOriginPanel={true}
                             onPromptRevisionNavigate={handlePromptRevisionNavigate}
@@ -14284,6 +14436,7 @@ function App() {
                             conversation={activeConversation}
                             responses={activeResponses}
                             activeLoomId={activeConversation.id}
+                            showMinimap={false}
                             onLink={(link) => {
                               markSplitPanelActive("weft");
                               linkObjectForDraft(link, activeConversation.id);
@@ -17351,6 +17504,7 @@ function ChatTranscript({
   isOriginPanel,
   onPromptRevisionNavigate,
   highlightedRevisionResponseId,
+  showMinimap = true,
 }: {
   transcriptRef?: (node: HTMLElement | null) => void;
   conversation?: Conversation;
@@ -17412,6 +17566,7 @@ function ChatTranscript({
   isOriginPanel?: boolean;
   onPromptRevisionNavigate?: (responseId: string, revisionIndex: number) => void;
   highlightedRevisionResponseId?: string | null;
+  showMinimap?: boolean;
 }) {
   const [sentReferenceHint, setSentReferenceHint] = useState<{
     link: LoomLink;
@@ -17571,9 +17726,76 @@ function ChatTranscript({
   const isGeneratingInTranscript = Boolean(
     generatingResponseId && responses.some((response) => response.id === generatingResponseId)
   );
+  const minimapItems = useMemo(
+    () =>
+      responseMinimapItems(
+        responses.map((response) => ({
+          id: response.id,
+          title: response.title,
+          question: response.question,
+          revisions: forkRecords
+            .filter(
+              (record) =>
+                record.kind === "revision" &&
+                record.parentConversationId === conversation.id &&
+                record.revisionSourceResponseId === response.id
+            )
+            .map((record) => ({
+              id: record.id,
+              childConversationId: record.childConversationId,
+              title: record.title,
+              revisionPrompt: record.revisionPrompt,
+            })),
+        })),
+        highlightedResponseId ?? generatingResponseId
+      ),
+    [conversation.id, forkRecords, generatingResponseId, highlightedResponseId, responses]
+  );
+
+  const handleMinimapRevisionSelect = useCallback(
+    (responseId: string, revisionIndex: number, childConversationId: string) => {
+      preserveTranscriptScrollAfterRevisionAction();
+      const revisionRecord = forkRecords.find(
+        (record) =>
+          record.kind === "revision" &&
+          record.parentConversationId === conversation.id &&
+          record.revisionSourceResponseId === responseId &&
+          record.childConversationId === childConversationId
+      );
+      if (!revisionRecord) return;
+      onPromptRevisionSelect?.(responseId, childConversationId);
+      onSelectWeft(revisionRecord, {
+        preserveOriginScroll: true,
+        scrollMode: "top",
+      });
+      onPromptRevisionNavigate?.(responseId, revisionIndex);
+    },
+    [
+      conversation.id,
+      forkRecords,
+      onPromptRevisionNavigate,
+      onPromptRevisionSelect,
+      onSelectWeft,
+    ]
+  );
+
+  const isMinimapActive = showMinimap && minimapItems.length >= 2;
 
   return (
-    <div className="chat-transcript-shell">
+    <div
+      className={
+        isMinimapActive
+          ? "chat-transcript-shell chat-transcript-shell--with-minimap"
+          : "chat-transcript-shell"
+      }
+    >
+      {showMinimap && (
+        <ConversationScrollMinimap
+          items={minimapItems}
+          onRevisionSelect={handleMinimapRevisionSelect}
+          scrollContainerRef={transcriptNodeRef}
+        />
+      )}
       <section
         className={isGeneratingInTranscript ? "chat-transcript is-generating-response" : "chat-transcript"}
         ref={setTranscriptNode}

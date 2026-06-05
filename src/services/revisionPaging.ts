@@ -40,18 +40,14 @@ export function resolveRevisionTarget(options: {
   const childLoomId = revisionRecord.childConversationId;
   const childResponses = options.getConversationResponses(childLoomId);
 
-  // Find parent response index in parentResponses
-  const parentIndex = options.parentResponses.findIndex(
-    (r) => r.id === options.displayResponseId
-  );
-
   // Locate the target response item in the child conversation.
-  // We prefer response IDs prefixed with the edit pattern, then parentIndex, then fallback.
+  // A Revision page points at the revision Loom's own answer. Do not project the
+  // parent response index into the child Loom: the child may already have follow-up
+  // responses, and paging 3/x must still highlight the initial revision answer.
   const targetResponse =
     childResponses.find((r) =>
       r.id.startsWith(`revision-${options.displayResponseId}`)
     ) ||
-    (parentIndex >= 0 ? childResponses[parentIndex] : undefined) ||
     childResponses[0];
 
   if (!targetResponse) return null;

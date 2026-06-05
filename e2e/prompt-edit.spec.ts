@@ -92,6 +92,26 @@ async function waitForPersistedResponses(
   throw new Error(`Timed out waiting for ${expectedCount} persisted responses in ${loomId}.`);
 }
 
+function cssAttrValue(value: string) {
+  return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+function highlightedAssistantResponse(page: Page, paneSelector: string, responseId: string) {
+  return page.locator(
+    `${paneSelector} .chat-transcript [data-response-id="${cssAttrValue(
+      responseId
+    )}"] > .assistant-message.revision-focus-highlight--response`
+  );
+}
+
+function assistantResponseCard(page: Page, paneSelector: string, responseId: string) {
+  return page.locator(
+    `${paneSelector} .chat-transcript [data-response-id="${cssAttrValue(
+      responseId
+    )}"] > .assistant-message`
+  );
+}
+
 async function permanentDeleteSidebarLoom(page: Page, loomId: string) {
   const tab = page.getByTestId(`sidebar-loom-${loomId}`);
   await expect(tab).toBeVisible();
@@ -182,8 +202,8 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         revisionResponses.some((response) => response.content.includes(originalPrompt))
       ).toBe(false);
       await expect(page.locator(".weft-split-view")).toBeVisible();
-      await expect(page.locator(".origin-split-panel")).not.toContainText(editedPrompt);
-      await expect(page.locator(".origin-split-panel")).toContainText(originalPrompt);
+      await expect(page.locator(".origin-split-panel .chat-transcript")).not.toContainText(editedPrompt);
+      await expect(page.locator(".origin-split-panel .chat-transcript")).toContainText(originalPrompt);
       await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
         "2/2"
       );
@@ -222,7 +242,7 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         timeout: 30_000,
       });
       await sendMainPrompt(page, promptB);
-      await expect(page.getByText("AWS").first()).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator(".chat-transcript").getByText("AWS").first()).toBeVisible({ timeout: 30_000 });
 
       const rootLoom = (await scenario.client.listLooms()).find((item) =>
         item.title.includes("Event Sourcing")
@@ -337,9 +357,9 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         timeout: 30_000,
       });
       await sendMainPrompt(page, promptB);
-      await expect(page.getByText("AWS").first()).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator(".chat-transcript").getByText("AWS").first()).toBeVisible({ timeout: 30_000 });
       await sendMainPrompt(page, promptC);
-      await expect(page.getByText("Azure").first()).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator(".chat-transcript").getByText("Azure").first()).toBeVisible({ timeout: 30_000 });
 
       const rootLoom = (await scenario.client.listLooms()).find((item) =>
         item.title.includes("Event Sourcing")
@@ -367,7 +387,7 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
 
       await editPrompt(page, assistantB!.responseId, editedPrompt);
       await expect(page.getByText("Revision:").first()).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByText("GCP").first()).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator(".chat-transcript").getByText("GCP").first()).toBeVisible({ timeout: 30_000 });
 
       expect(forbiddenMutationUrls).toEqual([]);
 
@@ -411,8 +431,19 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         )
       ).toBe(true);
       await expect(page.locator(".weft-split-view")).toBeVisible();
-      await expect(page.locator(".origin-split-panel")).not.toContainText(editedPrompt);
-      await expect(page.locator(".origin-split-panel")).toContainText(promptB);
+
+      // Return to Origin button must NOT be in the origin (left) split panel
+      await expect(
+        page.locator(".origin-split-panel").getByRole("button", { name: "Return to Origin" })
+      ).not.toBeVisible();
+
+      // Return to Origin button must be in the weft (right) split panel
+      await expect(
+        page.locator(".weft-split-panel").getByRole("button", { name: "Return to Origin" })
+      ).toBeVisible();
+
+      await expect(page.locator(".origin-split-panel .chat-transcript")).not.toContainText(editedPrompt);
+      await expect(page.locator(".origin-split-panel .chat-transcript")).toContainText(promptB);
       await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
         "2/2"
       );
@@ -424,18 +455,96 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
       const originScrollBeforeRevisionToggle = await originTranscript.evaluate(
         (element) => element.scrollTop
       );
+
+      // Go back to 1/2 in order to perform the second edit on B
       await page
         .locator(".origin-split-panel .prompt-revision-action-counter")
         .getByRole("button", { name: "Previous message revision" })
         .click({ force: true });
-      await expect(page.locator(".origin-split-panel")).toContainText(promptB);
       await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
         "1/2"
       );
 
-      // Verify highlights are applied immediately on click (response only)
+      // Perform second edit to create a 3rd revision (1/3, 2/3, 3/3)
+      const editedPrompt2 = "Event Sourcing GCP üzerinde veritabanı yedeği nasıl alınır?";
+      await editPrompt(page, assistantB!.responseId, editedPrompt2);
+      await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
+        "3/3"
+      );
+      await expect(page.locator(".weft-split-panel")).toContainText("GCP");
+      const revisionWeftsAfterSecondEdit = (await scenario.client.listLooms())
+        .filter(
+          (loom) =>
+            loom.kind === "weft" &&
+            loom.originLoomId === loomId &&
+            loom.originResponseId === assistantA!.responseId &&
+            loom.weftKind === "revision"
+        )
+        .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
+      expect(revisionWeftsAfterSecondEdit).toHaveLength(2);
+      const firstRevisionWeft = revisionWeftsAfterSecondEdit[0];
+      const secondRevisionWeft = revisionWeftsAfterSecondEdit[1];
+      expect(firstRevisionWeft.loomId).toBe(revisionWeft!.loomId);
+      const firstRevisionAssistantId = revisionResponses.find(
+        (response) => response.role === "assistant"
+      )?.responseId;
+      const secondRevisionResponses = await waitForPersistedResponses(
+        scenario,
+        secondRevisionWeft.loomId,
+        2
+      );
+      const secondRevisionAssistantId = secondRevisionResponses.find(
+        (response) => response.role === "assistant"
+      )?.responseId;
+      expect(firstRevisionAssistantId).toBeTruthy();
+      expect(secondRevisionAssistantId).toBeTruthy();
+
+      // No highlight check here because it was just edited (not paged to).
+      // Wait for any initial generated/edit state to settle down.
+      await page.waitForTimeout(500);
+
+      // 1. Click Previous to go to 2/3
+      await page
+        .locator(".origin-split-panel .prompt-revision-action-counter")
+        .getByRole("button", { name: "Previous message revision" })
+        .click({ force: true });
+      await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
+        "2/3"
+      );
+
+      // Verify highlights are applied only to the exact 2/3 assistant response in the split pane.
+      await expect(page.locator(".weft-split-panel .revision-focus-highlight--user")).toHaveCount(0);
+      await expect(
+        assistantResponseCard(page, ".weft-split-panel", firstRevisionAssistantId!)
+      ).toBeVisible();
+      await expect(
+        highlightedAssistantResponse(page, ".weft-split-panel", firstRevisionAssistantId!)
+      ).toBeVisible();
+      await expect(page.locator(".origin-split-panel .revision-focus-highlight--response")).toHaveCount(0);
+      // Verify weft panel displays the 2/3 text (editedPrompt)
+      await expect(page.locator(".weft-split-panel")).toContainText(editedPrompt);
+      // Verify it does NOT contain the 3/3 text (editedPrompt2)
+      await expect(page.locator(".weft-split-panel")).not.toContainText(editedPrompt2);
+
+      // Wait for highlight duration to expire
+      await page.waitForTimeout(1800);
+      await expect(page.locator(".weft-split-panel .revision-focus-highlight--response")).toHaveCount(0);
+
+      // 2. Click Previous to go to 1/3
+      await page
+        .locator(".origin-split-panel .prompt-revision-action-counter")
+        .getByRole("button", { name: "Previous message revision" })
+        .click({ force: true });
+      await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
+        "1/3"
+      );
+
+      // Verify highlights are applied only to the exact 1/3 origin assistant response.
       await expect(page.locator(".origin-split-panel .revision-focus-highlight--user")).toHaveCount(0);
-      await expect(page.locator(".origin-split-panel .revision-focus-highlight--response")).toBeVisible();
+      await expect(
+        highlightedAssistantResponse(page, ".origin-split-panel", assistantB!.responseId)
+      ).toBeVisible();
+      await expect(page.locator(".weft-split-panel .revision-focus-highlight--response")).toHaveCount(0);
 
       // Wait for highlight duration to expire
       await page.waitForTimeout(1800);
@@ -446,20 +555,42 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
       );
       expect(Math.abs(originScrollAfterOriginalRevision - originScrollBeforeRevisionToggle)).toBeLessThanOrEqual(4);
 
+      // 3. Click Next to go to 2/3
       await page
         .locator(".origin-split-panel .prompt-revision-action-counter")
         .getByRole("button", { name: "Next message revision" })
         .click({ force: true });
-      await expect(page.locator(".origin-split-panel")).not.toContainText(editedPrompt);
       await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
-        "2/2"
+        "2/3"
       );
+      await expect(
+        highlightedAssistantResponse(page, ".weft-split-panel", firstRevisionAssistantId!)
+      ).toBeVisible();
+      await expect(page.locator(".origin-split-panel .revision-focus-highlight--response")).toHaveCount(0);
 
-      // Verify highlights are applied immediately on click for weft panel target (response only)
-      await expect(page.locator(".weft-split-panel .revision-focus-highlight--user")).toHaveCount(0);
-      await expect(page.locator(".weft-split-panel .revision-focus-highlight--response")).toBeVisible();
+      // Wait for highlight duration to expire
+      await page.waitForTimeout(1800);
 
-      await expect(page.locator(".weft-split-panel")).toContainText(editedPrompt);
+      // 4. Click Next to go to 3/3
+      await page
+        .locator(".origin-split-panel .prompt-revision-action-counter")
+        .getByRole("button", { name: "Next message revision" })
+        .click({ force: true });
+      await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
+        "3/3"
+      );
+      await expect(
+        assistantResponseCard(page, ".weft-split-panel", secondRevisionAssistantId!)
+      ).toBeVisible();
+      await expect(
+        highlightedAssistantResponse(page, ".weft-split-panel", secondRevisionAssistantId!)
+      ).toBeVisible();
+      await expect(
+        highlightedAssistantResponse(page, ".weft-split-panel", firstRevisionAssistantId!)
+      ).toHaveCount(0);
+      await expect(page.locator(".origin-split-panel .revision-focus-highlight--response")).toHaveCount(0);
+
+      await expect(page.locator(".weft-split-panel")).toContainText(editedPrompt2);
       await expect
         .poll(async () =>
           page
@@ -476,6 +607,27 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
             })
         )
         .toBe(true);
+
+      await page.waitForTimeout(1800);
+      const revisionCounter = page.locator(".origin-split-panel .prompt-revision-action-counter");
+      const previousRevisionButton = revisionCounter.getByRole("button", {
+        name: "Previous message revision",
+      });
+      const nextRevisionButton = revisionCounter.getByRole("button", {
+        name: "Next message revision",
+      });
+      await previousRevisionButton.click({ force: true });
+      await expect(revisionCounter).toContainText("2/3");
+      await nextRevisionButton.click({ force: true });
+      await expect(revisionCounter).toContainText("3/3");
+      await previousRevisionButton.click({ force: true });
+      await expect(revisionCounter).toContainText("2/3");
+      await previousRevisionButton.click({ force: true });
+      await expect(revisionCounter).toContainText("1/3");
+      await expect(
+        highlightedAssistantResponse(page, ".origin-split-panel", assistantB!.responseId)
+      ).toBeVisible();
+      await expect(page.locator(".weft-split-panel .revision-focus-highlight--response")).toHaveCount(0);
 
       await page
         .locator(".weft-split-panel")
@@ -535,6 +687,8 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
       await expect(
         revisionGraphNode.getByRole("button", { name: "Previous graph message revision" })
       ).toBeDisabled();
+
+      // Go from 1/3 to 2/3
       await revisionGraphNode
         .getByRole("button", { name: "Next graph message revision" })
         .click();
@@ -542,14 +696,34 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
       await expect(revisionGraphNode.locator(".loom-graph-preview")).toContainText(
         "Deterministic E2E provider"
       );
+      // Next button should be enabled because 3/3 exists
+      await expect(
+        revisionGraphNode.getByRole("button", { name: "Next graph message revision" })
+      ).toBeEnabled();
+
+      // Go from 2/3 to 3/3
+      await revisionGraphNode
+        .getByRole("button", { name: "Next graph message revision" })
+        .click();
+      await expect(revisionGraphNode.locator("h3")).toContainText(editedPrompt2);
+      // Next button should be disabled now (at 3/3)
       await expect(
         revisionGraphNode.getByRole("button", { name: "Next graph message revision" })
       ).toBeDisabled();
+
       await revisionGraphNode.click();
       const graphPreviewModal = page.locator(".graph-response-preview-modal");
-      await expect(graphPreviewModal).toContainText(editedPrompt);
+      await expect(graphPreviewModal).toContainText(editedPrompt2);
       await expect(graphPreviewModal).toContainText("Deterministic E2E provider");
       await page.getByRole("button", { name: "Close response preview" }).click();
+
+      // Go back from 3/3 to 2/3
+      await revisionGraphNode
+        .getByRole("button", { name: "Previous graph message revision" })
+        .click();
+      await expect(revisionGraphNode.locator("h3")).toContainText(editedPrompt);
+
+      // Go back from 2/3 to 1/3
       await revisionGraphNode
         .getByRole("button", { name: "Previous graph message revision" })
         .click();
