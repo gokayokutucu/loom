@@ -285,6 +285,7 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       await expect(responseTicks).toHaveCount(16);
       await expect(outlineRows).toHaveCount(21);
       await expect(outline).toHaveCSS("opacity", "0");
+      await expect(minimap.locator(".conversation-minimap__ticks-container")).toHaveCSS("opacity", "1");
       await expectMinimapOnTranscriptRight(transcript, minimap);
       await expectRulerTicksEvenlySpaced(allTicks);
       await expectFixedRulerHeight(minimap);
@@ -313,6 +314,7 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       const firstTick = minimap.locator(".conversation-minimap__tick").first();
       await firstTick.hover();
       await expectOutlineOpen(outline);
+      await expect(minimap.locator(".conversation-minimap__ticks-container")).toHaveCSS("opacity", "0");
 
       // Verify title tooltips exist on ticks and parent outline rows
       await expect(firstTick).toHaveAttribute("title");
@@ -344,6 +346,18 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       await expect(outlineRows.first()).toContainText("Long Streaming Scroll Fixture");
       await expect(outlineRows.first()).not.toContainText("#");
       await expect(outlineRows.locator(".conversation-minimap__outline-type")).toHaveCount(0);
+
+      // Verify parent response row marker is on the right side of the label
+      const parentLabel = outlineRows.first().locator(".conversation-minimap__outline-label");
+      const parentMarker = outlineRows.first().locator(".conversation-minimap__outline-marker");
+      const [parentLabelBox, parentMarkerBox] = await Promise.all([
+        parentLabel.boundingBox(),
+        parentMarker.boundingBox(),
+      ]);
+      expect(parentLabelBox).not.toBeNull();
+      expect(parentMarkerBox).not.toBeNull();
+      expect(parentLabelBox!.x).toBeLessThan(parentMarkerBox!.x);
+
       await expect(minimap.locator(".conversation-minimap__outline-row--active")).toHaveCount(1);
 
       const outlineMetrics = await outline.evaluate((element) => {
@@ -365,7 +379,7 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       await expectPromptAnchorNearTranscriptTop(fifteenthPromptAnchor);
 
       const twentyFirstPromptAnchor = page.locator("[data-prompt-response-id]").nth(20);
-      await minimap.locator(".conversation-minimap__tick").first().hover();
+      await minimap.locator(".conversation-minimap__tick").first().hover({ force: true });
       await expectOutlineOpen(outline);
       await outlineRows.nth(20).click();
 
@@ -377,6 +391,7 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       });
       await page.mouse.move(100, 120);
       await expect(outline).toHaveCSS("opacity", "0");
+      await expect(minimap.locator(".conversation-minimap__ticks-container")).toHaveCSS("opacity", "1");
 
       await scrollPaneToTop(transcript);
       const thirdPromptAnchor = page.locator("[data-prompt-response-id]").nth(2);
@@ -458,11 +473,14 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       await expect(originRows).toHaveCount(4);
       await expectMinimapOnTranscriptRight(originTranscript, originMinimap);
 
+      await expect(originMinimap.locator(".conversation-minimap__ticks-container")).toHaveCSS("opacity", "1");
+
       await scrollPaneToTop(originTranscript);
       await stableScrollTop(weftTranscript);
 
       await originMinimap.locator(".conversation-minimap__tick").first().hover();
       await expect(originOutline).toHaveCSS("opacity", "1");
+      await expect(originMinimap.locator(".conversation-minimap__ticks-container")).toHaveCSS("opacity", "0");
 
       const weftBeforeOriginClick = await stableScrollTop(weftTranscript);
       await originRows.nth(3).click();
@@ -525,11 +543,43 @@ test.describe("[product-service-backed] Conversation minimap", () => {
 
       await expect(originMinimap).toBeVisible();
       await expect(originTicks).toHaveCount(2);
+      await expect(originMinimap.locator(".conversation-minimap__ticks-container")).toHaveCSS("opacity", "1");
       await originMinimap.locator(".conversation-minimap__tick").first().hover();
       await expectOutlineOpen(originMinimap.locator(".conversation-minimap__outline"));
+      await expect(originMinimap.locator(".conversation-minimap__ticks-container")).toHaveCSS("opacity", "0");
       await expect(parentRows).toHaveCount(2);
       await expect(revisionRow).toBeVisible();
       await expect(revisionRow).toHaveAttribute("title", revisionPrompt);
+
+      // Assert parent outline rows have markers and they are on the right side
+      const parentLabel = parentRows.first().locator(".conversation-minimap__outline-label");
+      const parentMarker = parentRows.first().locator(".conversation-minimap__outline-marker");
+      const [parentLabelBox, parentMarkerBox] = await Promise.all([
+        parentLabel.boundingBox(),
+        parentMarker.boundingBox(),
+      ]);
+      expect(parentLabelBox).not.toBeNull();
+      expect(parentMarkerBox).not.toBeNull();
+      expect(parentLabelBox!.x).toBeLessThan(parentMarkerBox!.x);
+
+      // Assert revision child rows do contain revision marker on the left side
+      await expect(
+        revisionRow.locator(".conversation-minimap__outline-marker--revision")
+      ).toHaveCount(1);
+      const revisionLabel = revisionRow.locator(".conversation-minimap__outline-label");
+      const revisionMarker = revisionRow.locator(".conversation-minimap__outline-marker");
+      const [revisionLabelBox, revisionMarkerBox] = await Promise.all([
+        revisionLabel.boundingBox(),
+        revisionMarker.boundingBox(),
+      ]);
+      expect(revisionLabelBox).not.toBeNull();
+      expect(revisionMarkerBox).not.toBeNull();
+      expect(revisionMarkerBox!.x).toBeLessThan(revisionLabelBox!.x);
+
+      // Assert active parent row exists
+      await expect(
+        originMinimap.locator(".conversation-minimap__outline-row--active")
+      ).toHaveCount(1);
 
       const [parentBox, revisionBox] = await Promise.all([
         parentRows.first().boundingBox(),
