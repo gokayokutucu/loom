@@ -401,6 +401,13 @@ export function ConversationScrollMinimap({
                   >
                     {item.label}
                   </span>
+                  <span
+                    aria-hidden="true"
+                    className={[
+                      "conversation-minimap__outline-marker",
+                      `conversation-minimap__outline-marker--${item.type}`,
+                    ].join(" ")}
+                  />
                 </button>
                 {item.outlineChildren?.map((child) => (
                   <button
