@@ -25,6 +25,20 @@ pub struct ResponseRecord {
     pub metadata_json: Option<String>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResponseOutlineRecord {
+    pub response_id: String,
+    pub loom_id: String,
+    pub role: String,
+    pub title: Option<String>,
+    pub canonical_uri: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+    pub sequence_index: i64,
+    pub metadata_json: Option<String>,
+    pub content_preview: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct NewResponse {
     pub response_id: String,
@@ -400,6 +414,225 @@ impl ResponseRepository {
         .map(|rows| rows.into_iter().map(response_from_row).collect())
         .map_err(|error| {
             ServiceError::storage(format!("failed to list Responses for Loom: {error}"))
+        })
+    }
+
+    pub async fn list_response_outline_for_loom(
+        &self,
+        loom_id: &str,
+    ) -> Result<Vec<ResponseOutlineRecord>, ServiceError> {
+        sqlx::query(
+            "SELECT
+                response_id,
+                loom_id,
+                role,
+                title,
+                canonical_uri,
+                created_at,
+                updated_at,
+                sequence_index,
+                metadata_json,
+                substr(content, 1, 180) AS content_preview
+             FROM responses
+             WHERE loom_id = ?1 AND is_deleted = 0
+             ORDER BY sequence_index ASC",
+        )
+        .bind(loom_id)
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(response_outline_from_row).collect())
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to list Response outline for Loom: {error}"))
+        })
+    }
+
+    pub async fn count_active_responses_for_loom(
+        &self,
+        loom_id: &str,
+    ) -> Result<i64, ServiceError> {
+        sqlx::query(
+            "SELECT COUNT(*) AS count
+             FROM responses
+             WHERE loom_id = ?1 AND is_deleted = 0",
+        )
+        .bind(loom_id)
+        .fetch_one(&self.pool)
+        .await
+        .map(|row| row.get("count"))
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to count Responses for Loom: {error}"))
+        })
+    }
+
+    pub async fn count_active_assistant_responses_for_loom(
+        &self,
+        loom_id: &str,
+    ) -> Result<i64, ServiceError> {
+        sqlx::query(
+            "SELECT COUNT(*) AS count
+             FROM responses
+             WHERE loom_id = ?1
+               AND role = 'assistant'
+               AND is_deleted = 0",
+        )
+        .bind(loom_id)
+        .fetch_one(&self.pool)
+        .await
+        .map(|row| row.get("count"))
+        .map_err(|error| {
+            ServiceError::storage(format!(
+                "failed to count assistant Responses for Loom: {error}"
+            ))
+        })
+    }
+
+    pub async fn list_latest_responses_for_loom(
+        &self,
+        loom_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ResponseRecord>, ServiceError> {
+        let mut responses = sqlx::query(
+            "SELECT * FROM responses
+             WHERE loom_id = ?1 AND is_deleted = 0
+             ORDER BY sequence_index DESC
+             LIMIT ?2",
+        )
+        .bind(loom_id)
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(response_from_row).collect::<Vec<_>>())
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to list latest Responses for Loom: {error}"))
+        })?;
+        responses.sort_by_key(|response| response.sequence_index);
+        Ok(responses)
+    }
+
+    pub async fn list_responses_before_sequence(
+        &self,
+        loom_id: &str,
+        before_sequence_index: i64,
+        limit: i64,
+    ) -> Result<Vec<ResponseRecord>, ServiceError> {
+        let mut responses = sqlx::query(
+            "SELECT * FROM responses
+             WHERE loom_id = ?1
+               AND is_deleted = 0
+               AND sequence_index < ?2
+             ORDER BY sequence_index DESC
+             LIMIT ?3",
+        )
+        .bind(loom_id)
+        .bind(before_sequence_index)
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(response_from_row).collect::<Vec<_>>())
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to list older Responses for Loom: {error}"))
+        })?;
+        responses.sort_by_key(|response| response.sequence_index);
+        Ok(responses)
+    }
+
+    pub async fn list_responses_after_sequence(
+        &self,
+        loom_id: &str,
+        after_sequence_index: i64,
+        limit: i64,
+    ) -> Result<Vec<ResponseRecord>, ServiceError> {
+        sqlx::query(
+            "SELECT * FROM responses
+             WHERE loom_id = ?1
+               AND is_deleted = 0
+               AND sequence_index > ?2
+             ORDER BY sequence_index ASC
+             LIMIT ?3",
+        )
+        .bind(loom_id)
+        .bind(after_sequence_index)
+        .bind(limit.max(0))
+        .fetch_all(&self.pool)
+        .await
+        .map(|rows| rows.into_iter().map(response_from_row).collect())
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to list newer Responses for Loom: {error}"))
+        })
+    }
+
+    pub async fn list_responses_around_response(
+        &self,
+        loom_id: &str,
+        target_response_id: &str,
+        limit: i64,
+    ) -> Result<Vec<ResponseRecord>, ServiceError> {
+        let Some(target) = self.get_response(target_response_id).await? else {
+            return Ok(Vec::new());
+        };
+        if target.loom_id != loom_id {
+            return Ok(Vec::new());
+        }
+        let limit = limit.max(0);
+        let before_limit = limit / 2;
+        let after_limit = limit.saturating_sub(before_limit + 1);
+        let mut before = self
+            .list_responses_before_sequence(loom_id, target.sequence_index, before_limit)
+            .await?;
+        let after = self
+            .list_responses_after_sequence(loom_id, target.sequence_index, after_limit)
+            .await?;
+        before.push(target);
+        before.extend(after);
+        before.sort_by_key(|response| response.sequence_index);
+        Ok(before)
+    }
+
+    pub async fn has_active_response_before(
+        &self,
+        loom_id: &str,
+        before_sequence_index: i64,
+    ) -> Result<bool, ServiceError> {
+        sqlx::query(
+            "SELECT 1 FROM responses
+             WHERE loom_id = ?1
+               AND is_deleted = 0
+               AND sequence_index < ?2
+             LIMIT 1",
+        )
+        .bind(loom_id)
+        .bind(before_sequence_index)
+        .fetch_optional(&self.pool)
+        .await
+        .map(|row| row.is_some())
+        .map_err(|error| {
+            ServiceError::storage(format!(
+                "failed to inspect older Responses for Loom: {error}"
+            ))
+        })
+    }
+
+    pub async fn has_active_response_after(
+        &self,
+        loom_id: &str,
+        after_sequence_index: i64,
+    ) -> Result<bool, ServiceError> {
+        sqlx::query(
+            "SELECT 1 FROM responses
+             WHERE loom_id = ?1
+               AND is_deleted = 0
+               AND sequence_index > ?2
+             LIMIT 1",
+        )
+        .bind(loom_id)
+        .bind(after_sequence_index)
+        .fetch_optional(&self.pool)
+        .await
+        .map(|row| row.is_some())
+        .map_err(|error| {
+            ServiceError::storage(format!(
+                "failed to inspect newer Responses for Loom: {error}"
+            ))
         })
     }
 
@@ -808,6 +1041,21 @@ fn response_from_row(row: sqlx::sqlite::SqliteRow) -> ResponseRecord {
         updated_at: row.get("updated_at"),
         sequence_index: row.get("sequence_index"),
         metadata_json: row.get("metadata_json"),
+    }
+}
+
+fn response_outline_from_row(row: sqlx::sqlite::SqliteRow) -> ResponseOutlineRecord {
+    ResponseOutlineRecord {
+        response_id: row.get("response_id"),
+        loom_id: row.get("loom_id"),
+        role: row.get("role"),
+        title: row.get("title"),
+        canonical_uri: row.get("canonical_uri"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        sequence_index: row.get("sequence_index"),
+        metadata_json: row.get("metadata_json"),
+        content_preview: row.get("content_preview"),
     }
 }
 

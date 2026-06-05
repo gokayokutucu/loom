@@ -3,8 +3,9 @@ use crate::{
     storage::{
         repositories::{
             code_blocks::is_reusable_code_artifact,
+            looms::{LoomRepository, NewLoom},
             parts::ResponsePartRepository,
-            responses::ResponseRepository,
+            responses::{NewResponse, ResponseRepository},
             tags_graph::{ContextGraphLinkRepository, ResponseTagRepository, TopicIndexRepository},
         },
         seed_fixtures,
@@ -22,6 +23,21 @@ use sqlx::Row;
 #[serde(rename_all = "camelCase")]
 pub struct SeedFixturesRequest {
     pub fixture: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeedTranscriptRequest {
+    pub loom_id: String,
+    pub title: String,
+    pub turn_count: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SeedTranscriptResponse {
+    pub loom_id: String,
+    pub turn_count: i64,
 }
 
 #[derive(Debug, Serialize)]
@@ -58,6 +74,84 @@ pub async fn seed_fixtures(
                 }),
             )
         })
+}
+
+pub async fn seed_transcript(
+    State(state): State<AppState>,
+    Json(input): Json<SeedTranscriptRequest>,
+) -> Result<Json<SeedTranscriptResponse>, (StatusCode, Json<DevApiError>)> {
+    if !state.config.current().service.local_only {
+        return Err(dev_endpoint_disabled());
+    }
+    if input.turn_count < 1 || input.turn_count > 500 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(DevApiError {
+                code: "INVALID_TURN_COUNT".to_string(),
+                message: "turnCount must be between 1 and 500.".to_string(),
+            }),
+        ));
+    }
+    let now = timestamp();
+    LoomRepository::new(&state.database)
+        .insert_loom_if_missing(&NewLoom {
+            loom_id: input.loom_id.clone(),
+            title: input.title.clone(),
+            summary: Some("Dev-seeded long transcript fixture.".to_string()),
+            code: Some("L-E2E-LONG".to_string()),
+            canonical_uri: Some(format!("loom://service/{}", input.loom_id)),
+            kind: "loom".to_string(),
+            origin_loom_id: None,
+            origin_response_id: None,
+            created_at: now.clone(),
+            updated_at: now.clone(),
+            metadata_json: Some("{\"source\":\"dev_seed_transcript\"}".to_string()),
+        })
+        .await
+        .map_err(dev_error)?;
+
+    let responses = ResponseRepository::new(&state.database);
+    for index in 1..=input.turn_count {
+        let sequence = (index - 1) * 2;
+        responses
+            .insert_response_pair(
+                &NewResponse {
+                    response_id: format!("{}-user-{index:03}", input.loom_id),
+                    loom_id: input.loom_id.clone(),
+                    role: "user".to_string(),
+                    content: format!("Seeded transcript prompt {index}."),
+                    title: Some(format!("Prompt {index}")),
+                    code: None,
+                    canonical_uri: None,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    sequence_index: sequence,
+                    metadata_json: Some("{}".to_string()),
+                },
+                &NewResponse {
+                    response_id: format!("{}-assistant-{index:03}", input.loom_id),
+                    loom_id: input.loom_id.clone(),
+                    role: "assistant".to_string(),
+                    content: format!(
+                        "Seeded transcript answer {index}.\n\nThis deterministic response provides enough body text for reverse transcript paging and minimap navigation proof.\n\nEND_SEEDED_TRANSCRIPT_TURN_{index:03}"
+                    ),
+                    title: Some(format!("Seeded Answer {index:03}")),
+                    code: None,
+                    canonical_uri: None,
+                    created_at: now.clone(),
+                    updated_at: now.clone(),
+                    sequence_index: sequence + 1,
+                    metadata_json: Some("{\"status\":\"completed\"}".to_string()),
+                },
+            )
+            .await
+            .map_err(dev_error)?;
+    }
+
+    Ok(Json(SeedTranscriptResponse {
+        loom_id: input.loom_id,
+        turn_count: input.turn_count,
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -238,6 +332,13 @@ fn dev_error(error: impl ToString) -> (StatusCode, Json<DevApiError>) {
             message: error.to_string(),
         }),
     )
+}
+
+fn timestamp() -> String {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos().to_string())
+        .unwrap_or_else(|_| "0".to_string())
 }
 
 #[cfg(test)]

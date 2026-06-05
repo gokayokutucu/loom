@@ -96,6 +96,7 @@ pub fn router(
         .route("/resolve", post(resolve::resolve))
         .route("/hard-reset", post(reset::hard_reset))
         .route("/dev/seed-fixtures", post(dev::seed_fixtures))
+        .route("/dev/seed-transcript", post(dev::seed_transcript))
         .route("/dev/e2e-proof/:loom_id", get(dev::e2e_proof))
         .route("/ask/quick", post(ask::quick))
         .route(
@@ -174,6 +175,14 @@ pub fn router(
         .route("/code-snippets", get(code_snippets::list_code_snippets))
         .route("/wefts", post(wefts::create_weft))
         .route("/looms", get(looms::list_looms).post(looms::create_loom))
+        .route(
+            "/looms/:loom_id/transcript",
+            get(looms::get_loom_transcript_page),
+        )
+        .route(
+            "/looms/:loom_id/transcript/outline",
+            get(looms::get_loom_transcript_outline),
+        )
         .route(
             "/looms/:loom_id",
             get(looms::get_loom)

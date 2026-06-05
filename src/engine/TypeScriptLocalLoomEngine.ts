@@ -51,6 +51,9 @@ import type {
   ListHistoryResult,
   ListLoomsInput,
   LoomDetail,
+  LoomTranscriptOutline,
+  LoomTranscriptPage,
+  LoomTranscriptPageInput,
   LoomSummary,
   OpenReferenceInput,
   PersistWeftTurnsInput,
@@ -230,6 +233,14 @@ export class TypeScriptLocalLoomEngine implements LoomEngineClient {
   async getLoom(_loomId: string): Promise<LoomDetail> {
     // TODO(engine): Adapt current conversation/response state into LoomDetail.
     throw notImplemented("getLoom");
+  }
+
+  async getLoomTranscriptPage(_input: LoomTranscriptPageInput): Promise<LoomTranscriptPage> {
+    throw notImplemented("getLoomTranscriptPage");
+  }
+
+  async getLoomTranscriptOutline(_loomId: string): Promise<LoomTranscriptOutline> {
+    throw notImplemented("getLoomTranscriptOutline");
   }
 
   async createLoom(_input: CreateLoomInput): Promise<CreateLoomResult> {

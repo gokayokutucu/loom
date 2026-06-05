@@ -425,6 +425,45 @@ export interface LoomDetail extends LoomSummary {
   responses: ResponseItem[];
 }
 
+export type LoomTranscriptPageDirection = "latest" | "older" | "newer" | "around";
+
+export interface LoomTranscriptPageInput {
+  loomId: string;
+  direction?: LoomTranscriptPageDirection;
+  cursor?: number | null;
+  limit?: number;
+  targetResponseId?: string | null;
+}
+
+export interface LoomTranscriptPage {
+  loomId: string;
+  responses: ResponseItem[];
+  hasOlder: boolean;
+  hasNewer: boolean;
+  oldestCursor?: number | null;
+  newestCursor?: number | null;
+  totalKnownCount: number;
+}
+
+export interface LoomTranscriptOutlineItem {
+  responseId: string;
+  loomId: string;
+  role: "user" | "assistant";
+  title?: string | null;
+  preview: string;
+  canonicalUri?: string | null;
+  createdAt: string;
+  updatedAt: string;
+  sequenceIndex: number;
+  metadata?: JsonValue | null;
+}
+
+export interface LoomTranscriptOutline {
+  loomId: string;
+  items: LoomTranscriptOutlineItem[];
+  totalKnownCount: number;
+}
+
 export interface ListHistoryResult {
   history: HistoryEntry[];
 }

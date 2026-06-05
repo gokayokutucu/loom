@@ -19,6 +19,7 @@ export type ConversationMinimapItemType =
 export interface ConversationMinimapItem {
   id: string;
   type: ConversationMinimapItemType;
+  responseId?: string;
   label: string;
   fullLabel?: string;
   anchorSelector: string;
@@ -45,10 +46,12 @@ interface ConversationScrollMinimapProps {
     revisionIndex: number,
     childConversationId: string
   ) => void;
+  onResponseSelect?: (responseId: string) => Promise<boolean> | boolean;
 }
 
 interface MeasuredMinimapItem extends ConversationMinimapItem {
-  anchorTop: number;
+  anchorTop: number | null;
+  mounted: boolean;
 }
 
 const MIN_ITEM_COUNT = 2;
@@ -87,6 +90,7 @@ export function responseMinimapItems(
       fullLabel,
       anchorSelector: `[data-prompt-response-id="${escapedId}"]`,
       active: activeResponseId === response.id,
+      responseId: response.id,
       outlineChildren: (response.revisions ?? []).map((revision, index) => {
         const rLabel = conversationMinimapRevisionLabel(revision, index + 2);
         const rFullLabel = conversationMinimapRevisionLabel(revision, index + 2, false);
@@ -108,6 +112,7 @@ export function ConversationScrollMinimap({
   scrollContainerRef,
   items,
   onRevisionSelect,
+  onResponseSelect,
 }: ConversationScrollMinimapProps) {
   const [measuredItems, setMeasuredItems] = useState<MeasuredMinimapItem[]>([]);
   const [nearestItemIdState, setNearestItemIdState] = useState<string | null>(null);
@@ -141,25 +146,27 @@ export function ConversationScrollMinimap({
 
     const measure = () => {
       rafRef.current = null;
-      const anchorItems = items
-        .map((item) => {
-          const anchor = container.querySelector<HTMLElement>(item.anchorSelector);
-          if (!anchor) return null;
-          return {
-            ...item,
-            anchorTop: anchor.offsetTop,
-          };
-        })
-        .filter((item): item is MeasuredMinimapItem => item !== null);
+      const anchorItems = items.map((item) => {
+        const anchor = container.querySelector<HTMLElement>(item.anchorSelector);
+        return {
+          ...item,
+          anchorTop: anchor ? anchor.offsetTop : null,
+          mounted: Boolean(anchor),
+        };
+      });
       setMeasuredItems(anchorItems);
 
-      const computedNearest = nearestConversationMinimapItemId(anchorItems, container.scrollTop);
+      const mountedItems = anchorItems.filter(
+        (item): item is MeasuredMinimapItem & { anchorTop: number } =>
+          item.mounted && item.anchorTop !== null
+      );
+      const computedNearest = nearestConversationMinimapItemId(mountedItems, container.scrollTop);
       setNearestItemIdState(computedNearest);
 
       // Release lock if we get close to the destination
       if (jumpTargetIdRef.current) {
         const targetItem = anchorItems.find(item => item.id === jumpTargetIdRef.current);
-        if (targetItem) {
+        if (targetItem?.mounted && targetItem.anchorTop !== null) {
           const targetScrollTop = Math.max(0, targetItem.anchorTop - 24);
           const atBottom = Math.abs(container.scrollTop + container.clientHeight - container.scrollHeight) < 4;
           const atTop = container.scrollTop === 0;
@@ -197,7 +204,13 @@ export function ConversationScrollMinimap({
           clearTimeout(jumpTimeoutRef.current);
         }
         setNearestItemIdState(
-          nearestConversationMinimapItemId(measuredItemsRef.current, container.scrollTop)
+          nearestConversationMinimapItemId(
+            measuredItemsRef.current.filter(
+              (item): item is MeasuredMinimapItem & { anchorTop: number } =>
+                item.mounted && item.anchorTop !== null
+            ),
+            container.scrollTop
+          )
         );
       }
     };
@@ -307,22 +320,41 @@ export function ConversationScrollMinimap({
     });
   }
 
-  function triggerExplicitJump(itemId: string, anchorTop: number) {
+  async function triggerExplicitJump(item: MeasuredMinimapItem) {
     if (jumpTimeoutRef.current) {
       clearTimeout(jumpTimeoutRef.current);
     }
     isExplicitJumpRef.current = true;
-    jumpTargetIdRef.current = itemId;
-    setNearestItemIdState(itemId);
+    jumpTargetIdRef.current = item.id;
+    setNearestItemIdState(item.id);
 
-    scrollToAnchor(anchorTop);
+    if (item.mounted && item.anchorTop !== null) {
+      scrollToAnchor(item.anchorTop);
+    } else if (item.responseId) {
+      const handled = await onResponseSelect?.(item.responseId);
+      if (!handled) {
+        jumpTargetIdRef.current = null;
+        isExplicitJumpRef.current = false;
+      }
+    } else {
+      jumpTargetIdRef.current = null;
+      isExplicitJumpRef.current = false;
+    }
 
     jumpTimeoutRef.current = setTimeout(() => {
       jumpTargetIdRef.current = null;
       isExplicitJumpRef.current = false;
       const container = scrollContainerRef.current;
       if (container) {
-        setNearestItemIdState(nearestConversationMinimapItemId(measuredItems, container.scrollTop));
+        setNearestItemIdState(
+          nearestConversationMinimapItemId(
+            measuredItems.filter(
+              (candidate): candidate is MeasuredMinimapItem & { anchorTop: number } =>
+                candidate.mounted && candidate.anchorTop !== null
+            ),
+            container.scrollTop
+          )
+        );
       }
     }, 1000);
   }
@@ -349,6 +381,7 @@ export function ConversationScrollMinimap({
             <button
               aria-label={`Jump to ${item.type}: ${item.label}`}
               title={item.fullLabel || item.label}
+              data-response-id={item.responseId}
               className={[
                 "conversation-minimap__tick",
                 `conversation-minimap__tick--${item.type}`,
@@ -361,7 +394,7 @@ export function ConversationScrollMinimap({
               key={item.id}
               onClick={(event) => {
                 event.stopPropagation();
-                triggerExplicitJump(item.id, item.anchorTop);
+                void triggerExplicitJump(item);
               }}
               style={{ top: `${item.topPx}px` }}
               type="button"
@@ -382,6 +415,7 @@ export function ConversationScrollMinimap({
                 <button
                   aria-label={`Jump to ${item.type}: ${item.label}`}
                   title={item.fullLabel || item.label}
+                  data-response-id={item.responseId}
                   className={[
                     "conversation-minimap__outline-row",
                     active ? "conversation-minimap__outline-row--active" : "",
@@ -391,7 +425,7 @@ export function ConversationScrollMinimap({
                   onClick={(event) => {
                     event.stopPropagation();
                     alignOutlineRowNearTop(event.currentTarget);
-                    triggerExplicitJump(item.id, item.anchorTop);
+                    void triggerExplicitJump(item);
                   }}
                   type="button"
                 >

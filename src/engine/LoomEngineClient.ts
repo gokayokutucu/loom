@@ -44,6 +44,9 @@ import type {
   ListLoomsInput,
   ListBookmarksResult,
   LoomDetail,
+  LoomTranscriptOutline,
+  LoomTranscriptPage,
+  LoomTranscriptPageInput,
   LoomSummary,
   OpenReferenceInput,
   PersistWeftTurnsInput,
@@ -114,6 +117,8 @@ export interface LoomEngineClient {
   getCapabilitySummary(): Promise<CapabilitySummary>;
   listLooms(input?: ListLoomsInput): Promise<LoomSummary[]>;
   getLoom(loomId: string): Promise<LoomDetail>;
+  getLoomTranscriptPage(input: LoomTranscriptPageInput): Promise<LoomTranscriptPage>;
+  getLoomTranscriptOutline(loomId: string): Promise<LoomTranscriptOutline>;
   createLoom(input: CreateLoomInput): Promise<CreateLoomResult>;
   renameLoom(input: RenameLoomInput): Promise<void>;
   updateLoomMetadata(input: UpdateLoomInput): Promise<CreateLoomResult>;

@@ -2557,6 +2557,13 @@ kbd {
   background: color-mix(in srgb, var(--loom-text-primary) 70%, transparent);
 }
 
+.conversation-minimap__outline-row:hover .conversation-minimap__outline-marker--revision,
+.conversation-minimap__outline-row:focus-visible .conversation-minimap__outline-marker--revision {
+  width: 12px;
+  height: 12px;
+  background: transparent;
+}
+
 .conversation-minimap__outline-row--revision:hover .conversation-minimap__outline-marker--revision::before,
 .conversation-minimap__outline-row--revision:hover .conversation-minimap__outline-marker--revision::after,
 .conversation-minimap__outline-row--revision:focus-visible .conversation-minimap__outline-marker--revision::before,

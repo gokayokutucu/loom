@@ -43,6 +43,10 @@ import type {
   ListCodeSnippetsInput,
   ListCodeSnippetsResult,
   LoomDetail,
+  LoomTranscriptOutline,
+  LoomTranscriptOutlineItem,
+  LoomTranscriptPage,
+  LoomTranscriptPageInput,
   LoomSummary,
   OpenReferenceInput,
   ListBookmarksResult,
@@ -1200,6 +1204,105 @@ function validateLoomDetail(value: unknown, endpoint: string): LoomDetail {
     responses: buildResponseItemsFromRows(
       responses.map((response) => validateServiceResponseRow(response, endpoint))
     ),
+  };
+}
+
+function validateLoomTranscriptPage(value: unknown, endpoint: string): LoomTranscriptPage {
+  if (!isRecord(value) || !Array.isArray(value.items)) {
+    throw new RustHttpLoomEngineError(
+      "invalid_response",
+      "loom-service returned an invalid transcript page.",
+      { endpoint }
+    );
+  }
+  const loomId = stringValue(value, "loomId");
+  if (!loomId) {
+    throw new RustHttpLoomEngineError(
+      "invalid_response",
+      "loom-service returned an invalid transcript page.",
+      { endpoint }
+    );
+  }
+  return {
+    loomId,
+    responses: buildResponseItemsFromRows(
+      value.items.map((response) => validateServiceResponseRow(response, endpoint))
+    ),
+    hasOlder: value.hasOlder === true,
+    hasNewer: value.hasNewer === true,
+    oldestCursor: numberValue(value, "oldestCursor"),
+    newestCursor: numberValue(value, "newestCursor"),
+    totalKnownCount: numberValue(value, "totalKnownCount") ?? 0,
+  };
+}
+
+function validateLoomTranscriptOutlineItem(
+  value: unknown,
+  endpoint: string
+): LoomTranscriptOutlineItem {
+  if (!isRecord(value)) {
+    throw new RustHttpLoomEngineError(
+      "invalid_response",
+      "loom-service returned an invalid transcript outline item.",
+      { endpoint }
+    );
+  }
+  const responseId = stringValue(value, "responseId");
+  const loomId = stringValue(value, "loomId");
+  const role = stringValue(value, "role");
+  const preview = stringValue(value, "preview");
+  const createdAt = stringValue(value, "createdAt");
+  const updatedAt = stringValue(value, "updatedAt");
+  const sequenceIndex = numberValue(value, "sequenceIndex");
+  if (
+    !responseId ||
+    !loomId ||
+    (role !== "user" && role !== "assistant") ||
+    preview === undefined ||
+    !createdAt ||
+    !updatedAt ||
+    sequenceIndex === undefined
+  ) {
+    throw new RustHttpLoomEngineError(
+      "invalid_response",
+      "loom-service returned an invalid transcript outline item.",
+      { endpoint }
+    );
+  }
+  return {
+    responseId,
+    loomId,
+    role,
+    title: stringValue(value, "title"),
+    preview,
+    canonicalUri: stringValue(value, "canonicalUri"),
+    createdAt,
+    updatedAt,
+    sequenceIndex,
+    metadata: value.metadata as JsonValue | undefined,
+  };
+}
+
+function validateLoomTranscriptOutline(value: unknown, endpoint: string): LoomTranscriptOutline {
+  if (!isRecord(value) || !Array.isArray(value.items)) {
+    throw new RustHttpLoomEngineError(
+      "invalid_response",
+      "loom-service returned an invalid transcript outline.",
+      { endpoint }
+    );
+  }
+  const loomId = stringValue(value, "loomId");
+  if (!loomId) {
+    throw new RustHttpLoomEngineError(
+      "invalid_response",
+      "loom-service returned an invalid transcript outline.",
+      { endpoint }
+    );
+  }
+  return {
+    loomId,
+    items: value.items.map((item) => validateLoomTranscriptOutlineItem(item, endpoint)),
+    totalKnownCount: numberValue(value, "totalKnownCount") ?? 0,
   };
 }
 
@@ -3247,6 +3350,29 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
     const endpoint = `/looms/${encodeURIComponent(loomId)}`;
     const response = await this.requestJson<unknown>(endpoint, { method: "GET" });
     return validateLoomDetail(response, endpoint);
+  }
+
+  async getLoomTranscriptPage(input: LoomTranscriptPageInput): Promise<LoomTranscriptPage> {
+    const params = new URLSearchParams();
+    params.set("direction", input.direction ?? "latest");
+    if (input.cursor !== undefined && input.cursor !== null) {
+      params.set("cursor", String(input.cursor));
+    }
+    if (input.limit !== undefined) {
+      params.set("limit", String(input.limit));
+    }
+    if (input.targetResponseId) {
+      params.set("targetResponseId", input.targetResponseId);
+    }
+    const endpoint = `/looms/${encodeURIComponent(input.loomId)}/transcript?${params.toString()}`;
+    const response = await this.requestJson<unknown>(endpoint, { method: "GET" });
+    return validateLoomTranscriptPage(response, endpoint);
+  }
+
+  async getLoomTranscriptOutline(loomId: string): Promise<LoomTranscriptOutline> {
+    const endpoint = `/looms/${encodeURIComponent(loomId)}/transcript/outline`;
+    const response = await this.requestJson<unknown>(endpoint, { method: "GET" });
+    return validateLoomTranscriptOutline(response, endpoint);
   }
 
   async createLoom(input: CreateLoomInput): Promise<CreateLoomResult> {

@@ -96,7 +96,12 @@ import {
 import {
   ConversationScrollMinimap,
   responseMinimapItems,
+  type ConversationMinimapItem,
 } from "./components/ConversationScrollMinimap";
+import {
+  conversationMinimapLabel,
+  conversationMinimapRevisionLabel,
+} from "./services/conversationMinimap";
 import { browserHostShell } from "./services/hostShell";
 import {
   isAttachmentLink as isAttachmentReferenceLink,
@@ -339,7 +344,7 @@ import {
   type GenerationResponseStateResult,
   type JsonValue,
   type LoomEngineClient,
-  type LoomDetail,
+  type LoomTranscriptOutlineItem,
   type LoomSummary,
   type PersistedWeftTurn,
   type VisibleWeftSeedResponse,
@@ -426,6 +431,16 @@ interface ConversationIconOption {
   label: string;
   tags: string[];
   Icon: LucideIcon;
+}
+
+interface TranscriptPageState {
+  hasOlder: boolean;
+  hasNewer: boolean;
+  oldestCursor?: number | null;
+  newestCursor?: number | null;
+  totalKnownCount: number;
+  loadingLatest?: boolean;
+  loadingOlder?: boolean;
 }
 
 const conversationIconOptions: ConversationIconOption[] = [
@@ -2253,7 +2268,7 @@ function tabOrderTimestamp(value?: string | null) {
   return Number.isNaN(parsed) ? 0n : BigInt(parsed) * 1_000_000n;
 }
 
-function compareServiceLoomDetailsByTabOrder(left: LoomDetail, right: LoomDetail) {
+function compareServiceLoomsByTabOrder(left: LoomSummary, right: LoomSummary) {
   const leftTime = tabOrderTimestamp(left.createdAt ?? left.updatedAt);
   const rightTime = tabOrderTimestamp(right.createdAt ?? right.updatedAt);
   if (leftTime !== rightTime) return leftTime < rightTime ? -1 : 1;
@@ -2280,11 +2295,11 @@ function appendTabGroupConversationId(group: TabGroup, conversationId: string) {
   };
 }
 
-function serviceLoomDetailsToState(details: LoomDetail[]) {
-  const sortedDetails = [...details].sort(compareServiceLoomDetailsByTabOrder);
+function serviceLoomDetailsToState(details: Array<LoomSummary & { responses?: ResponseItem[] }>) {
+  const sortedDetails = [...details].sort(compareServiceLoomsByTabOrder);
   const conversations = sortedDetails.map(conversationFromServiceLoom);
   const responses = Object.fromEntries(
-    sortedDetails.map((detail) => [detail.loomId, detail.responses])
+    sortedDetails.map((detail) => [detail.loomId, detail.responses ?? []])
   );
   const forkRecords: ForkRecord[] = sortedDetails
     .filter(
@@ -2327,6 +2342,59 @@ function serviceLoomDetailsToState(details: LoomDetail[]) {
       };
     });
   return { conversations, responses, forkRecords };
+}
+
+function responseMinimapItemsFromOutline(
+  outlineItems: LoomTranscriptOutlineItem[],
+  revisionsByResponseId: Map<string, Array<{
+    id: string;
+    childConversationId: string;
+    title?: string | null;
+    revisionPrompt?: string | null;
+  }>>,
+  activeResponseId?: string | null
+): ConversationMinimapItem[] {
+  const items: ConversationMinimapItem[] = [];
+  let pendingUser: LoomTranscriptOutlineItem | null = null;
+  for (const row of [...outlineItems].sort((left, right) => left.sequenceIndex - right.sequenceIndex)) {
+    if (row.role === "user") {
+      pendingUser = row;
+      continue;
+    }
+    const escapedId = globalThis.CSS?.escape
+      ? globalThis.CSS.escape(row.responseId)
+      : row.responseId.replace(/"/g, '\\"');
+    const labelInput = {
+      type: "response" as const,
+      title: row.title || pendingUser?.title || row.preview || pendingUser?.preview,
+    };
+    const label = conversationMinimapLabel(labelInput);
+    const fullLabel = conversationMinimapLabel({ ...labelInput, truncate: false });
+    items.push({
+      id: `${row.responseId}:response`,
+      responseId: row.responseId,
+      type: "response",
+      label,
+      fullLabel,
+      anchorSelector: `[data-prompt-response-id="${escapedId}"]`,
+      active: activeResponseId === row.responseId,
+      outlineChildren: (revisionsByResponseId.get(row.responseId) ?? []).map((revision, index) => {
+        const revisionLabel = conversationMinimapRevisionLabel(revision, index + 2);
+        const revisionFullLabel = conversationMinimapRevisionLabel(revision, index + 2, false);
+        return {
+          id: `${row.responseId}:revision:${revision.id}`,
+          type: "revision" as const,
+          label: revisionLabel,
+          fullLabel: revisionFullLabel,
+          responseId: row.responseId,
+          revisionIndex: index + 1,
+          childConversationId: revision.childConversationId,
+        };
+      }),
+    });
+    pendingUser = null;
+  }
+  return items;
 }
 
 function collectDeletedLoomIds(rootLoomId: string, records: ForkRecord[]) {
@@ -2434,6 +2502,12 @@ function App() {
         )
       : {}
   );
+  const [transcriptPageStateByLoomId, setTranscriptPageStateByLoomId] = useState<
+    Record<string, TranscriptPageState>
+  >({});
+  const [transcriptOutlineByLoomId, setTranscriptOutlineByLoomId] = useState<
+    Record<string, LoomTranscriptOutlineItem[]>
+  >({});
   const [forkRecords, setForkRecords] = useState<ForkRecord[]>(initialForkRecords);
   const [selectedPromptRevisionByResponseId, setSelectedPromptRevisionByResponseId] =
     useState<Record<string, string | null>>({});
@@ -3546,10 +3620,7 @@ function App() {
       const archivedSummaries = await loomEngineClientRef.current.listLooms({
         archived: true,
       });
-      const details = await Promise.all(
-        summaries.map((summary) => loomEngineClientRef.current.getLoom(summary.loomId))
-      );
-      const next = serviceLoomDetailsToState(details);
+      const next = serviceLoomDetailsToState(summaries);
       const nextArchived = archivedSummaries.map(conversationFromServiceLoom);
       const availableConversationIds = new Set(
         next.conversations.map((conversation) => conversation.id)
@@ -3639,6 +3710,204 @@ function App() {
       setServiceLoomsLoading(false);
     }
   }, [appSettings.startup.continueFromLastLoom, mockDataEnabled]);
+
+  const loadLatestTranscriptPage = useCallback(async (loomId: string) => {
+    if (getConfiguredLoomEngineMode() !== "rust-service" || mockDataEnabled) return;
+    setTranscriptPageStateByLoomId((current) => ({
+      ...current,
+      [loomId]: {
+        ...(current[loomId] ?? {
+          hasOlder: false,
+          hasNewer: false,
+          totalKnownCount: 0,
+        }),
+        loadingLatest: true,
+      },
+    }));
+    try {
+      const [page, outline] = await Promise.all([
+        loomEngineClientRef.current.getLoomTranscriptPage({
+          loomId,
+          direction: "latest",
+          limit: 20,
+        }),
+        loomEngineClientRef.current.getLoomTranscriptOutline(loomId),
+      ]);
+      setConversationResponses((current) => ({
+        ...current,
+        [loomId]: page.responses,
+      }));
+      setTranscriptPageStateByLoomId((current) => ({
+        ...current,
+        [loomId]: {
+          hasOlder: page.hasOlder,
+          hasNewer: page.hasNewer,
+          oldestCursor: page.oldestCursor,
+          newestCursor: page.newestCursor,
+          totalKnownCount: page.totalKnownCount,
+          loadingLatest: false,
+          loadingOlder: false,
+        },
+      }));
+      setTranscriptOutlineByLoomId((current) => ({
+        ...current,
+        [loomId]: outline.items,
+      }));
+    } catch (error) {
+      console.warn("Transcript page hydration requires loom-service.", error);
+      setTranscriptPageStateByLoomId((current) => ({
+        ...current,
+        [loomId]: {
+          ...(current[loomId] ?? {
+            hasOlder: false,
+            hasNewer: false,
+            totalKnownCount: 0,
+          }),
+          loadingLatest: false,
+        },
+      }));
+    }
+  }, [mockDataEnabled]);
+
+  const loadOlderTranscriptPage = useCallback(
+    async (loomId: string, transcript: HTMLElement | null) => {
+      console.log("[E2E DBG] loadOlderTranscriptPage called", {
+        loomId,
+        mode: getConfiguredLoomEngineMode(),
+        mockDataEnabled,
+        state: transcriptPageStateByLoomId[loomId]
+      });
+      if (getConfiguredLoomEngineMode() !== "rust-service" || mockDataEnabled) return;
+      const state = transcriptPageStateByLoomId[loomId];
+      if (!state?.hasOlder || state.loadingOlder || state.oldestCursor === undefined || state.oldestCursor === null) {
+        console.log("[E2E DBG] loadOlderTranscriptPage early return due to checks", { state });
+        return;
+      }
+      const previousScrollHeight = transcript?.scrollHeight ?? 0;
+      const previousScrollTop = transcript?.scrollTop ?? 0;
+      setTranscriptPageStateByLoomId((current) => ({
+        ...current,
+        [loomId]: {
+          ...(current[loomId] ?? state),
+          loadingOlder: true,
+        },
+      }));
+      try {
+        const page = await loomEngineClientRef.current.getLoomTranscriptPage({
+          loomId,
+          direction: "older",
+          cursor: state.oldestCursor,
+          limit: 20,
+        });
+        setConversationResponses((current) => {
+          const existing = current[loomId] ?? [];
+          const seen = new Set(page.responses.map((response) => response.id));
+          return {
+            ...current,
+            [loomId]: [
+              ...page.responses,
+              ...existing.filter((response) => !seen.has(response.id)),
+            ],
+          };
+        });
+        setTranscriptPageStateByLoomId((current) => ({
+          ...current,
+          [loomId]: {
+            hasOlder: page.hasOlder,
+            hasNewer: page.hasNewer,
+            oldestCursor: page.oldestCursor,
+            newestCursor: current[loomId]?.newestCursor ?? page.newestCursor,
+            totalKnownCount: page.totalKnownCount,
+            loadingLatest: false,
+            loadingOlder: false,
+          },
+        }));
+        if (transcript) {
+          window.requestAnimationFrame(() => {
+            const delta = transcript.scrollHeight - previousScrollHeight;
+            transcript.scrollTop = previousScrollTop + Math.max(0, delta);
+          });
+        }
+      } catch (error) {
+        console.warn("Older transcript page hydration requires loom-service.", error);
+        setTranscriptPageStateByLoomId((current) => ({
+          ...current,
+          [loomId]: {
+            ...(current[loomId] ?? state),
+            loadingOlder: false,
+          },
+        }));
+      }
+    },
+    [mockDataEnabled, transcriptPageStateByLoomId]
+  );
+
+  const ensureTranscriptResponseLoaded = useCallback(
+    async (loomId: string, responseId: string, transcript: HTMLElement) => {
+      const escapedId = globalThis.CSS?.escape
+        ? globalThis.CSS.escape(responseId)
+        : responseId.replace(/"/g, '\\"');
+      const anchorSelector = `[data-prompt-response-id="${escapedId}"]`;
+      if (transcript.querySelector(anchorSelector)) {
+        return true;
+      }
+      if (getConfiguredLoomEngineMode() !== "rust-service" || mockDataEnabled) return false;
+      try {
+        const page = await loomEngineClientRef.current.getLoomTranscriptPage({
+          loomId,
+          direction: "around",
+          targetResponseId: responseId,
+          limit: 20,
+        });
+        if (!page.responses.some((response) => response.id === responseId)) {
+          return false;
+        }
+        setConversationResponses((current) => ({
+          ...current,
+          [loomId]: page.responses,
+        }));
+        setTranscriptPageStateByLoomId((current) => ({
+          ...current,
+          [loomId]: {
+            hasOlder: page.hasOlder,
+            hasNewer: page.hasNewer,
+            oldestCursor: page.oldestCursor,
+            newestCursor: page.newestCursor,
+            totalKnownCount: page.totalKnownCount,
+            loadingLatest: false,
+            loadingOlder: false,
+          },
+        }));
+        setRecentResponseFeedbackId(responseId);
+        const startedAt = Date.now();
+        while (Date.now() - startedAt < 5000) {
+          await new Promise((resolve) => window.requestAnimationFrame(resolve));
+          const anchor = transcript.querySelector<HTMLElement>(anchorSelector);
+          if (anchor) {
+            transcript.scrollTo({
+              top: Math.max(0, anchor.offsetTop - 24),
+              behavior: "smooth",
+            });
+            return true;
+          }
+        }
+        return false;
+      } catch (error) {
+        console.warn("Around transcript page navigation requires loom-service.", error);
+        return false;
+      }
+    },
+    [mockDataEnabled]
+  );
+
+  useEffect(() => {
+    if (getConfiguredLoomEngineMode() !== "rust-service" || mockDataEnabled) return;
+    if (activeConversationId === EPHEMERAL_DRAFT_ID) return;
+    const hasLoadedResponses = (conversationResponsesRef.current[activeConversationId] ?? []).length > 0;
+    const pageState = transcriptPageStateByLoomId[activeConversationId];
+    if (hasLoadedResponses || pageState?.loadingLatest) return;
+    void loadLatestTranscriptPage(activeConversationId);
+  }, [activeConversationId, loadLatestTranscriptPage, mockDataEnabled, transcriptPageStateByLoomId]);
 
   const refreshServiceHistory = useCallback(async () => {
     if (getConfiguredLoomEngineMode() !== "rust-service" || mockDataEnabled) return;
@@ -14368,6 +14637,20 @@ function App() {
                               onSelectionAsk(response, originConversation.id);
                             }}
                             responseTitleOverrides={responseTitleOverrides}
+                            transcriptOutlineItems={
+                              originConversation
+                                ? transcriptOutlineByLoomId[originConversation.id]
+                                : undefined
+                            }
+                            onMinimapResponseNavigate={(responseId, node) =>
+                              originConversation
+                                ? ensureTranscriptResponseLoaded(
+                                    originConversation.id,
+                                    responseId,
+                                    node
+                                  )
+                                : false
+                            }
                             onOpenContextMenu={(event, response) =>
                               openContextMenu(event, {
                                 kind: "response",
@@ -14388,6 +14671,18 @@ function App() {
                             isOriginPanel={true}
                             onPromptRevisionNavigate={handlePromptRevisionNavigate}
                             highlightedRevisionResponseId={highlightedRevisionResponseId}
+                            hasOlderTranscriptPage={
+                              Boolean(originConversation) &&
+                              transcriptPageStateByLoomId[originConversation.id]?.hasOlder === true
+                            }
+                            loadingOlderTranscriptPage={
+                              Boolean(originConversation) &&
+                              transcriptPageStateByLoomId[originConversation.id]?.loadingOlder === true
+                            }
+                            onLoadOlderTranscript={(node) => {
+                              if (!originConversation) return;
+                              void loadOlderTranscriptPage(originConversation.id, node);
+                            }}
                             onTranscriptScroll={(event) => {
                               markSplitPanelActive("origin");
                               handleTranscriptScroll(event);
@@ -14468,6 +14763,20 @@ function App() {
                               onSelectionAsk(response, activeConversation.id);
                             }}
                             responseTitleOverrides={responseTitleOverrides}
+                            transcriptOutlineItems={
+                              activeConversation
+                                ? transcriptOutlineByLoomId[activeConversation.id]
+                                : undefined
+                            }
+                            onMinimapResponseNavigate={(responseId, node) =>
+                              activeConversation
+                                ? ensureTranscriptResponseLoaded(
+                                    activeConversation.id,
+                                    responseId,
+                                    node
+                                  )
+                                : false
+                            }
                             onOpenContextMenu={(event, response) =>
                               openContextMenu(event, {
                                 kind: "response",
@@ -14487,6 +14796,18 @@ function App() {
                             highlightedResponseId={recentResponseFeedbackId}
                             onPromptRevisionNavigate={handlePromptRevisionNavigate}
                             highlightedRevisionResponseId={highlightedRevisionResponseId}
+                            hasOlderTranscriptPage={
+                              Boolean(activeConversation) &&
+                              transcriptPageStateByLoomId[activeConversation.id]?.hasOlder === true
+                            }
+                            loadingOlderTranscriptPage={
+                              Boolean(activeConversation) &&
+                              transcriptPageStateByLoomId[activeConversation.id]?.loadingOlder === true
+                            }
+                            onLoadOlderTranscript={(node) => {
+                              if (!activeConversation) return;
+                              void loadOlderTranscriptPage(activeConversation.id, node);
+                            }}
                             onTranscriptScroll={(event) => {
                               markSplitPanelActive("weft");
                               handleTranscriptScroll(event);
@@ -14606,6 +14927,16 @@ function App() {
                     temporaryWefts={Object.values(temporaryWefts)}
                     onSelectionAsk={onSelectionAsk}
                     responseTitleOverrides={responseTitleOverrides}
+                    transcriptOutlineItems={
+                      activeConversation
+                        ? transcriptOutlineByLoomId[activeConversation.id]
+                        : undefined
+                    }
+                    onMinimapResponseNavigate={(responseId, node) =>
+                      activeConversation
+                        ? ensureTranscriptResponseLoaded(activeConversation.id, responseId, node)
+                        : false
+                    }
                     onOpenContextMenu={(event, response) =>
                       openContextMenu(event, {
                         kind: "response",
@@ -14626,6 +14957,18 @@ function App() {
                     isOriginPanel={activeConversationId === originConversation?.id}
                     onPromptRevisionNavigate={handlePromptRevisionNavigate}
                     highlightedRevisionResponseId={highlightedRevisionResponseId}
+                    hasOlderTranscriptPage={
+                      Boolean(activeConversation) &&
+                      transcriptPageStateByLoomId[activeConversation.id]?.hasOlder === true
+                    }
+                    loadingOlderTranscriptPage={
+                      Boolean(activeConversation) &&
+                      transcriptPageStateByLoomId[activeConversation.id]?.loadingOlder === true
+                    }
+                    onLoadOlderTranscript={(node) => {
+                      if (!activeConversation) return;
+                      void loadOlderTranscriptPage(activeConversation.id, node);
+                    }}
                     onTranscriptScroll={handleTranscriptScroll}
                     onTranscriptUserScrollIntent={markTranscriptUserScrollIntent}
                     onScrollToBottom={resumeTranscriptAutoFollow}
@@ -17484,7 +17827,12 @@ function ChatTranscript({
   onOpenAttachment,
   onReturnToOrigin,
   highlightedResponseId,
+  transcriptOutlineItems,
+  onMinimapResponseNavigate,
   onTranscriptScroll,
+  onLoadOlderTranscript,
+  hasOlderTranscriptPage = false,
+  loadingOlderTranscriptPage = false,
   onTranscriptUserScrollIntent,
   onScrollToBottom,
   generatingResponseId,
@@ -17541,7 +17889,15 @@ function ChatTranscript({
   onOpenAttachment?: (link: LoomLink) => void;
   onReturnToOrigin?: (options?: { keepPromptRevisionSelection?: boolean }) => void;
   highlightedResponseId?: string | null;
+  transcriptOutlineItems?: LoomTranscriptOutlineItem[];
+  onMinimapResponseNavigate?: (
+    responseId: string,
+    transcript: HTMLElement
+  ) => Promise<boolean> | boolean;
   onTranscriptScroll?: (event: React.UIEvent<HTMLElement>) => void;
+  onLoadOlderTranscript?: (transcript: HTMLElement) => void;
+  hasOlderTranscriptPage?: boolean;
+  loadingOlderTranscriptPage?: boolean;
   onTranscriptUserScrollIntent?: () => void;
   onScrollToBottom?: () => void;
   generatingResponseId?: string | null;
@@ -17599,9 +17955,28 @@ function ChatTranscript({
   const handleTranscriptScroll = useCallback(
     (event: React.UIEvent<HTMLElement>) => {
       onTranscriptScroll?.(event);
+      console.log("[E2E DBG] handleTranscriptScroll", {
+        scrollTop: event.currentTarget.scrollTop,
+        hasOlderTranscriptPage,
+        loadingOlderTranscriptPage
+      });
+      if (
+        hasOlderTranscriptPage &&
+        !loadingOlderTranscriptPage &&
+        event.currentTarget.scrollTop <= 96
+      ) {
+        console.log("[E2E DBG] handleTranscriptScroll calling onLoadOlderTranscript");
+        onLoadOlderTranscript?.(event.currentTarget);
+      }
       scheduleVisibilityUpdate();
     },
-    [onTranscriptScroll, scheduleVisibilityUpdate]
+    [
+      hasOlderTranscriptPage,
+      loadingOlderTranscriptPage,
+      onLoadOlderTranscript,
+      onTranscriptScroll,
+      scheduleVisibilityUpdate,
+    ]
   );
 
   useEffect(() => {
@@ -17727,29 +18102,59 @@ function ChatTranscript({
     generatingResponseId && responses.some((response) => response.id === generatingResponseId)
   );
   const minimapItems = useMemo(
-    () =>
-      responseMinimapItems(
+    () => {
+      const revisionsByResponseId = new globalThis.Map<
+        string,
+        Array<{
+          id: string;
+          childConversationId: string;
+          title?: string | null;
+          revisionPrompt?: string | null;
+        }>
+      >();
+      for (const record of forkRecords) {
+        if (
+          record.kind !== "revision" ||
+          record.parentConversationId !== conversation.id ||
+          !record.revisionSourceResponseId
+        ) {
+          continue;
+        }
+        const revisions = revisionsByResponseId.get(record.revisionSourceResponseId) ?? [];
+        revisions.push({
+          id: record.id,
+          childConversationId: record.childConversationId,
+          title: record.title,
+          revisionPrompt: record.revisionPrompt,
+        });
+        revisionsByResponseId.set(record.revisionSourceResponseId, revisions);
+      }
+      const activeId = highlightedResponseId ?? generatingResponseId;
+      if (transcriptOutlineItems && transcriptOutlineItems.length > 0) {
+        return responseMinimapItemsFromOutline(
+          transcriptOutlineItems,
+          revisionsByResponseId,
+          activeId
+        );
+      }
+      return responseMinimapItems(
         responses.map((response) => ({
           id: response.id,
           title: response.title,
           question: response.question,
-          revisions: forkRecords
-            .filter(
-              (record) =>
-                record.kind === "revision" &&
-                record.parentConversationId === conversation.id &&
-                record.revisionSourceResponseId === response.id
-            )
-            .map((record) => ({
-              id: record.id,
-              childConversationId: record.childConversationId,
-              title: record.title,
-              revisionPrompt: record.revisionPrompt,
-            })),
+          revisions: revisionsByResponseId.get(response.id) ?? [],
         })),
-        highlightedResponseId ?? generatingResponseId
-      ),
-    [conversation.id, forkRecords, generatingResponseId, highlightedResponseId, responses]
+        activeId
+      );
+    },
+    [
+      conversation.id,
+      forkRecords,
+      generatingResponseId,
+      highlightedResponseId,
+      responses,
+      transcriptOutlineItems,
+    ]
   );
 
   const handleMinimapRevisionSelect = useCallback(
@@ -17779,6 +18184,30 @@ function ChatTranscript({
     ]
   );
 
+  const handleMinimapResponseSelect = useCallback(
+    async (responseId: string) => {
+      const transcript = transcriptNodeRef.current;
+      if (!transcript) return false;
+      const escapedId = globalThis.CSS?.escape
+        ? globalThis.CSS.escape(responseId)
+        : responseId.replace(/"/g, '\\"');
+      const existingAnchor = transcript.querySelector<HTMLElement>(
+        `[data-prompt-response-id="${escapedId}"]`
+      );
+      if (existingAnchor) {
+        transcript.scrollTo({
+          top: Math.max(0, existingAnchor.offsetTop - 24),
+          behavior: "smooth",
+        });
+        return true;
+      }
+      const loaded = await onMinimapResponseNavigate?.(responseId, transcript);
+      if (!loaded) return false;
+      return true;
+    },
+    [onMinimapResponseNavigate]
+  );
+
   const isMinimapActive = showMinimap && minimapItems.length >= 2;
 
   return (
@@ -17792,6 +18221,7 @@ function ChatTranscript({
       {showMinimap && (
         <ConversationScrollMinimap
           items={minimapItems}
+          onResponseSelect={handleMinimapResponseSelect}
           onRevisionSelect={handleMinimapRevisionSelect}
           scrollContainerRef={transcriptNodeRef}
         />

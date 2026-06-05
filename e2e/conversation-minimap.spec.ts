@@ -41,6 +41,22 @@ async function createMinimapLoom(
   return loom;
 }
 
+async function seedLongTranscriptLoom(
+  scenario: Awaited<ReturnType<typeof createServiceTestHarness>>,
+  turnCount = 100
+) {
+  const loomId = `long-transcript-${Date.now()}`;
+  await scenario.fetchJson("/dev/seed-transcript", {
+    method: "POST",
+    body: JSON.stringify({
+      loomId,
+      title: "Long transcript paging proof",
+      turnCount,
+    }),
+  });
+  return { loomId };
+}
+
 async function sendPanelPrompt(panel: Locator, prompt: string) {
   const editor = panel.getByRole("textbox", { name: "Prompt" });
   await expect(editor).toBeVisible();
@@ -258,7 +274,7 @@ test.describe("[product-service-backed] Conversation minimap", () => {
     const scenario = await createServiceTestHarness({
       deterministicProvider: "event-sourcing",
       deterministicResponseMode: "long-streaming-scroll",
-      deterministicChunkMode: "phrase",
+      deterministicChunkMode: "paragraph",
       deterministicThinkingDelayMs: 50,
       deterministicStreamChunkDelayMs: 1,
       startApp: true,
@@ -373,15 +389,21 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       expect(outlineMetrics.overflowY).toBe("auto");
       expect(outlineMetrics.scrollbarWidth).toBe("none");
 
-      const fifteenthPromptAnchor = page.locator("[data-prompt-response-id]").nth(14);
-      await outlineRows.nth(14).click();
-      await expectOutlineRowNearTop(outlineRows.nth(14));
+      const outlineRow15 = outlineRows.nth(14);
+      const responseId15 = await outlineRow15.getAttribute("data-response-id");
+      expect(responseId15).toBeTruthy();
+      const fifteenthPromptAnchor = page.locator(`[data-prompt-response-id="${responseId15}"]`);
+      await outlineRow15.click();
+      await expectOutlineRowNearTop(outlineRow15);
       await expectPromptAnchorNearTranscriptTop(fifteenthPromptAnchor);
 
-      const twentyFirstPromptAnchor = page.locator("[data-prompt-response-id]").nth(20);
+      const outlineRow21 = outlineRows.nth(20);
+      const responseId21 = await outlineRow21.getAttribute("data-response-id");
+      expect(responseId21).toBeTruthy();
+      const twentyFirstPromptAnchor = page.locator(`[data-prompt-response-id="${responseId21}"]`);
       await minimap.locator(".conversation-minimap__tick").first().hover({ force: true });
       await expectOutlineOpen(outline);
-      await outlineRows.nth(20).click();
+      await outlineRow21.click();
 
       await expectPromptAnchorNearTranscriptTop(twentyFirstPromptAnchor);
 
@@ -391,13 +413,105 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       });
       await page.mouse.move(100, 120);
       await expect(outline).toHaveCSS("opacity", "0");
+      await expect(outline).toBeHidden();
       await expect(minimap.locator(".conversation-minimap__ticks-container")).toHaveCSS("opacity", "1");
 
-      await scrollPaneToTop(transcript);
-      const thirdPromptAnchor = page.locator("[data-prompt-response-id]").nth(2);
-      await responseTicks.nth(2).click();
+      await transcript.evaluate((element) => {
+        element.scrollTop = 0;
+      });
+      await expect.poll(() => transcript.locator("[data-response-id]").count(), { timeout: 10_000 }).toBe(21);
+      await page.waitForTimeout(500);
+      const responseTick3 = responseTicks.nth(2);
+      const responseId3 = await responseTick3.getAttribute("data-response-id");
+      expect(responseId3).toBeTruthy();
+      const thirdPromptAnchor = page.locator(`[data-prompt-response-id="${responseId3}"]`);
+      await responseTick3.evaluate((el) => {
+        (el as HTMLElement).click();
+      });
 
       await expectPromptAnchorNearTranscriptTop(thirdPromptAnchor);
+
+      expect(scenario.dbPath).toContain(scenario.tempDir);
+      expect(scenario.configPath).toContain(scenario.tempDir);
+    } finally {
+      const cleanup = await scenario.cleanup();
+      expect(cleanup.serviceStopped).toBe(true);
+      expect(cleanup.appStopped).toBe(true);
+      expect(cleanup.tempDirRemoved).toBe(true);
+    }
+  });
+
+  test("reverse-loads transcript pages and opens unloaded minimap outline targets", async ({
+    page,
+  }) => {
+    test.setTimeout(120_000);
+    const scenario = await createServiceTestHarness({
+      deterministicProvider: "event-sourcing",
+      startApp: true,
+    });
+
+    try {
+      const loom = await seedLongTranscriptLoom(scenario, 100);
+
+      await page.setViewportSize({ width: 980, height: 720 });
+      page.on("console", (msg) => {
+        console.log(`[BROWSER CONSOLE] ${msg.text()}`);
+      });
+      await page.goto(scenario.appUrl!);
+      await expect(page.getByTestId("loom-sidebar")).toBeVisible();
+      await page.getByTestId(`sidebar-loom-${loom.loomId}`).click();
+
+      const transcript = page.locator(".chat-transcript").first();
+      const minimap = page.locator(".conversation-minimap").first();
+      const mountedResponses = transcript.locator("[data-response-id]");
+      await expect(transcript).toBeVisible();
+      await expect(minimap).toBeVisible();
+
+      await expect.poll(() => mountedResponses.count(), { timeout: 10_000 }).toBe(20);
+      await expect(transcript.locator(`[data-response-id="${loom.loomId}-assistant-100"]`)).toBeVisible();
+      await expect(transcript.locator(`[data-response-id="${loom.loomId}-assistant-001"]`)).toHaveCount(0);
+      await expect(minimap.locator(".conversation-minimap__outline-row")).toHaveCount(100);
+
+      await transcript.evaluate((element) => {
+        element.scrollTop = element.scrollHeight;
+      });
+      await expect.poll(() => scrollTop(transcript), { timeout: 5_000 }).toBeGreaterThan(100);
+
+      const beforePrepend = await transcript.evaluate((element) => ({
+        scrollTop: (element as HTMLElement).scrollTop,
+        scrollHeight: (element as HTMLElement).scrollHeight,
+      }));
+      await transcript.evaluate((element) => {
+        element.scrollTop = 0;
+      });
+      await expect.poll(() => mountedResponses.count(), { timeout: 10_000 }).toBe(40);
+      const afterPrepend = await transcript.evaluate((element) => ({
+        scrollTop: (element as HTMLElement).scrollTop,
+        scrollHeight: (element as HTMLElement).scrollHeight,
+      }));
+      expect(afterPrepend.scrollHeight).toBeGreaterThan(beforePrepend.scrollHeight);
+      expect(afterPrepend.scrollTop).toBeGreaterThanOrEqual(beforePrepend.scrollTop);
+
+      const idsAfterPrepend = await mountedResponses.evaluateAll((nodes) =>
+        nodes.map((node) => node.getAttribute("data-response-id"))
+      );
+      expect(new Set(idsAfterPrepend).size).toBe(idsAfterPrepend.length);
+      expect(idsAfterPrepend).not.toContain(`${loom.loomId}-assistant-001`);
+
+      await minimap.locator(".conversation-minimap__tick").first().hover({ force: true });
+      const outline = minimap.locator(".conversation-minimap__outline");
+      await expectOutlineOpen(outline);
+      await minimap
+        .locator(".conversation-minimap__outline-row", { hasText: "Seeded Answer 001" })
+        .click();
+
+      const target = transcript.locator(`[data-response-id="${loom.loomId}-assistant-001"]`);
+      await expect(target).toBeVisible({ timeout: 10_000 });
+      await expectPromptAnchorNearTranscriptTop(
+        transcript.locator(`[data-prompt-response-id="${loom.loomId}-assistant-001"]`)
+      );
+      await expect.poll(() => mountedResponses.count(), { timeout: 10_000 }).toBeLessThanOrEqual(40);
+      await expect(transcript.locator(`[data-response-id="${loom.loomId}-assistant-100"]`)).toHaveCount(0);
 
       expect(scenario.dbPath).toContain(scenario.tempDir);
       expect(scenario.configPath).toContain(scenario.tempDir);
