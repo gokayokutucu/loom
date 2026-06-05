@@ -425,6 +425,11 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       await expect(originPanel).toBeVisible();
       await expect(weftPanel).toBeVisible();
 
+      // Return to Origin button must NOT be in the origin (left) split panel
+      await expect(
+        originPanel.getByRole("button", { name: "Return to Origin" })
+      ).not.toBeVisible();
+
       for (let index = 1; index <= 4; index += 1) {
         await sendPanelPrompt(
           weftPanel,

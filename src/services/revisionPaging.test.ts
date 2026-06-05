@@ -88,6 +88,26 @@ describe("resolveRevisionTarget", () => {
     });
   });
 
+  it("should return target revision details for revisionIndex = 2 (index 2)", () => {
+    const childResponses = [
+      { id: `revision-${displayResponseId}-child2`, question: "Prompt C", answer: "Response C" } as any,
+    ];
+    const result = resolveRevisionTarget({
+      revisionIndex: 2, // second revision record (rec-2)
+      displayResponseId,
+      originConversationId,
+      revisionRecords,
+      parentResponses,
+      getConversationResponses: (id) => (id === "loom-rev-2" ? childResponses : []),
+    });
+
+    expect(result).toEqual({
+      pane: "weft",
+      loomId: "loom-rev-2",
+      targetResponseId: `revision-${displayResponseId}-child2`,
+    });
+  });
+
   it("should return null if revisionIndex is out of bounds", () => {
     const result = resolveRevisionTarget({
       revisionIndex: 99,

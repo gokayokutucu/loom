@@ -2376,6 +2376,17 @@ function App() {
   const referenceFragmentHighlightTimerRef = useRef<number | null>(null);
   const [highlightedRevisionResponseId, setHighlightedRevisionResponseId] = useState<string | null>(null);
   const revisionHighlightTimerRef = useRef<number | null>(null);
+  const pendingRevisionHighlightRef = useRef<{
+    pane: "origin" | "weft";
+    loomId: string;
+    displayResponseId: string;
+    revisionIndex: number;
+    targetResponseId: string | null;
+    token: number;
+    createdAt: number;
+  } | null>(null);
+  const pendingHighlightTokenRef = useRef<number>(0);
+  const [pendingHighlightTrigger, setPendingHighlightTrigger] = useState(0);
   const revisionNavigationInProgressRef = useRef(false);
   const revisionNavigationTimerRef = useRef<number | null>(null);
   const activeVisitLoomIdRef = useRef<string | null>(null);
@@ -10657,24 +10668,119 @@ function App() {
   }
 
   function handlePromptRevisionNavigate(responseId: string, revisionIndex: number) {
+    const token = ++pendingHighlightTokenRef.current;
+
+    const revisionRecords = forkRecords.filter(
+      (record) =>
+        record.kind === "revision" &&
+        record.parentConversationId === originConversation?.id &&
+        record.revisionSourceResponseId === responseId
+    );
+
     const target = resolveRevisionTarget({
       revisionIndex,
       displayResponseId: responseId,
       originConversationId: originConversation?.id ?? "",
-      revisionRecords: forkRecords.filter(
-        (record) =>
-          record.kind === "revision" &&
-          record.parentConversationId === originConversation?.id &&
-          record.revisionSourceResponseId === responseId
-      ),
+      revisionRecords,
       parentResponses: originResponses,
       getConversationResponses: (loomId) => conversationResponses[loomId] ?? [],
     });
 
-    if (!target) return;
+    const pane = revisionIndex === 0 ? "origin" : "weft";
+    const loomId = revisionIndex === 0
+      ? (originConversation?.id ?? "")
+      : (revisionRecords[revisionIndex - 1]?.childConversationId ?? "");
 
-    triggerRevisionHighlight(target.targetResponseId);
+    pendingRevisionHighlightRef.current = {
+      pane,
+      loomId,
+      displayResponseId: responseId,
+      revisionIndex,
+      targetResponseId: target?.targetResponseId ?? null,
+      token,
+      createdAt: Date.now(),
+    };
+    setPendingHighlightTrigger((c) => c + 1);
   }
+
+  useEffect(() => {
+    const pending = pendingRevisionHighlightRef.current;
+    if (!pending) return;
+
+    if (Date.now() - pending.createdAt > 5000) {
+      pendingRevisionHighlightRef.current = null;
+      return;
+    }
+
+    let active = true;
+    let frameId: number;
+
+    const checkAndApply = () => {
+      if (!active) return;
+
+      const currentPending = pendingRevisionHighlightRef.current;
+      if (!currentPending || currentPending.token !== pending.token) {
+        return;
+      }
+
+      if (Date.now() - pending.createdAt > 3000) {
+        pendingRevisionHighlightRef.current = null;
+        return;
+      }
+
+      let targetResponseId = currentPending.targetResponseId;
+      if (!targetResponseId) {
+        const revisionRecords = forkRecords.filter(
+          (record) =>
+            record.kind === "revision" &&
+            record.parentConversationId === originConversation?.id &&
+            record.revisionSourceResponseId === currentPending.displayResponseId
+        );
+        const resolved = resolveRevisionTarget({
+          revisionIndex: currentPending.revisionIndex,
+          displayResponseId: currentPending.displayResponseId,
+          originConversationId: originConversation?.id ?? "",
+          revisionRecords,
+          parentResponses: originResponses,
+          getConversationResponses: (loomId) => conversationResponses[loomId] ?? [],
+        });
+        if (resolved) {
+          targetResponseId = resolved.targetResponseId;
+          currentPending.targetResponseId = targetResponseId;
+        }
+      }
+
+      if (!targetResponseId) {
+        return;
+      }
+
+      const pane = currentPending.pane;
+      const transcript = pane === "origin" ? originTranscriptRef.current : transcriptRef.current;
+
+      if (!transcript) {
+        frameId = requestAnimationFrame(checkAndApply);
+        return;
+      }
+
+      const targetEl = transcript.querySelector<HTMLElement>(
+        `[data-response-id="${CSS.escape(targetResponseId)}"]`
+      );
+
+      if (targetEl) {
+        triggerRevisionHighlight(targetResponseId);
+        pendingRevisionHighlightRef.current = null;
+      } else {
+        frameId = requestAnimationFrame(checkAndApply);
+      }
+    };
+
+    checkAndApply();
+
+    return () => {
+      active = false;
+      cancelAnimationFrame(frameId);
+    };
+  }, [conversationResponses, originConversation, originResponses, forkRecords, showWeftSplit, activeConversationId, pendingHighlightTrigger]);
 
   function anchorBranchCounterNavigation(
     loomId: string,
@@ -14235,7 +14341,7 @@ function App() {
                             onAddCodeReference={addCodeBlockAsReference}
                             onOpenReference={openComposerReference}
                             onOpenAttachment={(link) => void openSentAttachment(link, originConversation?.id)}
-                            onReturnToOrigin={returnToOrigin}
+                            onReturnToOrigin={undefined}
                             highlightedResponseId={recentResponseFeedbackId}
                             isOriginPanel={true}
                             onPromptRevisionNavigate={handlePromptRevisionNavigate}

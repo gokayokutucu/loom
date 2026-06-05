@@ -182,8 +182,8 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         revisionResponses.some((response) => response.content.includes(originalPrompt))
       ).toBe(false);
       await expect(page.locator(".weft-split-view")).toBeVisible();
-      await expect(page.locator(".origin-split-panel")).not.toContainText(editedPrompt);
-      await expect(page.locator(".origin-split-panel")).toContainText(originalPrompt);
+      await expect(page.locator(".origin-split-panel .chat-transcript")).not.toContainText(editedPrompt);
+      await expect(page.locator(".origin-split-panel .chat-transcript")).toContainText(originalPrompt);
       await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
         "2/2"
       );
@@ -222,7 +222,7 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         timeout: 30_000,
       });
       await sendMainPrompt(page, promptB);
-      await expect(page.getByText("AWS").first()).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator(".chat-transcript").getByText("AWS").first()).toBeVisible({ timeout: 30_000 });
 
       const rootLoom = (await scenario.client.listLooms()).find((item) =>
         item.title.includes("Event Sourcing")
@@ -337,9 +337,9 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         timeout: 30_000,
       });
       await sendMainPrompt(page, promptB);
-      await expect(page.getByText("AWS").first()).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator(".chat-transcript").getByText("AWS").first()).toBeVisible({ timeout: 30_000 });
       await sendMainPrompt(page, promptC);
-      await expect(page.getByText("Azure").first()).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator(".chat-transcript").getByText("Azure").first()).toBeVisible({ timeout: 30_000 });
 
       const rootLoom = (await scenario.client.listLooms()).find((item) =>
         item.title.includes("Event Sourcing")
@@ -367,7 +367,7 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
 
       await editPrompt(page, assistantB!.responseId, editedPrompt);
       await expect(page.getByText("Revision:").first()).toBeVisible({ timeout: 30_000 });
-      await expect(page.getByText("GCP").first()).toBeVisible({ timeout: 30_000 });
+      await expect(page.locator(".chat-transcript").getByText("GCP").first()).toBeVisible({ timeout: 30_000 });
 
       expect(forbiddenMutationUrls).toEqual([]);
 
@@ -411,8 +411,19 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
         )
       ).toBe(true);
       await expect(page.locator(".weft-split-view")).toBeVisible();
-      await expect(page.locator(".origin-split-panel")).not.toContainText(editedPrompt);
-      await expect(page.locator(".origin-split-panel")).toContainText(promptB);
+
+      // Return to Origin button must NOT be in the origin (left) split panel
+      await expect(
+        page.locator(".origin-split-panel").getByRole("button", { name: "Return to Origin" })
+      ).not.toBeVisible();
+
+      // Return to Origin button must be in the weft (right) split panel
+      await expect(
+        page.locator(".weft-split-panel").getByRole("button", { name: "Return to Origin" })
+      ).toBeVisible();
+
+      await expect(page.locator(".origin-split-panel .chat-transcript")).not.toContainText(editedPrompt);
+      await expect(page.locator(".origin-split-panel .chat-transcript")).toContainText(promptB);
       await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
         "2/2"
       );
@@ -424,18 +435,64 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
       const originScrollBeforeRevisionToggle = await originTranscript.evaluate(
         (element) => element.scrollTop
       );
+
+      // Go back to 1/2 in order to perform the second edit on B
       await page
         .locator(".origin-split-panel .prompt-revision-action-counter")
         .getByRole("button", { name: "Previous message revision" })
         .click({ force: true });
-      await expect(page.locator(".origin-split-panel")).toContainText(promptB);
       await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
         "1/2"
       );
 
-      // Verify highlights are applied immediately on click (response only)
+      // Perform second edit to create a 3rd revision (1/3, 2/3, 3/3)
+      const editedPrompt2 = "Event Sourcing GCP üzerinde veritabanı yedeği nasıl alınır?";
+      await editPrompt(page, assistantB!.responseId, editedPrompt2);
+      await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
+        "3/3"
+      );
+      await expect(page.locator(".weft-split-panel")).toContainText("GCP");
+
+      // No highlight check here because it was just edited (not paged to).
+      // Wait for any initial generated/edit state to settle down.
+      await page.waitForTimeout(500);
+
+      // 1. Click Previous to go to 2/3
+      await page
+        .locator(".origin-split-panel .prompt-revision-action-counter")
+        .getByRole("button", { name: "Previous message revision" })
+        .click({ force: true });
+      await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
+        "2/3"
+      );
+
+      // Verify highlights are applied immediately on 2/3 in weft panel target
+      await expect(page.locator(".weft-split-panel .revision-focus-highlight--user")).toHaveCount(0);
+      const highlight2 = page.locator(".weft-split-panel .revision-focus-highlight--response");
+      await expect(highlight2).toBeVisible();
+      await expect(highlight2).toContainText("Deterministic E2E provider");
+      // Verify weft panel displays the 2/3 text (editedPrompt)
+      await expect(page.locator(".weft-split-panel")).toContainText(editedPrompt);
+      // Verify it does NOT contain the 3/3 text (editedPrompt2)
+      await expect(page.locator(".weft-split-panel")).not.toContainText(editedPrompt2);
+
+      // Wait for highlight duration to expire
+      await page.waitForTimeout(1800);
+      await expect(page.locator(".weft-split-panel .revision-focus-highlight--response")).toHaveCount(0);
+
+      // 2. Click Previous to go to 1/3
+      await page
+        .locator(".origin-split-panel .prompt-revision-action-counter")
+        .getByRole("button", { name: "Previous message revision" })
+        .click({ force: true });
+      await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
+        "1/3"
+      );
+
+      // Verify highlights are applied immediately on 1/3 in origin panel
       await expect(page.locator(".origin-split-panel .revision-focus-highlight--user")).toHaveCount(0);
-      await expect(page.locator(".origin-split-panel .revision-focus-highlight--response")).toBeVisible();
+      const highlight1 = page.locator(".origin-split-panel .revision-focus-highlight--response");
+      await expect(highlight1).toBeVisible();
 
       // Wait for highlight duration to expire
       await page.waitForTimeout(1800);
@@ -446,20 +503,30 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
       );
       expect(Math.abs(originScrollAfterOriginalRevision - originScrollBeforeRevisionToggle)).toBeLessThanOrEqual(4);
 
+      // 3. Click Next to go to 2/3
       await page
         .locator(".origin-split-panel .prompt-revision-action-counter")
         .getByRole("button", { name: "Next message revision" })
         .click({ force: true });
-      await expect(page.locator(".origin-split-panel")).not.toContainText(editedPrompt);
       await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
-        "2/2"
+        "2/3"
       );
-
-      // Verify highlights are applied immediately on click for weft panel target (response only)
-      await expect(page.locator(".weft-split-panel .revision-focus-highlight--user")).toHaveCount(0);
       await expect(page.locator(".weft-split-panel .revision-focus-highlight--response")).toBeVisible();
 
-      await expect(page.locator(".weft-split-panel")).toContainText(editedPrompt);
+      // Wait for highlight duration to expire
+      await page.waitForTimeout(1800);
+
+      // 4. Click Next to go to 3/3
+      await page
+        .locator(".origin-split-panel .prompt-revision-action-counter")
+        .getByRole("button", { name: "Next message revision" })
+        .click({ force: true });
+      await expect(page.locator(".origin-split-panel .prompt-revision-action-counter")).toContainText(
+        "3/3"
+      );
+      await expect(page.locator(".weft-split-panel .revision-focus-highlight--response")).toBeVisible();
+
+      await expect(page.locator(".weft-split-panel")).toContainText(editedPrompt2);
       await expect
         .poll(async () =>
           page
@@ -535,6 +602,8 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
       await expect(
         revisionGraphNode.getByRole("button", { name: "Previous graph message revision" })
       ).toBeDisabled();
+
+      // Go from 1/3 to 2/3
       await revisionGraphNode
         .getByRole("button", { name: "Next graph message revision" })
         .click();
@@ -542,14 +611,34 @@ test.describe("[product-service-backed] prompt edit product proof", () => {
       await expect(revisionGraphNode.locator(".loom-graph-preview")).toContainText(
         "Deterministic E2E provider"
       );
+      // Next button should be enabled because 3/3 exists
+      await expect(
+        revisionGraphNode.getByRole("button", { name: "Next graph message revision" })
+      ).toBeEnabled();
+
+      // Go from 2/3 to 3/3
+      await revisionGraphNode
+        .getByRole("button", { name: "Next graph message revision" })
+        .click();
+      await expect(revisionGraphNode.locator("h3")).toContainText(editedPrompt2);
+      // Next button should be disabled now (at 3/3)
       await expect(
         revisionGraphNode.getByRole("button", { name: "Next graph message revision" })
       ).toBeDisabled();
+
       await revisionGraphNode.click();
       const graphPreviewModal = page.locator(".graph-response-preview-modal");
-      await expect(graphPreviewModal).toContainText(editedPrompt);
+      await expect(graphPreviewModal).toContainText(editedPrompt2);
       await expect(graphPreviewModal).toContainText("Deterministic E2E provider");
       await page.getByRole("button", { name: "Close response preview" }).click();
+
+      // Go back from 3/3 to 2/3
+      await revisionGraphNode
+        .getByRole("button", { name: "Previous graph message revision" })
+        .click();
+      await expect(revisionGraphNode.locator("h3")).toContainText(editedPrompt);
+
+      // Go back from 2/3 to 1/3
       await revisionGraphNode
         .getByRole("button", { name: "Previous graph message revision" })
         .click();
