@@ -2447,6 +2447,11 @@ kbd {
   pointer-events: none;
 }
 
+.conversation-minimap:hover .conversation-minimap__tick,
+.conversation-minimap:focus-within .conversation-minimap__tick {
+  pointer-events: none;
+}
+
 .conversation-minimap__outline-row {
   display: flex;
   align-items: center;
@@ -2546,13 +2551,20 @@ kbd {
   background: color-mix(in srgb, var(--loom-text-muted) 60%, transparent);
 }
 
-.conversation-minimap__outline-row:hover .conversation-minimap__outline-marker,
-.conversation-minimap__outline-row:focus-visible .conversation-minimap__outline-marker {
+.conversation-minimap__outline-row:hover .conversation-minimap__outline-marker:not(.conversation-minimap__outline-marker--revision),
+.conversation-minimap__outline-row:focus-visible .conversation-minimap__outline-marker:not(.conversation-minimap__outline-marker--revision) {
   width: 20px;
   background: color-mix(in srgb, var(--loom-text-primary) 70%, transparent);
 }
 
-.conversation-minimap__outline-row--active .conversation-minimap__outline-marker {
+.conversation-minimap__outline-row--revision:hover .conversation-minimap__outline-marker--revision::before,
+.conversation-minimap__outline-row--revision:hover .conversation-minimap__outline-marker--revision::after,
+.conversation-minimap__outline-row--revision:focus-visible .conversation-minimap__outline-marker--revision::before,
+.conversation-minimap__outline-row--revision:focus-visible .conversation-minimap__outline-marker--revision::after {
+  background: color-mix(in srgb, var(--loom-text-primary) 70%, transparent);
+}
+
+.conversation-minimap__outline-row--active .conversation-minimap__outline-marker:not(.conversation-minimap__outline-marker--revision) {
   width: 22px;
   height: 3px;
   background: var(--loom-accent);

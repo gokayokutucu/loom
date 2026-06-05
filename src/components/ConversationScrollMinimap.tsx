@@ -395,10 +395,7 @@ export function ConversationScrollMinimap({
                   }}
                   type="button"
                 >
-                  <span
-                    title={item.fullLabel || item.label}
-                    className="conversation-minimap__outline-label"
-                  >
+                  <span className="conversation-minimap__outline-label">
                     {item.label}
                   </span>
                   <span
@@ -430,10 +427,7 @@ export function ConversationScrollMinimap({
                       aria-hidden="true"
                       className="conversation-minimap__outline-marker conversation-minimap__outline-marker--revision"
                     />
-                    <span
-                      title={child.fullLabel || child.label}
-                      className="conversation-minimap__outline-label"
-                    >
+                    <span className="conversation-minimap__outline-label">
                       {child.label}
                     </span>
                   </button>

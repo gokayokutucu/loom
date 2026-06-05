@@ -312,7 +312,7 @@ test.describe("[product-service-backed] Conversation minimap", () => {
         .toBe(1);
 
       const firstTick = minimap.locator(".conversation-minimap__tick").first();
-      await firstTick.hover();
+      await firstTick.hover({ force: true });
       await expectOutlineOpen(outline);
       await expect(minimap.locator(".conversation-minimap__ticks-container")).toHaveCSS("opacity", "0");
 
@@ -478,7 +478,7 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       await scrollPaneToTop(originTranscript);
       await stableScrollTop(weftTranscript);
 
-      await originMinimap.locator(".conversation-minimap__tick").first().hover();
+      await originMinimap.locator(".conversation-minimap__tick").first().hover({ force: true });
       await expect(originOutline).toHaveCSS("opacity", "1");
       await expect(originMinimap.locator(".conversation-minimap__ticks-container")).toHaveCSS("opacity", "0");
 
@@ -544,7 +544,7 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       await expect(originMinimap).toBeVisible();
       await expect(originTicks).toHaveCount(2);
       await expect(originMinimap.locator(".conversation-minimap__ticks-container")).toHaveCSS("opacity", "1");
-      await originMinimap.locator(".conversation-minimap__tick").first().hover();
+      await originMinimap.locator(".conversation-minimap__tick").first().hover({ force: true });
       await expectOutlineOpen(originMinimap.locator(".conversation-minimap__outline"));
       await expect(originMinimap.locator(".conversation-minimap__ticks-container")).toHaveCSS("opacity", "0");
       await expect(parentRows).toHaveCount(2);
