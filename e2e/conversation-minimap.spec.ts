@@ -539,6 +539,28 @@ test.describe("[product-service-backed] Conversation minimap", () => {
       expect(revisionBox).not.toBeNull();
       expect(revisionBox!.x).toBeGreaterThan(parentBox!.x + 10);
 
+      // Verify parent response row marker is on the right side of the label
+      const parentLabel = parentRows.first().locator(".conversation-minimap__outline-label");
+      const parentMarker = parentRows.first().locator(".conversation-minimap__outline-marker");
+      const [parentLabelBox, parentMarkerBox] = await Promise.all([
+        parentLabel.boundingBox(),
+        parentMarker.boundingBox(),
+      ]);
+      expect(parentLabelBox).not.toBeNull();
+      expect(parentMarkerBox).not.toBeNull();
+      expect(parentLabelBox!.x).toBeLessThan(parentMarkerBox!.x);
+
+      // Verify revision child row marker is on the left side of the label
+      const revisionLabel = revisionRow.locator(".conversation-minimap__outline-label");
+      const revisionMarker = revisionRow.locator(".conversation-minimap__outline-marker");
+      const [revisionLabelBox, revisionMarkerBox] = await Promise.all([
+        revisionLabel.boundingBox(),
+        revisionMarker.boundingBox(),
+      ]);
+      expect(revisionLabelBox).not.toBeNull();
+      expect(revisionMarkerBox).not.toBeNull();
+      expect(revisionMarkerBox!.x).toBeLessThan(revisionLabelBox!.x);
+
       await revisionRow.click();
       await expect(page.locator(".weft-split-view")).toBeVisible();
       await expect(page.locator(".weft-split-panel")).toContainText(revisionPrompt);

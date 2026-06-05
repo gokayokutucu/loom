@@ -2445,7 +2445,7 @@ kbd {
 
 .conversation-minimap__outline-row {
   display: grid;
-  grid-template-columns: 14px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr) 14px;
   align-items: center;
   gap: 8px;
   min-height: 28px;
@@ -2478,6 +2478,7 @@ kbd {
 }
 
 .conversation-minimap__outline-row--child {
+  grid-template-columns: 14px minmax(0, 1fr);
   margin-left: 18px;
   min-height: 26px;
   color: color-mix(in srgb, var(--loom-text-secondary) 78%, transparent);
@@ -2489,6 +2490,7 @@ kbd {
   height: 3px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--loom-text-muted) 68%, transparent);
+  justify-self: end;
 }
 
 .conversation-minimap__outline-marker--user {
@@ -2497,12 +2499,34 @@ kbd {
 }
 
 .conversation-minimap__outline-marker--revision {
-  width: 8px;
-  height: 8px;
-  border: 1px solid color-mix(in srgb, var(--loom-accent) 70%, transparent);
-  border-radius: 3px;
-  background: color-mix(in srgb, var(--loom-accent) 16%, transparent);
-  transform: rotate(-8deg);
+  position: relative;
+  width: 12px;
+  height: 12px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  transform: none;
+  justify-self: start;
+}
+
+.conversation-minimap__outline-marker--revision::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 3px;
+  width: 2px;
+  height: 6px;
+  background: color-mix(in srgb, var(--loom-accent) 60%, transparent);
+}
+
+.conversation-minimap__outline-marker--revision::after {
+  content: "";
+  position: absolute;
+  top: 4px;
+  left: 3px;
+  width: 6px;
+  height: 2px;
+  background: color-mix(in srgb, var(--loom-accent) 60%, transparent);
 }
 
 .conversation-minimap__outline-row--active .conversation-minimap__outline-marker {
