@@ -325,6 +325,7 @@ import {
   type ModelProfileId,
   type RuntimeHealthState,
 } from "./services/modelProviders";
+import { normalizeRuntimeProvider, type ProviderProfile } from "./services/providerDiscovery";
 import {
   canQueueLocalMainGeneration,
   removeQueuedLocalMainGeneration,
@@ -19034,6 +19035,8 @@ function PromptComposer({
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [isScanningModels, setIsScanningModels] = useState(false);
   const modelScanGuardRef = useRef(false);
+  const [discoveredProfiles, setDiscoveredProfiles] = useState<ProviderProfile[]>([]);
+  const [loadingProfiles, setLoadingProfiles] = useState(false);
   const [modelPopoverStyle, setModelPopoverStyle] = useState<{
     left: number;
     top: number;
@@ -19770,6 +19773,34 @@ function PromptComposer({
       modelScanGuardRef.current = false;
     }
   }, [modelPickerOpen]);
+
+  // Load and normalize provider statuses when the model picker menu is opened.
+  useEffect(() => {
+    if (!modelPickerOpen || getConfiguredLoomEngineMode() !== "rust-service") {
+      return;
+    }
+    let cancelled = false;
+    setLoadingProfiles(true);
+
+    Promise.all([
+      engineClient.getRuntimeProviders().catch(() => []),
+      engineClient.getRuntimeModels().then((res) => res.models).catch(() => []),
+    ])
+      .then(([providers, models]) => {
+        if (cancelled) return;
+        const normalized = providers.map((p) => normalizeRuntimeProvider(p, models));
+        setDiscoveredProfiles(normalized);
+        setLoadingProfiles(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLoadingProfiles(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [modelPickerOpen, engineClient]);
 
   useLayoutEffect(() => {
     if (!mention) return;
@@ -22342,6 +22373,48 @@ function PromptComposer({
                   </button>
                 );
               })}
+              {getConfiguredLoomEngineMode() === "rust-service" && (
+                <>
+                  <div className="model-picker-section-divider" />
+                  <div className="model-picker-section-label">Provider Status</div>
+                  {loadingProfiles && (
+                    <div className="model-picker-status">Loading provider statuses...</div>
+                  )}
+                  {!loadingProfiles && discoveredProfiles.length === 0 && (
+                    <div className="model-picker-status">No active providers.</div>
+                  )}
+                  {!loadingProfiles &&
+                    discoveredProfiles.map((profile) => (
+                      <div key={profile.id} className="provider-status-item">
+                        <div className="provider-status-header">
+                          <span className="provider-status-label">{profile.label}</span>
+                          <span
+                            className={`provider-status-indicator ${
+                              profile.isAvailable ? "available" : "unavailable"
+                            }`}
+                          >
+                            {profile.isAvailable ? "Available" : "Unavailable"}
+                          </span>
+                        </div>
+                        <div className="provider-status-meta">
+                          <span className="provider-status-kind">{profile.kind}</span>
+                          <span className="provider-status-models-count">
+                            {profile.modelIds.length}{" "}
+                            {profile.modelIds.length === 1 ? "model" : "models"}
+                          </span>
+                          {profile.isSandbox && (
+                            <span className="provider-status-badge sandbox">Sandbox</span>
+                          )}
+                        </div>
+                        {profile.warning && (
+                          <div className="provider-status-warning" title={profile.warning}>
+                            {profile.warning}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                </>
+              )}
             </div>,
             document.body
           )}

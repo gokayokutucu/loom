@@ -10875,3 +10875,84 @@ kbd {
   50% { opacity: 0.6; }
   100% { opacity: 1; }
 }
+
+/* Provider status styles inside the model picker */
+.model-picker-menu .provider-status-item {
+  display: grid;
+  gap: 3px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid var(--loom-border-subtle);
+  margin: 2px 4px;
+}
+
+.model-picker-menu .provider-status-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+}
+
+.model-picker-menu .provider-status-label {
+  color: var(--loom-text-secondary);
+  font-size: 12px;
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.model-picker-menu .provider-status-indicator {
+  font-size: 10px;
+  font-weight: 600;
+  padding: 1px 5px;
+  border-radius: 4px;
+  text-transform: capitalize;
+}
+
+.model-picker-menu .provider-status-indicator.available {
+  background: rgba(46, 200, 100, 0.12);
+  color: #4cd964;
+}
+
+.model-picker-menu .provider-status-indicator.unavailable {
+  background: rgba(255, 69, 58, 0.12);
+  color: #ff453a;
+}
+
+.model-picker-menu .provider-status-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.model-picker-menu .provider-status-kind,
+.model-picker-menu .provider-status-models-count {
+  color: var(--loom-text-muted);
+  font-size: 10px;
+}
+
+.model-picker-menu .provider-status-badge {
+  font-size: 9px;
+  font-weight: 700;
+  padding: 0px 4px;
+  border-radius: 3px;
+  text-transform: uppercase;
+}
+
+.model-picker-menu .provider-status-badge.sandbox {
+  background: rgba(205, 139, 82, 0.2);
+  color: #f2ceb0;
+}
+
+.model-picker-menu .provider-status-warning {
+  margin-top: 2px;
+  color: #ffb0a0;
+  font-size: 10px;
+  line-height: 1.3;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
