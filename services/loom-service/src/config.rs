@@ -1876,6 +1876,12 @@ where
         apply_e2e_nvidia_openai_compatible_profile(config, &lookup, true)?;
     } else if lookup("LOOM_SERVICE_E2E_ENABLE_PROVIDER_PROFILE").as_deref() == Some("nvidia") {
         apply_e2e_nvidia_openai_compatible_profile(config, &lookup, false)?;
+    } else if lookup("LOOM_SERVICE_E2E_PROVIDER_PROFILE").as_deref() == Some("litellm-sandbox") {
+        apply_e2e_litellm_sandbox_profile(config, &lookup, true)?;
+    } else if lookup("LOOM_SERVICE_E2E_ENABLE_PROVIDER_PROFILE").as_deref()
+        == Some("litellm-sandbox")
+    {
+        apply_e2e_litellm_sandbox_profile(config, &lookup, false)?;
     }
 
     Ok(())
@@ -1907,6 +1913,54 @@ where
         config.providers.main_provider_profile_id = Some(profile.id.clone());
     }
     profile.secret_ref = Some("env:NVIDIA_API_KEY".to_string());
+    upsert_provider_profile(&mut config.providers.profiles, profile);
+    Ok(())
+}
+
+/// Inject the LiteLLM sandbox provider profile from environment variables.
+///
+/// This mirrors the nvidia pattern and is intended for local sandbox development only.
+/// The LiteLLM sandbox is defined in `tools/litellm-sandbox/` and must be running
+/// before any generation request is made.
+///
+/// When `select_for_main` is true the sandbox becomes the active main generation
+/// provider; when false it is added to the profile registry but Ollama remains active.
+///
+/// Environment variables consumed:
+/// - `LOOM_LITELLM_BASE_URL` — defaults to `http://127.0.0.1:4000/v1`
+/// - `LOOM_LITELLM_MODEL` — required when selecting for main (no default committed)
+/// - `LOOM_LITELLM_API_KEY` — resolved via `env:LOOM_LITELLM_API_KEY` secret_ref
+fn apply_e2e_litellm_sandbox_profile<F>(
+    config: &mut LoomServiceConfig,
+    lookup: &F,
+    select_for_main: bool,
+) -> Result<(), ServiceError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut profile = ProviderProfileConfig::litellm_sandbox_example();
+    profile.enabled = true;
+    // Override base URL from env (already defaults to http://127.0.0.1:4000/v1 in template).
+    if let Some(value) = lookup("LOOM_LITELLM_BASE_URL") {
+        profile.base_url = Some(value.trim_end_matches('/').to_string());
+    }
+    // Model must be provided; no model is committed in the template.
+    if let Some(value) = lookup("LOOM_LITELLM_MODEL") {
+        profile.default_model = Some(value);
+    }
+    if select_for_main {
+        // A model must be configured when selecting as main provider.
+        let model = profile.default_model.clone().ok_or_else(|| {
+            ServiceError::config(
+                "LOOM_LITELLM_MODEL is required when \
+                 LOOM_SERVICE_E2E_PROVIDER_PROFILE=litellm-sandbox",
+            )
+        })?;
+        config.providers.default_main_model = model.clone();
+        config.providers.main_model_id = Some(model);
+        config.providers.main_provider_profile_id = Some(profile.id.clone());
+    }
+    // secret_ref is already set to "env:LOOM_LITELLM_API_KEY" in the template.
     upsert_provider_profile(&mut config.providers.profiles, profile);
     Ok(())
 }
@@ -2446,6 +2500,139 @@ mod tests {
         let serialized = serialize_config(&config);
         assert!(!serialized.contains("nvapi-"));
         validate_config(&config).expect("enabled profile without Main assignment is valid");
+    }
+
+    // ── LiteLLM sandbox profile tests ────────────────────────────────────────
+
+    #[test]
+    fn litellm_sandbox_example_is_disabled_by_default() {
+        let profile = ProviderProfileConfig::litellm_sandbox_example();
+        assert_eq!(profile.id, "litellm-sandbox");
+        assert!(
+            !profile.enabled,
+            "sandbox profile must be disabled by default"
+        );
+        assert!(profile.experimental);
+        assert_eq!(
+            profile.base_url.as_deref(),
+            Some("http://127.0.0.1:4000/v1")
+        );
+        assert_eq!(
+            profile.secret_ref.as_deref(),
+            Some("env:LOOM_LITELLM_API_KEY")
+        );
+        assert!(profile.default_model.is_none(), "no model committed");
+        // Vendor must be Custom — not Nvidia / OpenAi / Ollama.
+        assert_eq!(
+            profile.vendor.as_config_str(),
+            "custom",
+            "litellm-sandbox vendor must be Custom"
+        );
+        // Must NOT appear in default config profiles.
+        let config = LoomServiceConfig::default();
+        assert!(
+            !config
+                .providers
+                .profiles
+                .iter()
+                .any(|p| p.id == "litellm-sandbox"),
+            "litellm-sandbox must not appear in default profiles"
+        );
+    }
+
+    #[test]
+    fn e2e_litellm_sandbox_profile_selects_for_main() {
+        let mut config = LoomServiceConfig::default();
+
+        apply_env_overrides_from(&mut config, |name| match name {
+            "LOOM_SERVICE_E2E_PROVIDER_PROFILE" => Some("litellm-sandbox".to_string()),
+            "LOOM_LITELLM_BASE_URL" => Some("http://127.0.0.1:4000/v1".to_string()),
+            "LOOM_LITELLM_MODEL" => Some("gpt-4o-mini".to_string()),
+            _ => None,
+        })
+        .expect("apply litellm env");
+
+        let sandbox = config
+            .providers
+            .profiles
+            .iter()
+            .find(|p| p.id == "litellm-sandbox")
+            .expect("litellm-sandbox profile must be injected");
+
+        assert!(sandbox.enabled);
+        assert_eq!(
+            sandbox.base_url.as_deref(),
+            Some("http://127.0.0.1:4000/v1")
+        );
+        assert_eq!(sandbox.default_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(
+            sandbox.secret_ref.as_deref(),
+            Some("env:LOOM_LITELLM_API_KEY")
+        );
+        assert_eq!(
+            config.providers.main_provider_profile_id.as_deref(),
+            Some("litellm-sandbox")
+        );
+        assert_eq!(
+            config.providers.main_model_id.as_deref(),
+            Some("gpt-4o-mini")
+        );
+        assert_eq!(config.providers.default_main_model, "gpt-4o-mini");
+        // Serialized config must not contain any real secret.
+        let serialized = serialize_config(&config);
+        assert!(
+            !serialized.contains("LOOM_LITELLM_API_KEY="),
+            "secret key must not be serialized"
+        );
+        validate_config(&config).expect("litellm-sandbox profile for main is valid");
+    }
+
+    #[test]
+    fn e2e_litellm_sandbox_enable_does_not_select_main() {
+        let mut config = LoomServiceConfig::default();
+
+        apply_env_overrides_from(&mut config, |name| match name {
+            "LOOM_SERVICE_E2E_ENABLE_PROVIDER_PROFILE" => Some("litellm-sandbox".to_string()),
+            "LOOM_LITELLM_BASE_URL" => Some("http://127.0.0.1:4000/v1".to_string()),
+            "LOOM_LITELLM_MODEL" => Some("gpt-4o-mini".to_string()),
+            _ => None,
+        })
+        .expect("apply litellm enable env");
+
+        let sandbox = config
+            .providers
+            .profiles
+            .iter()
+            .find(|p| p.id == "litellm-sandbox")
+            .expect("litellm-sandbox profile must be injected");
+
+        assert!(sandbox.enabled);
+        // main_provider_profile_id must remain None — Ollama stays active.
+        assert_eq!(config.providers.main_provider_profile_id, None);
+        assert_eq!(config.providers.main_model_id, None);
+        assert_eq!(config.providers.default_main_model, "qwen3.5:9b");
+        validate_config(&config).expect("enabled sandbox without Main assignment is valid");
+    }
+
+    #[test]
+    fn e2e_litellm_sandbox_profile_errors_without_model() {
+        let mut config = LoomServiceConfig::default();
+
+        let result = apply_env_overrides_from(&mut config, |name| match name {
+            "LOOM_SERVICE_E2E_PROVIDER_PROFILE" => Some("litellm-sandbox".to_string()),
+            // No LOOM_LITELLM_MODEL — must error.
+            _ => None,
+        });
+
+        assert!(
+            result.is_err(),
+            "selecting litellm-sandbox as main without a model must fail"
+        );
+        let message = format!("{}", result.unwrap_err());
+        assert!(
+            message.contains("LOOM_LITELLM_MODEL"),
+            "error must mention LOOM_LITELLM_MODEL; got: {message}"
+        );
     }
 
     #[test]

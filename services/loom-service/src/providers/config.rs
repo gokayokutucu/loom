@@ -286,6 +286,89 @@ impl ProviderProfileConfig {
             })),
         }
     }
+
+    /// Profile template for the LiteLLM local sandbox gateway.
+    ///
+    /// The sandbox is an **external, optional** OpenAI-compatible HTTP proxy
+    /// running at `http://127.0.0.1:4000` (see `tools/litellm-sandbox/`).
+    /// LiteLLM is NOT a Loom core dependency — this profile is disabled by
+    /// default and only activated via environment variables.
+    ///
+    /// Secret ref: `env:LOOM_LITELLM_API_KEY` — resolves from the process
+    /// environment at request time. Set to the `LITELLM_MASTER_KEY` value
+    /// from `tools/litellm-sandbox/.env`.
+    ///
+    /// To activate for development:
+    ///
+    /// ```sh
+    /// LOOM_SERVICE_E2E_PROVIDER_PROFILE=litellm-sandbox \
+    /// LOOM_LITELLM_BASE_URL=http://127.0.0.1:4000/v1 \
+    /// LOOM_LITELLM_API_KEY=loom-sandbox-key-change-me \
+    /// LOOM_LITELLM_MODEL=gpt-4o-mini \
+    ///   ./target/debug/loom-service
+    /// ```
+    #[allow(dead_code)]
+    pub fn litellm_sandbox_example() -> Self {
+        Self {
+            id: "litellm-sandbox".to_string(),
+            provider_kind: ProviderKind::OpenAiCompatible,
+            transport_kind: ProviderTransportKind::NativeOpenAiCompatible,
+            vendor: ProviderVendor::Custom,
+            display_name: "LiteLLM Sandbox".to_string(),
+            // Disabled by default — activated only via LOOM_SERVICE_E2E_PROVIDER_PROFILE.
+            enabled: false,
+            experimental: true,
+            // Default endpoint matches docker-compose.yml in tools/litellm-sandbox/.
+            base_url: Some("http://127.0.0.1:4000/v1".to_string()),
+            // No model committed — must be supplied via LOOM_LITELLM_MODEL env var.
+            default_model: None,
+            // Sandbox requires the LiteLLM master key (never a real provider secret).
+            requires_secret: true,
+            // Key resolved from env; set LOOM_LITELLM_API_KEY to LITELLM_MASTER_KEY value.
+            secret_ref: Some("env:LOOM_LITELLM_API_KEY".to_string()),
+            model_discovery: ProviderModelDiscoveryConfig {
+                // LiteLLM exposes /v1/models — standard OpenAI models endpoint.
+                enabled: true,
+                endpoint_path: Some("/models".to_string()),
+                refresh_interval_seconds: Some(300),
+            },
+            request_defaults: ProviderRequestDefaultsConfig {
+                temperature: Some(0.2),
+                top_p: None,
+                num_ctx: None,
+                num_predict: None,
+                think: Some(false),
+                stream: Some(true),
+            },
+            security: ProviderSecurityPolicyConfig {
+                // The sandbox is a local HTTP endpoint — insecure HTTP is intentional.
+                local_only_required: false,
+                allow_remote_endpoint: true,
+                allow_insecure_http_remote: true,
+                allow_unsafe_model_management: false,
+            },
+            capabilities: ProviderCapabilitiesConfig {
+                supports_streaming: true,
+                supports_cancellation: false,
+                supports_model_listing: true,
+                // Thinking forwarding depends on upstream model — off by default.
+                supports_thinking: false,
+                supports_system_prompt: true,
+                supports_json_mode: Some(false),
+            },
+            metadata_json: Some(serde_json::json!({
+                "sandboxTool": "tools/litellm-sandbox",
+                "documentation": "tools/litellm-sandbox/README.md",
+                "profileStatus": "sandbox_disabled",
+                "activationEnvVars": [
+                    "LOOM_SERVICE_E2E_PROVIDER_PROFILE=litellm-sandbox",
+                    "LOOM_LITELLM_BASE_URL",
+                    "LOOM_LITELLM_MODEL",
+                    "LOOM_LITELLM_API_KEY"
+                ]
+            })),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

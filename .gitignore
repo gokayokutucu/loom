@@ -56,4 +56,6 @@ tree_loom.txt
 services/loom-service/target/
 
 
-
+# LiteLLM sandbox — API keys must never be committed.
+# .env.example is the only committed env file in this directory.
+tools/litellm-sandbox/.env
