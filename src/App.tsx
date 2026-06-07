@@ -326,6 +326,7 @@ import {
   type RuntimeHealthState,
 } from "./services/modelProviders";
 import { normalizeRuntimeProvider, type ProviderProfile } from "./services/providerDiscovery";
+import { resolveModelSelection } from "./services/modelSelectionResolver";
 import {
   canQueueLocalMainGeneration,
   removeQueuedLocalMainGeneration,
@@ -4296,6 +4297,28 @@ function App() {
         message: "Demo responses are enabled for this development session.",
       }
     : composerRuntimeHealth;
+
+  const [discoveredProfiles, setDiscoveredProfiles] = useState<ProviderProfile[]>([]);
+
+  useEffect(() => {
+    if (getConfiguredLoomEngineMode() !== "rust-service") {
+      return;
+    }
+    let cancelled = false;
+    Promise.all([
+      loomEngineClient.getRuntimeProviders().catch(() => []),
+      loomEngineClient.getRuntimeModels().then((res) => res.models).catch(() => []),
+    ])
+      .then(([providers, models]) => {
+        if (cancelled) return;
+        const normalized = providers.map((p) => normalizeRuntimeProvider(p, models));
+        setDiscoveredProfiles(normalized);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [loomEngineClient]);
 
   function canAttemptMetadataGeneration() {
     return (
@@ -9393,7 +9416,14 @@ function App() {
           responseMode: selectedResponseMode,
           focusedResponseId: lastResponseInLoom(targetConversation.id)?.id,
           source: "composer",
-          model: mainModel.id,
+          // Resolve model selection target. Currently preserves the existing request model string
+          // but validates provider profile constraints. In a future phase, the resolved
+          // providerProfileId can be routed dynamically.
+          model: resolveModelSelection({
+            selectedModelId: mainModel.id,
+            selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
+            availableProfiles: discoveredProfiles,
+          }).requestModel,
           options: {
             numCtx: providerSettings.ollama.contextLength,
           },
@@ -12167,7 +12197,14 @@ function App() {
         responseMode: appSettings.modelResponseMode,
         focusedResponseId: seedItems[seedItems.length - 1]?.id,
         source: "composer",
-        model: mainModel.id,
+        // Resolve model selection target. Currently preserves the existing request model string
+        // but validates provider profile constraints. In a future phase, the resolved
+        // providerProfileId can be routed dynamically.
+        model: resolveModelSelection({
+          selectedModelId: mainModel.id,
+          selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
+          availableProfiles: discoveredProfiles,
+        }).requestModel,
         options: {
           numCtx: providerSettings.ollama.contextLength,
         },
@@ -12414,7 +12451,14 @@ function App() {
         staleAssistantResponseId: sourceResponse.id,
         responseMode: appSettings.modelResponseMode,
         source: "prompt_edit_regenerate",
-        model: mainModel.id,
+        // Resolve model selection target. Currently preserves the existing request model string
+        // but validates provider profile constraints. In a future phase, the resolved
+        // providerProfileId can be routed dynamically.
+        model: resolveModelSelection({
+          selectedModelId: mainModel.id,
+          selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
+          availableProfiles: discoveredProfiles,
+        }).requestModel,
         options: {
           numCtx: providerSettings.ollama.contextLength,
         },
@@ -12723,7 +12767,14 @@ function App() {
         responseMode: appSettings.modelResponseMode,
         softDeleteDownstream: true,
         reason: "retry_from_user_message",
-        model: mainModel.id,
+        // Resolve model selection target. Currently preserves the existing request model string
+        // but validates provider profile constraints. In a future phase, the resolved
+        // providerProfileId can be routed dynamically.
+        model: resolveModelSelection({
+          selectedModelId: mainModel.id,
+          selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
+          availableProfiles: discoveredProfiles,
+        }).requestModel,
         options: {
           numCtx: providerSettings.ollama.contextLength,
         },
