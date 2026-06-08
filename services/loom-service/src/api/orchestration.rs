@@ -741,6 +741,8 @@ pub struct OrchestrationExecuteInput {
     pub question_references: Option<serde_json::Value>,
     pub response_mode: ResponseMode,
     pub model: String,
+    #[serde(default)]
+    pub provider_profile_id: Option<String>,
     pub options: Option<OrchestrationExecuteOptions>,
     #[serde(default)]
     pub persist_workflow: bool,
@@ -769,6 +771,8 @@ pub struct RegenerateResponseInput {
     #[serde(default = "default_regenerate_source")]
     pub source: String,
     pub model: Option<String>,
+    #[serde(default)]
+    pub provider_profile_id: Option<String>,
     pub options: Option<OrchestrationExecuteOptions>,
 }
 
@@ -781,6 +785,8 @@ pub struct RetryResponseInput {
     #[serde(default = "default_retry_reason")]
     pub reason: String,
     pub model: Option<String>,
+    #[serde(default)]
+    pub provider_profile_id: Option<String>,
     pub options: Option<OrchestrationExecuteOptions>,
 }
 
@@ -1957,6 +1963,7 @@ fn regenerate_response_stream(
             question_references: None,
             response_mode: input.response_mode,
             model: input.model.unwrap_or_else(|| "qwen3:latest".to_string()),
+            provider_profile_id: input.provider_profile_id,
             options: input.options,
             persist_workflow: true,
             regenerate_from_response_id: Some(user.response_id),
@@ -2042,6 +2049,7 @@ fn retry_response_stream(
             question_references: None,
             response_mode: input.response_mode,
             model: input.model.unwrap_or_else(|| "qwen3:latest".to_string()),
+            provider_profile_id: input.provider_profile_id,
             options: input.options,
             persist_workflow: true,
             regenerate_from_response_id: Some(user.response_id),
@@ -4901,6 +4909,7 @@ mod tests {
                 question_references: None,
                 response_mode: ResponseMode::Instant,
                 model: "test-model".to_string(),
+                provider_profile_id: None,
                 options: None,
                 persist_workflow: false,
                 regenerate_from_response_id: None,
@@ -5145,6 +5154,25 @@ mod tests {
         assert_eq!(
             input.options.and_then(|options| options.num_predict),
             Some(768)
+        );
+        assert_eq!(input.provider_profile_id, None);
+    }
+
+    #[test]
+    fn execute_input_accepts_provider_profile_id() {
+        let input: OrchestrationExecuteInput = serde_json::from_value(serde_json::json!({
+            "loomId": "loom-1",
+            "prompt": "hello",
+            "responseMode": "auto",
+            "model": "qwen3.5:9b",
+            "providerProfileId": "litellm-sandbox"
+        }))
+        .expect("input deserializes");
+
+        assert_eq!(input.loom_id.as_deref(), Some("loom-1"));
+        assert_eq!(
+            input.provider_profile_id.as_deref(),
+            Some("litellm-sandbox")
         );
     }
 
@@ -5565,6 +5593,7 @@ mod tests {
             question_references: None,
             response_mode: ResponseMode::Instant,
             model: "qwen3.5:9b".to_string(),
+            provider_profile_id: None,
             options: None,
             persist_workflow: true,
             regenerate_from_response_id: None,
@@ -7282,6 +7311,7 @@ mod tests {
             question_references: None,
             response_mode: ResponseMode::Auto,
             model: "qwen3.5:9b".to_string(),
+            provider_profile_id: None,
             options: None,
             persist_workflow: true,
             regenerate_from_response_id: None,

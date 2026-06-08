@@ -2075,6 +2075,7 @@ function executePayload(input: SendMessageInput) {
     questionReferences: input.questionReferences ?? input.references,
     responseMode: serviceResponseMode(input.responseMode),
     model: input.model ?? "qwen3:latest",
+    providerProfileId: input.providerProfileId,
     options: input.options
       ? {
           numCtx: input.options.numCtx,
@@ -2092,6 +2093,7 @@ function regeneratePayload(input: RegenerateFromResponseInput) {
     replaceStale: false,
     source: input.source ?? "prompt_edit_regenerate",
     model: input.model ?? "qwen3:latest",
+    providerProfileId: input.providerProfileId,
     options: input.options
       ? {
           numCtx: input.options.numCtx,
@@ -2108,6 +2110,7 @@ function retryPayload(input: RetryUserMessageInput) {
     softDeleteDownstream: input.softDeleteDownstream ?? true,
     reason: input.reason ?? "retry_from_user_message",
     model: input.model ?? "qwen3:latest",
+    providerProfileId: input.providerProfileId,
     options: input.options
       ? {
           numCtx: input.options.numCtx,
@@ -4134,4 +4137,7 @@ export const __rustHttpLoomEngineClientTest = {
   mapReferenceForService,
   referenceTargetKind,
   validateServiceReference,
+  executePayload,
+  regeneratePayload,
+  retryPayload,
 };

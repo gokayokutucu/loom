@@ -9448,6 +9448,12 @@ function App() {
           responseId: serviceResponseId,
           cancelRequested: false,
         };
+        const resolvedModel = resolveModelSelection({
+          selectedModelId: mainModel.id,
+          selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
+          availableProfiles: discoveredProfiles,
+        });
+
         for await (const event of loomEngineClient.sendMessage({
           loomId: targetConversation.id,
           draftKey: targetLoomId,
@@ -9473,14 +9479,8 @@ function App() {
           responseMode: selectedResponseMode,
           focusedResponseId: lastResponseInLoom(targetConversation.id)?.id,
           source: "composer",
-          // Resolve model selection target. Currently preserves the existing request model string
-          // but validates provider profile constraints. In a future phase, the resolved
-          // providerProfileId can be routed dynamically.
-          model: resolveModelSelection({
-            selectedModelId: mainModel.id,
-            selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
-            availableProfiles: discoveredProfiles,
-          }).requestModel,
+          model: resolvedModel.requestModel,
+          providerProfileId: resolvedModel.providerProfileId,
           options: {
             numCtx: providerSettings.ollama.contextLength,
           },
@@ -12245,8 +12245,14 @@ function App() {
       }));
     };
 
-    try {
-      for await (const event of loomEngineClient.sendMessage({
+      const resolvedModel = resolveModelSelection({
+        selectedModelId: mainModel.id,
+        selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
+        availableProfiles: discoveredProfiles,
+      });
+
+      try {
+        for await (const event of loomEngineClient.sendMessage({
         loomId: weftConversation.id,
         draftKey: weftConversation.id,
         promptText: normalizedPrompt,
@@ -12254,14 +12260,8 @@ function App() {
         responseMode: appSettings.modelResponseMode,
         focusedResponseId: seedItems[seedItems.length - 1]?.id,
         source: "composer",
-        // Resolve model selection target. Currently preserves the existing request model string
-        // but validates provider profile constraints. In a future phase, the resolved
-        // providerProfileId can be routed dynamically.
-        model: resolveModelSelection({
-          selectedModelId: mainModel.id,
-          selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
-          availableProfiles: discoveredProfiles,
-        }).requestModel,
+        model: resolvedModel.requestModel,
+        providerProfileId: resolvedModel.providerProfileId,
         options: {
           numCtx: providerSettings.ollama.contextLength,
         },
@@ -12501,21 +12501,21 @@ function App() {
       }));
     };
 
-    try {
-      for await (const event of loomEngineClient.regenerateFromResponse({
+      const resolvedModel = resolveModelSelection({
+        selectedModelId: mainModel.id,
+        selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
+        availableProfiles: discoveredProfiles,
+      });
+
+      try {
+        for await (const event of loomEngineClient.regenerateFromResponse({
         loomId,
         userResponseId: sourceResponse.serviceUserResponseId,
         staleAssistantResponseId: sourceResponse.id,
         responseMode: appSettings.modelResponseMode,
         source: "prompt_edit_regenerate",
-        // Resolve model selection target. Currently preserves the existing request model string
-        // but validates provider profile constraints. In a future phase, the resolved
-        // providerProfileId can be routed dynamically.
-        model: resolveModelSelection({
-          selectedModelId: mainModel.id,
-          selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
-          availableProfiles: discoveredProfiles,
-        }).requestModel,
+        model: resolvedModel.requestModel,
+        providerProfileId: resolvedModel.providerProfileId,
         options: {
           numCtx: providerSettings.ollama.contextLength,
         },
@@ -12817,21 +12817,21 @@ function App() {
       }));
     };
 
-    try {
-      for await (const event of loomEngineClient.retryUserMessage({
+      const resolvedModel = resolveModelSelection({
+        selectedModelId: mainModel.id,
+        selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
+        availableProfiles: discoveredProfiles,
+      });
+
+      try {
+        for await (const event of loomEngineClient.retryUserMessage({
         loomId,
         userResponseId: sourceResponse.serviceUserResponseId,
         responseMode: appSettings.modelResponseMode,
         softDeleteDownstream: true,
         reason: "retry_from_user_message",
-        // Resolve model selection target. Currently preserves the existing request model string
-        // but validates provider profile constraints. In a future phase, the resolved
-        // providerProfileId can be routed dynamically.
-        model: resolveModelSelection({
-          selectedModelId: mainModel.id,
-          selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
-          availableProfiles: discoveredProfiles,
-        }).requestModel,
+        model: resolvedModel.requestModel,
+        providerProfileId: resolvedModel.providerProfileId,
         options: {
           numCtx: providerSettings.ollama.contextLength,
         },

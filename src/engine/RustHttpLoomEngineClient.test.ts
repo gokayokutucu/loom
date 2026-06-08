@@ -11,6 +11,9 @@ const {
   mapReferenceForService,
   referenceTargetKind,
   validateServiceReference,
+  executePayload,
+  regeneratePayload,
+  retryPayload,
 } = __rustHttpLoomEngineClientTest;
 
 function makeLink(overrides: Partial<LoomLink> = {}): LoomLink {
@@ -316,5 +319,73 @@ describe("RustHttpLoomEngineClient provider profile and secret mapping", () => {
         requiresSecret: true,
       }),
     ]);
+  });
+});
+
+describe("RustHttpLoomEngineClient payload serialization with providerProfileId", () => {
+  it("includes providerProfileId in executePayload if provided", () => {
+    const payload = executePayload({
+      loomId: "loom-1",
+      promptText: "hello",
+      references: [],
+      responseMode: "instant",
+      source: "composer",
+      model: "qwen",
+      providerProfileId: "litellm-sandbox",
+    });
+
+    expect(payload).toMatchObject({
+      loomId: "loom-1",
+      prompt: "hello",
+      model: "qwen",
+      providerProfileId: "litellm-sandbox",
+    });
+  });
+
+  it("omits providerProfileId in executePayload if undefined", () => {
+    const payload = executePayload({
+      loomId: "loom-1",
+      promptText: "hello",
+      references: [],
+      responseMode: "instant",
+      source: "composer",
+      model: "qwen",
+      providerProfileId: undefined,
+    });
+
+    expect(payload).toHaveProperty("model", "qwen");
+    expect(payload.providerProfileId).toBeUndefined();
+    // In JSON, undefined keys are omitted:
+    expect(JSON.parse(JSON.stringify(payload))).not.toHaveProperty("providerProfileId");
+  });
+
+  it("includes providerProfileId in regeneratePayload if provided", () => {
+    const payload = regeneratePayload({
+      loomId: "loom-1",
+      userResponseId: "user-1",
+      responseMode: "instant",
+      model: "qwen",
+      providerProfileId: "litellm-sandbox",
+    });
+
+    expect(payload).toMatchObject({
+      model: "qwen",
+      providerProfileId: "litellm-sandbox",
+    });
+  });
+
+  it("includes providerProfileId in retryPayload if provided", () => {
+    const payload = retryPayload({
+      loomId: "loom-1",
+      userResponseId: "user-1",
+      responseMode: "instant",
+      model: "qwen",
+      providerProfileId: "litellm-sandbox",
+    });
+
+    expect(payload).toMatchObject({
+      model: "qwen",
+      providerProfileId: "litellm-sandbox",
+    });
   });
 });
