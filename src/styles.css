@@ -10956,3 +10956,45 @@ kbd {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+
+/* Provider-aware Grouped Model Picker styling */
+.model-picker-group-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 6px 9px 4px;
+  margin-top: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.model-picker-group-title {
+  color: var(--loom-text-muted);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.model-picker-group-badges {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.model-picker-group-badge {
+  padding: 1px 4px;
+  border-radius: 4px;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+  background: var(--loom-border-subtle);
+  color: var(--loom-text-muted);
+}
+
+.model-picker-group-badge.sandbox {
+  background: rgba(224, 86, 36, 0.15);
+  color: #e05624;
+}
+
+.model-picker-group-count {
+  font-size: 10px;
+  color: var(--loom-text-muted);
+}

@@ -19138,6 +19138,14 @@ function PromptComposer({
       : mainSelectionIsLocal
         ? installedModels
         : [mainModel, ...installedModels];
+  const totalPickerItemsCount = useMemo(() => {
+    if (discoveredProfiles.length > 0) {
+      const groupedModelsCount = discoveredProfiles.reduce((sum, p) => sum + p.modelIds.length, 0);
+      const groupsCount = discoveredProfiles.filter((p) => p.modelIds.length > 0).length;
+      return groupedModelsCount + groupsCount;
+    }
+    return selectableModels.length;
+  }, [discoveredProfiles, selectableModels.length]);
   const selectedModelKey = `${providerSettings.profiles.mainProviderProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID}:${mainModel.id}`;
   const providerStatus = providerSettings.ollama.lastConnectionStatus;
   const modelPickerInstalledState: ModelPickerInstalledState = computeModelPickerInstalledState({
@@ -19741,7 +19749,7 @@ function PromptComposer({
       const minWidth = Math.max(buttonRect.width, 220);
       let left = buttonRect.left;
       let top = buttonRect.bottom + gap;
-      const menuHeight = menuRect.height || 44 * Math.max(selectableModels.length, 1);
+      const menuHeight = menuRect.height || 44 * Math.max(totalPickerItemsCount, 1);
 
       if (top + menuHeight > window.innerHeight - viewportPadding) {
         top = Math.max(viewportPadding, buttonRect.top - gap - menuHeight);
@@ -19763,7 +19771,7 @@ function PromptComposer({
       window.removeEventListener("resize", updateModelPopoverPosition);
       window.removeEventListener("scroll", updateModelPopoverPosition, true);
     };
-  }, [modelPickerOpen, selectableModels.length, pickerStatusText, selectedModelMissing]);
+  }, [modelPickerOpen, totalPickerItemsCount, pickerStatusText, selectedModelMissing]);
 
   // Auto-scan: when the picker opens in unknown-empty state and the service is
   // available, immediately discover installed Ollama models so the user does
@@ -22374,31 +22382,90 @@ function PromptComposer({
                   </span>
                 </div>
               )}
-              {selectableModels.map((model) => {
-                const modelProviderProfileId =
-                  !mainSelectionIsLocal && model.id === mainModel.id && model.provider === mainModel.provider
-                    ? providerSettings.profiles.mainProviderProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID
-                    : OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
-                const modelKey = `${modelProviderProfileId}:${model.id}`;
-                const selected = modelKey === selectedModelKey;
-                return (
-                  <button
-                    key={modelKey}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={selected}
-                    className={selected ? "selected" : ""}
-                    onClick={() => {
-                      setMainModel(model.id, modelProviderProfileId);
-                      setModelPickerOpen(false);
-                      setModelPopoverStyle(null);
-                    }}
-                  >
-                    {selected ? <Check size={15} /> : <span aria-hidden="true" />}
-                    <span>{model.name}</span>
-                  </button>
-                );
-              })}
+              {(() => {
+                const resolvedSelection = resolveModelSelection({
+                  selectedModelId: mainModel.id,
+                  selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
+                  availableProfiles: discoveredProfiles,
+                });
+                const activeSelectedProviderId =
+                  resolvedSelection.providerProfileId ??
+                  providerSettings.profiles.mainProviderProfileId ??
+                  OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+                const activeSelectedModelId = resolvedSelection.modelId;
+
+                const getModelDisplayName = (modelId: string) => {
+                  const matched = installedModels.find((m) => m.id === modelId);
+                  return matched ? matched.name : modelId;
+                };
+
+                if (discoveredProfiles.length > 0) {
+                  return discoveredProfiles.map((profile) => {
+                    if (profile.modelIds.length === 0) return null;
+                    return (
+                      <div key={profile.id} className="model-picker-group">
+                        <div className="model-picker-group-header">
+                          <span className="model-picker-group-title">{profile.label}</span>
+                          <div className="model-picker-group-badges">
+                            <span className="model-picker-group-badge">{profile.kind}</span>
+                            {profile.isSandbox && (
+                              <span className="model-picker-group-badge sandbox">Sandbox</span>
+                            )}
+                            <span className="model-picker-group-count">({profile.modelIds.length})</span>
+                          </div>
+                        </div>
+                        {profile.modelIds.map((modelId) => {
+                          const selected =
+                            profile.id === activeSelectedProviderId && modelId === activeSelectedModelId;
+                          return (
+                            <button
+                              key={`${profile.id}:${modelId}`}
+                              type="button"
+                              role="menuitemradio"
+                              aria-checked={selected}
+                              className={selected ? "selected" : ""}
+                              onClick={() => {
+                                setMainModel(modelId, profile.id);
+                                setModelPickerOpen(false);
+                                setModelPopoverStyle(null);
+                              }}
+                            >
+                              {selected ? <Check size={15} /> : <span aria-hidden="true" />}
+                              <span>{getModelDisplayName(modelId)}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    );
+                  });
+                }
+
+                return selectableModels.map((model) => {
+                  const modelProviderProfileId =
+                    !mainSelectionIsLocal && model.id === mainModel.id && model.provider === mainModel.provider
+                      ? providerSettings.profiles.mainProviderProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID
+                      : OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+                  const selected =
+                    modelProviderProfileId === activeSelectedProviderId && model.id === activeSelectedModelId;
+                  return (
+                    <button
+                      key={`${modelProviderProfileId}:${model.id}`}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={selected}
+                      className={selected ? "selected" : ""}
+                      onClick={() => {
+                        setMainModel(model.id, modelProviderProfileId);
+                        setModelPickerOpen(false);
+                        setModelPopoverStyle(null);
+                      }}
+                    >
+                      {selected ? <Check size={15} /> : <span aria-hidden="true" />}
+                      <span>{model.name}</span>
+                    </button>
+                  );
+                });
+              })()}
               <div className="model-picker-section-divider" />
               <div className="model-picker-section-label">Response Mode</div>
               {modelResponseModes.map((mode) => {
