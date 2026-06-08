@@ -32,6 +32,7 @@ pub enum ProviderKind {
     Ollama,
     OpenAiCompatible,
     CustomHttpLater,
+    OpenAi,
 }
 
 impl ProviderKind {
@@ -40,6 +41,7 @@ impl ProviderKind {
             Self::Ollama => "ollama",
             Self::OpenAiCompatible => "openai_compatible",
             Self::CustomHttpLater => "custom_http_later",
+            Self::OpenAi => "openai",
         }
     }
 
@@ -48,6 +50,7 @@ impl ProviderKind {
             "ollama" => Some(Self::Ollama),
             "openai_compatible" => Some(Self::OpenAiCompatible),
             "custom_http_later" => Some(Self::CustomHttpLater),
+            "openai" => Some(Self::OpenAi),
             _ => None,
         }
     }
@@ -59,6 +62,7 @@ pub enum ProviderTransportKind {
     Ollama,
     NativeOpenAiCompatible,
     RigOpenAiCompatible,
+    OpenAi,
 }
 
 impl ProviderTransportKind {
@@ -67,6 +71,7 @@ impl ProviderTransportKind {
             Self::Ollama => "ollama",
             Self::NativeOpenAiCompatible => "native_openai_compatible",
             Self::RigOpenAiCompatible => "rig_openai_compatible",
+            Self::OpenAi => "openai",
         }
     }
 
@@ -75,6 +80,7 @@ impl ProviderTransportKind {
             "ollama" => Some(Self::Ollama),
             "native_openai_compatible" => Some(Self::NativeOpenAiCompatible),
             "rig_openai_compatible" => Some(Self::RigOpenAiCompatible),
+            "openai" => Some(Self::OpenAi),
             _ => None,
         }
     }
@@ -369,6 +375,53 @@ impl ProviderProfileConfig {
             })),
         }
     }
+
+    pub fn openai_native_example() -> Self {
+        Self {
+            id: "openai-native".to_string(),
+            provider_kind: ProviderKind::OpenAi,
+            transport_kind: ProviderTransportKind::OpenAi,
+            vendor: ProviderVendor::OpenAi,
+            display_name: "OpenAI Native".to_string(),
+            enabled: false,
+            experimental: false,
+            base_url: Some("https://api.openai.com/v1".to_string()),
+            default_model: Some("gpt-4o-mini".to_string()),
+            requires_secret: true,
+            secret_ref: Some("env:LOOM_OPENAI_API_KEY".to_string()),
+            model_discovery: ProviderModelDiscoveryConfig {
+                enabled: true,
+                endpoint_path: Some("/v1/models".to_string()),
+                refresh_interval_seconds: Some(3600),
+            },
+            request_defaults: ProviderRequestDefaultsConfig {
+                temperature: Some(0.2),
+                top_p: Some(1.0),
+                num_ctx: None,
+                num_predict: None,
+                think: Some(false),
+                stream: Some(true),
+            },
+            security: ProviderSecurityPolicyConfig {
+                local_only_required: false,
+                allow_remote_endpoint: true,
+                allow_insecure_http_remote: false,
+                allow_unsafe_model_management: false,
+            },
+            capabilities: ProviderCapabilitiesConfig {
+                supports_streaming: true,
+                supports_cancellation: true,
+                supports_model_listing: true,
+                supports_thinking: false,
+                supports_system_prompt: true,
+                supports_json_mode: Some(true),
+            },
+            metadata_json: Some(serde_json::json!({
+                "documentation": "https://platform.openai.com/docs/api-reference",
+                "profileStatus": "example_disabled"
+            })),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -505,6 +558,18 @@ fn validate_profile_transport(profile: &ProviderProfileConfig) -> Result<(), Ser
                 ));
             }
         }
+        ProviderKind::OpenAi => {
+            if profile.transport_kind != ProviderTransportKind::OpenAi {
+                return Err(ServiceError::config(
+                    "openai provider profiles must use transportKind=openai",
+                ));
+            }
+            if profile.vendor != ProviderVendor::OpenAi {
+                return Err(ServiceError::config(
+                    "openai provider profiles must use vendor=openai",
+                ));
+            }
+        }
         ProviderKind::CustomHttpLater => {
             return Err(ServiceError::config(
                 "custom_http_later provider profiles are reserved and cannot be enabled yet",
@@ -516,9 +581,11 @@ fn validate_profile_transport(profile: &ProviderProfileConfig) -> Result<(), Ser
 
 fn validate_profile_endpoint(profile: &ProviderProfileConfig) -> Result<(), ServiceError> {
     let Some(base_url) = profile.base_url.as_deref() else {
-        if profile.provider_kind == ProviderKind::OpenAiCompatible {
+        if profile.provider_kind == ProviderKind::OpenAiCompatible
+            || profile.provider_kind == ProviderKind::OpenAi
+        {
             return Err(ServiceError::config(
-                "openai_compatible provider profiles require baseUrl",
+                "openai and openai_compatible provider profiles require baseUrl",
             ));
         }
         return Ok(());
@@ -674,7 +741,9 @@ pub fn normalize_provider_request_options(
     let max_context_tokens = input.context_budget.or(defaults.num_ctx);
     let (num_predict, num_ctx) = match profile.provider_kind {
         ProviderKind::Ollama => (max_output_tokens, max_context_tokens),
-        ProviderKind::OpenAiCompatible | ProviderKind::CustomHttpLater => (None, None),
+        ProviderKind::OpenAiCompatible | ProviderKind::CustomHttpLater | ProviderKind::OpenAi => {
+            (None, None)
+        }
     };
 
     Ok(NormalizedProviderRequestOptions {
@@ -832,6 +901,18 @@ mod tests {
         );
         assert_eq!(profile.vendor, ProviderVendor::Nvidia);
         validate_provider_profiles(&[profile]).expect("disabled nvidia example validates");
+    }
+
+    #[test]
+    fn openai_native_example_validates_while_disabled() {
+        let profile = ProviderProfileConfig::openai_native_example();
+
+        assert!(!profile.enabled);
+        assert!(!profile.experimental);
+        assert_eq!(profile.provider_kind, ProviderKind::OpenAi);
+        assert_eq!(profile.transport_kind, ProviderTransportKind::OpenAi);
+        assert_eq!(profile.vendor, ProviderVendor::OpenAi);
+        validate_provider_profiles(&[profile]).expect("disabled openai native validates");
     }
 
     #[test]

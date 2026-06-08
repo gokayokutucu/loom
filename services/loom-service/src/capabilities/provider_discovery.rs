@@ -208,6 +208,13 @@ mod tests {
                 profile.capabilities.supports_thinking = false;
                 profile
             }
+            ProviderKind::OpenAi => {
+                let mut profile = ProviderProfileConfig::openai_native_example();
+                profile.id = id.to_string();
+                profile.enabled = true;
+                profile.security.local_only_required = false;
+                profile
+            }
             ProviderKind::CustomHttpLater => unreachable!("not used in tests"),
         }
     }

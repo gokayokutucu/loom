@@ -1882,6 +1882,11 @@ where
         == Some("litellm-sandbox")
     {
         apply_e2e_litellm_sandbox_profile(config, &lookup, false)?;
+    } else if lookup("LOOM_SERVICE_E2E_PROVIDER_PROFILE").as_deref() == Some("openai-native") {
+        apply_e2e_openai_native_profile(config, &lookup, true)?;
+    } else if lookup("LOOM_SERVICE_E2E_ENABLE_PROVIDER_PROFILE").as_deref() == Some("openai-native")
+    {
+        apply_e2e_openai_native_profile(config, &lookup, false)?;
     }
 
     Ok(())
@@ -1961,6 +1966,39 @@ where
         config.providers.main_provider_profile_id = Some(profile.id.clone());
     }
     // secret_ref is already set to "env:LOOM_LITELLM_API_KEY" in the template.
+    upsert_provider_profile(&mut config.providers.profiles, profile);
+    Ok(())
+}
+
+fn apply_e2e_openai_native_profile<F>(
+    config: &mut LoomServiceConfig,
+    lookup: &F,
+    select_for_main: bool,
+) -> Result<(), ServiceError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut profile = ProviderProfileConfig::openai_native_example();
+    profile.enabled = true;
+    if let Some(value) = lookup("LOOM_OPENAI_BASE_URL") {
+        profile.base_url = Some(value.trim_end_matches('/').to_string());
+        profile.security.allow_insecure_http_remote = true;
+    }
+    if let Some(value) = lookup("LOOM_OPENAI_MODEL") {
+        profile.default_model = Some(value);
+    }
+    if select_for_main {
+        let model = profile.default_model.clone().ok_or_else(|| {
+            ServiceError::config(
+                "LOOM_OPENAI_MODEL is required when \
+                 LOOM_SERVICE_E2E_PROVIDER_PROFILE=openai-native",
+            )
+        })?;
+        config.providers.default_main_model = model.clone();
+        config.providers.main_model_id = Some(model);
+        config.providers.main_provider_profile_id = Some(profile.id.clone());
+    }
+    profile.secret_ref = Some("env:LOOM_OPENAI_API_KEY".to_string());
     upsert_provider_profile(&mut config.providers.profiles, profile);
     Ok(())
 }
@@ -2633,6 +2671,88 @@ mod tests {
             message.contains("LOOM_LITELLM_MODEL"),
             "error must mention LOOM_LITELLM_MODEL; got: {message}"
         );
+    }
+
+    // ── OpenAI Native profile tests ──────────────────────────────────────────
+
+    #[test]
+    fn openai_native_example_is_disabled_by_default() {
+        let profile = ProviderProfileConfig::openai_native_example();
+        assert_eq!(profile.id, "openai-native");
+        assert!(
+            !profile.enabled,
+            "openai-native profile must be disabled by default"
+        );
+        assert!(!profile.experimental);
+        assert_eq!(
+            profile.base_url.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(
+            profile.secret_ref.as_deref(),
+            Some("env:LOOM_OPENAI_API_KEY")
+        );
+        assert_eq!(profile.default_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(
+            profile.vendor.as_config_str(),
+            "openai",
+            "openai-native vendor must be OpenAi"
+        );
+        let config = LoomServiceConfig::default();
+        assert!(
+            !config
+                .providers
+                .profiles
+                .iter()
+                .any(|p| p.id == "openai-native"),
+            "openai-native must not appear in default profiles"
+        );
+    }
+
+    #[test]
+    fn e2e_openai_native_profile_selects_for_main() {
+        let mut config = LoomServiceConfig::default();
+
+        apply_env_overrides_from(&mut config, |name| match name {
+            "LOOM_SERVICE_E2E_PROVIDER_PROFILE" => Some("openai-native".to_string()),
+            "LOOM_OPENAI_BASE_URL" => Some("https://api.openai.com/v1".to_string()),
+            "LOOM_OPENAI_MODEL" => Some("gpt-4o-mini".to_string()),
+            _ => None,
+        })
+        .expect("apply openai env");
+
+        let openai = config
+            .providers
+            .profiles
+            .iter()
+            .find(|p| p.id == "openai-native")
+            .expect("openai-native profile must be injected");
+
+        assert!(openai.enabled);
+        assert_eq!(
+            openai.base_url.as_deref(),
+            Some("https://api.openai.com/v1")
+        );
+        assert_eq!(openai.default_model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(
+            openai.secret_ref.as_deref(),
+            Some("env:LOOM_OPENAI_API_KEY")
+        );
+        assert_eq!(
+            config.providers.main_provider_profile_id.as_deref(),
+            Some("openai-native")
+        );
+        assert_eq!(
+            config.providers.main_model_id.as_deref(),
+            Some("gpt-4o-mini")
+        );
+        assert_eq!(config.providers.default_main_model, "gpt-4o-mini");
+        let serialized = serialize_config(&config);
+        assert!(
+            !serialized.contains("LOOM_OPENAI_API_KEY="),
+            "secret key must not be serialized"
+        );
+        validate_config(&config).expect("openai-native profile for main is valid");
     }
 
     #[test]

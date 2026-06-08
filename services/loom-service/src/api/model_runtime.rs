@@ -656,7 +656,10 @@ fn provider_profile_status(
         }
     }
 
-    if profile.provider_kind == ProviderKind::OpenAiCompatible && status == "ready" {
+    if (profile.provider_kind == ProviderKind::OpenAiCompatible
+        || profile.provider_kind == ProviderKind::OpenAi)
+        && status == "ready"
+    {
         warnings.push("remote_endpoint_not_probed_without_explicit_discovery".to_string());
     }
     if profile.provider_kind == ProviderKind::CustomHttpLater {
@@ -907,6 +910,27 @@ mod tests {
         } else {
             assert_eq!(status.status, "feature_gated");
         }
+    }
+
+    #[test]
+    fn openai_profile_status_reports_ready_with_saved_secret() {
+        let mut profile = ProviderProfileConfig::openai_native_example();
+        profile.enabled = true;
+        profile.secret_ref = Some("provider:openai-native:apiKey".to_string());
+        let store = ProviderSecretStore::default();
+        store
+            .set_secret("provider:openai-native:apiKey", "openai-raw-secret")
+            .expect("set secret");
+
+        let status = provider_profile_status(&profile, &store);
+        let serialized = serde_json::to_string(&status).expect("runtime provider status json");
+
+        assert_eq!(status.status, "ready");
+        assert_eq!(status.secret_status, "saved");
+        assert!(status
+            .warnings
+            .contains(&"remote_endpoint_not_probed_without_explicit_discovery".to_string()));
+        assert!(!serialized.contains("openai-raw-secret"));
     }
 
     // ── sync_ollama_assets logic unit-tests ────────────────────────────────────
