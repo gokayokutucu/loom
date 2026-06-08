@@ -3153,6 +3153,33 @@ fn timestamp() -> String {
         .unwrap_or_else(|_| "0".to_string())
 }
 
+fn create_provider_pipeline_for_request(
+    ollama: OllamaRuntime,
+    config: &crate::config::LoomServiceConfig,
+    secret_store: &crate::providers::secret_store::ProviderSecretStore,
+    provider_profile_id: Option<&str>,
+) -> Result<ProviderPipeline, String> {
+    match provider_profile_id {
+        Some(profile_id) => {
+            let registry = crate::providers::adapter::ProviderRegistry::new_for_profile(
+                ollama,
+                config,
+                secret_store,
+                profile_id,
+            )?;
+            Ok(ProviderPipeline::from_registry(registry))
+        }
+        None => {
+            let registry = crate::providers::adapter::ProviderRegistry::new_for_main_generation(
+                ollama,
+                config,
+                secret_store,
+            );
+            Ok(ProviderPipeline::from_registry(registry))
+        }
+    }
+}
+
 fn execute_stream(
     state: crate::api::state::AppState,
     input: OrchestrationExecuteInput,
@@ -3645,20 +3672,60 @@ fn execute_stream(
             return;
         }
 
-        let provider_pipeline = ProviderPipeline::new_for_main_generation(
+        let provider_pipeline = match create_provider_pipeline_for_request(
             state.ollama.clone(),
             &service_config,
             &state.secret_store,
-        );
+            execution_input.provider_profile_id.as_deref(),
+        ) {
+            Ok(pipeline) => pipeline,
+            Err(error_msg) => {
+                let message = error_msg;
+                let _ = runner.mark_stage_failed(&run_id, "generate", "provider_resolution_error").await;
+                if let Some(lifecycle) = persisted_lifecycle.as_ref() {
+                    let _ = update_persisted_assistant_status(
+                        &state.database,
+                        lifecycle,
+                        "error",
+                        Some("error"),
+                        Some("provider_resolution_error"),
+                        Some(&message),
+                    )
+                    .await;
+                }
+                schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
+                let payload = merge_response_ids(json!({
+                    "runId": run_id,
+                    "stage": "generate",
+                    "kind": "provider_resolution_error",
+                    "message": message,
+                    "elapsedMs": started.elapsed().as_millis()
+                }), persisted_lifecycle.as_ref());
+                let _ = runner
+                    .persist_event(
+                        run_id.clone(),
+                        "response.error".to_string(),
+                        Some("generate".to_string()),
+                        payload.to_string(),
+                    )
+                    .await;
+                yield Ok(to_sse_event(service_event(run_id.clone(), "response.error", payload)));
+                return;
+            }
+        };
         let provider_profile = provider_pipeline.default_generation_profile();
         let provider_capabilities = provider_pipeline.default_generation_capabilities();
-        let provider_model_id = provider_profile
-            .provider_profile_id
-            .eq(service_config.providers.main_provider_profile_id.as_deref().unwrap_or(""))
-            .then(|| service_config.providers.main_model_id.clone())
-            .flatten()
-            .or(provider_profile.default_model.clone())
-            .unwrap_or_else(|| execution_input.model.clone());
+        let provider_model_id = if execution_input.provider_profile_id.is_some() {
+            execution_input.model.clone()
+        } else {
+            provider_profile
+                .provider_profile_id
+                .eq(service_config.providers.main_provider_profile_id.as_deref().unwrap_or(""))
+                .then(|| service_config.providers.main_model_id.clone())
+                .flatten()
+                .or(provider_profile.default_model.clone())
+                .unwrap_or_else(|| execution_input.model.clone())
+        };
         let provider_request = ProviderContractRequest {
             provider_kind: provider_profile.provider_kind,
             provider_profile_id: provider_profile.provider_profile_id,
@@ -4812,7 +4879,8 @@ mod tests {
         best_available_draft, build_generation_events, build_generation_response_state,
         build_generation_status, collect_provider_events_text, configured_quick_model,
         context_built_event_payload, context_references_for_execute, context_window_for_execution,
-        create_persisted_response_lifecycle, ensure_main_model_configured, eval_prompt,
+        create_persisted_response_lifecycle, create_provider_pipeline_for_request,
+        ensure_main_model_configured, eval_prompt,
         eval_strategy_decision, fallback_auto_router_decision, memory_messages_for_execution,
         minimum_successful_drafts, parse_auto_router_decision, parse_ndjson_bytes, plan,
         provider_request_from_ollama_request, recent_messages_before_response,
@@ -4824,6 +4892,7 @@ mod tests {
     };
     use crate::{
         api::state::AppState,
+        providers::secret_store::ProviderSecretStore,
         capabilities::strategy::{ExecutionStrategy, ExecutionStrategyDecision, RequestedMode},
         config::{ConfigManager, LoomServiceConfig, OllamaConfig},
         context::{
@@ -5174,6 +5243,135 @@ mod tests {
             input.provider_profile_id.as_deref(),
             Some("litellm-sandbox")
         );
+    }
+
+    #[test]
+    fn test_create_provider_pipeline_for_request_legacy() {
+        let ollama = OllamaRuntime::new(OllamaConfig {
+            base_url: "http://127.0.0.1:9".to_string(),
+            request_timeout: Duration::from_millis(200),
+            first_chunk_timeout: Duration::from_millis(200),
+            stream_idle_timeout: Duration::from_millis(200),
+            security: Default::default(),
+        });
+        let config = LoomServiceConfig::default();
+        let secret_store = ProviderSecretStore::default();
+
+        let pipeline = create_provider_pipeline_for_request(ollama, &config, &secret_store, None)
+            .expect("legacy pipeline creation succeeds");
+
+        let profile = pipeline.default_generation_profile();
+        assert_eq!(profile.provider_profile_id, "ollama-local");
+        assert_eq!(profile.provider_kind, ProviderKind::Ollama);
+    }
+
+    #[test]
+    fn test_create_provider_pipeline_for_request_ollama_local() {
+        let ollama = OllamaRuntime::new(OllamaConfig {
+            base_url: "http://127.0.0.1:9".to_string(),
+            request_timeout: Duration::from_millis(200),
+            first_chunk_timeout: Duration::from_millis(200),
+            stream_idle_timeout: Duration::from_millis(200),
+            security: Default::default(),
+        });
+        let config = LoomServiceConfig::default();
+        let secret_store = ProviderSecretStore::default();
+
+        let pipeline = create_provider_pipeline_for_request(
+            ollama,
+            &config,
+            &secret_store,
+            Some("ollama-local"),
+        )
+        .expect("ollama-local pipeline creation succeeds");
+
+        let profile = pipeline.default_generation_profile();
+        assert_eq!(profile.provider_profile_id, "ollama-local");
+        assert_eq!(profile.provider_kind, ProviderKind::Ollama);
+    }
+
+    #[test]
+    fn test_create_provider_pipeline_for_request_unknown_profile_fails() {
+        let ollama = OllamaRuntime::new(OllamaConfig {
+            base_url: "http://127.0.0.1:9".to_string(),
+            request_timeout: Duration::from_millis(200),
+            first_chunk_timeout: Duration::from_millis(200),
+            stream_idle_timeout: Duration::from_millis(200),
+            security: Default::default(),
+        });
+        let config = LoomServiceConfig::default();
+        let secret_store = ProviderSecretStore::default();
+
+        let err = create_provider_pipeline_for_request(
+            ollama,
+            &config,
+            &secret_store,
+            Some("unknown-profile"),
+        )
+        .expect_err("unknown profile should fail");
+
+        assert!(err.contains("Provider profile 'unknown-profile' not found"));
+    }
+
+    #[test]
+    fn test_create_provider_pipeline_for_request_disabled_profile_fails() {
+        let ollama = OllamaRuntime::new(OllamaConfig {
+            base_url: "http://127.0.0.1:9".to_string(),
+            request_timeout: Duration::from_millis(200),
+            first_chunk_timeout: Duration::from_millis(200),
+            stream_idle_timeout: Duration::from_millis(200),
+            security: Default::default(),
+        });
+        let mut config = LoomServiceConfig::default();
+        let mut profile =
+            crate::providers::config::ProviderProfileConfig::nvidia_openai_compatible_example();
+        profile.id = "nvidia-disabled".to_string();
+        profile.enabled = false;
+        config.providers.profiles.push(profile);
+        let secret_store = ProviderSecretStore::default();
+
+        let err = create_provider_pipeline_for_request(
+            ollama,
+            &config,
+            &secret_store,
+            Some("nvidia-disabled"),
+        )
+        .expect_err("disabled profile should fail");
+
+        assert!(err.contains("Provider profile 'nvidia-disabled' is disabled"));
+    }
+
+    #[test]
+    fn test_create_provider_pipeline_for_request_litellm_sandbox() {
+        let ollama = OllamaRuntime::new(OllamaConfig {
+            base_url: "http://127.0.0.1:9".to_string(),
+            request_timeout: Duration::from_millis(200),
+            first_chunk_timeout: Duration::from_millis(200),
+            stream_idle_timeout: Duration::from_millis(200),
+            security: Default::default(),
+        });
+        let mut config = LoomServiceConfig::default();
+        let mut profile =
+            crate::providers::config::ProviderProfileConfig::nvidia_openai_compatible_example();
+        profile.id = "litellm-sandbox".to_string();
+        profile.enabled = true;
+        profile.provider_kind = ProviderKind::OpenAiCompatible;
+        profile.transport_kind =
+            crate::providers::config::ProviderTransportKind::NativeOpenAiCompatible;
+        config.providers.profiles.push(profile);
+        let secret_store = ProviderSecretStore::default();
+
+        let pipeline = create_provider_pipeline_for_request(
+            ollama,
+            &config,
+            &secret_store,
+            Some("litellm-sandbox"),
+        )
+        .expect("litellm-sandbox pipeline creation succeeds");
+
+        let profile = pipeline.default_generation_profile();
+        assert_eq!(profile.provider_profile_id, "litellm-sandbox");
+        assert_eq!(profile.provider_kind, ProviderKind::OpenAiCompatible);
     }
 
     #[test]

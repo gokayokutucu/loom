@@ -68,6 +68,64 @@ impl ProviderRegistry {
         Self::new(ollama)
     }
 
+    pub fn new_for_ollama_profile(ollama: OllamaRuntime, profile_id: String) -> Self {
+        Self {
+            default_generation: ProviderRegistryAdapter::Ollama(
+                OllamaProviderAdapter::new_with_profile_id(ollama, profile_id),
+            ),
+        }
+    }
+
+    pub fn new_for_openai_profile(adapter: OpenAiCompatibleProviderAdapter) -> Self {
+        Self {
+            default_generation: ProviderRegistryAdapter::OpenAiCompatible(adapter),
+        }
+    }
+
+    pub fn new_for_profile(
+        ollama: OllamaRuntime,
+        config: &crate::config::LoomServiceConfig,
+        secret_store: &ProviderSecretStore,
+        profile_id: &str,
+    ) -> Result<Self, String> {
+        let profile = config
+            .providers
+            .profiles
+            .iter()
+            .find(|p| p.id == profile_id);
+
+        let profile = match profile {
+            Some(p) => p,
+            None => {
+                if profile_id == "ollama-local" {
+                    return Ok(Self::new(ollama));
+                }
+                return Err(format!("Provider profile '{}' not found", profile_id));
+            }
+        };
+
+        if !profile.enabled {
+            return Err(format!("Provider profile '{}' is disabled", profile_id));
+        }
+
+        match profile.provider_kind {
+            ProviderKind::Ollama => Ok(Self::new_for_ollama_profile(ollama, profile.id.clone())),
+            ProviderKind::OpenAiCompatible => {
+                let secret = profile
+                    .secret_ref
+                    .as_deref()
+                    .and_then(|secret_ref| secret_store.resolve_secret(secret_ref).ok().flatten())
+                    .map(|secret| secret.expose_for_provider_runtime().to_string());
+                let adapter = OpenAiCompatibleProviderAdapter::new(profile.clone(), secret);
+                Ok(Self::new_for_openai_profile(adapter))
+            }
+            ProviderKind::CustomHttpLater => Err(format!(
+                "Provider kind 'custom_http_later' is not supported for profile '{}'",
+                profile_id
+            )),
+        }
+    }
+
     pub fn default_generation_adapter(&self) -> &ProviderRegistryAdapter {
         &self.default_generation
     }
@@ -340,6 +398,13 @@ impl OllamaProviderAdapter {
         Self {
             runtime,
             provider_profile_id: "ollama-local".to_string(),
+        }
+    }
+
+    pub fn new_with_profile_id(runtime: OllamaRuntime, provider_profile_id: String) -> Self {
+        Self {
+            runtime,
+            provider_profile_id,
         }
     }
 }

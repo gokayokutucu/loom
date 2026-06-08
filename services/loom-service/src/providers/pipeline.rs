@@ -43,6 +43,7 @@ impl ProviderPipeline<ProviderRegistry> {
         Self::from_registry(ProviderRegistry::new(ollama))
     }
 
+    #[allow(dead_code)]
     pub fn new_for_main_generation(
         ollama: OllamaRuntime,
         config: &crate::config::LoomServiceConfig,
