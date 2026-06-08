@@ -311,11 +311,13 @@ export function reconcileModelProfiles(settings: AIProviderSettings): AIProvider
     "quick",
     settings.ollama.models
   );
-  const mainModelId = resolveProfileModelId(
-    settings.profiles.mainModelId,
-    "main",
-    settings.ollama.models
-  );
+  const mainModelId = isMainModelSelectionLocal(settings)
+    ? resolveProfileModelId(
+        settings.profiles.mainModelId,
+        "main",
+        settings.ollama.models
+      )
+    : settings.profiles.mainModelId;
   if (
     quickModelId === settings.profiles.quickModelId &&
     mainModelId === settings.profiles.mainModelId
