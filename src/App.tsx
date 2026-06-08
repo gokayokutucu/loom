@@ -326,7 +326,7 @@ import {
   type RuntimeHealthState,
 } from "./services/modelProviders";
 import { normalizeRuntimeProvider, type ProviderProfile } from "./services/providerDiscovery";
-import { resolveModelSelection } from "./services/modelSelectionResolver";
+import { resolveModelSelection, restoreModelSelection } from "./services/modelSelectionResolver";
 import {
   canQueueLocalMainGeneration,
   removeQueuedLocalMainGeneration,
@@ -4319,6 +4319,63 @@ function App() {
       cancelled = true;
     };
   }, [loomEngineClient]);
+
+  useEffect(() => {
+    if (discoveredProfiles.length === 0) return;
+
+    let updated = false;
+    const profilesCopy = { ...providerSettings.profiles };
+
+    // Resolve Main Model
+    const resolvedMain = restoreModelSelection({
+      selectedModelId: profilesCopy.mainModelId,
+      selectedProviderProfileId: profilesCopy.mainProviderProfileId,
+      availableProfiles: discoveredProfiles,
+    });
+
+    const targetMainProviderId = resolvedMain.providerProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+    if (profilesCopy.mainProviderProfileId !== targetMainProviderId) {
+      profilesCopy.mainProviderProfileId = targetMainProviderId;
+      const matchedProfile = discoveredProfiles.find((p) => p.id === targetMainProviderId);
+      profilesCopy.mainProviderDisplayName =
+        matchedProfile?.label ??
+        (targetMainProviderId === OLLAMA_LOCAL_PROVIDER_PROFILE_ID ? "Ollama Local" : targetMainProviderId);
+      profilesCopy.mainProviderKind =
+        targetMainProviderId === OLLAMA_LOCAL_PROVIDER_PROFILE_ID ? "ollama" : "openai-compatible";
+      updated = true;
+    }
+
+    // Resolve Quick Model
+    const resolvedQuick = restoreModelSelection({
+      selectedModelId: profilesCopy.quickModelId,
+      selectedProviderProfileId: profilesCopy.quickProviderProfileId,
+      availableProfiles: discoveredProfiles,
+    });
+    const targetQuickProviderId = resolvedQuick.providerProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+    if (profilesCopy.quickProviderProfileId !== targetQuickProviderId) {
+      profilesCopy.quickProviderProfileId = targetQuickProviderId;
+      updated = true;
+    }
+
+    if (updated) {
+      const nextSettings = {
+        ...providerSettings,
+        profiles: profilesCopy,
+      };
+      saveProviderSettings(nextSettings);
+
+      if (getConfiguredLoomEngineMode() === "rust-service") {
+        void loomEngineClient.updateServiceConfig({
+          providers: {
+            defaultQuickModel: profilesCopy.quickModelId,
+            defaultMainModel: profilesCopy.mainModelId,
+            mainProviderProfileId: profilesCopy.mainProviderProfileId,
+            mainModelId: profilesCopy.mainModelId,
+          },
+        });
+      }
+    }
+  }, [discoveredProfiles]);
 
   function canAttemptMetadataGeneration() {
     return (

@@ -89,3 +89,43 @@ export function resolveModelSelection(input: ModelSelectionInput): ResolvedModel
     warning: `Model "${selectedModelId}" is ambiguous because it exists under multiple provider profiles: ${profileIds}.`,
   };
 }
+
+export interface RestoreModelSelectionInput {
+  selectedModelId: string;
+  selectedProviderProfileId?: string;
+  availableProfiles: ProviderProfile[];
+}
+
+/**
+ * Restores model selection while preserving backward compatibility.
+ * Restore algorithm:
+ * - If provider profile exists in availableProfiles: restores exact pair.
+ * - Else: uses resolveModelSelection to auto-resolve where the model belongs.
+ */
+export function restoreModelSelection(input: RestoreModelSelectionInput): ResolvedModelSelection {
+  const { selectedModelId, selectedProviderProfileId, availableProfiles } = input;
+
+  if (selectedProviderProfileId) {
+    const profileExists = availableProfiles.some((p) => p.id === selectedProviderProfileId);
+    if (profileExists) {
+      const profile = availableProfiles.find((p) => p.id === selectedProviderProfileId)!;
+      const hasModel = profile.modelIds.includes(selectedModelId);
+      return {
+        providerProfileId: selectedProviderProfileId,
+        modelId: selectedModelId,
+        requestModel: selectedModelId,
+        isAmbiguous: false,
+        warning: hasModel
+          ? undefined
+          : `Model "${selectedModelId}" is not declared in provider profile "${selectedProviderProfileId}".`,
+      };
+    }
+  }
+
+  // Fall back to automatic resolution
+  return resolveModelSelection({
+    selectedModelId,
+    selectedProviderProfileId: undefined,
+    availableProfiles,
+  });
+}

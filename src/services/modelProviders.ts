@@ -79,6 +79,7 @@ export interface ModelProfileSettings {
   quickModelId: string;
   mainModelId: string;
   mainProviderProfileId?: string;
+  quickProviderProfileId?: string;
   mainProviderDisplayName?: string;
   mainProviderKind?: ModelProviderKind;
 }
@@ -345,20 +346,18 @@ function mergeSettings(value: Partial<AIProviderSettings>): AIProviderSettings {
     profiles: {
       ...defaultAIProviderSettings.profiles,
       ...value.profiles,
-      mainProviderProfileId:
-        value.profiles?.mainProviderProfileId || OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
-      mainProviderDisplayName:
-        value.profiles?.mainProviderDisplayName ||
-        (value.profiles?.mainProviderProfileId &&
-        value.profiles.mainProviderProfileId !== OLLAMA_LOCAL_PROVIDER_PROFILE_ID
-          ? value.profiles.mainProviderProfileId
-          : "Ollama Local"),
-      mainProviderKind:
-        value.profiles?.mainProviderKind ||
-        (value.profiles?.mainProviderProfileId &&
-        value.profiles.mainProviderProfileId !== OLLAMA_LOCAL_PROVIDER_PROFILE_ID
-          ? "openai-compatible"
-          : "ollama"),
+      mainProviderProfileId: value.profiles
+        ? value.profiles.mainProviderProfileId
+        : defaultAIProviderSettings.profiles.mainProviderProfileId,
+      quickProviderProfileId: value.profiles
+        ? value.profiles.quickProviderProfileId
+        : defaultAIProviderSettings.profiles.quickProviderProfileId,
+      mainProviderDisplayName: value.profiles
+        ? value.profiles.mainProviderDisplayName
+        : defaultAIProviderSettings.profiles.mainProviderDisplayName,
+      mainProviderKind: value.profiles
+        ? value.profiles.mainProviderKind
+        : defaultAIProviderSettings.profiles.mainProviderKind,
     },
     demo: {
       ...defaultAIProviderSettings.demo,
