@@ -34,6 +34,7 @@ pub enum ProviderKind {
     CustomHttpLater,
     OpenAi,
     Anthropic,
+    Gemini,
 }
 
 impl ProviderKind {
@@ -44,6 +45,7 @@ impl ProviderKind {
             Self::CustomHttpLater => "custom_http_later",
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
         }
     }
 
@@ -54,6 +56,7 @@ impl ProviderKind {
             "custom_http_later" => Some(Self::CustomHttpLater),
             "openai" => Some(Self::OpenAi),
             "anthropic" => Some(Self::Anthropic),
+            "gemini" => Some(Self::Gemini),
             _ => None,
         }
     }
@@ -67,6 +70,7 @@ pub enum ProviderTransportKind {
     RigOpenAiCompatible,
     OpenAi,
     Anthropic,
+    Gemini,
 }
 
 impl ProviderTransportKind {
@@ -77,6 +81,7 @@ impl ProviderTransportKind {
             Self::RigOpenAiCompatible => "rig_openai_compatible",
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
         }
     }
 
@@ -87,6 +92,7 @@ impl ProviderTransportKind {
             "rig_openai_compatible" => Some(Self::RigOpenAiCompatible),
             "openai" => Some(Self::OpenAi),
             "anthropic" => Some(Self::Anthropic),
+            "gemini" => Some(Self::Gemini),
             _ => None,
         }
     }
@@ -99,6 +105,7 @@ pub enum ProviderVendor {
     Nvidia,
     OpenAi,
     Anthropic,
+    Google,
     Custom,
 }
 
@@ -109,6 +116,7 @@ impl ProviderVendor {
             Self::Nvidia => "nvidia",
             Self::OpenAi => "openai",
             Self::Anthropic => "anthropic",
+            Self::Google => "google",
             Self::Custom => "custom",
         }
     }
@@ -119,6 +127,7 @@ impl ProviderVendor {
             "nvidia" => Some(Self::Nvidia),
             "openai" => Some(Self::OpenAi),
             "anthropic" => Some(Self::Anthropic),
+            "google" => Some(Self::Google),
             "custom" => Some(Self::Custom),
             _ => None,
         }
@@ -478,6 +487,53 @@ impl ProviderProfileConfig {
             })),
         }
     }
+
+    pub fn gemini_native_example() -> Self {
+        Self {
+            id: "gemini-native".to_string(),
+            provider_kind: ProviderKind::Gemini,
+            transport_kind: ProviderTransportKind::Gemini,
+            vendor: ProviderVendor::Google,
+            display_name: "Gemini Native".to_string(),
+            enabled: false,
+            experimental: false,
+            base_url: Some("https://generativelanguage.googleapis.com".to_string()),
+            default_model: Some("gemini-1.5-flash".to_string()),
+            requires_secret: true,
+            secret_ref: Some("env:LOOM_GEMINI_API_KEY".to_string()),
+            model_discovery: ProviderModelDiscoveryConfig {
+                enabled: true,
+                endpoint_path: Some("/v1beta/models".to_string()),
+                refresh_interval_seconds: Some(3600),
+            },
+            request_defaults: ProviderRequestDefaultsConfig {
+                temperature: Some(0.2),
+                top_p: Some(1.0),
+                num_ctx: None,
+                num_predict: Some(1024),
+                think: Some(false),
+                stream: Some(true),
+            },
+            security: ProviderSecurityPolicyConfig {
+                local_only_required: false,
+                allow_remote_endpoint: true,
+                allow_insecure_http_remote: false,
+                allow_unsafe_model_management: false,
+            },
+            capabilities: ProviderCapabilitiesConfig {
+                supports_streaming: true,
+                supports_cancellation: true,
+                supports_model_listing: true,
+                supports_thinking: false,
+                supports_system_prompt: true,
+                supports_json_mode: Some(false),
+            },
+            metadata_json: Some(serde_json::json!({
+                "documentation": "https://ai.google.dev/gemini-api/docs",
+                "profileStatus": "example_disabled"
+            })),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -638,6 +694,18 @@ fn validate_profile_transport(profile: &ProviderProfileConfig) -> Result<(), Ser
                 ));
             }
         }
+        ProviderKind::Gemini => {
+            if profile.transport_kind != ProviderTransportKind::Gemini {
+                return Err(ServiceError::config(
+                    "gemini provider profiles must use transportKind=gemini",
+                ));
+            }
+            if profile.vendor != ProviderVendor::Google {
+                return Err(ServiceError::config(
+                    "gemini provider profiles must use vendor=google",
+                ));
+            }
+        }
         ProviderKind::CustomHttpLater => {
             return Err(ServiceError::config(
                 "custom_http_later provider profiles are reserved and cannot be enabled yet",
@@ -652,9 +720,10 @@ fn validate_profile_endpoint(profile: &ProviderProfileConfig) -> Result<(), Serv
         if profile.provider_kind == ProviderKind::OpenAiCompatible
             || profile.provider_kind == ProviderKind::OpenAi
             || profile.provider_kind == ProviderKind::Anthropic
+            || profile.provider_kind == ProviderKind::Gemini
         {
             return Err(ServiceError::config(
-                "openai, anthropic, and openai_compatible provider profiles require baseUrl",
+                "openai, anthropic, gemini, and openai_compatible provider profiles require baseUrl",
             ));
         }
         return Ok(());
@@ -813,7 +882,8 @@ pub fn normalize_provider_request_options(
         ProviderKind::OpenAiCompatible
         | ProviderKind::CustomHttpLater
         | ProviderKind::OpenAi
-        | ProviderKind::Anthropic => (None, None),
+        | ProviderKind::Anthropic
+        | ProviderKind::Gemini => (None, None),
     };
 
     Ok(NormalizedProviderRequestOptions {
@@ -999,5 +1069,17 @@ mod tests {
             let error = result.expect_err("rig transport requires feature");
             assert!(error.to_string().contains("experimental-rig"));
         }
+    }
+
+    #[test]
+    fn gemini_native_example_validates_while_disabled() {
+        let profile = ProviderProfileConfig::gemini_native_example();
+
+        assert!(!profile.enabled);
+        assert!(!profile.experimental);
+        assert_eq!(profile.provider_kind, ProviderKind::Gemini);
+        assert_eq!(profile.transport_kind, ProviderTransportKind::Gemini);
+        assert_eq!(profile.vendor, ProviderVendor::Google);
+        validate_provider_profiles(&[profile]).expect("disabled gemini native validates");
     }
 }

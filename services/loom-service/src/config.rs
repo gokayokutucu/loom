@@ -1889,9 +1889,15 @@ where
         apply_e2e_openai_native_profile(config, &lookup, false)?;
     } else if lookup("LOOM_SERVICE_E2E_PROVIDER_PROFILE").as_deref() == Some("anthropic-native") {
         apply_e2e_anthropic_native_profile(config, &lookup, true)?;
-    } else if lookup("LOOM_SERVICE_E2E_ENABLE_PROVIDER_PROFILE").as_deref() == Some("anthropic-native")
+    } else if lookup("LOOM_SERVICE_E2E_ENABLE_PROVIDER_PROFILE").as_deref()
+        == Some("anthropic-native")
     {
         apply_e2e_anthropic_native_profile(config, &lookup, false)?;
+    } else if lookup("LOOM_SERVICE_E2E_PROVIDER_PROFILE").as_deref() == Some("gemini-native") {
+        apply_e2e_gemini_native_profile(config, &lookup, true)?;
+    } else if lookup("LOOM_SERVICE_E2E_ENABLE_PROVIDER_PROFILE").as_deref() == Some("gemini-native")
+    {
+        apply_e2e_gemini_native_profile(config, &lookup, false)?;
     }
 
     Ok(())
@@ -2037,6 +2043,39 @@ where
         config.providers.main_provider_profile_id = Some(profile.id.clone());
     }
     profile.secret_ref = Some("env:LOOM_ANTHROPIC_API_KEY".to_string());
+    upsert_provider_profile(&mut config.providers.profiles, profile);
+    Ok(())
+}
+
+fn apply_e2e_gemini_native_profile<F>(
+    config: &mut LoomServiceConfig,
+    lookup: &F,
+    select_for_main: bool,
+) -> Result<(), ServiceError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut profile = ProviderProfileConfig::gemini_native_example();
+    profile.enabled = true;
+    if let Some(value) = lookup("LOOM_GEMINI_BASE_URL") {
+        profile.base_url = Some(value.trim_end_matches('/').to_string());
+        profile.security.allow_insecure_http_remote = true;
+    }
+    if let Some(value) = lookup("LOOM_GEMINI_MODEL") {
+        profile.default_model = Some(value);
+    }
+    if select_for_main {
+        let model = profile.default_model.clone().ok_or_else(|| {
+            ServiceError::config(
+                "LOOM_GEMINI_MODEL is required when \
+                 LOOM_SERVICE_E2E_PROVIDER_PROFILE=gemini-native",
+            )
+        })?;
+        config.providers.default_main_model = model.clone();
+        config.providers.main_model_id = Some(model);
+        config.providers.main_provider_profile_id = Some(profile.id.clone());
+    }
+    profile.secret_ref = Some("env:LOOM_GEMINI_API_KEY".to_string());
     upsert_provider_profile(&mut config.providers.profiles, profile);
     Ok(())
 }
@@ -2791,6 +2830,88 @@ mod tests {
             "secret key must not be serialized"
         );
         validate_config(&config).expect("openai-native profile for main is valid");
+    }
+
+    // ── Gemini Native profile tests ──────────────────────────────────────────
+
+    #[test]
+    fn gemini_native_example_is_disabled_by_default() {
+        let profile = ProviderProfileConfig::gemini_native_example();
+        assert_eq!(profile.id, "gemini-native");
+        assert!(
+            !profile.enabled,
+            "gemini-native profile must be disabled by default"
+        );
+        assert!(!profile.experimental);
+        assert_eq!(
+            profile.base_url.as_deref(),
+            Some("https://generativelanguage.googleapis.com")
+        );
+        assert_eq!(
+            profile.secret_ref.as_deref(),
+            Some("env:LOOM_GEMINI_API_KEY")
+        );
+        assert_eq!(profile.default_model.as_deref(), Some("gemini-1.5-flash"));
+        assert_eq!(
+            profile.vendor.as_config_str(),
+            "google",
+            "gemini-native vendor must be google"
+        );
+        let config = LoomServiceConfig::default();
+        assert!(
+            !config
+                .providers
+                .profiles
+                .iter()
+                .any(|p| p.id == "gemini-native"),
+            "gemini-native must not appear in default profiles"
+        );
+    }
+
+    #[test]
+    fn e2e_gemini_native_profile_selects_for_main() {
+        let mut config = LoomServiceConfig::default();
+
+        apply_env_overrides_from(&mut config, |name| match name {
+            "LOOM_SERVICE_E2E_PROVIDER_PROFILE" => Some("gemini-native".to_string()),
+            "LOOM_GEMINI_BASE_URL" => Some("https://generativelanguage.googleapis.com".to_string()),
+            "LOOM_GEMINI_MODEL" => Some("gemini-1.5-flash".to_string()),
+            _ => None,
+        })
+        .expect("apply gemini env");
+
+        let gemini = config
+            .providers
+            .profiles
+            .iter()
+            .find(|p| p.id == "gemini-native")
+            .expect("gemini-native profile must be injected");
+
+        assert!(gemini.enabled);
+        assert_eq!(
+            gemini.base_url.as_deref(),
+            Some("https://generativelanguage.googleapis.com")
+        );
+        assert_eq!(gemini.default_model.as_deref(), Some("gemini-1.5-flash"));
+        assert_eq!(
+            gemini.secret_ref.as_deref(),
+            Some("env:LOOM_GEMINI_API_KEY")
+        );
+        assert_eq!(
+            config.providers.main_provider_profile_id.as_deref(),
+            Some("gemini-native")
+        );
+        assert_eq!(
+            config.providers.main_model_id.as_deref(),
+            Some("gemini-1.5-flash")
+        );
+        assert_eq!(config.providers.default_main_model, "gemini-1.5-flash");
+        let serialized = serialize_config(&config);
+        assert!(
+            !serialized.contains("LOOM_GEMINI_API_KEY="),
+            "secret key must not be serialized"
+        );
+        validate_config(&config).expect("gemini-native profile for main is valid");
     }
 
     #[test]

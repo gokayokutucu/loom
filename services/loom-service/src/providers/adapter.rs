@@ -7,6 +7,7 @@ use crate::providers::{
         ProviderContractCapabilities, ProviderContractEvent, ProviderContractMessageRole,
         ProviderContractOptions, ProviderContractRequest, ProviderUsageMetadata,
     },
+    gemini::GeminiProviderAdapter,
     ollama::OllamaRuntime,
     openai::OpenAiProviderAdapter,
     openai_compatible::{
@@ -77,6 +78,11 @@ impl ProviderRegistry {
                 default_generation: ProviderRegistryAdapter::Anthropic(adapter),
             };
         }
+        if let Some(adapter) = gemini_native_adapter_from_main_profile(config, secret_store) {
+            return Self {
+                default_generation: ProviderRegistryAdapter::Gemini(adapter),
+            };
+        }
         Self::new(ollama)
     }
 
@@ -103,6 +109,12 @@ impl ProviderRegistry {
     pub fn new_for_anthropic_native_profile(adapter: AnthropicProviderAdapter) -> Self {
         Self {
             default_generation: ProviderRegistryAdapter::Anthropic(adapter),
+        }
+    }
+
+    pub fn new_for_gemini_native_profile(adapter: GeminiProviderAdapter) -> Self {
+        Self {
+            default_generation: ProviderRegistryAdapter::Gemini(adapter),
         }
     }
 
@@ -161,6 +173,15 @@ impl ProviderRegistry {
                 let adapter = AnthropicProviderAdapter::new(profile.clone(), secret);
                 Ok(Self::new_for_anthropic_native_profile(adapter))
             }
+            ProviderKind::Gemini => {
+                let secret = profile
+                    .secret_ref
+                    .as_deref()
+                    .and_then(|secret_ref| secret_store.resolve_secret(secret_ref).ok().flatten())
+                    .map(|secret| secret.expose_for_provider_runtime().to_string());
+                let adapter = GeminiProviderAdapter::new(profile.clone(), secret);
+                Ok(Self::new_for_gemini_native_profile(adapter))
+            }
             ProviderKind::CustomHttpLater => Err(format!(
                 "Provider kind 'custom_http_later' is not supported for profile '{}'",
                 profile_id
@@ -183,6 +204,7 @@ pub enum ProviderRegistryAdapter {
     OpenAiCompatible(OpenAiCompatibleProviderAdapter),
     OpenAi(OpenAiProviderAdapter),
     Anthropic(AnthropicProviderAdapter),
+    Gemini(GeminiProviderAdapter),
     #[cfg(feature = "experimental-rig")]
     RigOpenAiCompatible(RigOpenAiCompatibleProviderAdapter),
 }
@@ -194,6 +216,7 @@ impl ProviderAdapter for ProviderRegistryAdapter {
             Self::OpenAiCompatible(adapter) => adapter.provider_kind(),
             Self::OpenAi(adapter) => adapter.provider_kind(),
             Self::Anthropic(adapter) => adapter.provider_kind(),
+            Self::Gemini(adapter) => adapter.provider_kind(),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.provider_kind(),
         }
@@ -205,6 +228,7 @@ impl ProviderAdapter for ProviderRegistryAdapter {
             Self::OpenAiCompatible(adapter) => adapter.provider_profile_id(),
             Self::OpenAi(adapter) => adapter.provider_profile_id(),
             Self::Anthropic(adapter) => adapter.provider_profile_id(),
+            Self::Gemini(adapter) => adapter.provider_profile_id(),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.provider_profile_id(),
         }
@@ -216,6 +240,7 @@ impl ProviderAdapter for ProviderRegistryAdapter {
             Self::OpenAiCompatible(adapter) => adapter.default_model(),
             Self::OpenAi(adapter) => adapter.default_model(),
             Self::Anthropic(adapter) => adapter.default_model(),
+            Self::Gemini(adapter) => adapter.default_model(),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.default_model(),
         }
@@ -227,6 +252,7 @@ impl ProviderAdapter for ProviderRegistryAdapter {
             Self::OpenAiCompatible(adapter) => adapter.capabilities(),
             Self::OpenAi(adapter) => adapter.capabilities(),
             Self::Anthropic(adapter) => adapter.capabilities(),
+            Self::Gemini(adapter) => adapter.capabilities(),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.capabilities(),
         }
@@ -238,6 +264,7 @@ impl ProviderAdapter for ProviderRegistryAdapter {
             Self::OpenAiCompatible(adapter) => adapter.stream_chat(request),
             Self::OpenAi(adapter) => adapter.stream_chat(request),
             Self::Anthropic(adapter) => adapter.stream_chat(request),
+            Self::Gemini(adapter) => adapter.stream_chat(request),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.stream_chat(request),
         }
@@ -249,6 +276,7 @@ impl ProviderAdapter for ProviderRegistryAdapter {
             Self::OpenAiCompatible(adapter) => adapter.cancel(request_id),
             Self::OpenAi(adapter) => adapter.cancel(request_id),
             Self::Anthropic(adapter) => adapter.cancel(request_id),
+            Self::Gemini(adapter) => adapter.cancel(request_id),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.cancel(request_id),
         }
@@ -453,6 +481,25 @@ fn anthropic_native_adapter_from_main_profile(
         .and_then(|secret_ref| secret_store.resolve_secret(secret_ref).ok().flatten())
         .map(|secret| secret.expose_for_provider_runtime().to_string());
     Some(AnthropicProviderAdapter::new(profile.clone(), secret))
+}
+
+fn gemini_native_adapter_from_main_profile(
+    config: &crate::config::LoomServiceConfig,
+    secret_store: &ProviderSecretStore,
+) -> Option<GeminiProviderAdapter> {
+    let profile_id = config.providers.main_provider_profile_id.as_deref()?;
+    let profile = config.providers.profiles.iter().find(|profile| {
+        profile.id == profile_id
+            && profile.enabled
+            && profile.provider_kind == ProviderKind::Gemini
+            && profile.transport_kind == ProviderTransportKind::Gemini
+    })?;
+    let secret = profile
+        .secret_ref
+        .as_deref()
+        .and_then(|secret_ref| secret_store.resolve_secret(secret_ref).ok().flatten())
+        .map(|secret| secret.expose_for_provider_runtime().to_string());
+    Some(GeminiProviderAdapter::new(profile.clone(), secret))
 }
 
 fn openai_chat_input_from_contract(request: &ProviderContractRequest) -> OpenAiCompatibleChatInput {
@@ -1067,6 +1114,39 @@ mod tests {
         assert_eq!(adapter.provider_kind(), ProviderKind::OpenAiCompatible);
         assert_eq!(adapter.provider_profile_id(), "litellm-sandbox");
         assert!(!debug.contains("litellm-adapter-secret"));
+    }
+
+    fn gemini_native_config(enabled: bool) -> LoomServiceConfig {
+        let mut config = LoomServiceConfig::default();
+        let mut profile = ProviderProfileConfig::gemini_native_example();
+        profile.enabled = enabled;
+        profile.base_url = Some("http://127.0.0.1:8080/v1beta".to_string());
+        profile.default_model = Some("gemini-1.5-flash".to_string());
+        profile.security.allow_insecure_http_remote = true;
+        profile.secret_ref = Some("env:LOOM_TEST_GEMINI_ADAPTER_API_KEY".to_string());
+        config.providers.main_provider_profile_id = Some("gemini-native".to_string());
+        config.providers.main_model_id = Some("gemini-1.5-flash".to_string());
+        config.providers.profiles.push(profile);
+        config
+    }
+
+    #[test]
+    fn registry_selects_enabled_native_gemini_profile_without_exposing_secret() {
+        let _lock = e2e_env_lock();
+        std::env::set_var("LOOM_TEST_GEMINI_ADAPTER_API_KEY", "gemini-adapter-secret");
+        let secret_store = ProviderSecretStore::default();
+        let registry = ProviderRegistry::new_for_main_generation(
+            test_ollama_runtime(),
+            &gemini_native_config(true),
+            &secret_store,
+        );
+        std::env::remove_var("LOOM_TEST_GEMINI_ADAPTER_API_KEY");
+
+        let adapter = registry.default_generation_adapter();
+        let debug = format!("{adapter:?}");
+        assert_eq!(adapter.provider_kind(), ProviderKind::Gemini);
+        assert_eq!(adapter.provider_profile_id(), "gemini-native");
+        assert!(!debug.contains("gemini-adapter-secret"));
     }
 
     #[test]
