@@ -73,7 +73,11 @@ pub struct AnthropicRuntimeError {
 }
 
 impl AnthropicRuntimeError {
-    pub fn new(kind: AnthropicRuntimeErrorKind, message: impl Into<String>, retryable: bool) -> Self {
+    pub fn new(
+        kind: AnthropicRuntimeErrorKind,
+        message: impl Into<String>,
+        retryable: bool,
+    ) -> Self {
         Self {
             kind,
             message: message.into(),
@@ -278,13 +282,16 @@ impl AnthropicRuntime {
             };
             return Err(classify_status(status, &err_msg));
         }
-        let envelope = response.json::<AnthropicModelsEnvelope>().await.map_err(|_| {
-            AnthropicRuntimeError::new(
-                AnthropicRuntimeErrorKind::MalformedResponse,
-                "Anthropic model discovery returned malformed metadata.",
-                true,
-            )
-        })?;
+        let envelope = response
+            .json::<AnthropicModelsEnvelope>()
+            .await
+            .map_err(|_| {
+                AnthropicRuntimeError::new(
+                    AnthropicRuntimeErrorKind::MalformedResponse,
+                    "Anthropic model discovery returned malformed metadata.",
+                    true,
+                )
+            })?;
         let models = model_ids_from_envelope(envelope);
         Ok(AnthropicModelsResponse {
             discovery: ProviderModelDiscoveryResult {
@@ -431,7 +438,9 @@ impl AnthropicRuntime {
     }
 }
 
-pub fn validate_anthropic_profile(profile: &ProviderProfileConfig) -> Result<(), AnthropicRuntimeError> {
+pub fn validate_anthropic_profile(
+    profile: &ProviderProfileConfig,
+) -> Result<(), AnthropicRuntimeError> {
     if profile.provider_kind != ProviderKind::Anthropic {
         return Err(AnthropicRuntimeError::new(
             AnthropicRuntimeErrorKind::InvalidConfig,
@@ -462,7 +471,7 @@ pub fn build_messages_body(
         "messages": messages,
         "stream": stream_active,
     });
-    
+
     // Anthropic Messages API requires max_tokens to be provided
     let max_tokens = normalized.max_output_tokens.unwrap_or(1024);
     body["max_tokens"] = json!(max_tokens);
@@ -481,7 +490,9 @@ pub fn build_messages_body(
     body
 }
 
-pub fn parse_anthropic_sse_event(payload: &str) -> Result<AnthropicSseEvent, AnthropicRuntimeError> {
+pub fn parse_anthropic_sse_event(
+    payload: &str,
+) -> Result<AnthropicSseEvent, AnthropicRuntimeError> {
     let mut delta_text = None;
     let mut done = false;
     let mut done_reason = None;
@@ -517,7 +528,10 @@ pub fn parse_anthropic_sse_event(payload: &str) -> Result<AnthropicSseEvent, Ant
 
         match current_event.as_str() {
             "message_start" => {
-                if let Some(input) = value.pointer("/message/usage/input_tokens").and_then(Value::as_u64) {
+                if let Some(input) = value
+                    .pointer("/message/usage/input_tokens")
+                    .and_then(Value::as_u64)
+                {
                     input_tokens = Some(input);
                 }
             }
@@ -527,7 +541,10 @@ pub fn parse_anthropic_sse_event(payload: &str) -> Result<AnthropicSseEvent, Ant
                 }
             }
             "message_delta" => {
-                if let Some(output) = value.pointer("/usage/output_tokens").and_then(Value::as_u64) {
+                if let Some(output) = value
+                    .pointer("/usage/output_tokens")
+                    .and_then(Value::as_u64)
+                {
                     output_tokens = Some(output);
                 }
                 if let Some(stop) = value.pointer("/delta/stop_reason").and_then(Value::as_str) {
@@ -687,7 +704,7 @@ impl ProviderAdapter for AnthropicProviderAdapter {
         let adapter = self.clone();
         Box::pin(stream! {
             let model_id = request.model_id.clone();
-            
+
             // Extract system prompt if any, and filter them out of message history
             let system_prompt = request.messages.iter()
                 .filter(|m| m.role == ProviderContractMessageRole::System)
@@ -731,7 +748,7 @@ impl ProviderAdapter for AnthropicProviderAdapter {
             };
             let mut bytes_stream = response.bytes_stream();
             let mut buffer = String::new();
-            
+
             let mut accumulated_prompt_tokens = None;
 
             while let Some(chunk) = bytes_stream.next().await {
@@ -954,8 +971,14 @@ data: {"type": "message_stop"}"#;
         let provider_error =
             raw_error.to_provider_error(Some("anthropic-native"), Some("claude-3-5-sonnet-latest"));
         assert_eq!(provider_error.kind, ProviderErrorKind::Unauthorized);
-        assert_eq!(provider_error.provider_id.as_deref(), Some("anthropic-native"));
-        assert_eq!(provider_error.model.as_deref(), Some("claude-3-5-sonnet-latest"));
+        assert_eq!(
+            provider_error.provider_id.as_deref(),
+            Some("anthropic-native")
+        );
+        assert_eq!(
+            provider_error.model.as_deref(),
+            Some("claude-3-5-sonnet-latest")
+        );
     }
 
     #[test]
