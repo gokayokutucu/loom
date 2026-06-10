@@ -1,0 +1,37 @@
+# tools/litellm-sandbox/docker-compose.yml
+#
+# Starts a local LiteLLM proxy that exposes an OpenAI-compatible API gateway.
+# Loom interacts with it via http://127.0.0.1:4000 — the same way it talks to
+# any native_openai_compatible provider profile.
+#
+# This is a LOCAL DEVELOPMENT SANDBOX only.
+# It is intentionally NOT a Loom core dependency.
+# Do not import or reference this container from Loom Rust or frontend code.
+#
+# Usage:
+#   cp .env.example .env          # fill in your real API keys
+#   docker compose up -d
+#   docker compose logs -f
+#   docker compose down
+
+services:
+  litellm:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: loom-litellm-sandbox
+    restart: unless-stopped
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_config.yaml:/app/config.yaml:ro
+    env_file:
+      - .env
+    command:
+      - "--config=/app/config.yaml"
+      - "--port=4000"
+      - "--num_workers=1"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:4000/health/liveliness"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s

@@ -576,6 +576,7 @@ export interface SendMessageInput {
   focusedResponseId?: string;
   source: "composer" | "graph" | "ask" | "weft";
   model?: string;
+  providerProfileId?: string;
   options?: {
     numCtx?: number;
     numPredict?: number;
@@ -662,6 +663,7 @@ export interface RegenerateFromResponseInput {
   responseMode: ModelResponseMode;
   source?: "prompt_edit_regenerate";
   model?: string;
+  providerProfileId?: string;
   options?: {
     numCtx?: number;
     numPredict?: number;
@@ -677,6 +679,7 @@ export interface RetryUserMessageInput {
   softDeleteDownstream?: boolean;
   reason?: "retry_from_user_message";
   model?: string;
+  providerProfileId?: string;
   options?: {
     numCtx?: number;
     numPredict?: number;

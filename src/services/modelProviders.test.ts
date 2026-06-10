@@ -13,6 +13,7 @@ import {
   modelPickerStatusText,
   normalizeOllamaModelId,
   OLLAMA_LOCAL_PROVIDER_PROFILE_ID,
+  reconcileModelProfiles,
   type AIProviderSettings,
   type ModelDescriptor,
 } from "./modelProviders";
@@ -372,6 +373,31 @@ describe("model picker selection → providerSettings.profiles.mainModelId", () 
     expect(mainModel).toMatchObject({
       id: "nvidia/e2e-openai-compatible",
       name: "NVIDIA NIM · nvidia/e2e-openai-compatible",
+      provider: "openai-compatible",
+      installed: true,
+    });
+  });
+
+  test("remote Main selection survives localStorage merge without Ollama fallback", () => {
+    const settings: AIProviderSettings = {
+      ...defaultAIProviderSettings,
+      profiles: {
+        ...defaultAIProviderSettings.profiles,
+        mainProviderProfileId: "litellm-sandbox",
+        mainProviderDisplayName: "LiteLLM Sandbox",
+        mainProviderKind: "openai-compatible",
+        mainModelId: "ollama-qwen",
+      },
+    };
+
+    const reconciled = reconcileModelProfiles(settings);
+    const mainModel = getProfileModel(reconciled, "main");
+
+    expect(reconciled.profiles.mainProviderProfileId).toBe("litellm-sandbox");
+    expect(reconciled.profiles.mainModelId).toBe("ollama-qwen");
+    expect(mainModel).toMatchObject({
+      id: "ollama-qwen",
+      name: "LiteLLM Sandbox · ollama-qwen",
       provider: "openai-compatible",
       installed: true,
     });

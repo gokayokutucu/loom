@@ -1,7 +1,10 @@
 pub mod adapter;
+pub mod anthropic;
 pub mod config;
 pub mod contract;
+pub mod gemini;
 pub mod ollama;
+pub mod openai;
 pub mod openai_compatible;
 pub mod pipeline;
 #[cfg(feature = "experimental-rig")]

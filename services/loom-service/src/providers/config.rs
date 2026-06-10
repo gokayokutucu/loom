@@ -32,6 +32,9 @@ pub enum ProviderKind {
     Ollama,
     OpenAiCompatible,
     CustomHttpLater,
+    OpenAi,
+    Anthropic,
+    Gemini,
 }
 
 impl ProviderKind {
@@ -40,6 +43,9 @@ impl ProviderKind {
             Self::Ollama => "ollama",
             Self::OpenAiCompatible => "openai_compatible",
             Self::CustomHttpLater => "custom_http_later",
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
         }
     }
 
@@ -48,6 +54,9 @@ impl ProviderKind {
             "ollama" => Some(Self::Ollama),
             "openai_compatible" => Some(Self::OpenAiCompatible),
             "custom_http_later" => Some(Self::CustomHttpLater),
+            "openai" => Some(Self::OpenAi),
+            "anthropic" => Some(Self::Anthropic),
+            "gemini" => Some(Self::Gemini),
             _ => None,
         }
     }
@@ -59,6 +68,9 @@ pub enum ProviderTransportKind {
     Ollama,
     NativeOpenAiCompatible,
     RigOpenAiCompatible,
+    OpenAi,
+    Anthropic,
+    Gemini,
 }
 
 impl ProviderTransportKind {
@@ -67,6 +79,9 @@ impl ProviderTransportKind {
             Self::Ollama => "ollama",
             Self::NativeOpenAiCompatible => "native_openai_compatible",
             Self::RigOpenAiCompatible => "rig_openai_compatible",
+            Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Gemini => "gemini",
         }
     }
 
@@ -75,6 +90,9 @@ impl ProviderTransportKind {
             "ollama" => Some(Self::Ollama),
             "native_openai_compatible" => Some(Self::NativeOpenAiCompatible),
             "rig_openai_compatible" => Some(Self::RigOpenAiCompatible),
+            "openai" => Some(Self::OpenAi),
+            "anthropic" => Some(Self::Anthropic),
+            "gemini" => Some(Self::Gemini),
             _ => None,
         }
     }
@@ -86,6 +104,8 @@ pub enum ProviderVendor {
     Ollama,
     Nvidia,
     OpenAi,
+    Anthropic,
+    Google,
     Custom,
 }
 
@@ -95,6 +115,8 @@ impl ProviderVendor {
             Self::Ollama => "ollama",
             Self::Nvidia => "nvidia",
             Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
+            Self::Google => "google",
             Self::Custom => "custom",
         }
     }
@@ -104,6 +126,8 @@ impl ProviderVendor {
             "ollama" => Some(Self::Ollama),
             "nvidia" => Some(Self::Nvidia),
             "openai" => Some(Self::OpenAi),
+            "anthropic" => Some(Self::Anthropic),
+            "google" => Some(Self::Google),
             "custom" => Some(Self::Custom),
             _ => None,
         }
@@ -286,6 +310,230 @@ impl ProviderProfileConfig {
             })),
         }
     }
+
+    /// Profile template for the LiteLLM local sandbox gateway.
+    ///
+    /// The sandbox is an **external, optional** OpenAI-compatible HTTP proxy
+    /// running at `http://127.0.0.1:4000` (see `tools/litellm-sandbox/`).
+    /// LiteLLM is NOT a Loom core dependency — this profile is disabled by
+    /// default and only activated via environment variables.
+    ///
+    /// Secret ref: `env:LOOM_LITELLM_API_KEY` — resolves from the process
+    /// environment at request time. Set to the `LITELLM_MASTER_KEY` value
+    /// from `tools/litellm-sandbox/.env`.
+    ///
+    /// To activate for development:
+    ///
+    /// ```sh
+    /// LOOM_SERVICE_E2E_PROVIDER_PROFILE=litellm-sandbox \
+    /// LOOM_LITELLM_BASE_URL=http://127.0.0.1:4000/v1 \
+    /// LOOM_LITELLM_API_KEY=loom-sandbox-key-change-me \
+    /// LOOM_LITELLM_MODEL=gpt-4o-mini \
+    ///   ./target/debug/loom-service
+    /// ```
+    #[allow(dead_code)]
+    pub fn litellm_sandbox_example() -> Self {
+        Self {
+            id: "litellm-sandbox".to_string(),
+            provider_kind: ProviderKind::OpenAiCompatible,
+            transport_kind: ProviderTransportKind::NativeOpenAiCompatible,
+            vendor: ProviderVendor::Custom,
+            display_name: "LiteLLM Sandbox".to_string(),
+            // Disabled by default — activated only via LOOM_SERVICE_E2E_PROVIDER_PROFILE.
+            enabled: false,
+            experimental: true,
+            // Default endpoint matches docker-compose.yml in tools/litellm-sandbox/.
+            base_url: Some("http://127.0.0.1:4000/v1".to_string()),
+            // No model committed — must be supplied via LOOM_LITELLM_MODEL env var.
+            default_model: None,
+            // Sandbox requires the LiteLLM master key (never a real provider secret).
+            requires_secret: true,
+            // Key resolved from env; set LOOM_LITELLM_API_KEY to LITELLM_MASTER_KEY value.
+            secret_ref: Some("env:LOOM_LITELLM_API_KEY".to_string()),
+            model_discovery: ProviderModelDiscoveryConfig {
+                // LiteLLM exposes /v1/models — standard OpenAI models endpoint.
+                enabled: true,
+                endpoint_path: Some("/models".to_string()),
+                refresh_interval_seconds: Some(300),
+            },
+            request_defaults: ProviderRequestDefaultsConfig {
+                temperature: Some(0.2),
+                top_p: None,
+                num_ctx: None,
+                num_predict: None,
+                think: Some(false),
+                stream: Some(true),
+            },
+            security: ProviderSecurityPolicyConfig {
+                // The sandbox is a local HTTP endpoint — insecure HTTP is intentional.
+                local_only_required: false,
+                allow_remote_endpoint: true,
+                allow_insecure_http_remote: true,
+                allow_unsafe_model_management: false,
+            },
+            capabilities: ProviderCapabilitiesConfig {
+                supports_streaming: true,
+                supports_cancellation: false,
+                supports_model_listing: true,
+                // Thinking forwarding depends on upstream model — off by default.
+                supports_thinking: false,
+                supports_system_prompt: true,
+                supports_json_mode: Some(false),
+            },
+            metadata_json: Some(serde_json::json!({
+                "sandboxTool": "tools/litellm-sandbox",
+                "documentation": "tools/litellm-sandbox/README.md",
+                "profileStatus": "sandbox_disabled",
+                "activationEnvVars": [
+                    "LOOM_SERVICE_E2E_PROVIDER_PROFILE=litellm-sandbox",
+                    "LOOM_LITELLM_BASE_URL",
+                    "LOOM_LITELLM_MODEL",
+                    "LOOM_LITELLM_API_KEY"
+                ]
+            })),
+        }
+    }
+
+    pub fn openai_native_example() -> Self {
+        Self {
+            id: "openai-native".to_string(),
+            provider_kind: ProviderKind::OpenAi,
+            transport_kind: ProviderTransportKind::OpenAi,
+            vendor: ProviderVendor::OpenAi,
+            display_name: "OpenAI Native".to_string(),
+            enabled: false,
+            experimental: false,
+            base_url: Some("https://api.openai.com/v1".to_string()),
+            default_model: Some("gpt-4o-mini".to_string()),
+            requires_secret: true,
+            secret_ref: Some("env:LOOM_OPENAI_API_KEY".to_string()),
+            model_discovery: ProviderModelDiscoveryConfig {
+                enabled: true,
+                endpoint_path: Some("/v1/models".to_string()),
+                refresh_interval_seconds: Some(3600),
+            },
+            request_defaults: ProviderRequestDefaultsConfig {
+                temperature: Some(0.2),
+                top_p: Some(1.0),
+                num_ctx: None,
+                num_predict: None,
+                think: Some(false),
+                stream: Some(true),
+            },
+            security: ProviderSecurityPolicyConfig {
+                local_only_required: false,
+                allow_remote_endpoint: true,
+                allow_insecure_http_remote: false,
+                allow_unsafe_model_management: false,
+            },
+            capabilities: ProviderCapabilitiesConfig {
+                supports_streaming: true,
+                supports_cancellation: true,
+                supports_model_listing: true,
+                supports_thinking: false,
+                supports_system_prompt: true,
+                supports_json_mode: Some(true),
+            },
+            metadata_json: Some(serde_json::json!({
+                "documentation": "https://platform.openai.com/docs/api-reference",
+                "profileStatus": "example_disabled"
+            })),
+        }
+    }
+
+    pub fn anthropic_native_example() -> Self {
+        Self {
+            id: "anthropic-native".to_string(),
+            provider_kind: ProviderKind::Anthropic,
+            transport_kind: ProviderTransportKind::Anthropic,
+            vendor: ProviderVendor::Anthropic,
+            display_name: "Anthropic Native".to_string(),
+            enabled: false,
+            experimental: false,
+            base_url: Some("https://api.anthropic.com".to_string()),
+            default_model: Some("claude-3-5-sonnet-latest".to_string()),
+            requires_secret: true,
+            secret_ref: Some("env:LOOM_ANTHROPIC_API_KEY".to_string()),
+            model_discovery: ProviderModelDiscoveryConfig {
+                enabled: true,
+                endpoint_path: Some("/v1/models".to_string()),
+                refresh_interval_seconds: Some(3600),
+            },
+            request_defaults: ProviderRequestDefaultsConfig {
+                temperature: Some(0.2),
+                top_p: Some(1.0),
+                num_ctx: None,
+                num_predict: Some(1024), // Anthropic requires max_tokens, maps here
+                think: Some(false),
+                stream: Some(true),
+            },
+            security: ProviderSecurityPolicyConfig {
+                local_only_required: false,
+                allow_remote_endpoint: true,
+                allow_insecure_http_remote: false,
+                allow_unsafe_model_management: false,
+            },
+            capabilities: ProviderCapabilitiesConfig {
+                supports_streaming: true,
+                supports_cancellation: true,
+                supports_model_listing: true,
+                supports_thinking: false,
+                supports_system_prompt: true,
+                supports_json_mode: Some(false),
+            },
+            metadata_json: Some(serde_json::json!({
+                "documentation": "https://docs.anthropic.com/en/api/getting-started",
+                "profileStatus": "example_disabled"
+            })),
+        }
+    }
+
+    pub fn gemini_native_example() -> Self {
+        Self {
+            id: "gemini-native".to_string(),
+            provider_kind: ProviderKind::Gemini,
+            transport_kind: ProviderTransportKind::Gemini,
+            vendor: ProviderVendor::Google,
+            display_name: "Gemini Native".to_string(),
+            enabled: false,
+            experimental: false,
+            base_url: Some("https://generativelanguage.googleapis.com".to_string()),
+            default_model: Some("gemini-1.5-flash".to_string()),
+            requires_secret: true,
+            secret_ref: Some("env:LOOM_GEMINI_API_KEY".to_string()),
+            model_discovery: ProviderModelDiscoveryConfig {
+                enabled: true,
+                endpoint_path: Some("/v1beta/models".to_string()),
+                refresh_interval_seconds: Some(3600),
+            },
+            request_defaults: ProviderRequestDefaultsConfig {
+                temperature: Some(0.2),
+                top_p: Some(1.0),
+                num_ctx: None,
+                num_predict: Some(1024),
+                think: Some(false),
+                stream: Some(true),
+            },
+            security: ProviderSecurityPolicyConfig {
+                local_only_required: false,
+                allow_remote_endpoint: true,
+                allow_insecure_http_remote: false,
+                allow_unsafe_model_management: false,
+            },
+            capabilities: ProviderCapabilitiesConfig {
+                supports_streaming: true,
+                supports_cancellation: true,
+                supports_model_listing: true,
+                supports_thinking: false,
+                supports_system_prompt: true,
+                supports_json_mode: Some(false),
+            },
+            metadata_json: Some(serde_json::json!({
+                "documentation": "https://ai.google.dev/gemini-api/docs",
+                "profileStatus": "example_disabled"
+            })),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -422,6 +670,42 @@ fn validate_profile_transport(profile: &ProviderProfileConfig) -> Result<(), Ser
                 ));
             }
         }
+        ProviderKind::OpenAi => {
+            if profile.transport_kind != ProviderTransportKind::OpenAi {
+                return Err(ServiceError::config(
+                    "openai provider profiles must use transportKind=openai",
+                ));
+            }
+            if profile.vendor != ProviderVendor::OpenAi {
+                return Err(ServiceError::config(
+                    "openai provider profiles must use vendor=openai",
+                ));
+            }
+        }
+        ProviderKind::Anthropic => {
+            if profile.transport_kind != ProviderTransportKind::Anthropic {
+                return Err(ServiceError::config(
+                    "anthropic provider profiles must use transportKind=anthropic",
+                ));
+            }
+            if profile.vendor != ProviderVendor::Anthropic {
+                return Err(ServiceError::config(
+                    "anthropic provider profiles must use vendor=anthropic",
+                ));
+            }
+        }
+        ProviderKind::Gemini => {
+            if profile.transport_kind != ProviderTransportKind::Gemini {
+                return Err(ServiceError::config(
+                    "gemini provider profiles must use transportKind=gemini",
+                ));
+            }
+            if profile.vendor != ProviderVendor::Google {
+                return Err(ServiceError::config(
+                    "gemini provider profiles must use vendor=google",
+                ));
+            }
+        }
         ProviderKind::CustomHttpLater => {
             return Err(ServiceError::config(
                 "custom_http_later provider profiles are reserved and cannot be enabled yet",
@@ -433,9 +717,13 @@ fn validate_profile_transport(profile: &ProviderProfileConfig) -> Result<(), Ser
 
 fn validate_profile_endpoint(profile: &ProviderProfileConfig) -> Result<(), ServiceError> {
     let Some(base_url) = profile.base_url.as_deref() else {
-        if profile.provider_kind == ProviderKind::OpenAiCompatible {
+        if profile.provider_kind == ProviderKind::OpenAiCompatible
+            || profile.provider_kind == ProviderKind::OpenAi
+            || profile.provider_kind == ProviderKind::Anthropic
+            || profile.provider_kind == ProviderKind::Gemini
+        {
             return Err(ServiceError::config(
-                "openai_compatible provider profiles require baseUrl",
+                "openai, anthropic, gemini, and openai_compatible provider profiles require baseUrl",
             ));
         }
         return Ok(());
@@ -591,7 +879,11 @@ pub fn normalize_provider_request_options(
     let max_context_tokens = input.context_budget.or(defaults.num_ctx);
     let (num_predict, num_ctx) = match profile.provider_kind {
         ProviderKind::Ollama => (max_output_tokens, max_context_tokens),
-        ProviderKind::OpenAiCompatible | ProviderKind::CustomHttpLater => (None, None),
+        ProviderKind::OpenAiCompatible
+        | ProviderKind::CustomHttpLater
+        | ProviderKind::OpenAi
+        | ProviderKind::Anthropic
+        | ProviderKind::Gemini => (None, None),
     };
 
     Ok(NormalizedProviderRequestOptions {
@@ -752,6 +1044,18 @@ mod tests {
     }
 
     #[test]
+    fn openai_native_example_validates_while_disabled() {
+        let profile = ProviderProfileConfig::openai_native_example();
+
+        assert!(!profile.enabled);
+        assert!(!profile.experimental);
+        assert_eq!(profile.provider_kind, ProviderKind::OpenAi);
+        assert_eq!(profile.transport_kind, ProviderTransportKind::OpenAi);
+        assert_eq!(profile.vendor, ProviderVendor::OpenAi);
+        validate_provider_profiles(&[profile]).expect("disabled openai native validates");
+    }
+
+    #[test]
     fn rig_transport_is_feature_gated() {
         let mut profile = ProviderProfileConfig::nvidia_openai_compatible_example();
         profile.id = "rig-nvidia".to_string();
@@ -765,5 +1069,17 @@ mod tests {
             let error = result.expect_err("rig transport requires feature");
             assert!(error.to_string().contains("experimental-rig"));
         }
+    }
+
+    #[test]
+    fn gemini_native_example_validates_while_disabled() {
+        let profile = ProviderProfileConfig::gemini_native_example();
+
+        assert!(!profile.enabled);
+        assert!(!profile.experimental);
+        assert_eq!(profile.provider_kind, ProviderKind::Gemini);
+        assert_eq!(profile.transport_kind, ProviderTransportKind::Gemini);
+        assert_eq!(profile.vendor, ProviderVendor::Google);
+        validate_provider_profiles(&[profile]).expect("disabled gemini native validates");
     }
 }

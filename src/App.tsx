@@ -325,6 +325,8 @@ import {
   type ModelProfileId,
   type RuntimeHealthState,
 } from "./services/modelProviders";
+import { normalizeRuntimeProvider, type ProviderProfile } from "./services/providerDiscovery";
+import { resolveModelSelection, restoreModelSelection } from "./services/modelSelectionResolver";
 import {
   canQueueLocalMainGeneration,
   removeQueuedLocalMainGeneration,
@@ -4295,6 +4297,85 @@ function App() {
         message: "Demo responses are enabled for this development session.",
       }
     : composerRuntimeHealth;
+
+  const [discoveredProfiles, setDiscoveredProfiles] = useState<ProviderProfile[]>([]);
+
+  useEffect(() => {
+    if (getConfiguredLoomEngineMode() !== "rust-service") {
+      return;
+    }
+    let cancelled = false;
+    Promise.all([
+      loomEngineClient.getRuntimeProviders().catch(() => []),
+      loomEngineClient.getRuntimeModels().then((res) => res.models).catch(() => []),
+    ])
+      .then(([providers, models]) => {
+        if (cancelled) return;
+        const normalized = providers.map((p) => normalizeRuntimeProvider(p, models));
+        setDiscoveredProfiles(normalized);
+      })
+      .catch(() => {});
+    return () => {
+      cancelled = true;
+    };
+  }, [loomEngineClient]);
+
+  useEffect(() => {
+    if (discoveredProfiles.length === 0) return;
+
+    let updated = false;
+    const profilesCopy = { ...providerSettings.profiles };
+
+    // Resolve Main Model
+    const resolvedMain = restoreModelSelection({
+      selectedModelId: profilesCopy.mainModelId,
+      selectedProviderProfileId: profilesCopy.mainProviderProfileId,
+      availableProfiles: discoveredProfiles,
+    });
+
+    const targetMainProviderId = resolvedMain.providerProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+    if (profilesCopy.mainProviderProfileId !== targetMainProviderId) {
+      profilesCopy.mainProviderProfileId = targetMainProviderId;
+      const matchedProfile = discoveredProfiles.find((p) => p.id === targetMainProviderId);
+      profilesCopy.mainProviderDisplayName =
+        matchedProfile?.label ??
+        (targetMainProviderId === OLLAMA_LOCAL_PROVIDER_PROFILE_ID ? "Ollama Local" : targetMainProviderId);
+      profilesCopy.mainProviderKind =
+        targetMainProviderId === OLLAMA_LOCAL_PROVIDER_PROFILE_ID ? "ollama" : "openai-compatible";
+      updated = true;
+    }
+
+    // Resolve Quick Model
+    const resolvedQuick = restoreModelSelection({
+      selectedModelId: profilesCopy.quickModelId,
+      selectedProviderProfileId: profilesCopy.quickProviderProfileId,
+      availableProfiles: discoveredProfiles,
+    });
+    const targetQuickProviderId = resolvedQuick.providerProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+    if (profilesCopy.quickProviderProfileId !== targetQuickProviderId) {
+      profilesCopy.quickProviderProfileId = targetQuickProviderId;
+      updated = true;
+    }
+
+    if (updated) {
+      const nextSettings = {
+        ...providerSettings,
+        profiles: profilesCopy,
+      };
+      saveProviderSettings(nextSettings);
+
+      if (getConfiguredLoomEngineMode() === "rust-service") {
+        void loomEngineClient.updateServiceConfig({
+          providers: {
+            defaultQuickModel: profilesCopy.quickModelId,
+            defaultMainModel: profilesCopy.mainModelId,
+            mainProviderProfileId: profilesCopy.mainProviderProfileId,
+            mainModelId: profilesCopy.mainModelId,
+          },
+        });
+      }
+    }
+  }, [discoveredProfiles]);
 
   function canAttemptMetadataGeneration() {
     return (
@@ -9367,6 +9448,12 @@ function App() {
           responseId: serviceResponseId,
           cancelRequested: false,
         };
+        const resolvedModel = resolveModelSelection({
+          selectedModelId: mainModel.id,
+          selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
+          availableProfiles: discoveredProfiles,
+        });
+
         for await (const event of loomEngineClient.sendMessage({
           loomId: targetConversation.id,
           draftKey: targetLoomId,
@@ -9392,7 +9479,8 @@ function App() {
           responseMode: selectedResponseMode,
           focusedResponseId: lastResponseInLoom(targetConversation.id)?.id,
           source: "composer",
-          model: mainModel.id,
+          model: resolvedModel.requestModel,
+          providerProfileId: resolvedModel.providerProfileId,
           options: {
             numCtx: providerSettings.ollama.contextLength,
           },
@@ -12157,8 +12245,14 @@ function App() {
       }));
     };
 
-    try {
-      for await (const event of loomEngineClient.sendMessage({
+      const resolvedModel = resolveModelSelection({
+        selectedModelId: mainModel.id,
+        selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
+        availableProfiles: discoveredProfiles,
+      });
+
+      try {
+        for await (const event of loomEngineClient.sendMessage({
         loomId: weftConversation.id,
         draftKey: weftConversation.id,
         promptText: normalizedPrompt,
@@ -12166,7 +12260,8 @@ function App() {
         responseMode: appSettings.modelResponseMode,
         focusedResponseId: seedItems[seedItems.length - 1]?.id,
         source: "composer",
-        model: mainModel.id,
+        model: resolvedModel.requestModel,
+        providerProfileId: resolvedModel.providerProfileId,
         options: {
           numCtx: providerSettings.ollama.contextLength,
         },
@@ -12406,14 +12501,21 @@ function App() {
       }));
     };
 
-    try {
-      for await (const event of loomEngineClient.regenerateFromResponse({
+      const resolvedModel = resolveModelSelection({
+        selectedModelId: mainModel.id,
+        selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
+        availableProfiles: discoveredProfiles,
+      });
+
+      try {
+        for await (const event of loomEngineClient.regenerateFromResponse({
         loomId,
         userResponseId: sourceResponse.serviceUserResponseId,
         staleAssistantResponseId: sourceResponse.id,
         responseMode: appSettings.modelResponseMode,
         source: "prompt_edit_regenerate",
-        model: mainModel.id,
+        model: resolvedModel.requestModel,
+        providerProfileId: resolvedModel.providerProfileId,
         options: {
           numCtx: providerSettings.ollama.contextLength,
         },
@@ -12715,14 +12817,21 @@ function App() {
       }));
     };
 
-    try {
-      for await (const event of loomEngineClient.retryUserMessage({
+      const resolvedModel = resolveModelSelection({
+        selectedModelId: mainModel.id,
+        selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
+        availableProfiles: discoveredProfiles,
+      });
+
+      try {
+        for await (const event of loomEngineClient.retryUserMessage({
         loomId,
         userResponseId: sourceResponse.serviceUserResponseId,
         responseMode: appSettings.modelResponseMode,
         softDeleteDownstream: true,
         reason: "retry_from_user_message",
-        model: mainModel.id,
+        model: resolvedModel.requestModel,
+        providerProfileId: resolvedModel.providerProfileId,
         options: {
           numCtx: providerSettings.ollama.contextLength,
         },
@@ -19034,6 +19143,8 @@ function PromptComposer({
   const [modelPickerOpen, setModelPickerOpen] = useState(false);
   const [isScanningModels, setIsScanningModels] = useState(false);
   const modelScanGuardRef = useRef(false);
+  const [discoveredProfiles, setDiscoveredProfiles] = useState<ProviderProfile[]>([]);
+  const [loadingProfiles, setLoadingProfiles] = useState(false);
   const [modelPopoverStyle, setModelPopoverStyle] = useState<{
     left: number;
     top: number;
@@ -19084,6 +19195,14 @@ function PromptComposer({
       : mainSelectionIsLocal
         ? installedModels
         : [mainModel, ...installedModels];
+  const totalPickerItemsCount = useMemo(() => {
+    if (discoveredProfiles.length > 0) {
+      const groupedModelsCount = discoveredProfiles.reduce((sum, p) => sum + p.modelIds.length, 0);
+      const groupsCount = discoveredProfiles.filter((p) => p.modelIds.length > 0).length;
+      return groupedModelsCount + groupsCount;
+    }
+    return selectableModels.length;
+  }, [discoveredProfiles, selectableModels.length]);
   const selectedModelKey = `${providerSettings.profiles.mainProviderProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID}:${mainModel.id}`;
   const providerStatus = providerSettings.ollama.lastConnectionStatus;
   const modelPickerInstalledState: ModelPickerInstalledState = computeModelPickerInstalledState({
@@ -19687,7 +19806,7 @@ function PromptComposer({
       const minWidth = Math.max(buttonRect.width, 220);
       let left = buttonRect.left;
       let top = buttonRect.bottom + gap;
-      const menuHeight = menuRect.height || 44 * Math.max(selectableModels.length, 1);
+      const menuHeight = menuRect.height || 44 * Math.max(totalPickerItemsCount, 1);
 
       if (top + menuHeight > window.innerHeight - viewportPadding) {
         top = Math.max(viewportPadding, buttonRect.top - gap - menuHeight);
@@ -19709,7 +19828,7 @@ function PromptComposer({
       window.removeEventListener("resize", updateModelPopoverPosition);
       window.removeEventListener("scroll", updateModelPopoverPosition, true);
     };
-  }, [modelPickerOpen, selectableModels.length, pickerStatusText, selectedModelMissing]);
+  }, [modelPickerOpen, totalPickerItemsCount, pickerStatusText, selectedModelMissing]);
 
   // Auto-scan: when the picker opens in unknown-empty state and the service is
   // available, immediately discover installed Ollama models so the user does
@@ -19770,6 +19889,34 @@ function PromptComposer({
       modelScanGuardRef.current = false;
     }
   }, [modelPickerOpen]);
+
+  // Load and normalize provider statuses when the model picker menu is opened.
+  useEffect(() => {
+    if (!modelPickerOpen || getConfiguredLoomEngineMode() !== "rust-service") {
+      return;
+    }
+    let cancelled = false;
+    setLoadingProfiles(true);
+
+    Promise.all([
+      engineClient.getRuntimeProviders().catch(() => []),
+      engineClient.getRuntimeModels().then((res) => res.models).catch(() => []),
+    ])
+      .then(([providers, models]) => {
+        if (cancelled) return;
+        const normalized = providers.map((p) => normalizeRuntimeProvider(p, models));
+        setDiscoveredProfiles(normalized);
+        setLoadingProfiles(false);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setLoadingProfiles(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [modelPickerOpen, engineClient]);
 
   useLayoutEffect(() => {
     if (!mention) return;
@@ -22292,31 +22439,90 @@ function PromptComposer({
                   </span>
                 </div>
               )}
-              {selectableModels.map((model) => {
-                const modelProviderProfileId =
-                  !mainSelectionIsLocal && model.id === mainModel.id && model.provider === mainModel.provider
-                    ? providerSettings.profiles.mainProviderProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID
-                    : OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
-                const modelKey = `${modelProviderProfileId}:${model.id}`;
-                const selected = modelKey === selectedModelKey;
-                return (
-                  <button
-                    key={modelKey}
-                    type="button"
-                    role="menuitemradio"
-                    aria-checked={selected}
-                    className={selected ? "selected" : ""}
-                    onClick={() => {
-                      setMainModel(model.id, modelProviderProfileId);
-                      setModelPickerOpen(false);
-                      setModelPopoverStyle(null);
-                    }}
-                  >
-                    {selected ? <Check size={15} /> : <span aria-hidden="true" />}
-                    <span>{model.name}</span>
-                  </button>
-                );
-              })}
+              {(() => {
+                const resolvedSelection = resolveModelSelection({
+                  selectedModelId: mainModel.id,
+                  selectedProviderProfileId: providerSettings.profiles.mainProviderProfileId,
+                  availableProfiles: discoveredProfiles,
+                });
+                const activeSelectedProviderId =
+                  resolvedSelection.providerProfileId ??
+                  providerSettings.profiles.mainProviderProfileId ??
+                  OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+                const activeSelectedModelId = resolvedSelection.modelId;
+
+                const getModelDisplayName = (modelId: string) => {
+                  const matched = installedModels.find((m) => m.id === modelId);
+                  return matched ? matched.name : modelId;
+                };
+
+                if (discoveredProfiles.length > 0) {
+                  return discoveredProfiles.map((profile) => {
+                    if (profile.modelIds.length === 0) return null;
+                    return (
+                      <div key={profile.id} className="model-picker-group">
+                        <div className="model-picker-group-header">
+                          <span className="model-picker-group-title">{profile.label}</span>
+                          <div className="model-picker-group-badges">
+                            <span className="model-picker-group-badge">{profile.kind}</span>
+                            {profile.isSandbox && (
+                              <span className="model-picker-group-badge sandbox">Sandbox</span>
+                            )}
+                            <span className="model-picker-group-count">({profile.modelIds.length})</span>
+                          </div>
+                        </div>
+                        {profile.modelIds.map((modelId) => {
+                          const selected =
+                            profile.id === activeSelectedProviderId && modelId === activeSelectedModelId;
+                          return (
+                            <button
+                              key={`${profile.id}:${modelId}`}
+                              type="button"
+                              role="menuitemradio"
+                              aria-checked={selected}
+                              className={selected ? "selected" : ""}
+                              onClick={() => {
+                                setMainModel(modelId, profile.id);
+                                setModelPickerOpen(false);
+                                setModelPopoverStyle(null);
+                              }}
+                            >
+                              {selected ? <Check size={15} /> : <span aria-hidden="true" />}
+                              <span>{getModelDisplayName(modelId)}</span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    );
+                  });
+                }
+
+                return selectableModels.map((model) => {
+                  const modelProviderProfileId =
+                    !mainSelectionIsLocal && model.id === mainModel.id && model.provider === mainModel.provider
+                      ? providerSettings.profiles.mainProviderProfileId ?? OLLAMA_LOCAL_PROVIDER_PROFILE_ID
+                      : OLLAMA_LOCAL_PROVIDER_PROFILE_ID;
+                  const selected =
+                    modelProviderProfileId === activeSelectedProviderId && model.id === activeSelectedModelId;
+                  return (
+                    <button
+                      key={`${modelProviderProfileId}:${model.id}`}
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={selected}
+                      className={selected ? "selected" : ""}
+                      onClick={() => {
+                        setMainModel(model.id, modelProviderProfileId);
+                        setModelPickerOpen(false);
+                        setModelPopoverStyle(null);
+                      }}
+                    >
+                      {selected ? <Check size={15} /> : <span aria-hidden="true" />}
+                      <span>{model.name}</span>
+                    </button>
+                  );
+                });
+              })()}
               <div className="model-picker-section-divider" />
               <div className="model-picker-section-label">Response Mode</div>
               {modelResponseModes.map((mode) => {
@@ -22342,6 +22548,48 @@ function PromptComposer({
                   </button>
                 );
               })}
+              {getConfiguredLoomEngineMode() === "rust-service" && (
+                <>
+                  <div className="model-picker-section-divider" />
+                  <div className="model-picker-section-label">Provider Status</div>
+                  {loadingProfiles && (
+                    <div className="model-picker-status">Loading provider statuses...</div>
+                  )}
+                  {!loadingProfiles && discoveredProfiles.length === 0 && (
+                    <div className="model-picker-status">No active providers.</div>
+                  )}
+                  {!loadingProfiles &&
+                    discoveredProfiles.map((profile) => (
+                      <div key={profile.id} className="provider-status-item">
+                        <div className="provider-status-header">
+                          <span className="provider-status-label">{profile.label}</span>
+                          <span
+                            className={`provider-status-indicator ${
+                              profile.isAvailable ? "available" : "unavailable"
+                            }`}
+                          >
+                            {profile.isAvailable ? "Available" : "Unavailable"}
+                          </span>
+                        </div>
+                        <div className="provider-status-meta">
+                          <span className="provider-status-kind">{profile.kind}</span>
+                          <span className="provider-status-models-count">
+                            {profile.modelIds.length}{" "}
+                            {profile.modelIds.length === 1 ? "model" : "models"}
+                          </span>
+                          {profile.isSandbox && (
+                            <span className="provider-status-badge sandbox">Sandbox</span>
+                          )}
+                        </div>
+                        {profile.warning && (
+                          <div className="provider-status-warning" title={profile.warning}>
+                            {profile.warning}
+                          </div>
+                        )}
+                      </div>
+                    ))}
+                </>
+              )}
             </div>,
             document.body
           )}
