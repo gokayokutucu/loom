@@ -2,10 +2,16 @@ use crate::api::state::AppState;
 use axum::extract::State;
 use axum::Json;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
+use std::fs::File;
+use std::io::{self, Read};
+use std::path::Path;
 use std::sync::OnceLock;
 use std::time::SystemTime;
 
 const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
+const GIT_COMMIT: &str = env!("GIT_COMMIT");
+const BUILD_TIMESTAMP: &str = env!("BUILD_TIMESTAMP");
 
 pub fn service_start_time() -> SystemTime {
     static START_TIME: OnceLock<SystemTime> = OnceLock::new();
@@ -41,6 +47,17 @@ pub struct HealthResponse {
     pub config: crate::config::ConfigStatus,
     pub providers: ProvidersHealthResponse,
     pub fingerprint: LoomServiceFingerprint,
+
+    #[serde(rename = "service_version")]
+    pub service_version: &'static str,
+    #[serde(rename = "git_commit")]
+    pub git_commit: String,
+    #[serde(rename = "build_timestamp")]
+    pub build_timestamp: String,
+    #[serde(rename = "binary_path")]
+    pub binary_path: Option<String>,
+    #[serde(rename = "binary_fingerprint")]
+    pub binary_fingerprint: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -133,6 +150,35 @@ fn format_system_time(system_time: SystemTime) -> String {
     }
 }
 
+fn compute_sha256(path: &Path) -> io::Result<String> {
+    let mut file = File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0; 8192];
+    loop {
+        let n = file.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buffer[..n]);
+    }
+    let result = hasher.finalize();
+    Ok(format!("sha256:{:x}", result))
+}
+
+pub fn get_binary_fingerprint() -> String {
+    static FINGERPRINT: OnceLock<String> = OnceLock::new();
+    FINGERPRINT
+        .get_or_init(|| {
+            if let Ok(exe_path) = std::env::current_exe() {
+                if let Ok(fp) = compute_sha256(&exe_path) {
+                    return fp;
+                }
+            }
+            "sha256:unknown".to_string()
+        })
+        .clone()
+}
+
 pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
     let database_ready = state.database.health_check().await;
     let ollama = state.ollama.health().await;
@@ -158,6 +204,8 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
             }
         }
     }
+
+    let binary_path_str = binary_path.clone();
 
     let fingerprint = LoomServiceFingerprint {
         package_version: PACKAGE_VERSION,
@@ -200,6 +248,11 @@ pub async fn health(State(state): State<AppState>) -> Json<HealthResponse> {
         config: state.config.status(),
         providers: ProvidersHealthResponse { ollama },
         fingerprint,
+        service_version: PACKAGE_VERSION,
+        git_commit: GIT_COMMIT.to_string(),
+        build_timestamp: BUILD_TIMESTAMP.to_string(),
+        binary_path: binary_path_str,
+        binary_fingerprint: get_binary_fingerprint(),
     })
 }
 
@@ -258,6 +311,12 @@ mod tests {
                 || response.fingerprint.build_profile == "release"
         );
 
+        assert_eq!(response.service_version, env!("CARGO_PKG_VERSION"));
+        assert_eq!(response.git_commit, env!("GIT_COMMIT"));
+        assert_eq!(response.build_timestamp, env!("BUILD_TIMESTAMP"));
+        assert!(response.binary_path.is_some());
+        assert!(response.binary_fingerprint.starts_with("sha256:"));
+
         let serialized =
             serde_json::to_value(&response.fingerprint).expect("serialize fingerprint");
         let serialized_str = serialized.to_string().to_lowercase();
@@ -266,6 +325,14 @@ mod tests {
         assert!(!serialized_str.contains("password"));
         assert!(!serialized_str.contains("token"));
         assert!(!serialized_str.contains("auth"));
+
+        let serialized_health = serde_json::to_value(&response).expect("serialize health response");
+        let serialized_health_str = serialized_health.to_string().to_lowercase();
+        assert!(!serialized_health_str.contains("secret"));
+        assert!(!serialized_health_str.contains("key"));
+        assert!(!serialized_health_str.contains("password"));
+        assert!(!serialized_health_str.contains("token"));
+        assert!(!serialized_health_str.contains("auth"));
     }
 
     async fn test_state(ollama_base_url: &str) -> AppState {

@@ -58,6 +58,11 @@ export interface ServiceHealthStatus {
     };
   };
   fingerprint?: LoomServiceFingerprint;
+  serviceVersion?: string;
+  gitCommit?: string;
+  buildTimestamp?: string;
+  binaryPath?: string | null;
+  binaryFingerprint?: string;
   serviceUrl?: string;
   lastCheckedAt?: string;
   error?: string;

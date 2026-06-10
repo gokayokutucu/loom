@@ -29,6 +29,7 @@ export interface LoomDesktopRuntimeStatus {
   lastCheckedAt?: string;
   previousServiceUrl?: string;
   serviceUrlChanged?: boolean;
+  expectedFingerprint?: string;
 }
 
 export interface LoomDesktopMicrophonePermissionStatus {

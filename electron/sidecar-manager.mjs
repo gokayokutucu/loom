@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import crypto from "node:crypto";
 import fs from "node:fs";
 import net from "node:net";
 import path from "node:path";
@@ -139,6 +140,16 @@ function resolveBinaryPath(repoRoot, app) {
   return path.join(repoRoot, "services", "loom-service", "target", "debug", binaryName);
 }
 
+function getBinaryFingerprint(filePath) {
+  if (!fs.existsSync(filePath)) return null;
+  try {
+    const fileBuffer = fs.readFileSync(filePath);
+    return `sha256:${crypto.createHash("sha256").update(fileBuffer).digest("hex")}`;
+  } catch (error) {
+    return null;
+  }
+}
+
 function resolveElectronDataPaths(repoRoot, app) {
   // Production (packaged build): use Electron's userData directory.
   // On macOS this is ~/Library/Application Support/<AppName>/loom-service/
@@ -229,6 +240,7 @@ export class LoomServiceSidecarManager {
       pid: undefined,
       port: undefined,
       binaryPath: resolveBinaryPath(repoRoot, app),
+      expectedFingerprint: undefined,
       configPath: undefined,
       dbPath: undefined,
       dataMode: undefined,
@@ -275,6 +287,8 @@ export class LoomServiceSidecarManager {
       throw new Error(`loom-service binary is missing at ${binaryPath}. Build it first.`);
     }
 
+    const expectedFingerprint = getBinaryFingerprint(binaryPath) || undefined;
+
     const port = this.preferredPort;
     const serviceUrl = `http://${this.host}:${port}`;
     const { configPath, dbPath, dataMode } = resolveElectronDataPaths(this.repoRoot, this.app);
@@ -287,6 +301,7 @@ export class LoomServiceSidecarManager {
       serviceUrl,
       port,
       binaryPath,
+      expectedFingerprint,
       configPath,
       dbPath,
       dataMode,
@@ -412,6 +427,10 @@ export class LoomServiceSidecarManager {
     let health;
     try {
       health = await waitForHealth(serviceUrl);
+      const runningFingerprint = health?.binary_fingerprint;
+      if (expectedFingerprint && runningFingerprint && expectedFingerprint !== runningFingerprint) {
+        throw new Error(`runtime_binary_mismatch: Expected ${expectedFingerprint}, got ${runningFingerprint}`);
+      }
     } catch (error) {
       const failureTransition = this.transition({
         type: "HEALTH_FAILED",
@@ -450,6 +469,7 @@ export class LoomServiceSidecarManager {
       state: "ready",
       health,
       runtimeStatus,
+      expectedFingerprint,
       error: undefined,
       appSessionId: this.logger?.sessionId,
       logPath: this.logger?.logPath,
@@ -498,6 +518,13 @@ export class LoomServiceSidecarManager {
       );
     }
 
+    const expectedFingerprint = getBinaryFingerprint(binaryPath) || undefined;
+    const health = await fetchHealth(runtimeUrl).catch(() => null);
+    const runningFingerprint = health?.binary_fingerprint;
+    if (expectedFingerprint && runningFingerprint && expectedFingerprint !== runningFingerprint) {
+      throw new Error(`runtime_binary_mismatch: Expected fingerprint ${expectedFingerprint}, but running service reported ${runningFingerprint}`);
+    }
+
     if (lockedRuntimeAlive && !samePath(lock.dbPath, dbPath)) {
       throw new Error(
         `Existing loom-service lock points at a different DB (${lock.dbPath}); refusing to attach or start another writer.`,
@@ -514,6 +541,7 @@ export class LoomServiceSidecarManager {
           port: Number(lock?.port ?? this.preferredPort),
           pid: runtimeStatus.pid ?? lock?.pid,
           binaryPath,
+          expectedFingerprint,
           configPath,
           dbPath,
           dataMode,
@@ -583,6 +611,7 @@ export class LoomServiceSidecarManager {
       port: Number(lock?.port ?? this.preferredPort),
       pid: runtimeStatus.pid ?? lock?.pid,
       binaryPath,
+      expectedFingerprint,
       configPath,
       dbPath,
       dataMode,

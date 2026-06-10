@@ -3052,6 +3052,11 @@ export class RustHttpLoomEngineClient implements LoomEngineClient {
             }
           : undefined,
         fingerprint,
+        serviceVersion: stringValue(health, "service_version"),
+        gitCommit: stringValue(health, "git_commit"),
+        buildTimestamp: stringValue(health, "build_timestamp"),
+        binaryPath: stringValue(health, "binary_path"),
+        binaryFingerprint: stringValue(health, "binary_fingerprint"),
         serviceUrl: this.serviceUrl,
         lastCheckedAt: new Date().toISOString(),
       };

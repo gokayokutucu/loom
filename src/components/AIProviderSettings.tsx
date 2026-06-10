@@ -2661,6 +2661,18 @@ export function AIProviderSettingsModal({
       : desktopStatus === "ready"
         ? "ready"
         : "degraded";
+    const isMismatched =
+      desktopRuntimeInfo?.isElectron &&
+      health?.binaryFingerprint &&
+      desktopRuntimeStatus?.expectedFingerprint &&
+      health.binaryFingerprint !== desktopRuntimeStatus.expectedFingerprint;
+
+    const freshnessInfo = desktopRuntimeInfo?.isElectron && health?.binaryFingerprint
+      ? {
+          label: isMismatched ? "⚠ runtime_binary_mismatch" : "✓ Fresh",
+        }
+      : null;
+
     return (
       <>
         <section className="provider-section">
@@ -2697,6 +2709,19 @@ export function AIProviderSettingsModal({
             {health?.serviceUrl && <span>Service URL: {health.serviceUrl}</span>}
             {health?.database && <span>Database: {statusLabel(health.database.status)}</span>}
             {health?.config && <span>Config: {statusLabel(health.config.status)}</span>}
+            {freshnessInfo && (
+              <span>
+                Runtime Freshness:{" "}
+                <span
+                  style={{
+                    color: isMismatched ? "var(--accent)" : "var(--success)",
+                    fontWeight: 500,
+                  }}
+                >
+                  {freshnessInfo.label}
+                </span>
+              </span>
+            )}
             {health?.error && <span>Start loom-service and refresh. {health.error}</span>}
           </div>
 
@@ -3808,6 +3833,19 @@ export function AIProviderSettingsModal({
     const capability = serviceStatus.capability;
     const models = capability?.models ?? [];
     const compactModels = models.slice(0, 3).map((model) => model.modelName).join(", ");
+
+    const isMismatched =
+      desktopRuntimeInfo?.isElectron &&
+      health?.binaryFingerprint &&
+      desktopRuntimeStatus?.expectedFingerprint &&
+      health.binaryFingerprint !== desktopRuntimeStatus.expectedFingerprint;
+
+    const freshnessInfo = desktopRuntimeInfo?.isElectron && health?.binaryFingerprint
+      ? {
+          label: isMismatched ? "⚠ runtime_binary_mismatch" : "✓ Fresh",
+        }
+      : null;
+
     return (
       <>
         <section className="provider-section">
@@ -3878,6 +3916,19 @@ export function AIProviderSettingsModal({
             {health?.version && <span>Version: {health.version}</span>}
             {health?.database && <span>Database: {statusLabel(health.database.status)}</span>}
             {health?.config && <span>Config: {statusLabel(health.config.status)}</span>}
+            {freshnessInfo && (
+              <span>
+                Runtime Freshness:{" "}
+                <span
+                  style={{
+                    color: isMismatched ? "var(--accent)" : "var(--success)",
+                    fontWeight: 500,
+                  }}
+                >
+                  {freshnessInfo.label}
+                </span>
+              </span>
+            )}
             {health?.providers?.ollama && (
               <>
                 <span>
