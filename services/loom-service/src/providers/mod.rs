@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod anthropic;
 pub mod config;
 pub mod contract;
 pub mod ollama;

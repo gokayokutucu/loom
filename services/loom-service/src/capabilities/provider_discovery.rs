@@ -215,6 +215,13 @@ mod tests {
                 profile.security.local_only_required = false;
                 profile
             }
+            ProviderKind::Anthropic => {
+                let mut profile = ProviderProfileConfig::anthropic_native_example();
+                profile.id = id.to_string();
+                profile.enabled = true;
+                profile.security.local_only_required = false;
+                profile
+            }
             ProviderKind::CustomHttpLater => unreachable!("not used in tests"),
         }
     }

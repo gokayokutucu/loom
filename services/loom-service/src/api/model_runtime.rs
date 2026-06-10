@@ -657,7 +657,8 @@ fn provider_profile_status(
     }
 
     if (profile.provider_kind == ProviderKind::OpenAiCompatible
-        || profile.provider_kind == ProviderKind::OpenAi)
+        || profile.provider_kind == ProviderKind::OpenAi
+        || profile.provider_kind == ProviderKind::Anthropic)
         && status == "ready"
     {
         warnings.push("remote_endpoint_not_probed_without_explicit_discovery".to_string());

@@ -1,6 +1,7 @@
 #[cfg(feature = "experimental-rig")]
 use crate::providers::rig_openai_compatible::RigOpenAiCompatibleProviderAdapter;
 use crate::providers::{
+    anthropic::AnthropicProviderAdapter,
     config::{ProviderKind, ProviderProfileConfig, ProviderTransportKind},
     contract::{
         ProviderContractCapabilities, ProviderContractEvent, ProviderContractMessageRole,
@@ -71,6 +72,11 @@ impl ProviderRegistry {
                 default_generation: ProviderRegistryAdapter::OpenAi(adapter),
             };
         }
+        if let Some(adapter) = anthropic_native_adapter_from_main_profile(config, secret_store) {
+            return Self {
+                default_generation: ProviderRegistryAdapter::Anthropic(adapter),
+            };
+        }
         Self::new(ollama)
     }
 
@@ -91,6 +97,12 @@ impl ProviderRegistry {
     pub fn new_for_openai_native_profile(adapter: OpenAiProviderAdapter) -> Self {
         Self {
             default_generation: ProviderRegistryAdapter::OpenAi(adapter),
+        }
+    }
+
+    pub fn new_for_anthropic_native_profile(adapter: AnthropicProviderAdapter) -> Self {
+        Self {
+            default_generation: ProviderRegistryAdapter::Anthropic(adapter),
         }
     }
 
@@ -140,6 +152,15 @@ impl ProviderRegistry {
                 let adapter = OpenAiProviderAdapter::new(profile.clone(), secret);
                 Ok(Self::new_for_openai_native_profile(adapter))
             }
+            ProviderKind::Anthropic => {
+                let secret = profile
+                    .secret_ref
+                    .as_deref()
+                    .and_then(|secret_ref| secret_store.resolve_secret(secret_ref).ok().flatten())
+                    .map(|secret| secret.expose_for_provider_runtime().to_string());
+                let adapter = AnthropicProviderAdapter::new(profile.clone(), secret);
+                Ok(Self::new_for_anthropic_native_profile(adapter))
+            }
             ProviderKind::CustomHttpLater => Err(format!(
                 "Provider kind 'custom_http_later' is not supported for profile '{}'",
                 profile_id
@@ -161,6 +182,7 @@ pub enum ProviderRegistryAdapter {
     Ollama(OllamaProviderAdapter),
     OpenAiCompatible(OpenAiCompatibleProviderAdapter),
     OpenAi(OpenAiProviderAdapter),
+    Anthropic(AnthropicProviderAdapter),
     #[cfg(feature = "experimental-rig")]
     RigOpenAiCompatible(RigOpenAiCompatibleProviderAdapter),
 }
@@ -171,6 +193,7 @@ impl ProviderAdapter for ProviderRegistryAdapter {
             Self::Ollama(adapter) => adapter.provider_kind(),
             Self::OpenAiCompatible(adapter) => adapter.provider_kind(),
             Self::OpenAi(adapter) => adapter.provider_kind(),
+            Self::Anthropic(adapter) => adapter.provider_kind(),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.provider_kind(),
         }
@@ -181,6 +204,7 @@ impl ProviderAdapter for ProviderRegistryAdapter {
             Self::Ollama(adapter) => adapter.provider_profile_id(),
             Self::OpenAiCompatible(adapter) => adapter.provider_profile_id(),
             Self::OpenAi(adapter) => adapter.provider_profile_id(),
+            Self::Anthropic(adapter) => adapter.provider_profile_id(),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.provider_profile_id(),
         }
@@ -191,6 +215,7 @@ impl ProviderAdapter for ProviderRegistryAdapter {
             Self::Ollama(adapter) => adapter.default_model(),
             Self::OpenAiCompatible(adapter) => adapter.default_model(),
             Self::OpenAi(adapter) => adapter.default_model(),
+            Self::Anthropic(adapter) => adapter.default_model(),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.default_model(),
         }
@@ -201,6 +226,7 @@ impl ProviderAdapter for ProviderRegistryAdapter {
             Self::Ollama(adapter) => adapter.capabilities(),
             Self::OpenAiCompatible(adapter) => adapter.capabilities(),
             Self::OpenAi(adapter) => adapter.capabilities(),
+            Self::Anthropic(adapter) => adapter.capabilities(),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.capabilities(),
         }
@@ -211,6 +237,7 @@ impl ProviderAdapter for ProviderRegistryAdapter {
             Self::Ollama(adapter) => adapter.stream_chat(request),
             Self::OpenAiCompatible(adapter) => adapter.stream_chat(request),
             Self::OpenAi(adapter) => adapter.stream_chat(request),
+            Self::Anthropic(adapter) => adapter.stream_chat(request),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.stream_chat(request),
         }
@@ -221,6 +248,7 @@ impl ProviderAdapter for ProviderRegistryAdapter {
             Self::Ollama(adapter) => adapter.cancel(request_id),
             Self::OpenAiCompatible(adapter) => adapter.cancel(request_id),
             Self::OpenAi(adapter) => adapter.cancel(request_id),
+            Self::Anthropic(adapter) => adapter.cancel(request_id),
             #[cfg(feature = "experimental-rig")]
             Self::RigOpenAiCompatible(adapter) => adapter.cancel(request_id),
         }
@@ -406,6 +434,25 @@ fn openai_native_adapter_from_main_profile(
         .and_then(|secret_ref| secret_store.resolve_secret(secret_ref).ok().flatten())
         .map(|secret| secret.expose_for_provider_runtime().to_string());
     Some(OpenAiProviderAdapter::new(profile.clone(), secret))
+}
+
+fn anthropic_native_adapter_from_main_profile(
+    config: &crate::config::LoomServiceConfig,
+    secret_store: &ProviderSecretStore,
+) -> Option<AnthropicProviderAdapter> {
+    let profile_id = config.providers.main_provider_profile_id.as_deref()?;
+    let profile = config.providers.profiles.iter().find(|profile| {
+        profile.id == profile_id
+            && profile.enabled
+            && profile.provider_kind == ProviderKind::Anthropic
+            && profile.transport_kind == ProviderTransportKind::Anthropic
+    })?;
+    let secret = profile
+        .secret_ref
+        .as_deref()
+        .and_then(|secret_ref| secret_store.resolve_secret(secret_ref).ok().flatten())
+        .map(|secret| secret.expose_for_provider_runtime().to_string());
+    Some(AnthropicProviderAdapter::new(profile.clone(), secret))
 }
 
 fn openai_chat_input_from_contract(request: &ProviderContractRequest) -> OpenAiCompatibleChatInput {

@@ -1887,6 +1887,11 @@ where
     } else if lookup("LOOM_SERVICE_E2E_ENABLE_PROVIDER_PROFILE").as_deref() == Some("openai-native")
     {
         apply_e2e_openai_native_profile(config, &lookup, false)?;
+    } else if lookup("LOOM_SERVICE_E2E_PROVIDER_PROFILE").as_deref() == Some("anthropic-native") {
+        apply_e2e_anthropic_native_profile(config, &lookup, true)?;
+    } else if lookup("LOOM_SERVICE_E2E_ENABLE_PROVIDER_PROFILE").as_deref() == Some("anthropic-native")
+    {
+        apply_e2e_anthropic_native_profile(config, &lookup, false)?;
     }
 
     Ok(())
@@ -1999,6 +2004,39 @@ where
         config.providers.main_provider_profile_id = Some(profile.id.clone());
     }
     profile.secret_ref = Some("env:LOOM_OPENAI_API_KEY".to_string());
+    upsert_provider_profile(&mut config.providers.profiles, profile);
+    Ok(())
+}
+
+fn apply_e2e_anthropic_native_profile<F>(
+    config: &mut LoomServiceConfig,
+    lookup: &F,
+    select_for_main: bool,
+) -> Result<(), ServiceError>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    let mut profile = ProviderProfileConfig::anthropic_native_example();
+    profile.enabled = true;
+    if let Some(value) = lookup("LOOM_ANTHROPIC_BASE_URL") {
+        profile.base_url = Some(value.trim_end_matches('/').to_string());
+        profile.security.allow_insecure_http_remote = true;
+    }
+    if let Some(value) = lookup("LOOM_ANTHROPIC_MODEL") {
+        profile.default_model = Some(value);
+    }
+    if select_for_main {
+        let model = profile.default_model.clone().ok_or_else(|| {
+            ServiceError::config(
+                "LOOM_ANTHROPIC_MODEL is required when \
+                 LOOM_SERVICE_E2E_PROVIDER_PROFILE=anthropic-native",
+            )
+        })?;
+        config.providers.default_main_model = model.clone();
+        config.providers.main_model_id = Some(model);
+        config.providers.main_provider_profile_id = Some(profile.id.clone());
+    }
+    profile.secret_ref = Some("env:LOOM_ANTHROPIC_API_KEY".to_string());
     upsert_provider_profile(&mut config.providers.profiles, profile);
     Ok(())
 }

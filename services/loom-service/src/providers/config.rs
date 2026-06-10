@@ -33,6 +33,7 @@ pub enum ProviderKind {
     OpenAiCompatible,
     CustomHttpLater,
     OpenAi,
+    Anthropic,
 }
 
 impl ProviderKind {
@@ -42,6 +43,7 @@ impl ProviderKind {
             Self::OpenAiCompatible => "openai_compatible",
             Self::CustomHttpLater => "custom_http_later",
             Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
         }
     }
 
@@ -51,6 +53,7 @@ impl ProviderKind {
             "openai_compatible" => Some(Self::OpenAiCompatible),
             "custom_http_later" => Some(Self::CustomHttpLater),
             "openai" => Some(Self::OpenAi),
+            "anthropic" => Some(Self::Anthropic),
             _ => None,
         }
     }
@@ -63,6 +66,7 @@ pub enum ProviderTransportKind {
     NativeOpenAiCompatible,
     RigOpenAiCompatible,
     OpenAi,
+    Anthropic,
 }
 
 impl ProviderTransportKind {
@@ -72,6 +76,7 @@ impl ProviderTransportKind {
             Self::NativeOpenAiCompatible => "native_openai_compatible",
             Self::RigOpenAiCompatible => "rig_openai_compatible",
             Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
         }
     }
 
@@ -81,6 +86,7 @@ impl ProviderTransportKind {
             "native_openai_compatible" => Some(Self::NativeOpenAiCompatible),
             "rig_openai_compatible" => Some(Self::RigOpenAiCompatible),
             "openai" => Some(Self::OpenAi),
+            "anthropic" => Some(Self::Anthropic),
             _ => None,
         }
     }
@@ -92,6 +98,7 @@ pub enum ProviderVendor {
     Ollama,
     Nvidia,
     OpenAi,
+    Anthropic,
     Custom,
 }
 
@@ -101,6 +108,7 @@ impl ProviderVendor {
             Self::Ollama => "ollama",
             Self::Nvidia => "nvidia",
             Self::OpenAi => "openai",
+            Self::Anthropic => "anthropic",
             Self::Custom => "custom",
         }
     }
@@ -110,6 +118,7 @@ impl ProviderVendor {
             "ollama" => Some(Self::Ollama),
             "nvidia" => Some(Self::Nvidia),
             "openai" => Some(Self::OpenAi),
+            "anthropic" => Some(Self::Anthropic),
             "custom" => Some(Self::Custom),
             _ => None,
         }
@@ -422,6 +431,53 @@ impl ProviderProfileConfig {
             })),
         }
     }
+
+    pub fn anthropic_native_example() -> Self {
+        Self {
+            id: "anthropic-native".to_string(),
+            provider_kind: ProviderKind::Anthropic,
+            transport_kind: ProviderTransportKind::Anthropic,
+            vendor: ProviderVendor::Anthropic,
+            display_name: "Anthropic Native".to_string(),
+            enabled: false,
+            experimental: false,
+            base_url: Some("https://api.anthropic.com".to_string()),
+            default_model: Some("claude-3-5-sonnet-latest".to_string()),
+            requires_secret: true,
+            secret_ref: Some("env:LOOM_ANTHROPIC_API_KEY".to_string()),
+            model_discovery: ProviderModelDiscoveryConfig {
+                enabled: true,
+                endpoint_path: Some("/v1/models".to_string()),
+                refresh_interval_seconds: Some(3600),
+            },
+            request_defaults: ProviderRequestDefaultsConfig {
+                temperature: Some(0.2),
+                top_p: Some(1.0),
+                num_ctx: None,
+                num_predict: Some(1024), // Anthropic requires max_tokens, maps here
+                think: Some(false),
+                stream: Some(true),
+            },
+            security: ProviderSecurityPolicyConfig {
+                local_only_required: false,
+                allow_remote_endpoint: true,
+                allow_insecure_http_remote: false,
+                allow_unsafe_model_management: false,
+            },
+            capabilities: ProviderCapabilitiesConfig {
+                supports_streaming: true,
+                supports_cancellation: true,
+                supports_model_listing: true,
+                supports_thinking: false,
+                supports_system_prompt: true,
+                supports_json_mode: Some(false),
+            },
+            metadata_json: Some(serde_json::json!({
+                "documentation": "https://docs.anthropic.com/en/api/getting-started",
+                "profileStatus": "example_disabled"
+            })),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -570,6 +626,18 @@ fn validate_profile_transport(profile: &ProviderProfileConfig) -> Result<(), Ser
                 ));
             }
         }
+        ProviderKind::Anthropic => {
+            if profile.transport_kind != ProviderTransportKind::Anthropic {
+                return Err(ServiceError::config(
+                    "anthropic provider profiles must use transportKind=anthropic",
+                ));
+            }
+            if profile.vendor != ProviderVendor::Anthropic {
+                return Err(ServiceError::config(
+                    "anthropic provider profiles must use vendor=anthropic",
+                ));
+            }
+        }
         ProviderKind::CustomHttpLater => {
             return Err(ServiceError::config(
                 "custom_http_later provider profiles are reserved and cannot be enabled yet",
@@ -583,9 +651,10 @@ fn validate_profile_endpoint(profile: &ProviderProfileConfig) -> Result<(), Serv
     let Some(base_url) = profile.base_url.as_deref() else {
         if profile.provider_kind == ProviderKind::OpenAiCompatible
             || profile.provider_kind == ProviderKind::OpenAi
+            || profile.provider_kind == ProviderKind::Anthropic
         {
             return Err(ServiceError::config(
-                "openai and openai_compatible provider profiles require baseUrl",
+                "openai, anthropic, and openai_compatible provider profiles require baseUrl",
             ));
         }
         return Ok(());
@@ -741,9 +810,10 @@ pub fn normalize_provider_request_options(
     let max_context_tokens = input.context_budget.or(defaults.num_ctx);
     let (num_predict, num_ctx) = match profile.provider_kind {
         ProviderKind::Ollama => (max_output_tokens, max_context_tokens),
-        ProviderKind::OpenAiCompatible | ProviderKind::CustomHttpLater | ProviderKind::OpenAi => {
-            (None, None)
-        }
+        ProviderKind::OpenAiCompatible
+        | ProviderKind::CustomHttpLater
+        | ProviderKind::OpenAi
+        | ProviderKind::Anthropic => (None, None),
     };
 
     Ok(NormalizedProviderRequestOptions {

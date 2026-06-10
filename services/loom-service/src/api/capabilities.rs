@@ -11,6 +11,7 @@ use crate::{
         ProviderModelDiscoveryResponse, ResolveExecutionStrategyInput, SystemResourceSnapshot,
     },
     providers::{
+        anthropic::{AnthropicRuntime, AnthropicSecret},
         openai::{OpenAiRuntime, OpenAiSecret},
         openai_compatible::{OpenAiCompatibleRuntime, OpenAiCompatibleSecret},
         secret_store::{default_provider_secret_ref, SecretStore},
@@ -169,6 +170,44 @@ pub async fn discover_models(
                 }
 
                 let runtime = OpenAiRuntime::new(profile.clone(), secret);
+                match runtime.models().await {
+                    Ok(response) => {
+                        discovered.extend(
+                            ingest_provider_model_names(&repo, &profile, response.models, persist)
+                                .await
+                                .map_err(api_error)?,
+                        );
+                    }
+                    Err(error) => {
+                        errors.push(discovery_error_from_provider(
+                            &profile,
+                            error.to_provider_error(Some(&profile.id), None),
+                        ));
+                    }
+                }
+            }
+            crate::providers::config::ProviderKind::Anthropic => {
+                let mut secret = None;
+                if profile.requires_secret {
+                    let secret_ref = profile
+                        .secret_ref
+                        .clone()
+                        .unwrap_or_else(|| default_provider_secret_ref(&profile.id));
+                    match state.secret_store.resolve_secret(&secret_ref) {
+                        Ok(Some(resolved)) => {
+                            secret = Some(AnthropicSecret::new(
+                                resolved.expose_for_provider_runtime().to_string(),
+                            ));
+                        }
+                        _ => {
+                            errors
+                                .push(discovery_error(&profile, ProviderErrorKind::MissingSecret));
+                            continue;
+                        }
+                    }
+                }
+
+                let runtime = AnthropicRuntime::new(profile.clone(), secret);
                 match runtime.models().await {
                     Ok(response) => {
                         discovered.extend(
