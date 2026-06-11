@@ -1,3 +1,4 @@
+mod agent_runtime;
 mod api;
 mod capabilities;
 mod config;
