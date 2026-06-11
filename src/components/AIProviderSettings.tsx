@@ -81,6 +81,8 @@ import {
   providerProfileAccessLabel,
   providerSecretStatusLabel,
 } from "../services/providerProfiles";
+import { AgentRunInspector } from "./AgentRunInspector";
+import { isExperimentalAgentInspectorEnabled } from "../services/agentRuntimeInspector";
 
 export type SettingsCategoryId =
   | "runtime"
@@ -3884,6 +3886,8 @@ export function AIProviderSettingsModal({
             <button disabled>Report issue</button>
           </div>
         </section>
+
+        <AgentRunInspector enabled={isExperimentalAgentInspectorEnabled()} />
 
         <section className="provider-section">
           <div className="provider-section-heading">
