@@ -11,8 +11,8 @@
 :root {
   /* Assistant Response Typography System */
   --loom-response-font-family: "Literata", "Georgia", "Times New Roman", serif;
-  --loom-response-font-size: 18px;
-  --loom-response-font-weight: 280;
+  --loom-response-font-size: 17px;
+  --loom-response-font-weight: 300;
   --loom-response-line-height: 1.75;
   --loom-response-paragraph-spacing: 12px;
 
@@ -3778,6 +3778,35 @@ kbd {
 .assistant-response-content .assistant-markdown-list {
   font-size: var(--loom-response-font-size);
   line-height: var(--loom-response-line-height);
+}
+
+.assistant-response-content li {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.assistant-response-content li p {
+  font-size: inherit;
+  line-height: inherit;
+}
+
+.assistant-response-content strong,
+.assistant-response-content b {
+  font-weight: 650;
+  font-size: inherit;
+}
+
+.assistant-response-content li strong,
+.assistant-response-content li b {
+  font-weight: 650;
+  font-size: inherit;
+}
+
+.assistant-response-content li .assistant-markdown-heading {
+  font-size: inherit;
+  line-height: inherit;
+  font-weight: 650;
+  margin: 0;
 }
 
 .assistant-markdown-list.assistant-markdown-list--follows-colon {
