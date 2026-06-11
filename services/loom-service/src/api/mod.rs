@@ -1,3 +1,4 @@
+mod agent_experimental;
 mod ask;
 mod attachments;
 mod bookmarks;
@@ -43,12 +44,51 @@ use axum::{
 };
 use state::AppState;
 
+/// Opt-in switches for experimental, non-product API surfaces. Everything is
+/// off by default; gated routes are not mounted at all unless enabled.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ExperimentalApiConfig {
+    pub agent_runtime_api: bool,
+}
+
+impl ExperimentalApiConfig {
+    pub fn from_env() -> Self {
+        let enabled = matches!(
+            std::env::var(agent_experimental::EXPERIMENTAL_AGENT_RUNTIME_ENV)
+                .ok()
+                .as_deref(),
+            Some("1") | Some("true")
+        );
+        Self {
+            agent_runtime_api: enabled,
+        }
+    }
+}
+
 pub fn router(
     database: Database,
     ollama: OllamaRuntime,
     config: ConfigManager,
     operations: OperationTracker,
     restart: RestartState,
+) -> Router {
+    router_with_experimental(
+        database,
+        ollama,
+        config,
+        operations,
+        restart,
+        ExperimentalApiConfig::from_env(),
+    )
+}
+
+pub fn router_with_experimental(
+    database: Database,
+    ollama: OllamaRuntime,
+    config: ConfigManager,
+    operations: OperationTracker,
+    restart: RestartState,
+    experimental: ExperimentalApiConfig,
 ) -> Router {
     let state = AppState {
         database,
@@ -60,7 +100,21 @@ pub fn router(
         agent_runs: crate::agent_runtime::runtime::AgentRunStore::new(),
     };
 
+    let experimental_routes = if experimental.agent_runtime_api {
+        tracing::info!(
+            path = agent_experimental::EXPERIMENTAL_AGENT_RUN_PATH,
+            "experimental agent runtime API enabled"
+        );
+        Router::new().route(
+            agent_experimental::EXPERIMENTAL_AGENT_RUN_PATH,
+            post(agent_experimental::run),
+        )
+    } else {
+        Router::new()
+    };
+
     Router::new()
+        .merge(experimental_routes)
         .route("/health", get(health::health))
         .route("/version", get(health::version))
         .route("/events", get(events::events_stream))
