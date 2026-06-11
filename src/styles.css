@@ -3141,7 +3141,6 @@ kbd {
   box-shadow: inset 0 0 0 1px var(--loom-border-subtle);
 }
 
-.user-message p,
 .assistant-body p {
   margin: 0;
   color: var(--loom-text-primary);
@@ -3150,6 +3149,10 @@ kbd {
 }
 
 .user-message p {
+  margin: 0;
+  color: var(--loom-text-primary);
+  font-size: var(--font-subtitle-size);
+  line-height: var(--font-subtitle-line);
   white-space: pre-wrap;
 }
 
