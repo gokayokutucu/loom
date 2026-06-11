@@ -3733,44 +3733,6 @@ kbd {
   letter-spacing: 0;
 }
 
-.assistant-response-content h1.assistant-markdown-heading {
-  font-size: 1.18em;
-  font-weight: 700;
-  line-height: 1.4;
-  margin-top: 1.4em;
-  margin-bottom: 0.4em;
-}
-
-.assistant-response-content h2.assistant-markdown-heading {
-  font-size: 1.12em;
-  font-weight: 700;
-  line-height: 1.4;
-  margin-top: 1.4em;
-  margin-bottom: 0.4em;
-}
-
-.assistant-response-content h3.assistant-markdown-heading {
-  font-size: 1.05em;
-  font-weight: 650;
-  line-height: 1.45;
-  margin-top: 1.4em;
-  margin-bottom: 0.4em;
-}
-
-.assistant-response-content h4.assistant-markdown-heading,
-.assistant-response-content h5.assistant-markdown-heading,
-.assistant-response-content h6.assistant-markdown-heading {
-  font-size: 1em;
-  font-weight: 650;
-  line-height: 1.45;
-  margin-top: 1.4em;
-  margin-bottom: 0.4em;
-}
-
-.assistant-response-content > .assistant-markdown-heading:first-child {
-  margin-top: 0;
-}
-
 .assistant-body h1.assistant-markdown-heading,
 .assistant-body h2.assistant-markdown-heading {
   font-size: calc(var(--font-body-size) + 4px);
@@ -3789,6 +3751,48 @@ kbd {
   line-height: var(--font-body-line);
 }
 
+.assistant-response-content h1.assistant-markdown-heading {
+  font-family: var(--loom-response-font-family) !important;
+  font-size: 1.18em;
+  font-weight: 700;
+  line-height: 1.4;
+  margin-top: 1.4em;
+  margin-bottom: 0.4em;
+}
+
+.assistant-response-content h2.assistant-markdown-heading {
+  font-family: var(--loom-response-font-family) !important;
+  font-size: 1.12em;
+  font-weight: 700;
+  line-height: 1.4;
+  margin-top: 1.4em;
+  margin-bottom: 0.4em;
+}
+
+.assistant-response-content h3.assistant-markdown-heading {
+  font-family: var(--loom-response-font-family) !important;
+  font-size: 1.05em;
+  font-weight: 650;
+  line-height: 1.45;
+  margin-top: 1.4em;
+  margin-bottom: 0.4em;
+}
+
+.assistant-response-content h4.assistant-markdown-heading,
+.assistant-response-content h5.assistant-markdown-heading,
+.assistant-response-content h6.assistant-markdown-heading {
+  font-family: var(--loom-response-font-family) !important;
+  font-size: 1em;
+  font-weight: 650;
+  line-height: 1.45;
+  margin-top: 1.4em;
+  margin-bottom: 0.4em;
+}
+
+.assistant-response-content > .assistant-markdown-heading:first-child {
+  margin-top: 0;
+}
+
 .assistant-markdown-list {
   display: grid;
   gap: 7px;
@@ -3800,8 +3804,8 @@ kbd {
 }
 
 .assistant-response-content .assistant-markdown-list {
-  font-size: var(--loom-response-font-size);
-  line-height: var(--loom-response-line-height);
+  font-size: inherit;
+  line-height: inherit;
 }
 
 .assistant-response-content li {
@@ -3843,8 +3847,8 @@ kbd {
 
 .assistant-response-content p {
   margin-bottom: var(--loom-response-paragraph-spacing);
-  line-height: var(--loom-response-line-height);
-  font-size: var(--loom-response-font-size);
+  line-height: inherit;
+  font-size: inherit;
 }
 
 .assistant-response-content p:last-child {
@@ -3874,8 +3878,8 @@ kbd {
 }
 
 .assistant-response-content .assistant-markdown-table {
-  font-size: var(--loom-response-font-size);
-  line-height: var(--loom-response-line-height);
+  font-size: inherit;
+  line-height: inherit;
 }
 
 .assistant-markdown-table th,
@@ -3910,7 +3914,9 @@ kbd {
   position: relative;
   min-width: 0;
   font-family: var(--loom-response-font-family);
+  font-size: var(--loom-response-font-size);
   font-weight: var(--loom-response-font-weight);
+  line-height: var(--loom-response-line-height);
 }
 
 /* Ensure code blocks and inline code maintain DM Mono font, size, weight, and line-height */
