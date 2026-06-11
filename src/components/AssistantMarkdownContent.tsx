@@ -323,8 +323,9 @@ export function AssistantMarkdownContent({
   onReferenceHint?: (link: LoomLink, target: HTMLElement) => void;
   onReferenceHintClose?: () => void;
 }) {
-  let renderedCodeBlockIndex = -1;
   const normalizedMarkdown = normalizeAssistantMarkdownSource(markdown);
+  const blocks = parseAssistantMarkdown(normalizedMarkdown);
+  let renderedCodeBlockIndex = -1;
   const referenceHandlers = {
     onOpenReference,
     onReferenceHint,
@@ -332,7 +333,7 @@ export function AssistantMarkdownContent({
   };
   return (
     <>
-      {parseAssistantMarkdown(normalizedMarkdown).map((block, index) => {
+      {blocks.map((block, index) => {
         if (block.kind === "paragraph") {
           return (
             <p key={`paragraph-${index}`}>
@@ -353,8 +354,13 @@ export function AssistantMarkdownContent({
         }
         if (block.kind === "list") {
           const List = block.ordered ? "ol" : "ul";
+          const prevBlock = index > 0 ? blocks[index - 1] : null;
+          const followsColon = prevBlock?.kind === "paragraph" && prevBlock.text.trim().endsWith(":");
           return (
-            <List className="assistant-markdown-list" key={`list-${index}`}>
+            <List
+              className={followsColon ? "assistant-markdown-list assistant-markdown-list--follows-colon" : "assistant-markdown-list"}
+              key={`list-${index}`}
+            >
               {block.items.map((item, itemIndex) => (
                 <li key={`${itemIndex}-${item}`}>
                   {renderInlineMarkdown(

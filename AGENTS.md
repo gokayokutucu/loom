@@ -111,6 +111,8 @@ Before finishing any change:
 
 - npm run build
 - git diff --check
+- If the task changes React UI components, CSS styles, or renderer behavior, run:
+  `npm run electron:package:dev` to verify the packaged Electron app compiles and packages successfully.
 - Run targeted E2E when the task touches a tested feature
 - Run full E2E when broad architecture, routing, or test infrastructure changes occur
 

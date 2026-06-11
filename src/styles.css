@@ -3709,20 +3709,20 @@ kbd {
 
 .assistant-response-content h1.assistant-markdown-heading,
 .assistant-response-content h2.assistant-markdown-heading {
-  margin-top: 1.45em;
-  margin-bottom: 0.42em;
+  margin-top: 1.75em;
+  margin-bottom: 0.5em;
 }
 
 .assistant-response-content h3.assistant-markdown-heading {
-  margin-top: 1.28em;
-  margin-bottom: 0.36em;
+  margin-top: 1.5em;
+  margin-bottom: 0.4em;
 }
 
 .assistant-response-content h4.assistant-markdown-heading,
 .assistant-response-content h5.assistant-markdown-heading,
 .assistant-response-content h6.assistant-markdown-heading {
-  margin-top: 1.12em;
-  margin-bottom: 0.32em;
+  margin-top: 1.35em;
+  margin-bottom: 0.35em;
 }
 
 .assistant-response-content > .assistant-markdown-heading:first-child {
@@ -3750,15 +3750,28 @@ kbd {
 .assistant-markdown-list {
   display: grid;
   gap: 7px;
-  margin: 0;
+  margin: 12px 0;
   padding-left: 22px;
   color: var(--loom-text-primary);
   font-size: var(--font-body-size);
-  line-height: var(--font-body-line);
+  line-height: 1.65;
+}
+
+.assistant-markdown-list.assistant-markdown-list--follows-colon {
+  margin-top: 8px;
 }
 
 .assistant-markdown-list li {
   padding-left: 2px;
+}
+
+.assistant-response-content p {
+  margin-bottom: 8px;
+  line-height: 1.65;
+}
+
+.assistant-response-content p:last-child {
+  margin-bottom: 0;
 }
 
 .assistant-markdown-rule {
@@ -3780,7 +3793,7 @@ kbd {
   border-collapse: collapse;
   color: var(--loom-text-primary);
   font-size: var(--font-body-size);
-  line-height: var(--font-body-line);
+  line-height: 1.65;
 }
 
 .assistant-markdown-table th,
