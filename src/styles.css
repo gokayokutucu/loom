@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Literata:ital,opsz,wght@0,7..72,200..900;1,7..72,200..900&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500;1,300;1,400;1,500&family=Literata:ital,opsz,wght@0,7..72,200..900;1,7..72,200..900&display=swap');
 
 @font-face {
   font-family: "Symbols Nerd Font";
@@ -15,6 +15,14 @@
   --loom-response-font-weight: 300;
   --loom-response-line-height: 1.75;
   --loom-response-paragraph-spacing: 12px;
+
+  /* Code Typography System */
+  --loom-code-font-family: "DM Mono", monospace;
+  --loom-code-font-size: 14px;
+  --loom-code-font-weight: 400;
+  --loom-code-line-height: 1.7;
+  --loom-inline-code-font-size: 0.92em;
+  --loom-inline-code-font-weight: 500;
 
   color-scheme: dark;
   font-family: "Segoe UI Variable", "Segoe UI", system-ui, -apple-system,
@@ -1136,6 +1144,12 @@ textarea:focus-visible {
 
 .conversation-tab-main:active {
   cursor: pointer;
+}
+
+/* No focus outline on sidebar tabs: the tab's overflow clipping mangles it,
+   and focus is already shown via the .conversation-tab:focus-within background. */
+.conversation-tab-main:focus-visible {
+  outline: none;
 }
 
 .conversation-favicon {
@@ -3719,31 +3733,38 @@ kbd {
   letter-spacing: 0;
 }
 
-.assistant-response-content h1.assistant-markdown-heading,
+.assistant-response-content h1.assistant-markdown-heading {
+  font-size: 1.18em;
+  font-weight: 700;
+  line-height: 1.4;
+  margin-top: 1.4em;
+  margin-bottom: 0.4em;
+}
+
 .assistant-response-content h2.assistant-markdown-heading {
-  font-size: calc(var(--loom-response-font-size) + 4px);
-  line-height: 1.35;
-  margin-top: 1.75em;
-  margin-bottom: 0.5em;
-  font-weight: 600;
+  font-size: 1.12em;
+  font-weight: 700;
+  line-height: 1.4;
+  margin-top: 1.4em;
+  margin-bottom: 0.4em;
 }
 
 .assistant-response-content h3.assistant-markdown-heading {
-  font-size: calc(var(--loom-response-font-size) + 2px);
-  line-height: 1.4;
-  margin-top: 1.5em;
+  font-size: 1.05em;
+  font-weight: 650;
+  line-height: 1.45;
+  margin-top: 1.4em;
   margin-bottom: 0.4em;
-  font-weight: 600;
 }
 
 .assistant-response-content h4.assistant-markdown-heading,
 .assistant-response-content h5.assistant-markdown-heading,
 .assistant-response-content h6.assistant-markdown-heading {
-  font-size: var(--loom-response-font-size);
+  font-size: 1em;
+  font-weight: 650;
   line-height: 1.45;
-  margin-top: 1.35em;
-  margin-bottom: 0.35em;
-  font-weight: 600;
+  margin-top: 1.4em;
+  margin-bottom: 0.4em;
 }
 
 .assistant-response-content > .assistant-markdown-heading:first-child {
@@ -3892,12 +3913,18 @@ kbd {
   font-weight: var(--loom-response-font-weight);
 }
 
-/* Ensure code blocks and inline code maintain monospace font and weight */
-.assistant-code-block,
-.assistant-code-block code,
-.assistant-response-content code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace !important;
-  font-weight: 400 !important;
+/* Ensure code blocks and inline code maintain DM Mono font, size, weight, and line-height */
+.assistant-response-content :not(pre) > code {
+  font-family: var(--loom-code-font-family) !important;
+  font-size: var(--loom-inline-code-font-size) !important;
+  font-weight: var(--loom-inline-code-font-weight) !important;
+}
+
+.assistant-response-content pre > code {
+  font-family: var(--loom-code-font-family) !important;
+  font-size: var(--loom-code-font-size) !important;
+  font-weight: var(--loom-code-font-weight) !important;
+  line-height: var(--loom-code-line-height) !important;
 }
 
 .reference-fragment-scroll-highlight {
@@ -4064,15 +4091,15 @@ kbd {
 
 .assistant-code-block code {
   color: var(--syntax-text);
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 12px;
-  line-height: 1.55;
+  font-family: var(--loom-code-font-family);
+  font-size: var(--loom-code-font-size);
+  line-height: var(--loom-code-line-height);
   white-space: pre;
 }
 
 .assistant-code-line {
   display: block;
-  min-height: 1.55em;
+  min-height: calc(var(--loom-code-line-height) * 1em);
 }
 
 .syntax-comment {
