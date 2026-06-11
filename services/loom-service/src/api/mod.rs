@@ -57,6 +57,7 @@ pub fn router(
         secret_store: ProviderSecretStore::default(),
         operations,
         restart,
+        agent_runs: crate::agent_runtime::runtime::AgentRunStore::new(),
     };
 
     Router::new()

@@ -52,6 +52,17 @@ impl AgentRunStore {
         self.runs.lock().unwrap().is_empty()
     }
 
+    /// Cancellation placeholder: flags the run without interrupting it.
+    /// Returns true if the run exists.
+    pub fn request_cancel(&self, run_id: &AgentRunId) -> bool {
+        if let Some(run) = self.runs.lock().unwrap().get_mut(run_id) {
+            run.cancel_requested = true;
+            true
+        } else {
+            false
+        }
+    }
+
     fn finish(&self, run_id: &AgentRunId, status: AgentRunStatus, usage: Option<AgentUsage>) {
         if let Some(run) = self.runs.lock().unwrap().get_mut(run_id) {
             run.status = status;
@@ -63,6 +74,7 @@ impl AgentRunStore {
     }
 }
 
+#[derive(Debug)]
 pub struct AgentRuntime<R = ProviderRegistry> {
     pipeline: ProviderPipeline<R>,
     run_store: AgentRunStore,
@@ -73,14 +85,26 @@ where
     R: ProviderPipelineRegistry,
 {
     pub fn new(pipeline: ProviderPipeline<R>) -> Self {
+        Self::with_run_store(pipeline, AgentRunStore::new())
+    }
+
+    pub fn with_run_store(pipeline: ProviderPipeline<R>, run_store: AgentRunStore) -> Self {
         Self {
             pipeline,
-            run_store: AgentRunStore::new(),
+            run_store,
         }
     }
 
     pub fn run_store(&self) -> &AgentRunStore {
         &self.run_store
+    }
+
+    /// Cancellation placeholder: flags the stored run and asks the provider
+    /// pipeline to cancel the in-flight request. Cooperative mid-run
+    /// cancellation is deferred to AGENT-RUNTIME-CANCELLATION-001.
+    pub fn cancel_run(&self, run_id: &AgentRunId) -> bool {
+        self.run_store.request_cancel(run_id);
+        self.pipeline.cancel_generation(run_id.as_str())
     }
 
     pub fn execute_run(&self, request: AgentRuntimeRequest) -> impl Stream<Item = AgentEvent> {
@@ -284,94 +308,11 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent_runtime::test_support::make_test_runtime;
     use crate::agent_runtime::types::AgentRuntimeRequest;
-    use crate::providers::adapter::ProviderAdapter;
     use crate::providers::config::ProviderKind;
-    use crate::providers::contract::{ProviderContractCapabilities, ProviderUsageMetadata};
+    use crate::providers::contract::ProviderUsageMetadata;
     use crate::providers::types::{ProviderError, ProviderErrorKind};
-
-    #[derive(Debug, Clone, Default)]
-    struct FakeAdapterState {
-        cancel_called_with: Option<String>,
-        last_request: Option<ProviderContractRequest>,
-    }
-
-    #[derive(Debug, Clone)]
-    struct FakeProviderAdapter {
-        state: Arc<Mutex<FakeAdapterState>>,
-        events: Vec<ProviderContractEvent>,
-    }
-
-    impl ProviderAdapter for FakeProviderAdapter {
-        fn provider_kind(&self) -> ProviderKind {
-            ProviderKind::Ollama
-        }
-
-        fn provider_profile_id(&self) -> &str {
-            "fake-agent-provider"
-        }
-
-        fn capabilities(&self) -> ProviderContractCapabilities {
-            ProviderContractCapabilities {
-                supports_streaming: true,
-                supports_cancellation: true,
-                supports_usage_metadata: true,
-                supports_temperature: true,
-                supports_top_p: false,
-                supports_max_tokens: true,
-                supports_system_prompt: true,
-                supports_thinking_status: true,
-            }
-        }
-
-        fn stream_chat(
-            &self,
-            request: ProviderContractRequest,
-        ) -> crate::providers::adapter::ProviderEventStream {
-            self.state.lock().unwrap().last_request = Some(request);
-            let events = self.events.clone();
-            Box::pin(stream! {
-                for event in events {
-                    yield event;
-                }
-            })
-        }
-
-        fn cancel(&self, request_id: &str) -> bool {
-            self.state.lock().unwrap().cancel_called_with = Some(request_id.to_string());
-            true
-        }
-    }
-
-    #[derive(Debug, Clone)]
-    struct FakeRegistry {
-        adapter: FakeProviderAdapter,
-    }
-
-    impl ProviderPipelineRegistry for FakeRegistry {
-        type Adapter = FakeProviderAdapter;
-
-        fn default_generation_adapter(&self) -> &Self::Adapter {
-            &self.adapter
-        }
-
-        fn cancel_generation(&self, request_id: &str) -> bool {
-            self.adapter.cancel(request_id)
-        }
-    }
-
-    fn make_test_runtime(
-        events: Vec<ProviderContractEvent>,
-    ) -> (AgentRuntime<FakeRegistry>, Arc<Mutex<FakeAdapterState>>) {
-        let state = Arc::new(Mutex::new(FakeAdapterState::default()));
-        let adapter = FakeProviderAdapter {
-            state: state.clone(),
-            events,
-        };
-        let registry = FakeRegistry { adapter };
-        let pipeline = ProviderPipeline::from_registry(registry);
-        (AgentRuntime::new(pipeline), state)
-    }
 
     fn make_request(response_id: &str) -> AgentRuntimeRequest {
         AgentRuntimeRequest {

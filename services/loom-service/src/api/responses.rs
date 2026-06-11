@@ -472,6 +472,7 @@ mod tests {
             secret_store: crate::providers::secret_store::ProviderSecretStore::default(),
             operations: OperationTracker::default(),
             restart: RestartState::default(),
+            agent_runs: Default::default(),
         };
         LoomRepository::new(&state.database)
             .insert_loom(&NewLoom {
