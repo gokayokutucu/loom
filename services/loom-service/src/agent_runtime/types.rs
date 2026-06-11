@@ -144,6 +144,22 @@ pub struct AgentStep {
     pub error: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRuntimeProviderOptions {
+    pub temperature: Option<f32>,
+    pub max_output_tokens: Option<u32>,
+}
+
+impl Default for AgentRuntimeProviderOptions {
+    fn default() -> Self {
+        Self {
+            temperature: Some(0.7),
+            max_output_tokens: Some(1024),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRuntimeRequest {
@@ -155,6 +171,7 @@ pub struct AgentRuntimeRequest {
     pub model_id: Option<String>,
     /// Context Manager integration point (Phase 3). No assembly logic yet.
     pub context_snapshot_id: Option<String>,
+    pub provider_options: Option<AgentRuntimeProviderOptions>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

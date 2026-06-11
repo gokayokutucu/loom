@@ -7,7 +7,8 @@ use futures_util::StreamExt;
 
 use crate::agent_runtime::events::AgentEvent;
 use crate::agent_runtime::types::{
-    AgentRun, AgentRunId, AgentRunStatus, AgentRuntimeRequest, AgentStepKind, AgentUsage,
+    AgentRun, AgentRunId, AgentRunStatus, AgentRuntimeProviderOptions, AgentRuntimeRequest,
+    AgentStepKind, AgentUsage,
 };
 use crate::providers::adapter::ProviderRegistry;
 use crate::providers::contract::{
@@ -136,6 +137,15 @@ where
                 kind: AgentStepKind::ProviderCall,
             };
 
+            let default_opts = AgentRuntimeProviderOptions::default();
+            let provider_opts = request.provider_options.as_ref();
+            let temperature = provider_opts
+                .and_then(|o| o.temperature)
+                .or(default_opts.temperature);
+            let max_tokens = provider_opts
+                .and_then(|o| o.max_output_tokens)
+                .or(default_opts.max_output_tokens);
+
             let provider_request = ProviderContractRequest {
                 provider_kind,
                 provider_profile_id,
@@ -145,9 +155,9 @@ where
                     content: request.prompt.clone(),
                 }],
                 options: ProviderContractOptions {
-                    temperature: Some(0.7),
+                    temperature,
                     top_p: None,
-                    max_tokens: Some(1024),
+                    max_tokens,
                     context_tokens: Some(2048),
                     thinking: Some(false),
                 },
@@ -283,6 +293,7 @@ mod tests {
     #[derive(Debug, Clone, Default)]
     struct FakeAdapterState {
         cancel_called_with: Option<String>,
+        last_request: Option<ProviderContractRequest>,
     }
 
     #[derive(Debug, Clone)]
@@ -315,8 +326,9 @@ mod tests {
 
         fn stream_chat(
             &self,
-            _request: ProviderContractRequest,
+            request: ProviderContractRequest,
         ) -> crate::providers::adapter::ProviderEventStream {
+            self.state.lock().unwrap().last_request = Some(request);
             let events = self.events.clone();
             Box::pin(stream! {
                 for event in events {
@@ -370,6 +382,7 @@ mod tests {
             provider_profile_id: None,
             model_id: None,
             context_snapshot_id: None,
+            provider_options: None,
         }
     }
 
@@ -725,5 +738,41 @@ mod tests {
             event,
             AgentEvent::ProviderDelta { ref delta, .. } if delta == "[sanitized thinking]"
         ));
+    }
+
+    #[tokio::test]
+    async fn test_agent_runtime_maps_default_provider_options() {
+        let events = vec![ProviderContractEvent::Completed {
+            done_reason: Some("stop".to_string()),
+            usage: ProviderUsageMetadata::unavailable("no-usage"),
+        }];
+        let (runtime, state) = make_test_runtime(events);
+        let request = make_request("test-response-default-opts");
+
+        let _ = runtime.execute_run(request).collect::<Vec<_>>().await;
+
+        let captured_req = state.lock().unwrap().last_request.clone().unwrap();
+        assert_eq!(captured_req.options.temperature, Some(0.7));
+        assert_eq!(captured_req.options.max_tokens, Some(1024));
+    }
+
+    #[tokio::test]
+    async fn test_agent_runtime_maps_custom_provider_options() {
+        let events = vec![ProviderContractEvent::Completed {
+            done_reason: Some("stop".to_string()),
+            usage: ProviderUsageMetadata::unavailable("no-usage"),
+        }];
+        let (runtime, state) = make_test_runtime(events);
+        let mut request = make_request("test-response-custom-opts");
+        request.provider_options = Some(AgentRuntimeProviderOptions {
+            temperature: Some(0.4),
+            max_output_tokens: Some(512),
+        });
+
+        let _ = runtime.execute_run(request).collect::<Vec<_>>().await;
+
+        let captured_req = state.lock().unwrap().last_request.clone().unwrap();
+        assert_eq!(captured_req.options.temperature, Some(0.4));
+        assert_eq!(captured_req.options.max_tokens, Some(512));
     }
 }
