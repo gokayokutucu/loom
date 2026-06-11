@@ -4,6 +4,7 @@ use std::sync::{Arc, Mutex};
 use async_stream::stream;
 use futures_util::Stream;
 use futures_util::StreamExt;
+use tokio::sync::watch;
 
 use crate::agent_runtime::events::AgentEvent;
 use crate::agent_runtime::types::{
@@ -29,6 +30,19 @@ fn now_epoch_ms() -> u64 {
 #[derive(Debug, Clone, Default)]
 pub struct AgentRunStore {
     runs: Arc<Mutex<HashMap<AgentRunId, AgentRun>>>,
+    cancellation_signals: Arc<Mutex<HashMap<AgentRunId, watch::Sender<bool>>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentCancellationOutcome {
+    NotFound,
+    Cancelled {
+        run: AgentRun,
+        newly_requested: bool,
+    },
+    Terminal {
+        run: AgentRun,
+    },
 }
 
 impl AgentRunStore {
@@ -36,8 +50,15 @@ impl AgentRunStore {
         Self::default()
     }
 
-    pub fn insert(&self, run: AgentRun) {
-        self.runs.lock().unwrap().insert(run.run_id.clone(), run);
+    pub fn insert(&self, run: AgentRun) -> watch::Receiver<bool> {
+        let run_id = run.run_id.clone();
+        let (sender, receiver) = watch::channel(false);
+        self.runs.lock().unwrap().insert(run_id.clone(), run);
+        self.cancellation_signals
+            .lock()
+            .unwrap()
+            .insert(run_id, sender);
+        receiver
     }
 
     pub fn get(&self, run_id: &AgentRunId) -> Option<AgentRun> {
@@ -52,25 +73,61 @@ impl AgentRunStore {
         self.runs.lock().unwrap().is_empty()
     }
 
-    /// Cancellation placeholder: flags the run without interrupting it.
-    /// Returns true if the run exists.
-    pub fn request_cancel(&self, run_id: &AgentRunId) -> bool {
-        if let Some(run) = self.runs.lock().unwrap().get_mut(run_id) {
-            run.cancel_requested = true;
-            true
-        } else {
-            false
+    pub fn request_cancel(&self, run_id: &AgentRunId) -> AgentCancellationOutcome {
+        let outcome = {
+            let mut runs = self.runs.lock().unwrap();
+            let Some(run) = runs.get_mut(run_id) else {
+                return AgentCancellationOutcome::NotFound;
+            };
+
+            match run.status {
+                AgentRunStatus::Pending | AgentRunStatus::Running => {
+                    let newly_requested = !run.cancel_requested;
+                    run.cancel_requested = true;
+                    run.status = AgentRunStatus::Cancelled;
+                    run.completed_at.get_or_insert_with(now_epoch_ms);
+                    AgentCancellationOutcome::Cancelled {
+                        run: run.clone(),
+                        newly_requested,
+                    }
+                }
+                AgentRunStatus::Cancelled => AgentCancellationOutcome::Cancelled {
+                    run: run.clone(),
+                    newly_requested: false,
+                },
+                AgentRunStatus::Completed | AgentRunStatus::Failed => {
+                    AgentCancellationOutcome::Terminal { run: run.clone() }
+                }
+            }
+        };
+
+        if matches!(
+            outcome,
+            AgentCancellationOutcome::Cancelled {
+                newly_requested: true,
+                ..
+            }
+        ) {
+            if let Some(sender) = self.cancellation_signals.lock().unwrap().get(run_id) {
+                let _ = sender.send(true);
+            }
         }
+
+        outcome
     }
 
     fn finish(&self, run_id: &AgentRunId, status: AgentRunStatus, usage: Option<AgentUsage>) {
         if let Some(run) = self.runs.lock().unwrap().get_mut(run_id) {
+            if run.status == AgentRunStatus::Cancelled && status != AgentRunStatus::Cancelled {
+                return;
+            }
             run.status = status;
             run.completed_at = Some(now_epoch_ms());
             if usage.is_some() {
                 run.usage = usage;
             }
         }
+        self.cancellation_signals.lock().unwrap().remove(run_id);
     }
 }
 
@@ -99,12 +156,21 @@ where
         &self.run_store
     }
 
-    /// Cancellation placeholder: flags the stored run and asks the provider
-    /// pipeline to cancel the in-flight request. Cooperative mid-run
-    /// cancellation is deferred to AGENT-RUNTIME-CANCELLATION-001.
-    pub fn cancel_run(&self, run_id: &AgentRunId) -> bool {
-        self.run_store.request_cancel(run_id);
-        self.pipeline.cancel_generation(run_id.as_str())
+    pub fn cancel_run(&self, run_id: &AgentRunId) -> AgentCancellationOutcome {
+        let outcome = self.run_store.request_cancel(run_id);
+        if matches!(
+            outcome,
+            AgentCancellationOutcome::Cancelled {
+                newly_requested: true,
+                ..
+            }
+        ) {
+            // The runtime-owned signal is authoritative. Provider cancellation
+            // is best-effort because some adapters cancel by dropping the
+            // stream rather than exposing an active request registry.
+            self.pipeline.cancel_generation(run_id.as_str());
+        }
+        outcome
     }
 
     pub fn execute_run(&self, request: AgentRuntimeRequest) -> impl Stream<Item = AgentEvent> {
@@ -124,7 +190,7 @@ where
                 .or(profile.default_model)
                 .unwrap_or_else(|| "default-model".to_string());
 
-            run_store.insert(AgentRun {
+            let mut cancel_rx = run_store.insert(AgentRun {
                 run_id: AgentRunId::from(run_id.clone()),
                 loom_id: request.loom_id.clone(),
                 response_id: request.response_id.clone(),
@@ -201,7 +267,23 @@ where
             let mut completed_successfully = false;
             let mut run_usage: Option<AgentUsage> = None;
 
-            while let Some(event) = provider_stream.next().await {
+            loop {
+                let next_event = tokio::select! {
+                    biased;
+                    changed = cancel_rx.changed() => {
+                        if changed.is_ok() && *cancel_rx.borrow() {
+                            run_store.finish(&store_run_id, AgentRunStatus::Cancelled, None);
+                            yield AgentEvent::RunCancelled { run_id: run_id.clone() };
+                            return;
+                        }
+                        continue;
+                    }
+                    event = provider_stream.next() => event,
+                };
+
+                let Some(event) = next_event else {
+                    break;
+                };
                 match event {
                     ProviderContractEvent::Delta { text } => {
                         yield AgentEvent::provider_delta(
@@ -252,6 +334,12 @@ where
                     run_id: run_id.clone(),
                     error_message: "Provider stream ended abruptly without completion event".to_string(),
                 };
+                return;
+            }
+
+            if *cancel_rx.borrow() {
+                run_store.finish(&store_run_id, AgentRunStatus::Cancelled, None);
+                yield AgentEvent::RunCancelled { run_id: run_id.clone() };
                 return;
             }
 

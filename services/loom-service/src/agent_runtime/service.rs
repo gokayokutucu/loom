@@ -3,7 +3,7 @@ use std::sync::Arc;
 use futures_util::Stream;
 
 use crate::agent_runtime::events::AgentEvent;
-use crate::agent_runtime::runtime::{AgentRunStore, AgentRuntime};
+use crate::agent_runtime::runtime::{AgentCancellationOutcome, AgentRunStore, AgentRuntime};
 use crate::agent_runtime::types::{AgentRunId, AgentRuntimeRequest};
 use crate::providers::adapter::ProviderRegistry;
 use crate::providers::ollama::OllamaRuntime;
@@ -58,10 +58,7 @@ where
         self.runtime.run_store()
     }
 
-    /// Cancellation placeholder: flags the run as cancel-requested and asks the
-    /// provider pipeline to cancel the in-flight request. Cooperative mid-run
-    /// cancellation is deferred to AGENT-RUNTIME-CANCELLATION-001.
-    pub fn cancel(&self, run_id: &AgentRunId) -> bool {
+    pub fn cancel(&self, run_id: &AgentRunId) -> AgentCancellationOutcome {
         self.runtime.cancel_run(run_id)
     }
 }
@@ -69,11 +66,15 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent_runtime::test_support::{make_test_service, FakeRegistry};
+    use crate::agent_runtime::test_support::{
+        make_pending_test_service, make_test_service, FakeRegistry,
+    };
     use crate::agent_runtime::types::{
         AgentRunStatus, AgentRuntimeProviderOptions, AgentRuntimeRequest,
     };
+    use crate::providers::config::ProviderKind;
     use crate::providers::contract::{ProviderContractEvent, ProviderUsageMetadata};
+    use crate::providers::types::{ProviderError, ProviderErrorKind};
     use futures_util::StreamExt;
 
     fn make_request(response_id: &str) -> AgentRuntimeRequest {
@@ -201,22 +202,88 @@ mod tests {
 
     #[tokio::test]
     async fn test_service_cancel_flags_run_and_calls_pipeline() {
-        let (service, state) = make_test_service(completed_events());
+        let (service, state) = make_pending_test_service(vec![ProviderContractEvent::Delta {
+            text: "partial".to_string(),
+        }]);
         let run_id = AgentRunId::from("service-cancel");
 
-        let _ = service
+        let collect = service
             .execute(make_request("service-cancel"))
-            .collect::<Vec<_>>()
-            .await;
+            .collect::<Vec<_>>();
+        let cancel = async {
+            while service.run_store().get(&run_id).is_none() {
+                tokio::task::yield_now().await;
+            }
+            service.cancel(&run_id)
+        };
+        let (events, outcome) = tokio::join!(collect, cancel);
 
-        let accepted = service.cancel(&run_id);
-        assert!(accepted);
+        assert!(matches!(
+            outcome,
+            AgentCancellationOutcome::Cancelled {
+                newly_requested: true,
+                ..
+            }
+        ));
         assert_eq!(
             state.lock().unwrap().cancel_called_with.as_deref(),
             Some("service-cancel")
         );
         let run = service.run_store().get(&run_id).expect("run recorded");
         assert!(run.cancel_requested);
+        assert_eq!(run.status, AgentRunStatus::Cancelled);
+        assert!(matches!(
+            events.last(),
+            Some(AgentEvent::RunCancelled { run_id }) if run_id == "service-cancel"
+        ));
+
+        let repeated = service.cancel(&run_id);
+        assert!(matches!(
+            repeated,
+            AgentCancellationOutcome::Cancelled {
+                newly_requested: false,
+                ..
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn test_service_cancel_preserves_completed_run() {
+        let (service, state) = make_test_service(completed_events());
+        let run_id = AgentRunId::from("service-completed");
+        let _ = service
+            .execute(make_request("service-completed"))
+            .collect::<Vec<_>>()
+            .await;
+
+        let outcome = service.cancel(&run_id);
+
+        assert!(matches!(
+            outcome,
+            AgentCancellationOutcome::Terminal { ref run }
+                if run.status == AgentRunStatus::Completed
+        ));
+        assert!(state.lock().unwrap().cancel_called_with.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_service_cancel_preserves_failed_run() {
+        let error = ProviderError::new(ProviderErrorKind::RuntimeUnavailable, ProviderKind::Ollama);
+        let (service, state) = make_test_service(vec![ProviderContractEvent::Error { error }]);
+        let run_id = AgentRunId::from("service-failed");
+        let _ = service
+            .execute(make_request("service-failed"))
+            .collect::<Vec<_>>()
+            .await;
+
+        let outcome = service.cancel(&run_id);
+
+        assert!(matches!(
+            outcome,
+            AgentCancellationOutcome::Terminal { ref run }
+                if run.status == AgentRunStatus::Failed
+        ));
+        assert!(state.lock().unwrap().cancel_called_with.is_none());
     }
 
     #[tokio::test]

@@ -101,14 +101,16 @@ pub fn router_with_experimental(
     };
 
     let experimental_routes = if experimental.agent_runtime_api {
-        tracing::info!(
-            path = agent_experimental::EXPERIMENTAL_AGENT_RUN_PATH,
-            "experimental agent runtime API enabled"
-        );
-        Router::new().route(
-            agent_experimental::EXPERIMENTAL_AGENT_RUN_PATH,
-            post(agent_experimental::run),
-        )
+        tracing::info!("experimental agent runtime API enabled");
+        Router::new()
+            .route(
+                agent_experimental::EXPERIMENTAL_AGENT_RUN_PATH,
+                post(agent_experimental::run),
+            )
+            .route(
+                agent_experimental::EXPERIMENTAL_AGENT_CANCEL_PATH,
+                post(agent_experimental::cancel),
+            )
     } else {
         Router::new()
     };

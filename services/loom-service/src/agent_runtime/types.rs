@@ -125,7 +125,7 @@ pub struct AgentRun {
     pub status: AgentRunStatus,
     pub started_at: u64,
     pub completed_at: Option<u64>,
-    /// Cancellation placeholder: cooperative cancellation lands in a later phase.
+    /// Safe process-local cancellation metadata only.
     pub cancel_requested: bool,
     pub provider_profile_id: Option<String>,
     pub model_id: Option<String>,

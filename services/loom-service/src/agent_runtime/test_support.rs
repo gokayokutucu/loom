@@ -23,6 +23,7 @@ pub struct FakeAdapterState {
 pub struct FakeProviderAdapter {
     pub state: Arc<Mutex<FakeAdapterState>>,
     pub events: Vec<ProviderContractEvent>,
+    pub hold_open_after_events: bool,
 }
 
 impl ProviderAdapter for FakeProviderAdapter {
@@ -53,9 +54,13 @@ impl ProviderAdapter for FakeProviderAdapter {
     ) -> crate::providers::adapter::ProviderEventStream {
         self.state.lock().unwrap().last_request = Some(request);
         let events = self.events.clone();
+        let hold_open_after_events = self.hold_open_after_events;
         Box::pin(stream! {
             for event in events {
                 yield event;
+            }
+            if hold_open_after_events {
+                std::future::pending::<()>().await;
             }
         })
     }
@@ -90,9 +95,29 @@ pub fn make_test_pipeline(
     let adapter = FakeProviderAdapter {
         state: state.clone(),
         events,
+        hold_open_after_events: false,
     };
     let registry = FakeRegistry { adapter };
     (ProviderPipeline::from_registry(registry), state)
+}
+
+pub fn make_pending_test_service(
+    events: Vec<ProviderContractEvent>,
+) -> (
+    AgentRuntimeService<FakeRegistry>,
+    Arc<Mutex<FakeAdapterState>>,
+) {
+    let state = Arc::new(Mutex::new(FakeAdapterState::default()));
+    let adapter = FakeProviderAdapter {
+        state: state.clone(),
+        events,
+        hold_open_after_events: true,
+    };
+    let registry = FakeRegistry { adapter };
+    (
+        AgentRuntimeService::new(ProviderPipeline::from_registry(registry)),
+        state,
+    )
 }
 
 pub fn make_test_runtime(
