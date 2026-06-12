@@ -5,12 +5,12 @@ Create a clean navigation list variant for the expanded conversation minimap out
 ## Technical Scope
 
 ### 1. Component Markup Modification
-- **File**: [ConversationScrollMinimap.tsx](file:///Users/gokay/Documents/Workspace/LoomAI/src/components/ConversationScrollMinimap.tsx)
+- **File**: [ConversationScrollMinimap.tsx](../../src/components/ConversationScrollMinimap.tsx)
 - **Change**: Omit rendering `<span className="conversation-minimap__outline-marker">` completely for parent response rows so there is no marker element in the DOM for them.
 - **Child Rows**: Keep rendering `<span className="conversation-minimap__outline-marker conversation-minimap__outline-marker--revision">` before the label for revision child rows.
 
 ### 2. Styling Modifications
-- **File**: [styles.css](file:///Users/gokay/Documents/Workspace/LoomAI/src/styles.css)
+- **File**: [styles.css](../../src/styles.css)
 - **Change**:
   - Update `.conversation-minimap__outline-row` to use `display: block;` (or a single-column layout) and slightly increase padding (`padding: 5px 10px;`) for a clean, text-only list feel.
   - Update `.conversation-minimap__outline-row--child` to override layout as `display: grid; grid-template-columns: 14px minmax(0, 1fr); gap: 8px; align-items: center;` to preserve left-side layout for indented child rows.

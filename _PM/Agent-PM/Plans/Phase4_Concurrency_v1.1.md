@@ -15,7 +15,7 @@ Ensure local generations (Ollama) are serialized/queued to prevent machine overl
 ## Proposed Changes
 
 ### Policy Helper Layer
-#### [NEW] [localGenerationQueue.ts](file:///Users/gokay/Documents/Workspace/LoomAI/src/services/localGenerationQueue.ts)
+#### [NEW] [localGenerationQueue.ts](../../src/services/localGenerationQueue.ts)
 - Add `ActiveMainGenerationInfo` interface:
   ```typescript
   export interface ActiveMainGenerationInfo {
@@ -29,12 +29,12 @@ Ensure local generations (Ollama) are serialized/queued to prevent machine overl
   ```
 - Implement `computeMainGenerationConcurrencyDecision(input: { providerProfileId, providerKind, modelId, targetLoomId, activeRuns })` to return `"allow" | "queue" | "block_same_loom" | "block_limit_exceeded"`.
 
-#### [MODIFY] [modelProviders.ts](file:///Users/gokay/Documents/Workspace/LoomAI/src/services/modelProviders.ts)
+#### [MODIFY] [modelProviders.ts](../../src/services/modelProviders.ts)
 - Keep `computeQuickAskBlockedReason` signature but call it with local-only run status in `App.tsx`.
 
 ### UI Components
 
-#### [MODIFY] [AskPopup.tsx](file:///Users/gokay/Documents/Workspace/LoomAI/src/components/AskPopup.tsx)
+#### [MODIFY] [AskPopup.tsx](../../src/components/AskPopup.tsx)
 - Check `submitBlockedReason` in `onKeyDown` to prevent Enter keypress submission when blocked.
 
 ---

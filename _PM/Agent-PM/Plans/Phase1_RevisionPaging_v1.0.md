@@ -35,20 +35,20 @@ Ensure that paging through message revisions:
 
 ### Logic / Services
 
-#### [NEW] [revisionPaging.ts](file:///Users/gokay/Documents/Workspace/LoomAI/src/services/revisionPaging.ts)
+#### [NEW] [revisionPaging.ts](../../src/services/revisionPaging.ts)
 - Implement `resolveRevisionTarget` logic to resolve the target pane, loomId, and responseId for a given revision index.
 
-#### [NEW] [revisionPaging.test.ts](file:///Users/gokay/Documents/Workspace/LoomAI/src/services/revisionPaging.test.ts)
+#### [NEW] [revisionPaging.test.ts](../../src/services/revisionPaging.test.ts)
 - Add Vitest unit tests verifying `resolveRevisionTarget` targets `main-origin` for `1/x` (index 0) and `weft` pane/response for `2/x+`.
 
 ### Frontend Styling
 
-#### [MODIFY] [styles.css](file:///Users/gokay/Documents/Workspace/LoomAI/src/styles.css)
+#### [MODIFY] [styles.css](../../src/styles.css)
 - Define `.revision-focus-highlight`, `.revision-focus-highlight--prompt`, `.revision-focus-highlight--response` styling and animation to temporarily highlight the elements.
 
 ### Frontend Components
 
-#### [MODIFY] [App.tsx](file:///Users/gokay/Documents/Workspace/LoomAI/src/App.tsx)
+#### [MODIFY] [App.tsx](../../src/App.tsx)
 - Define `highlightedRevisionResponseId` state and trigger highlight on navigation with a 1500ms timeout.
 - Implement `onPromptRevisionNavigate` handler that invokes `resolveRevisionTarget` and triggers scroll/focus/highlight.
 - Support `smooth` parameter in `scrollElementIntoViewFromCurrent` to animate scrolling.

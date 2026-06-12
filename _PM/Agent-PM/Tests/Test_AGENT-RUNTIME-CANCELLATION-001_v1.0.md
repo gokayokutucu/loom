@@ -19,5 +19,5 @@
 - Frontend unit suite: 543 passed.
 - `npm run build`: passed.
 - `./loom.sh --publish --test`: passed after running outside the restricted network sandbox required by an existing localhost-binding Ollama test.
-- Fresh service: PID `8235`, port `17633`, binary `services/loom-service/target/debug/loom-service`, inode `186521074`, health `ready`.
+- Fresh service: PID observed locally, port `17633`, binary `services/loom-service/target/debug/loom-service`, inode omitted, health `ready`.
 - Live unknown-run proof: `404` with `{ "runId": "live-unknown", "status": "not_found", "cancelled": false }`.

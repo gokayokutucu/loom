@@ -10,12 +10,12 @@ Implement the morphing expanded ruler design directly on the `feature/scroll-min
 ## Technical Scope
 
 ### 1. Component Modifications
-- **File**: [ConversationScrollMinimap.tsx](file:///Users/gokay/Documents/Workspace/LoomAI/src/components/ConversationScrollMinimap.tsx)
+- **File**: [ConversationScrollMinimap.tsx](../../src/components/ConversationScrollMinimap.tsx)
 - **Changes**:
   - Re-add the `<span aria-hidden="true" className={["conversation-minimap__outline-marker", `conversation-minimap__outline-marker--${item.type}`].join(" ")} />` element to the parent `.conversation-minimap__outline-row` button, placing it *after* the label span.
 
 ### 2. Style Modifications in styles.css
-- **File**: [styles.css](file:///Users/gokay/Documents/Workspace/LoomAI/src/styles.css)
+- **File**: [styles.css](../../src/styles.css)
 - **Changes**:
   - Add transition support (`opacity 140ms ease 150ms`) and `opacity: 1` to `.conversation-minimap__ticks-container`.
   - Set `opacity: 0` and `transition-delay: 0s` on `.conversation-minimap__ticks-container` when `.conversation-minimap` is hovered or focused-within.
@@ -29,7 +29,7 @@ Implement the morphing expanded ruler design directly on the `feature/scroll-min
   - Add active styles for revision markers to highlight the L-shaped hook to accent color.
 
 ### 3. Testing
-- **File**: [conversation-minimap.spec.ts](file:///Users/gokay/Documents/Workspace/LoomAI/e2e/conversation-minimap.spec.ts)
+- **File**: [conversation-minimap.spec.ts](../../e2e/conversation-minimap.spec.ts)
 - **Changes**:
   - Assert that when the outline is open, the ticks container has `opacity: 0`.
   - Assert that when the outline is closed, the ticks container has `opacity: 1`.

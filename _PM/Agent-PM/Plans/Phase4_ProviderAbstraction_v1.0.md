@@ -27,7 +27,7 @@ Objective: Introduce a frontend-side provider profile abstraction and discovery 
 
 We will define the new types and functions in `src/services/providerDiscovery.ts`.
 
-#### [NEW] [providerDiscovery.ts](file:///Users/gokay/Documents/Workspace/LoomAI/src/services/providerDiscovery.ts)
+#### [NEW] [providerDiscovery.ts](../../src/services/providerDiscovery.ts)
 - Define `ProviderProfile` structure:
 ```typescript
 import type { RuntimeModelProviderStatus, RuntimeModelItem } from "../engine";
@@ -49,7 +49,7 @@ export interface ProviderProfile {
 - Implement the normalization helper `normalizeRuntimeProvider(status: RuntimeModelProviderStatus, models?: RuntimeModelItem[]): ProviderProfile`.
 - Keep secrets safe: do not accept or process secret values (only read `requiresSecret` and `secretStatus` from the status object).
 
-#### [NEW] [providerDiscovery.test.ts](file:///Users/gokay/Documents/Workspace/LoomAI/src/services/providerDiscovery.test.ts)
+#### [NEW] [providerDiscovery.test.ts](../../src/services/providerDiscovery.test.ts)
 - Add Vitest tests for `normalizeRuntimeProvider` mapping:
   - Default Ollama/local provider mapping (`ollama-local`).
   - `litellm-sandbox` mapping (`sandbox`).

@@ -23,14 +23,14 @@
 - [x] `git diff --check`
   - Result before artifacts: passed.
 - [x] `curl -sf http://127.0.0.1:17633/health`
-  - Result: passed; runtime reports `loom-service`, `ready`, process id `31040`.
+  - Result: passed; runtime reports `loom-service`, `ready`, process id observed locally.
 
 ## Runtime Freshness
 
 - Service URL: `http://127.0.0.1:17633`
 - Runtime owner: Electron
-- Process ID: `31040`
-- Binary path: `/Users/gokay/Documents/Workspace/LoomAI/services/loom-service/target/debug/loom-service`
+- Process ID: observed locally
+- Binary path: `<repo-root>/services/loom-service/target/debug/loom-service`
 - Binary modified at: `2026-06-08T19:15:50Z`
 - Service start time: `2026-06-08T19:21:09Z`
 - Runtime binary mismatch: no
