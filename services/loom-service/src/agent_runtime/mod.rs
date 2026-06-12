@@ -8,6 +8,7 @@
 pub mod events;
 pub mod runtime;
 pub mod service;
+pub mod tool_registry;
 pub mod tools;
 pub mod types;
 

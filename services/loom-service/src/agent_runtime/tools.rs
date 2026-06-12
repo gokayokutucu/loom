@@ -250,11 +250,13 @@ fn now_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
+use crate::agent_runtime::tool_registry::ToolRegistry;
+
 /// Boundary, not executor: evaluates tool requests against an explicit policy
 /// and returns safe placeholder results. No tool is ever executed here.
 #[derive(Debug, Clone, Default)]
 pub struct ToolRuntimeBoundary {
-    policy: HashMap<ToolName, ToolPermissionStatus>,
+    registry: ToolRegistry,
 }
 
 impl ToolRuntimeBoundary {
@@ -264,32 +266,63 @@ impl ToolRuntimeBoundary {
         Self::default()
     }
 
+    pub fn with_registry(registry: ToolRegistry) -> Self {
+        Self { registry }
+    }
+
     pub fn with_policy(policy: HashMap<ToolName, ToolPermissionStatus>) -> Self {
-        Self { policy }
+        use crate::agent_runtime::tool_registry::{
+            RegisteredTool, ToolAvailability, ToolPermissionRequirement,
+        };
+        let mut registry = ToolRegistry::new();
+        for (name, status) in policy {
+            let (availability, permission_requirement, enabled) = match status {
+                ToolPermissionStatus::Allowed => (
+                    ToolAvailability::Available,
+                    ToolPermissionRequirement::AlwaysAllowed,
+                    true,
+                ),
+                ToolPermissionStatus::Denied => (
+                    ToolAvailability::Available,
+                    ToolPermissionRequirement::DenyByDefault,
+                    true,
+                ),
+                ToolPermissionStatus::RequiresUserApproval => (
+                    ToolAvailability::Available,
+                    ToolPermissionRequirement::RequiresUserApproval,
+                    true,
+                ),
+                ToolPermissionStatus::NotAvailable => (
+                    ToolAvailability::NotAvailable,
+                    ToolPermissionRequirement::AlwaysAllowed,
+                    true,
+                ),
+                ToolPermissionStatus::Disabled => (
+                    ToolAvailability::Available,
+                    ToolPermissionRequirement::Disabled,
+                    false,
+                ),
+                ToolPermissionStatus::UnknownTool => {
+                    continue;
+                }
+            };
+            registry.register(RegisteredTool {
+                name: name.clone(),
+                display_name: format!("Policy Tool: {}", name),
+                description: "Auto-generated from mock policy".to_string(),
+                category: "policy".to_string(),
+                availability,
+                permission_requirement,
+                argument_schema: None,
+                output_schema: None,
+                enabled,
+            });
+        }
+        Self { registry }
     }
 
     pub fn evaluate_permission(&self, tool_name: &ToolName) -> ToolPermissionDecision {
-        match self.policy.get(tool_name) {
-            None => ToolPermissionDecision::new(
-                ToolPermissionStatus::UnknownTool,
-                "tool is not registered with the tool runtime",
-            ),
-            Some(status) => ToolPermissionDecision::new(
-                *status,
-                match status {
-                    ToolPermissionStatus::Allowed => "tool is registered and permitted",
-                    ToolPermissionStatus::Denied => "tool is denied by policy",
-                    ToolPermissionStatus::RequiresUserApproval => {
-                        "tool requires explicit user approval"
-                    }
-                    ToolPermissionStatus::NotAvailable => "tool is not available in this build",
-                    ToolPermissionStatus::Disabled => "tool is disabled",
-                    ToolPermissionStatus::UnknownTool => {
-                        "tool is not registered with the tool runtime"
-                    }
-                },
-            ),
-        }
+        self.registry.permission_for(tool_name)
     }
 
     /// Evaluates a request and returns a safe result without executing
@@ -473,6 +506,59 @@ mod tests {
                 "found forbidden text: {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn boundary_with_registry_resolves_and_executes_nothing() {
+        use crate::agent_runtime::tool_registry::{
+            RegisteredTool, ToolAvailability, ToolPermissionRequirement,
+        };
+        let mut registry = ToolRegistry::new();
+
+        registry.register(RegisteredTool {
+            name: ToolName::from("my_always_allowed_tool"),
+            display_name: "Allowed".to_string(),
+            description: "allowed tool".to_string(),
+            category: "test".to_string(),
+            availability: ToolAvailability::Available,
+            permission_requirement: ToolPermissionRequirement::AlwaysAllowed,
+            argument_schema: None,
+            output_schema: None,
+            enabled: true,
+        });
+
+        registry.register(RegisteredTool {
+            name: ToolName::from("my_approval_tool"),
+            display_name: "Approval".to_string(),
+            description: "approval tool".to_string(),
+            category: "test".to_string(),
+            availability: ToolAvailability::Available,
+            permission_requirement: ToolPermissionRequirement::RequiresUserApproval,
+            argument_schema: None,
+            output_schema: None,
+            enabled: true,
+        });
+
+        let boundary = ToolRuntimeBoundary::with_registry(registry);
+
+        // Always allowed tool should be skipped with implementation error
+        let req_allowed = make_request("my_always_allowed_tool", json!({}));
+        let res_allowed = boundary.invoke(&req_allowed);
+        assert_eq!(res_allowed.status, ToolInvocationStatus::Skipped);
+        assert_eq!(res_allowed.permission.status, ToolPermissionStatus::Allowed);
+        assert_eq!(
+            res_allowed.error.as_ref().map(|e| e.code.as_str()),
+            Some("TOOL_EXECUTION_NOT_IMPLEMENTED")
+        );
+
+        // Approval tool should be skipped (deferred execution)
+        let req_approval = make_request("my_approval_tool", json!({}));
+        let res_approval = boundary.invoke(&req_approval);
+        assert_eq!(res_approval.status, ToolInvocationStatus::Skipped);
+        assert_eq!(
+            res_approval.permission.status,
+            ToolPermissionStatus::RequiresUserApproval
+        );
     }
 
     #[test]
