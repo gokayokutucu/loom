@@ -15,4 +15,4 @@
 - The inspector is a manual proof surface, not a product Agent composer.
 - The inspector does not expose cancellation controls; it can display a terminal cancellation event if the run is cancelled through the experimental API.
 - Runs and event rows are intentionally lost when the Settings modal closes or the app reloads.
-- Packaged `Loom.app` was built successfully. A first startup correctly rejected the already-running debug service with `runtime_binary_mismatch`; the isolated-port retry could not be authorized by the execution environment, so a clean packaged window startup remains a follow-up smoke.
+- Packaged `Loom.app` was built successfully. Packaged startup smoke verified that it starts cleanly, the sidecar is ready, no binary mismatch occurs, and the inspector UI remains gated.
