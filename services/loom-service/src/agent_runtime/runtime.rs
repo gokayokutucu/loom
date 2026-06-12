@@ -7,9 +7,12 @@ use futures_util::StreamExt;
 use tokio::sync::watch;
 
 use crate::agent_runtime::events::AgentEvent;
+use crate::agent_runtime::tools::{
+    SafeToolArguments, ToolCallId, ToolInvocationRequest, ToolName, ToolRuntimeBoundary,
+};
 use crate::agent_runtime::types::{
     AgentRun, AgentRunId, AgentRunStatus, AgentRuntimeProviderOptions, AgentRuntimeRequest,
-    AgentStepKind, AgentUsage,
+    AgentStepId, AgentStepKind, AgentUsage,
 };
 use crate::providers::adapter::ProviderRegistry;
 use crate::providers::contract::{
@@ -351,16 +354,38 @@ where
                 step_id: tool_step_id.clone(),
                 kind: AgentStepKind::ToolCallPlaceholder,
             };
+            let tool_boundary = ToolRuntimeBoundary::new();
+            let tool_request = ToolInvocationRequest {
+                call_id: ToolCallId::from(format!("{tool_step_id}-call")),
+                run_id: AgentRunId::from(run_id.clone()),
+                step_id: Some(AgentStepId::from(tool_step_id.clone())),
+                tool_name: ToolName::from("dummy_placeholder_tool"),
+                arguments: SafeToolArguments::empty(),
+                requested_at: now_epoch_ms(),
+                origin: Some("placeholder".to_string()),
+            };
             yield AgentEvent::ToolCallRequested {
                 run_id: run_id.clone(),
                 step_id: tool_step_id.clone(),
-                tool_name: "dummy_placeholder_tool".to_string(),
+                tool_name: tool_request.tool_name.to_string(),
+            };
+            let tool_result = tool_boundary.invoke(&tool_request);
+            yield AgentEvent::ToolPermissionEvaluated {
+                run_id: run_id.clone(),
+                step_id: tool_step_id.clone(),
+                tool_name: tool_result.tool_name.to_string(),
+                status: tool_result.permission.status,
+                reason: tool_result.permission.reason.clone(),
             };
             yield AgentEvent::ToolCallSkipped {
                 run_id: run_id.clone(),
                 step_id: tool_step_id.clone(),
-                tool_name: "dummy_placeholder_tool".to_string(),
-                reason: "tool execution not implemented in foundation phase".to_string(),
+                tool_name: tool_result.tool_name.to_string(),
+                reason: tool_result
+                    .permission
+                    .reason
+                    .clone()
+                    .unwrap_or_else(|| "tool execution not implemented".to_string()),
             };
 
             // 4. ArtifactPlaceholder step
@@ -397,6 +422,7 @@ where
 mod tests {
     use super::*;
     use crate::agent_runtime::test_support::make_test_runtime;
+    use crate::agent_runtime::tools::ToolPermissionStatus;
     use crate::agent_runtime::types::AgentRuntimeRequest;
     use crate::providers::config::ProviderKind;
     use crate::providers::contract::ProviderUsageMetadata;
@@ -481,31 +507,39 @@ mod tests {
         ));
         assert!(matches!(
             stream_events[7],
-            AgentEvent::ToolCallSkipped { ref tool_name, .. } if tool_name == "dummy_placeholder_tool"
+            AgentEvent::ToolPermissionEvaluated {
+                ref tool_name,
+                status: ToolPermissionStatus::UnknownTool,
+                ..
+            } if tool_name == "dummy_placeholder_tool"
         ));
         assert!(matches!(
             stream_events[8],
+            AgentEvent::ToolCallSkipped { ref tool_name, .. } if tool_name == "dummy_placeholder_tool"
+        ));
+        assert!(matches!(
+            stream_events[9],
             AgentEvent::StepStarted {
                 kind: AgentStepKind::ArtifactPlaceholder,
                 ..
             }
         ));
         assert!(matches!(
-            stream_events[9],
+            stream_events[10],
             AgentEvent::ArtifactCreated { ref artifact_id, .. } if artifact_id == "dummy_placeholder_artifact"
         ));
         assert!(matches!(
-            stream_events[10],
+            stream_events[11],
             AgentEvent::StepStarted {
                 kind: AgentStepKind::ValidationPlaceholder,
                 ..
             }
         ));
         assert!(matches!(
-            stream_events[11],
+            stream_events[12],
             AgentEvent::RunCompleted { ref run_id, .. } if run_id == "test-response"
         ));
-        assert_eq!(stream_events.len(), 12);
+        assert_eq!(stream_events.len(), 13);
     }
 
     #[tokio::test]
@@ -677,11 +711,16 @@ mod tests {
             .iter()
             .position(|e| matches!(e, AgentEvent::ToolCallRequested { .. }))
             .expect("tool call requested");
+        let permission = stream_events
+            .iter()
+            .position(|e| matches!(e, AgentEvent::ToolPermissionEvaluated { .. }))
+            .expect("tool permission evaluated");
         let skipped = stream_events
             .iter()
             .position(|e| matches!(e, AgentEvent::ToolCallSkipped { .. }))
             .expect("tool call skipped");
-        assert_eq!(skipped, requested + 1, "skip follows request immediately");
+        assert_eq!(permission, requested + 1, "permission follows request");
+        assert_eq!(skipped, permission + 1, "skip follows permission decision");
 
         // The fake adapter saw no side effects beyond the single chat stream.
         assert!(state.lock().unwrap().cancel_called_with.is_none());
@@ -718,11 +757,33 @@ mod tests {
                 step_id: "s".into(),
                 tool_name: "t".into(),
             },
+            AgentEvent::ToolPermissionEvaluated {
+                run_id: "r".into(),
+                step_id: "s".into(),
+                tool_name: "t".into(),
+                status: ToolPermissionStatus::UnknownTool,
+                reason: Some("tool is not registered".into()),
+            },
             AgentEvent::ToolCallSkipped {
                 run_id: "r".into(),
                 step_id: "s".into(),
                 tool_name: "t".into(),
                 reason: "foundation phase".into(),
+            },
+            AgentEvent::ToolCallCompleted {
+                run_id: "r".into(),
+                step_id: "s".into(),
+                call_id: "c".into(),
+                tool_name: "t".into(),
+                output_summary: Some("summary".into()),
+            },
+            AgentEvent::ToolCallFailed {
+                run_id: "r".into(),
+                step_id: "s".into(),
+                call_id: "c".into(),
+                tool_name: "t".into(),
+                error_code: "TOOL_FAILED".into(),
+                error_message: "safe message".into(),
             },
             AgentEvent::ArtifactCreated {
                 run_id: "r".into(),
@@ -752,6 +813,9 @@ mod tests {
             "hidden_reasoning",
             "authorization",
             "bearer",
+            "apikey",
+            "api_key",
+            "secret",
         ] {
             assert!(
                 !serialized.to_ascii_lowercase().contains(forbidden),

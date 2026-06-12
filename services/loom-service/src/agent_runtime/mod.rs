@@ -8,6 +8,7 @@
 pub mod events;
 pub mod runtime;
 pub mod service;
+pub mod tools;
 pub mod types;
 
 #[cfg(test)]

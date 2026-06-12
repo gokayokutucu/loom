@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::agent_runtime::tools::ToolPermissionStatus;
 use crate::agent_runtime::types::{AgentStepKind, AgentUsage};
 
 const FORBIDDEN_THINKING_SUBSTRINGS: [&str; 4] = [
@@ -45,11 +46,37 @@ pub enum AgentEvent {
         step_id: String,
         tool_name: String,
     },
+    /// Permission decision for a requested tool call. Carries the decision
+    /// status and a sanitized reason only.
+    ToolPermissionEvaluated {
+        run_id: String,
+        step_id: String,
+        tool_name: String,
+        status: ToolPermissionStatus,
+        reason: Option<String>,
+    },
     ToolCallSkipped {
         run_id: String,
         step_id: String,
         tool_name: String,
         reason: String,
+    },
+    /// Future-execution contract: a short summary only, never raw tool output.
+    ToolCallCompleted {
+        run_id: String,
+        step_id: String,
+        call_id: String,
+        tool_name: String,
+        output_summary: Option<String>,
+    },
+    /// Future-execution contract: stable error code plus sanitized message.
+    ToolCallFailed {
+        run_id: String,
+        step_id: String,
+        call_id: String,
+        tool_name: String,
+        error_code: String,
+        error_message: String,
     },
     ArtifactCreated {
         run_id: String,
