@@ -740,7 +740,7 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn tools_route_returns_safe_metadata_when_enabled() {
+        async fn tools_route_starts_empty_by_default() {
             let router = test_router(ExperimentalApiConfig {
                 agent_runtime_api: true,
             })
@@ -758,19 +758,12 @@ mod tests {
 
             // Check counts and static properties
             assert_eq!(payload["executionEnabled"], false);
-            assert_eq!(payload["registryStatus"], "available");
-            assert_eq!(payload["count"], 1);
+            assert_eq!(payload["registryStatus"], "empty");
+            assert_eq!(payload["count"], 0);
 
-            // Inspect the harmless placeholder tool
+            // Inspect that the tools array is empty
             let tools = payload["tools"].as_array().expect("tools array");
-            assert_eq!(tools.len(), 1);
-            let tool = &tools[0];
-            assert_eq!(tool["name"], "harmless_placeholder_tool");
-            assert_eq!(tool["displayName"], "Harmless Placeholder Tool");
-            assert_eq!(tool["category"], "debug");
-            assert_eq!(tool["availability"], "available");
-            assert_eq!(tool["permissionRequirement"], "always_allowed");
-            assert_eq!(tool["enabled"], true);
+            assert_eq!(tools.len(), 0);
 
             // Assert no forbidden strings in the raw body
             let body_str = String::from_utf8(body.to_vec()).expect("utf8");

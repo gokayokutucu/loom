@@ -94,34 +94,6 @@ pub fn router_with_experimental(
         crate::agent_runtime::tool_registry::ToolRegistry::new(),
     ));
 
-    // Seed registry with harmless_placeholder_tool
-    tool_registry
-        .write()
-        .unwrap()
-        .register(crate::agent_runtime::tool_registry::RegisteredTool {
-            name: crate::agent_runtime::tools::ToolName::from("harmless_placeholder_tool"),
-            display_name: "Harmless Placeholder Tool".to_string(),
-            description: "A read-only metadata placeholder tool that performs no execution."
-                .to_string(),
-            category: "debug".to_string(),
-            availability: crate::agent_runtime::tool_registry::ToolAvailability::Available,
-            permission_requirement:
-                crate::agent_runtime::tool_registry::ToolPermissionRequirement::AlwaysAllowed,
-            argument_schema: Some(serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "input": {
-                        "type": "string",
-                        "description": "Safe placeholder input parameter"
-                    }
-                }
-            })),
-            output_schema: Some(serde_json::json!({
-                "type": "string"
-            })),
-            enabled: true,
-        });
-
     let state = AppState {
         database,
         ollama,
