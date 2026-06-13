@@ -559,6 +559,23 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn cloned_runtimes_share_cancellation_registry() {
+        let runtime = OllamaRuntime::new(test_config("http://127.0.0.1:11434"));
+        let cloned = runtime.clone();
+        let mut cancellation = runtime.register_cancellation("shared-cancel-run");
+
+        assert!(cloned.cancel("shared-cancel-run"));
+        cancellation
+            .changed()
+            .await
+            .expect("shared cancellation signal");
+        assert!(*cancellation.borrow());
+
+        cloned.finish_request("shared-cancel-run");
+        assert!(!runtime.cancel("shared-cancel-run"));
+    }
+
     #[test]
     fn localhost_and_loopback_ollama_urls_are_allowed() {
         for base_url in [

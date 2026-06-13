@@ -444,7 +444,7 @@ mod tests {
             extract::{Path, State},
             http::{header, Request, StatusCode},
             response::{IntoResponse, Response},
-            routing::{get, post},
+            routing::post,
             Json, Router,
         };
         use http_body_util::BodyExt;
@@ -788,21 +788,58 @@ mod tests {
 
         #[tokio::test]
         async fn test_shared_registry_visibility_and_identity() {
+            use crate::agent_runtime::events::AgentEvent;
             use crate::agent_runtime::tool_registry::{
                 RegisteredTool, ToolAvailability, ToolPermissionRequirement,
             };
             use crate::agent_runtime::tools::{ToolName, ToolPermissionStatus};
+            use crate::agent_runtime::types::{AgentRunStatus, AgentRuntimeRequest};
             use crate::api::state::AppState;
             use crate::config::{ConfigManager, LoomServiceConfig, OllamaConfig};
             use crate::providers::ollama::OllamaRuntime;
             use crate::runtime::{OperationTracker, RestartState};
             use crate::storage::db::test_database;
+            use futures_util::StreamExt;
             use std::path::PathBuf;
             use std::time::Duration;
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            use tokio::net::TcpListener;
 
             let database = test_database().await;
+            let listener = TcpListener::bind("127.0.0.1:0")
+                .await
+                .expect("bind test Ollama server");
+            let address = listener.local_addr().expect("test server address");
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.expect("accept request");
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let read = socket.read(&mut buffer).await.expect("read request");
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let body = concat!(
+                    "{\"message\":{\"role\":\"assistant\",\"content\":\"visible\"},\"done\":false}\n",
+                    "{\"message\":{\"role\":\"assistant\",\"content\":\"\"},\"done\":true,\"done_reason\":\"stop\",\"prompt_eval_count\":1,\"eval_count\":1}\n"
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/x-ndjson\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                socket
+                    .write_all(response.as_bytes())
+                    .await
+                    .expect("write response");
+            });
             let ollama = OllamaRuntime::new(OllamaConfig {
-                base_url: "http://127.0.0.1:9".to_string(),
+                base_url: format!("http://{address}"),
                 request_timeout: Duration::from_millis(200),
                 first_chunk_timeout: Duration::from_millis(200),
                 stream_idle_timeout: Duration::from_millis(200),
@@ -833,7 +870,7 @@ mod tests {
             let _service2 = state.agent_runtime();
 
             let test_tool = RegisteredTool {
-                name: ToolName::from("test_shared_visibility_tool"),
+                name: ToolName::from("dummy_placeholder_tool"),
                 display_name: "Test Shared Visibility Tool".to_string(),
                 description: "Proves shared registry identity".to_string(),
                 category: "test".to_string(),
@@ -846,13 +883,59 @@ mod tests {
 
             tool_registry.write().unwrap().register(test_tool.clone());
 
-            // 2. Confirm runtime boundary resolves the same tool metadata/status
-            let boundary1 = crate::agent_runtime::tools::ToolRuntimeBoundary::with_shared_registry(
-                tool_registry.clone(),
+            // 2. Execute through AppState -> AgentRuntimeService -> AgentRuntime
+            // -> ToolRuntimeBoundary and observe the shared registry policy.
+            let events = service1
+                .execute(AgentRuntimeRequest {
+                    prompt: "shared registry proof".to_string(),
+                    loom_id: Some("shared-registry-loom".to_string()),
+                    response_id: Some("shared-registry-run".to_string()),
+                    parent_response_id: None,
+                    provider_profile_id: None,
+                    model_id: Some("test-model".to_string()),
+                    context_snapshot_id: None,
+                    provider_options: None,
+                })
+                .collect::<Vec<_>>()
+                .await;
+            server.await.expect("test Ollama server");
+
+            assert!(events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolPermissionEvaluated {
+                    tool_name,
+                    status: ToolPermissionStatus::Allowed,
+                    reason: Some(reason),
+                    ..
+                } if tool_name == "dummy_placeholder_tool"
+                    && reason.contains("is permitted")
+            )));
+            assert!(events.iter().any(|event| matches!(
+                event,
+                AgentEvent::ToolCallSkipped {
+                    tool_name,
+                    reason,
+                    ..
+                } if tool_name == "dummy_placeholder_tool"
+                    && reason == "TOOL_EXECUTION_NOT_IMPLEMENTED"
+            )));
+            assert!(!events
+                .iter()
+                .any(|event| matches!(event, AgentEvent::ToolCallCompleted { .. })));
+            assert!(matches!(
+                events.last(),
+                Some(AgentEvent::RunCompleted { .. })
+            ));
+            assert_eq!(
+                service1
+                    .run_store()
+                    .get(&crate::agent_runtime::types::AgentRunId::from(
+                        "shared-registry-run"
+                    ))
+                    .expect("stored run")
+                    .status,
+                AgentRunStatus::Completed
             );
-            let decision =
-                boundary1.evaluate_permission(&ToolName::from("test_shared_visibility_tool"));
-            assert_eq!(decision.status, ToolPermissionStatus::Allowed);
 
             // Verify that the service runtime uses the shared registry under the hood
             // 3. Confirm listing tools via route extracts the exact registered metadata
@@ -869,9 +952,7 @@ mod tests {
 
             // Confirm the dynamic tool is listed
             let tools = payload["tools"].as_array().expect("tools array");
-            let found_tool = tools
-                .iter()
-                .find(|t| t["name"] == "test_shared_visibility_tool");
+            let found_tool = tools.iter().find(|t| t["name"] == "dummy_placeholder_tool");
             assert!(
                 found_tool.is_some(),
                 "dynamic tool not found in list_tools response"
@@ -879,24 +960,7 @@ mod tests {
             let found_tool_val = found_tool.unwrap();
             assert_eq!(found_tool_val["displayName"], "Test Shared Visibility Tool");
 
-            // 4. Confirm no tool executes
-            let req = crate::agent_runtime::tools::ToolInvocationRequest {
-                call_id: crate::agent_runtime::tools::ToolCallId::from("c1"),
-                run_id: crate::agent_runtime::types::AgentRunId::from("r1"),
-                step_id: None,
-                tool_name: ToolName::from("test_shared_visibility_tool"),
-                arguments: crate::agent_runtime::tools::SafeToolArguments::empty(),
-                requested_at: 0,
-                origin: None,
-            };
-            let res = boundary1.invoke(&req);
-            assert_eq!(
-                res.status,
-                crate::agent_runtime::tools::ToolInvocationStatus::Skipped
-            );
-            assert_eq!(res.error.unwrap().code, "TOOL_EXECUTION_NOT_IMPLEMENTED");
-
-            // 5. Confirm serialized response contains no forbidden fields
+            // 4. Confirm serialized response contains no forbidden fields.
             let body_str = String::from_utf8(body.to_vec()).unwrap();
             let serialized_lower = body_str.to_ascii_lowercase();
             for forbidden in [

@@ -26,6 +26,11 @@ impl AppState {
     /// `ProviderPipeline::new(state.ollama.clone())` idiom used by product
     /// paths while sharing the process-lifetime run store. HTTP exposure is
     /// restricted to the explicitly gated experimental route module.
+    ///
+    /// Each HTTP request may construct a new service instance. Cancellation
+    /// still reaches an active provider request because `OllamaRuntime` clones
+    /// share one Arc-backed `CancellationRegistry`. Any change to those clone
+    /// semantics requires revisiting the Agent Runtime cancellation design.
     pub fn agent_runtime(&self) -> AgentRuntimeService {
         AgentRuntimeService::from_ollama_with_store_and_registry(
             self.ollama.clone(),

@@ -48,6 +48,22 @@ pub enum AgentCancellationOutcome {
     },
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentTerminalTransition {
+    Applied(AgentRun),
+    Preserved(AgentRun),
+    Missing,
+}
+
+impl AgentTerminalTransition {
+    fn effective_status(&self) -> Option<AgentRunStatus> {
+        match self {
+            Self::Applied(run) | Self::Preserved(run) => Some(run.status),
+            Self::Missing => None,
+        }
+    }
+}
+
 impl AgentRunStore {
     pub fn new() -> Self {
         Self::default()
@@ -119,18 +135,67 @@ impl AgentRunStore {
         outcome
     }
 
-    fn finish(&self, run_id: &AgentRunId, status: AgentRunStatus, usage: Option<AgentUsage>) {
-        if let Some(run) = self.runs.lock().unwrap().get_mut(run_id) {
-            if run.status == AgentRunStatus::Cancelled && status != AgentRunStatus::Cancelled {
-                return;
+    fn transition_terminal(
+        &self,
+        run_id: &AgentRunId,
+        requested_status: AgentRunStatus,
+        usage: Option<AgentUsage>,
+    ) -> AgentTerminalTransition {
+        debug_assert!(matches!(
+            requested_status,
+            AgentRunStatus::Completed | AgentRunStatus::Failed | AgentRunStatus::Cancelled
+        ));
+
+        let transition = {
+            let mut runs = self.runs.lock().unwrap();
+            let Some(run) = runs.get_mut(run_id) else {
+                return AgentTerminalTransition::Missing;
+            };
+
+            if matches!(
+                run.status,
+                AgentRunStatus::Completed | AgentRunStatus::Failed | AgentRunStatus::Cancelled
+            ) {
+                AgentTerminalTransition::Preserved(run.clone())
+            } else {
+                run.status = requested_status;
+                run.completed_at = Some(now_epoch_ms());
+                if requested_status == AgentRunStatus::Completed {
+                    run.usage = usage;
+                }
+                AgentTerminalTransition::Applied(run.clone())
             }
-            run.status = status;
-            run.completed_at = Some(now_epoch_ms());
-            if usage.is_some() {
-                run.usage = usage;
+        };
+
+        self.cancellation_signals.lock().unwrap().remove(run_id);
+        transition
+    }
+}
+
+fn terminal_event(
+    run_id: &str,
+    transition: &AgentTerminalTransition,
+    elapsed_ms: u64,
+    failure_message: impl Into<String>,
+) -> AgentEvent {
+    match transition.effective_status() {
+        Some(AgentRunStatus::Completed) => AgentEvent::RunCompleted {
+            run_id: run_id.to_string(),
+            elapsed_ms,
+        },
+        Some(AgentRunStatus::Cancelled) => AgentEvent::RunCancelled {
+            run_id: run_id.to_string(),
+        },
+        Some(AgentRunStatus::Failed) | Some(AgentRunStatus::Pending | AgentRunStatus::Running) => {
+            AgentEvent::RunFailed {
+                run_id: run_id.to_string(),
+                error_message: failure_message.into(),
             }
         }
-        self.cancellation_signals.lock().unwrap().remove(run_id);
+        None => AgentEvent::RunFailed {
+            run_id: run_id.to_string(),
+            error_message: "Agent run state was unavailable during terminal transition".to_string(),
+        },
     }
 }
 
@@ -292,8 +357,17 @@ where
                     biased;
                     changed = cancel_rx.changed() => {
                         if changed.is_ok() && *cancel_rx.borrow() {
-                            run_store.finish(&store_run_id, AgentRunStatus::Cancelled, None);
-                            yield AgentEvent::RunCancelled { run_id: run_id.clone() };
+                            let transition = run_store.transition_terminal(
+                                &store_run_id,
+                                AgentRunStatus::Cancelled,
+                                None,
+                            );
+                            yield terminal_event(
+                                &run_id,
+                                &transition,
+                                start_time.elapsed().as_millis() as u64,
+                                "Agent run cancelled",
+                            );
                             return;
                         }
                         continue;
@@ -331,35 +405,63 @@ where
                         break;
                     }
                     ProviderContractEvent::Error { error } => {
-                        run_store.finish(&store_run_id, AgentRunStatus::Failed, None);
-                        yield AgentEvent::RunFailed {
-                            run_id: run_id.clone(),
-                            error_message: error.user_message,
-                        };
+                        let transition = run_store.transition_terminal(
+                            &store_run_id,
+                            AgentRunStatus::Failed,
+                            None,
+                        );
+                        yield terminal_event(
+                            &run_id,
+                            &transition,
+                            start_time.elapsed().as_millis() as u64,
+                            error.user_message,
+                        );
                         return;
                     }
                     ProviderContractEvent::Cancelled => {
-                        run_store.finish(&store_run_id, AgentRunStatus::Cancelled, None);
-                        yield AgentEvent::RunCancelled {
-                            run_id: run_id.clone(),
-                        };
+                        let transition = run_store.transition_terminal(
+                            &store_run_id,
+                            AgentRunStatus::Cancelled,
+                            None,
+                        );
+                        yield terminal_event(
+                            &run_id,
+                            &transition,
+                            start_time.elapsed().as_millis() as u64,
+                            "Agent run cancelled",
+                        );
                         return;
                     }
                 }
             }
 
             if !completed_successfully {
-                run_store.finish(&store_run_id, AgentRunStatus::Failed, None);
-                yield AgentEvent::RunFailed {
-                    run_id: run_id.clone(),
-                    error_message: "Provider stream ended abruptly without completion event".to_string(),
-                };
+                let transition = run_store.transition_terminal(
+                    &store_run_id,
+                    AgentRunStatus::Failed,
+                    None,
+                );
+                yield terminal_event(
+                    &run_id,
+                    &transition,
+                    start_time.elapsed().as_millis() as u64,
+                    "Provider stream ended abruptly without completion event",
+                );
                 return;
             }
 
             if *cancel_rx.borrow() {
-                run_store.finish(&store_run_id, AgentRunStatus::Cancelled, None);
-                yield AgentEvent::RunCancelled { run_id: run_id.clone() };
+                let transition = run_store.transition_terminal(
+                    &store_run_id,
+                    AgentRunStatus::Cancelled,
+                    None,
+                );
+                yield terminal_event(
+                    &run_id,
+                    &transition,
+                    start_time.elapsed().as_millis() as u64,
+                    "Agent run cancelled",
+                );
                 return;
             }
 
@@ -399,9 +501,10 @@ where
                 step_id: tool_step_id.clone(),
                 tool_name: tool_result.tool_name.to_string(),
                 reason: tool_result
-                    .permission
-                    .reason
-                    .clone()
+                    .error
+                    .as_ref()
+                    .map(|error| error.code.clone())
+                    .or_else(|| tool_result.permission.reason.clone())
                     .unwrap_or_else(|| "tool execution not implemented".to_string()),
             };
 
@@ -426,11 +529,17 @@ where
                 kind: AgentStepKind::ValidationPlaceholder,
             };
 
-            run_store.finish(&store_run_id, AgentRunStatus::Completed, run_usage);
-            yield AgentEvent::RunCompleted {
-                run_id: run_id.clone(),
-                elapsed_ms: start_time.elapsed().as_millis() as u64,
-            };
+            let transition = run_store.transition_terminal(
+                &store_run_id,
+                AgentRunStatus::Completed,
+                run_usage,
+            );
+            yield terminal_event(
+                &run_id,
+                &transition,
+                start_time.elapsed().as_millis() as u64,
+                "Agent run failed",
+            );
         }
     }
 }
@@ -456,6 +565,122 @@ mod tests {
             context_snapshot_id: None,
             provider_options: None,
         }
+    }
+
+    fn make_stored_run(run_id: &str) -> AgentRun {
+        AgentRun {
+            run_id: AgentRunId::from(run_id),
+            loom_id: Some("test-loom".to_string()),
+            response_id: Some(run_id.to_string()),
+            parent_response_id: None,
+            status: AgentRunStatus::Running,
+            started_at: now_epoch_ms(),
+            completed_at: None,
+            cancel_requested: false,
+            provider_profile_id: Some("fake-agent-provider".to_string()),
+            model_id: Some("test-model".to_string()),
+            usage: None,
+        }
+    }
+
+    fn terminal_event_count(events: &[AgentEvent]) -> usize {
+        events
+            .iter()
+            .filter(|event| {
+                matches!(
+                    event,
+                    AgentEvent::RunCompleted { .. }
+                        | AgentEvent::RunFailed { .. }
+                        | AgentEvent::RunCancelled { .. }
+                )
+            })
+            .count()
+    }
+
+    #[test]
+    fn cancellation_immediately_before_completion_preserves_cancelled_terminal_state() {
+        let store = AgentRunStore::new();
+        let run_id = AgentRunId::from("cancel-before-complete");
+        let _receiver = store.insert(make_stored_run(run_id.as_str()));
+
+        assert!(matches!(
+            store.request_cancel(&run_id),
+            AgentCancellationOutcome::Cancelled {
+                newly_requested: true,
+                ..
+            }
+        ));
+        let transition = store.transition_terminal(
+            &run_id,
+            AgentRunStatus::Completed,
+            Some(AgentUsage {
+                input_tokens: Some(1),
+                output_tokens: Some(2),
+                total_tokens: Some(3),
+            }),
+        );
+
+        assert!(matches!(
+            transition,
+            AgentTerminalTransition::Preserved(ref run)
+                if run.status == AgentRunStatus::Cancelled && run.usage.is_none()
+        ));
+        assert!(matches!(
+            terminal_event(run_id.as_str(), &transition, 1, "failed"),
+            AgentEvent::RunCancelled { .. }
+        ));
+        assert_eq!(
+            store.get(&run_id).expect("stored run").status,
+            AgentRunStatus::Cancelled
+        );
+    }
+
+    #[test]
+    fn completion_before_cancellation_remains_completed() {
+        let store = AgentRunStore::new();
+        let run_id = AgentRunId::from("complete-before-cancel");
+        let _receiver = store.insert(make_stored_run(run_id.as_str()));
+
+        let transition = store.transition_terminal(
+            &run_id,
+            AgentRunStatus::Completed,
+            Some(AgentUsage {
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: Some(5),
+            }),
+        );
+        assert!(matches!(transition, AgentTerminalTransition::Applied(_)));
+        assert!(matches!(
+            store.request_cancel(&run_id),
+            AgentCancellationOutcome::Terminal { ref run }
+                if run.status == AgentRunStatus::Completed
+        ));
+        assert_eq!(
+            store
+                .get(&run_id)
+                .expect("stored run")
+                .usage
+                .and_then(|usage| usage.total_tokens),
+            Some(5)
+        );
+    }
+
+    #[test]
+    fn failure_after_cancellation_emits_cancelled_and_preserves_store() {
+        let store = AgentRunStore::new();
+        let run_id = AgentRunId::from("failure-after-cancel");
+        let _receiver = store.insert(make_stored_run(run_id.as_str()));
+        let _ = store.request_cancel(&run_id);
+
+        let transition = store.transition_terminal(&run_id, AgentRunStatus::Failed, None);
+        let event = terminal_event(run_id.as_str(), &transition, 1, "provider failed");
+
+        assert!(matches!(event, AgentEvent::RunCancelled { .. }));
+        assert_eq!(
+            store.get(&run_id).expect("stored run").status,
+            AgentRunStatus::Cancelled
+        );
     }
 
     #[tokio::test]
@@ -557,6 +782,7 @@ mod tests {
             AgentEvent::RunCompleted { ref run_id, .. } if run_id == "test-response"
         ));
         assert_eq!(stream_events.len(), 13);
+        assert_eq!(terminal_event_count(&stream_events), 1);
     }
 
     #[tokio::test]
@@ -685,6 +911,7 @@ mod tests {
             .get(&AgentRunId::from("test-response-error"))
             .expect("run recorded");
         assert_eq!(run.status, AgentRunStatus::Failed);
+        assert_eq!(terminal_event_count(&stream_events), 1);
     }
 
     #[tokio::test]
@@ -711,6 +938,7 @@ mod tests {
             .get(&AgentRunId::from("test-response-cancel"))
             .expect("run recorded");
         assert_eq!(run.status, AgentRunStatus::Cancelled);
+        assert_eq!(terminal_event_count(&stream_events), 1);
     }
 
     #[tokio::test]

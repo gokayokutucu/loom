@@ -6,6 +6,7 @@
 //! filesystem, performs network calls, or implements MCP — real execution is
 //! deferred to TOOL-RUNTIME-REGISTRY-001 and later tasks.
 
+#[cfg(test)]
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -115,7 +116,30 @@ fn key_is_sensitive(key: &str) -> bool {
 
 fn value_is_sensitive(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    lower.contains("bearer ") || lower.contains("authorization:")
+    lower.contains("bearer ")
+        || lower.contains("authorization:")
+        || [
+            "api_key",
+            "apikey",
+            "password",
+            "credential",
+            "secret",
+            "token",
+        ]
+        .iter()
+        .any(|label| lower.contains(&format!("{label}=")) || lower.contains(&format!("{label}: ")))
+}
+
+fn contains_private_reasoning_marker(text: &str) -> bool {
+    let lower = text.to_ascii_lowercase();
+    [
+        "raw_thinking",
+        "thinking_text",
+        "chain_of_thought",
+        "hidden_reasoning",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
 }
 
 fn redact_value(value: Value) -> Value {
@@ -145,7 +169,7 @@ fn redact_value(value: Value) -> Value {
 
 /// Redacts forbidden markers from free-form text (error messages, reasons).
 pub fn sanitize_tool_text(text: &str) -> String {
-    if value_is_sensitive(text) || key_is_sensitive(text) {
+    if value_is_sensitive(text) || contains_private_reasoning_marker(text) {
         REDACTED_PLACEHOLDER.to_string()
     } else {
         text.to_string()
@@ -284,6 +308,10 @@ impl ToolRuntimeBoundary {
         Self { registry }
     }
 
+    /// Test-only constructor that creates a fresh isolated registry from a
+    /// compact permission map. Production callers must use the shared registry
+    /// owned by `AppState`.
+    #[cfg(test)]
     pub fn with_policy(policy: HashMap<ToolName, ToolPermissionStatus>) -> Self {
         use crate::agent_runtime::tool_registry::{
             RegisteredTool, ToolAvailability, ToolPermissionRequirement,
@@ -491,6 +519,33 @@ mod tests {
         let decision =
             ToolPermissionDecision::new(ToolPermissionStatus::Denied, "Authorization: leaked");
         assert_eq!(decision.reason.as_deref(), Some("[redacted]"));
+    }
+
+    #[test]
+    fn safe_tool_name_fragments_remain_readable_in_reason_text() {
+        for tool_name in [
+            "get_access_token",
+            "inspect_secret_metadata",
+            "validate_password_policy",
+            "validate_credential",
+        ] {
+            let reason = format!("tool '{tool_name}' requires explicit user approval");
+            assert_eq!(sanitize_tool_text(&reason), reason);
+        }
+    }
+
+    #[test]
+    fn free_form_credentials_and_private_reasoning_markers_are_redacted() {
+        for text in [
+            "upstream returned Bearer sk-live-123",
+            "Authorization: Basic abc123",
+            "api_key=sk-live-456",
+            "password: hunter2",
+            "provider included raw_thinking content",
+            "hidden_reasoning must not be displayed",
+        ] {
+            assert_eq!(sanitize_tool_text(text), "[redacted]");
+        }
     }
 
     #[test]
