@@ -425,6 +425,9 @@ mod tests {
             operations: OperationTracker::default(),
             restart: RestartState::default(),
             agent_runs: Default::default(),
+            tool_registry: std::sync::Arc::new(std::sync::RwLock::new(
+                crate::agent_runtime::tool_registry::ToolRegistry::new(),
+            )),
         }
     }
 

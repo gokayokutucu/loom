@@ -138,6 +138,7 @@ impl AgentRunStore {
 pub struct AgentRuntime<R = ProviderRegistry> {
     pipeline: ProviderPipeline<R>,
     run_store: AgentRunStore,
+    tool_registry: Arc<std::sync::RwLock<crate::agent_runtime::tool_registry::ToolRegistry>>,
 }
 
 impl<R> AgentRuntime<R>
@@ -152,6 +153,21 @@ where
         Self {
             pipeline,
             run_store,
+            tool_registry: Arc::new(std::sync::RwLock::new(
+                crate::agent_runtime::tool_registry::ToolRegistry::new(),
+            )),
+        }
+    }
+
+    pub fn with_run_store_and_registry(
+        pipeline: ProviderPipeline<R>,
+        run_store: AgentRunStore,
+        tool_registry: Arc<std::sync::RwLock<crate::agent_runtime::tool_registry::ToolRegistry>>,
+    ) -> Self {
+        Self {
+            pipeline,
+            run_store,
+            tool_registry,
         }
     }
 
@@ -179,6 +195,7 @@ where
     pub fn execute_run(&self, request: AgentRuntimeRequest) -> impl Stream<Item = AgentEvent> {
         let pipeline = self.pipeline.clone();
         let run_store = self.run_store.clone();
+        let tool_registry = self.tool_registry.clone();
         stream! {
             let run_id = request.response_id.clone().unwrap_or_else(|| {
                 format!("agent-run-{}", now_epoch_ms())
@@ -354,7 +371,7 @@ where
                 step_id: tool_step_id.clone(),
                 kind: AgentStepKind::ToolCallPlaceholder,
             };
-            let tool_boundary = ToolRuntimeBoundary::new();
+            let tool_boundary = ToolRuntimeBoundary::with_shared_registry(tool_registry);
             let tool_request = ToolInvocationRequest {
                 call_id: ToolCallId::from(format!("{tool_step_id}-call")),
                 run_id: AgentRunId::from(run_id.clone()),

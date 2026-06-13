@@ -31,6 +31,14 @@ impl AgentRuntimeService<ProviderRegistry> {
     pub fn from_ollama_with_store(ollama: OllamaRuntime, run_store: AgentRunStore) -> Self {
         Self::with_run_store(ProviderPipeline::new(ollama), run_store)
     }
+
+    pub fn from_ollama_with_store_and_registry(
+        ollama: OllamaRuntime,
+        run_store: AgentRunStore,
+        tool_registry: Arc<std::sync::RwLock<crate::agent_runtime::tool_registry::ToolRegistry>>,
+    ) -> Self {
+        Self::with_run_store_and_registry(ProviderPipeline::new(ollama), run_store, tool_registry)
+    }
 }
 
 impl<R> AgentRuntimeService<R>
@@ -46,6 +54,20 @@ where
     pub fn with_run_store(pipeline: ProviderPipeline<R>, run_store: AgentRunStore) -> Self {
         Self {
             runtime: Arc::new(AgentRuntime::with_run_store(pipeline, run_store)),
+        }
+    }
+
+    pub fn with_run_store_and_registry(
+        pipeline: ProviderPipeline<R>,
+        run_store: AgentRunStore,
+        tool_registry: Arc<std::sync::RwLock<crate::agent_runtime::tool_registry::ToolRegistry>>,
+    ) -> Self {
+        Self {
+            runtime: Arc::new(AgentRuntime::with_run_store_and_registry(
+                pipeline,
+                run_store,
+                tool_registry,
+            )),
         }
     }
 

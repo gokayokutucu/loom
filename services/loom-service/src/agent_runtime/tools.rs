@@ -254,9 +254,17 @@ use crate::agent_runtime::tool_registry::ToolRegistry;
 
 /// Boundary, not executor: evaluates tool requests against an explicit policy
 /// and returns safe placeholder results. No tool is ever executed here.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ToolRuntimeBoundary {
-    registry: ToolRegistry,
+    registry: std::sync::Arc<std::sync::RwLock<ToolRegistry>>,
+}
+
+impl Default for ToolRuntimeBoundary {
+    fn default() -> Self {
+        Self {
+            registry: std::sync::Arc::new(std::sync::RwLock::new(ToolRegistry::new())),
+        }
+    }
 }
 
 impl ToolRuntimeBoundary {
@@ -267,6 +275,12 @@ impl ToolRuntimeBoundary {
     }
 
     pub fn with_registry(registry: ToolRegistry) -> Self {
+        Self {
+            registry: std::sync::Arc::new(std::sync::RwLock::new(registry)),
+        }
+    }
+
+    pub fn with_shared_registry(registry: std::sync::Arc<std::sync::RwLock<ToolRegistry>>) -> Self {
         Self { registry }
     }
 
@@ -318,11 +332,13 @@ impl ToolRuntimeBoundary {
                 enabled,
             });
         }
-        Self { registry }
+        Self {
+            registry: std::sync::Arc::new(std::sync::RwLock::new(registry)),
+        }
     }
 
     pub fn evaluate_permission(&self, tool_name: &ToolName) -> ToolPermissionDecision {
-        self.registry.permission_for(tool_name)
+        self.registry.read().unwrap().permission_for(tool_name)
     }
 
     /// Evaluates a request and returns a safe result without executing

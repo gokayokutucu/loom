@@ -237,33 +237,8 @@ pub struct ExperimentalToolRegistryResponse {
     pub execution_enabled: bool,
 }
 
-pub async fn list_tools() -> impl IntoResponse {
-    let mut registry = crate::agent_runtime::tool_registry::ToolRegistry::new();
-    registry.register(crate::agent_runtime::tool_registry::RegisteredTool {
-        name: crate::agent_runtime::tools::ToolName::from("harmless_placeholder_tool"),
-        display_name: "Harmless Placeholder Tool".to_string(),
-        description: "A read-only metadata placeholder tool that performs no execution."
-            .to_string(),
-        category: "debug".to_string(),
-        availability: crate::agent_runtime::tool_registry::ToolAvailability::Available,
-        permission_requirement:
-            crate::agent_runtime::tool_registry::ToolPermissionRequirement::AlwaysAllowed,
-        argument_schema: Some(serde_json::json!({
-            "type": "object",
-            "properties": {
-                "input": {
-                    "type": "string",
-                    "description": "Safe placeholder input parameter"
-                }
-            }
-        })),
-        output_schema: Some(serde_json::json!({
-            "type": "string"
-        })),
-        enabled: true,
-    });
-
-    let tools = registry.list();
+pub async fn list_tools(State(state): State<AppState>) -> impl IntoResponse {
+    let tools = state.tool_registry.read().unwrap().list();
     let count = tools.len();
     let registry_status = if count > 0 { "available" } else { "empty" }.to_string();
 
@@ -799,6 +774,137 @@ mod tests {
 
             // Assert no forbidden strings in the raw body
             let body_str = String::from_utf8(body.to_vec()).expect("utf8");
+            let serialized_lower = body_str.to_ascii_lowercase();
+            for forbidden in [
+                "raw_thinking",
+                "thinking_text",
+                "chain_of_thought",
+                "hidden_reasoning",
+                "authorization",
+                "bearer",
+                "apikey",
+                "api_key",
+                "secret",
+            ] {
+                assert!(
+                    !serialized_lower.contains(forbidden),
+                    "found forbidden key/value: {forbidden}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn test_shared_registry_visibility_and_identity() {
+            use crate::agent_runtime::tool_registry::{
+                RegisteredTool, ToolAvailability, ToolPermissionRequirement,
+            };
+            use crate::agent_runtime::tools::{ToolName, ToolPermissionStatus};
+            use crate::api::state::AppState;
+            use crate::config::{ConfigManager, LoomServiceConfig, OllamaConfig};
+            use crate::providers::ollama::OllamaRuntime;
+            use crate::runtime::{OperationTracker, RestartState};
+            use crate::storage::db::test_database;
+            use std::path::PathBuf;
+            use std::time::Duration;
+
+            let database = test_database().await;
+            let ollama = OllamaRuntime::new(OllamaConfig {
+                base_url: "http://127.0.0.1:9".to_string(),
+                request_timeout: Duration::from_millis(200),
+                first_chunk_timeout: Duration::from_millis(200),
+                stream_idle_timeout: Duration::from_millis(200),
+                security: Default::default(),
+            });
+            let config = ConfigManager::new(
+                PathBuf::from("/tmp/loom-agent-shared-test.toml"),
+                LoomServiceConfig::default(),
+            );
+
+            let tool_registry = std::sync::Arc::new(std::sync::RwLock::new(
+                crate::agent_runtime::tool_registry::ToolRegistry::new(),
+            ));
+
+            let state = AppState {
+                database,
+                ollama,
+                config,
+                secret_store: crate::providers::secret_store::ProviderSecretStore::default(),
+                operations: OperationTracker::default(),
+                restart: RestartState::default(),
+                agent_runs: crate::agent_runtime::runtime::AgentRunStore::new(),
+                tool_registry: tool_registry.clone(),
+            };
+
+            // 1. Confirm multiple AppState::agent_runtime() accessor calls share the same registry
+            let service1 = state.agent_runtime();
+            let _service2 = state.agent_runtime();
+
+            let test_tool = RegisteredTool {
+                name: ToolName::from("test_shared_visibility_tool"),
+                display_name: "Test Shared Visibility Tool".to_string(),
+                description: "Proves shared registry identity".to_string(),
+                category: "test".to_string(),
+                availability: ToolAvailability::Available,
+                permission_requirement: ToolPermissionRequirement::AlwaysAllowed,
+                argument_schema: None,
+                output_schema: None,
+                enabled: true,
+            };
+
+            tool_registry.write().unwrap().register(test_tool.clone());
+
+            // 2. Confirm runtime boundary resolves the same tool metadata/status
+            let boundary1 = crate::agent_runtime::tools::ToolRuntimeBoundary::with_shared_registry(
+                tool_registry.clone(),
+            );
+            let decision =
+                boundary1.evaluate_permission(&ToolName::from("test_shared_visibility_tool"));
+            assert_eq!(decision.status, ToolPermissionStatus::Allowed);
+
+            // Verify that the service runtime uses the shared registry under the hood
+            // 3. Confirm listing tools via route extracts the exact registered metadata
+            let response = super::super::list_tools(State(state.clone()))
+                .await
+                .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+
+            // Read response body
+            let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+            // Confirm the dynamic tool is listed
+            let tools = payload["tools"].as_array().expect("tools array");
+            let found_tool = tools
+                .iter()
+                .find(|t| t["name"] == "test_shared_visibility_tool");
+            assert!(
+                found_tool.is_some(),
+                "dynamic tool not found in list_tools response"
+            );
+            let found_tool_val = found_tool.unwrap();
+            assert_eq!(found_tool_val["displayName"], "Test Shared Visibility Tool");
+
+            // 4. Confirm no tool executes
+            let req = crate::agent_runtime::tools::ToolInvocationRequest {
+                call_id: crate::agent_runtime::tools::ToolCallId::from("c1"),
+                run_id: crate::agent_runtime::types::AgentRunId::from("r1"),
+                step_id: None,
+                tool_name: ToolName::from("test_shared_visibility_tool"),
+                arguments: crate::agent_runtime::tools::SafeToolArguments::empty(),
+                requested_at: 0,
+                origin: None,
+            };
+            let res = boundary1.invoke(&req);
+            assert_eq!(
+                res.status,
+                crate::agent_runtime::tools::ToolInvocationStatus::Skipped
+            );
+            assert_eq!(res.error.unwrap().code, "TOOL_EXECUTION_NOT_IMPLEMENTED");
+
+            // 5. Confirm serialized response contains no forbidden fields
+            let body_str = String::from_utf8(body.to_vec()).unwrap();
             let serialized_lower = body_str.to_ascii_lowercase();
             for forbidden in [
                 "raw_thinking",
