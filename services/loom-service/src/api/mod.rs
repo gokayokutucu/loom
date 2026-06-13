@@ -111,6 +111,10 @@ pub fn router_with_experimental(
                 agent_experimental::EXPERIMENTAL_AGENT_CANCEL_PATH,
                 post(agent_experimental::cancel),
             )
+            .route(
+                agent_experimental::EXPERIMENTAL_AGENT_TOOLS_PATH,
+                get(agent_experimental::list_tools),
+            )
     } else {
         Router::new()
     };

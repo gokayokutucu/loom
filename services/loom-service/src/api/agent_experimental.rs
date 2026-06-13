@@ -24,6 +24,7 @@ use crate::api::state::AppState;
 
 pub const EXPERIMENTAL_AGENT_RUN_PATH: &str = "/experimental/agent/run";
 pub const EXPERIMENTAL_AGENT_CANCEL_PATH: &str = "/experimental/agent/runs/:run_id/cancel";
+pub const EXPERIMENTAL_AGENT_TOOLS_PATH: &str = "/experimental/agent/tools";
 pub const EXPERIMENTAL_AGENT_RUNTIME_ENV: &str = "LOOM_EXPERIMENTAL_AGENT_RUNTIME_API";
 
 const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
@@ -227,6 +228,56 @@ fn cancel_response(
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExperimentalToolRegistryResponse {
+    pub tools: Vec<crate::agent_runtime::tool_registry::RegisteredTool>,
+    pub count: usize,
+    pub registry_status: String,
+    pub execution_enabled: bool,
+}
+
+pub async fn list_tools() -> impl IntoResponse {
+    let mut registry = crate::agent_runtime::tool_registry::ToolRegistry::new();
+    registry.register(crate::agent_runtime::tool_registry::RegisteredTool {
+        name: crate::agent_runtime::tools::ToolName::from("harmless_placeholder_tool"),
+        display_name: "Harmless Placeholder Tool".to_string(),
+        description: "A read-only metadata placeholder tool that performs no execution."
+            .to_string(),
+        category: "debug".to_string(),
+        availability: crate::agent_runtime::tool_registry::ToolAvailability::Available,
+        permission_requirement:
+            crate::agent_runtime::tool_registry::ToolPermissionRequirement::AlwaysAllowed,
+        argument_schema: Some(serde_json::json!({
+            "type": "object",
+            "properties": {
+                "input": {
+                    "type": "string",
+                    "description": "Safe placeholder input parameter"
+                }
+            }
+        })),
+        output_schema: Some(serde_json::json!({
+            "type": "string"
+        })),
+        enabled: true,
+    });
+
+    let tools = registry.list();
+    let count = tools.len();
+    let registry_status = if count > 0 { "available" } else { "empty" }.to_string();
+
+    (
+        StatusCode::OK,
+        Json(ExperimentalToolRegistryResponse {
+            tools,
+            count,
+            registry_status,
+            execution_enabled: false,
+        }),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -398,7 +449,8 @@ mod tests {
 
     mod router_gate {
         use super::super::{
-            EXPERIMENTAL_AGENT_CANCEL_PATH, EXPERIMENTAL_AGENT_RUN_PATH, NDJSON_CONTENT_TYPE,
+            EXPERIMENTAL_AGENT_CANCEL_PATH, EXPERIMENTAL_AGENT_RUN_PATH,
+            EXPERIMENTAL_AGENT_TOOLS_PATH, NDJSON_CONTENT_TYPE,
         };
         use crate::{
             agent_runtime::runtime::AgentCancellationOutcome,
@@ -417,7 +469,7 @@ mod tests {
             extract::{Path, State},
             http::{header, Request, StatusCode},
             response::{IntoResponse, Response},
-            routing::post,
+            routing::{get, post},
             Json, Router,
         };
         use http_body_util::BodyExt;
@@ -693,6 +745,75 @@ mod tests {
                 assert!(
                     !body.to_ascii_lowercase().contains(forbidden),
                     "found forbidden text in route body: {forbidden}"
+                );
+            }
+        }
+
+        fn tools_request() -> Request<Body> {
+            Request::builder()
+                .method("GET")
+                .uri(EXPERIMENTAL_AGENT_TOOLS_PATH)
+                .body(Body::empty())
+                .expect("request")
+        }
+
+        #[tokio::test]
+        async fn tools_route_is_gated_by_default() {
+            let router = test_router(ExperimentalApiConfig::default()).await;
+            let response = router.oneshot(tools_request()).await.expect("response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn tools_route_returns_safe_metadata_when_enabled() {
+            let router = test_router(ExperimentalApiConfig {
+                agent_runtime_api: true,
+            })
+            .await;
+            let response = router.oneshot(tools_request()).await.expect("response");
+
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+
+            // Check counts and static properties
+            assert_eq!(payload["executionEnabled"], false);
+            assert_eq!(payload["registryStatus"], "available");
+            assert_eq!(payload["count"], 1);
+
+            // Inspect the harmless placeholder tool
+            let tools = payload["tools"].as_array().expect("tools array");
+            assert_eq!(tools.len(), 1);
+            let tool = &tools[0];
+            assert_eq!(tool["name"], "harmless_placeholder_tool");
+            assert_eq!(tool["displayName"], "Harmless Placeholder Tool");
+            assert_eq!(tool["category"], "debug");
+            assert_eq!(tool["availability"], "available");
+            assert_eq!(tool["permissionRequirement"], "always_allowed");
+            assert_eq!(tool["enabled"], true);
+
+            // Assert no forbidden strings in the raw body
+            let body_str = String::from_utf8(body.to_vec()).expect("utf8");
+            let serialized_lower = body_str.to_ascii_lowercase();
+            for forbidden in [
+                "raw_thinking",
+                "thinking_text",
+                "chain_of_thought",
+                "hidden_reasoning",
+                "authorization",
+                "bearer",
+                "apikey",
+                "api_key",
+                "secret",
+            ] {
+                assert!(
+                    !serialized_lower.contains(forbidden),
+                    "found forbidden key/value: {forbidden}"
                 );
             }
         }

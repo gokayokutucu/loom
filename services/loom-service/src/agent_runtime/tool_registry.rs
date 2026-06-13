@@ -110,6 +110,10 @@ impl ToolRegistry {
         self.tools.insert(tool.name.clone(), tool);
     }
 
+    pub fn list(&self) -> Vec<RegisteredTool> {
+        self.tools.values().cloned().collect()
+    }
+
     pub fn resolve(&self, tool_name: &ToolName) -> ToolRegistryResolution {
         match self.tools.get(tool_name) {
             None => ToolRegistryResolution::Unknown,
