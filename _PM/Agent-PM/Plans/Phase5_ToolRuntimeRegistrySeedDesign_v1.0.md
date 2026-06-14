@@ -1,15 +1,27 @@
 # Phase 5 — Tool Runtime Registry Seed Design v1.0
 # TOOL-RUNTIME-REGISTRY-SEED-DESIGN-001
 
+## Approved Amendment: Four-Descriptor Initial Catalog
+
+`TOOL-RUNTIME-REGISTRY-SEED-001` expands the initial metadata-only seed from three to exactly
+four descriptors by adding `loom.weft.inspect`. The canonical backend vocabulary is Loom, Weft,
+and Response; `conversation`, `branch`, and `fork` are explanatory language only and are not
+canonical tool-name segments.
+
+The approved initial catalog is `loom.runtime.status`, `loom.loom.inspect`,
+`loom.weft.inspect`, and `loom.response.read`. This amendment supersedes later references in this
+design to a three-descriptor minimal seed. All four remain metadata-only, `NotAvailable`,
+`AlwaysAllowed`, and enabled. Tool execution remains impossible.
+
 ## 1. Executive Recommendation
 
-**Outcome: Option B — Seed a minimal, read-only set of 3 descriptors.**
+**Outcome: Option B — Seed a minimal, read-only set of 4 descriptors.**
 
-All three are `NotAvailable` (no execution path exists), `AlwaysAllowed` (read-only inspection), and
+All four are `NotAvailable` (no execution path exists), `AlwaysAllowed` (read-only inspection), and
 carry stable Loom-native names that will not need renaming when execution eventually lands.
 
 The registry remaining empty is semantically correct but technically wasteful: the introspection
-endpoint exists and is gated. Seeding three stable descriptors proves the seeding mechanism and
+endpoint exists and is gated. Seeding four stable descriptors proves the seeding mechanism and
 establishes naming convention without implying any executable capability or freezing any unfinished
 architecture.
 
@@ -189,7 +201,7 @@ These are orthogonal.
 | `loom.runtime.status` | **Keep** | `NotAvailable` | `AlwaysAllowed` | `runtime.diagnostics` | Agent Runtime | Backed by `/runtime/status`. Clean, stable name. No dependency on unfinished work. |
 | `loom.loom.inspect` | **Keep** | `NotAvailable` | `AlwaysAllowed` | `loom.core` | Core Loom service | LoomRepository.get_loom exists. Stable name. Doubled "loom" is intentional and documented. |
 | `loom.response.read` | **Keep** | `NotAvailable` | `AlwaysAllowed` | `loom.content` | Core Loom service | ResponseRepository.get_response exists. "read" signals content; distinguishable from "inspect" (metadata-only). |
-| `loom.weft.inspect` | **Keep (catalog)** | `NotAvailable` | `AlwaysAllowed` | `loom.core` | Core Loom service | LoomRepository has weft methods. Stable Loom vocabulary. Deferred from minimal seed. |
+| `loom.weft.inspect` | **Keep** | `NotAvailable` | `AlwaysAllowed` | `weft` | Core Loom service | Stable first-class Loom vocabulary for a derived Loom lineage. Included in the amended initial seed. |
 | `loom.response.list` | **Keep (catalog)** | `NotAvailable` | `AlwaysAllowed` | `loom.content` | Core Loom service | ResponseRepository.list_responses_for_loom. Defer from minimal seed; list semantics need arg schema design. |
 | `loom.reference.resolve` | **Keep (catalog)** | `NotAvailable` | `AlwaysAllowed` | `loom.references` | Core Loom service | AddressRepository + ReferenceRepository. "resolve" is the precise verb for address→record. |
 | `loom.reference.list` | **Keep (catalog)** | `NotAvailable` | `AlwaysAllowed` | `loom.references` | Core Loom service | ReferenceRepository.list_references_for_loom. |
@@ -211,9 +223,9 @@ These are orthogonal.
 
 ## 8. Recommended Initial Seed Set (SEED-001)
 
-**Outcome: Option B — 3 descriptors.**
+**Outcome: Option B — 4 descriptors.**
 
-These three are chosen for maximum naming stability, zero dependency on unfinished work, and the
+These four are chosen for maximum naming stability, zero dependency on unfinished work, and the
 clearest read-only semantics:
 
 ### 8.1 `loom.runtime.status`
@@ -262,7 +274,28 @@ the first capability most agent behaviors will need. The "inspect" verb signals 
 
 **Future owner:** Core Loom service (LoomRepository).
 
-### 8.3 `loom.response.read`
+### 8.3 `loom.weft.inspect`
+
+```
+name:                 loom.weft.inspect
+display_name:         "Inspect Weft"
+description:          "Inspect safe metadata and lineage information for a Weft derived from a
+                       Loom response."
+category:             weft
+availability:         NotAvailable
+permission_requirement: AlwaysAllowed
+enabled:              true
+argument_schema:      { "type": "object",
+                        "properties": { "weftId": { "type": "string" } } }
+output_schema:        { "type": "object" }
+```
+
+**Rationale:** Weft is the canonical domain term for a derived Loom branch with response lineage.
+The descriptor preserves that first-class model without introducing branch or fork aliases.
+
+**Future owner:** Core Loom service (LoomRepository).
+
+### 8.4 `loom.response.read`
 
 ```
 name:                 loom.response.read
@@ -302,15 +335,13 @@ responses already in the agent's run context is expected behaviour.
 | `loom.search.semantic` | RETRIEVAL-ARCH-001 not implemented. |
 | `loom.memory.search` | Same. |
 
-### Deferred to SEED-001 implementation catalog (not minimal seed, but ready for catalog)
+### Deferred to later catalog expansion
 
-`loom.weft.inspect`, `loom.response.list`, `loom.reference.resolve`, `loom.reference.list`,
+`loom.response.list`, `loom.reference.resolve`, `loom.reference.list`,
 `loom.attachment.list`, `loom.attachment.inspect`, `loom.graph.inspect`, `loom.bookmark.list`,
 `loom.memory.list`, `loom.search.keyword`
 
-These are fully designed here and may be registered in TOOL-RUNTIME-REGISTRY-SEED-001 implementation
-as part of a broader catalog. They are not the minimal seed. The task author decides whether to
-register all ten at once or add only the three minimum.
+These are design candidates only and are not registered by TOOL-RUNTIME-REGISTRY-SEED-001.
 
 ---
 
@@ -493,19 +524,16 @@ panics, which it currently cannot). No `Result` return type.
 
 ### 14.3 Seeding call site
 
-Call from `router_with_experimental()` in `services/loom-service/src/api/mod.rs`,
-immediately after creating the `tool_registry` Arc and before constructing `AppState`:
+Call from `router_with_experimental()` in `services/loom-service/src/api/mod.rs`, after creating
+the mutable registry and before wrapping it in shared state or constructing `AppState`:
 
 ```rust
-let tool_registry = std::sync::Arc::new(std::sync::RwLock::new(
-    crate::agent_runtime::tool_registry::ToolRegistry::new(),
-));
-crate::agent_runtime::catalog::seed_builtin_tools(
-    &mut tool_registry.write().expect("tool registry seed lock")
-);
+let mut tool_registry = crate::agent_runtime::tool_registry::ToolRegistry::new();
+crate::agent_runtime::catalog::seed_builtin_tools(&mut tool_registry);
+let tool_registry = std::sync::Arc::new(std::sync::RwLock::new(tool_registry));
 ```
 
-The write lock is held for microseconds at process startup. No runtime contention risk.
+No registry lock is required during seeding because the registry has not yet been shared.
 
 ### 14.4 Seeding is unconditional
 
@@ -606,7 +634,7 @@ substrings. Seeded tool names like `loom.runtime.status`, `loom.loom.inspect`, a
 ```
 #[tokio::test] tools_route_returns_seeded_tools_after_startup
   → test_router(experimental: true) → GET /experimental/agent/tools
-    → payload["count"] >= 3
+    → payload["count"] == 4
     → all tools have executionEnabled: false
     → all tools have availability != "available"
     → loom.runtime.status is present in the list

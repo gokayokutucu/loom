@@ -379,10 +379,12 @@ impl ToolRuntimeBoundary {
             _ => ToolInvocationStatus::Skipped,
         };
         let error = match permission.status {
-            ToolPermissionStatus::Allowed => Some(ToolRuntimeError::new(
-                "TOOL_EXECUTION_NOT_IMPLEMENTED",
-                "tool execution is not implemented in the boundary phase",
-            )),
+            ToolPermissionStatus::Allowed | ToolPermissionStatus::NotAvailable => {
+                Some(ToolRuntimeError::new(
+                    "TOOL_EXECUTION_NOT_IMPLEMENTED",
+                    "tool execution is not implemented in the boundary phase",
+                ))
+            }
             _ => None,
         };
         ToolInvocationResult {

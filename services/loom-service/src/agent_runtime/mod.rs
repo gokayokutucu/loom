@@ -5,6 +5,7 @@
 // consumes the full surface (AGENT-RUNTIME-API-EXPERIMENTAL-ROUTE-001 gated).
 #![allow(dead_code)]
 
+pub mod catalog;
 pub mod events;
 pub mod runtime;
 pub mod service;

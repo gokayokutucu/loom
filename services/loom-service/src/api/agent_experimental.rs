@@ -740,30 +740,63 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn tools_route_starts_empty_by_default() {
+        async fn tools_route_returns_seeded_catalog_deterministically() {
             let router = test_router(ExperimentalApiConfig {
                 agent_runtime_api: true,
             })
             .await;
-            let response = router.oneshot(tools_request()).await.expect("response");
+            let first_response = router
+                .clone()
+                .oneshot(tools_request())
+                .await
+                .expect("first response");
+            let second_response = router
+                .oneshot(tools_request())
+                .await
+                .expect("second response");
 
-            assert_eq!(response.status(), StatusCode::OK);
-            let body = response
+            assert_eq!(first_response.status(), StatusCode::OK);
+            assert_eq!(second_response.status(), StatusCode::OK);
+            let body = first_response
                 .into_body()
                 .collect()
                 .await
                 .expect("body")
                 .to_bytes();
+            let second_body = second_response
+                .into_body()
+                .collect()
+                .await
+                .expect("second body")
+                .to_bytes();
+            assert_eq!(body, second_body);
             let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
 
-            // Check counts and static properties
             assert_eq!(payload["executionEnabled"], false);
-            assert_eq!(payload["registryStatus"], "empty");
-            assert_eq!(payload["count"], 0);
+            assert_eq!(payload["registryStatus"], "available");
+            assert_eq!(payload["count"], 4);
 
-            // Inspect that the tools array is empty
             let tools = payload["tools"].as_array().expect("tools array");
-            assert_eq!(tools.len(), 0);
+            assert_eq!(tools.len(), 4);
+            assert_eq!(
+                tools
+                    .iter()
+                    .map(|tool| tool["name"].as_str().expect("tool name"))
+                    .collect::<Vec<_>>(),
+                vec![
+                    "loom.loom.inspect",
+                    "loom.response.read",
+                    "loom.runtime.status",
+                    "loom.weft.inspect",
+                ]
+            );
+            assert!(tools.iter().all(|tool| tool["enabled"] == true));
+            assert!(tools
+                .iter()
+                .all(|tool| tool["availability"] == "not_available"));
+            assert!(tools
+                .iter()
+                .all(|tool| tool["permissionRequirement"] == "always_allowed"));
 
             // Assert no forbidden strings in the raw body
             let body_str = String::from_utf8(body.to_vec()).expect("utf8");
@@ -850,9 +883,10 @@ mod tests {
                 LoomServiceConfig::default(),
             );
 
-            let tool_registry = std::sync::Arc::new(std::sync::RwLock::new(
-                crate::agent_runtime::tool_registry::ToolRegistry::new(),
-            ));
+            let mut seeded_registry = crate::agent_runtime::tool_registry::ToolRegistry::new();
+            crate::agent_runtime::catalog::seed_builtin_tools(&mut seeded_registry);
+            assert_eq!(seeded_registry.list().len(), 4);
+            let tool_registry = std::sync::Arc::new(std::sync::RwLock::new(seeded_registry));
 
             let state = AppState {
                 database,
@@ -952,6 +986,7 @@ mod tests {
 
             // Confirm the dynamic tool is listed
             let tools = payload["tools"].as_array().expect("tools array");
+            assert_eq!(tools.len(), 5);
             let found_tool = tools.iter().find(|t| t["name"] == "dummy_placeholder_tool");
             assert!(
                 found_tool.is_some(),

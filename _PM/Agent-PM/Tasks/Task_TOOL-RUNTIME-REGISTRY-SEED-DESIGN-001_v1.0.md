@@ -1,6 +1,13 @@
 # Task: TOOL-RUNTIME-REGISTRY-SEED-DESIGN-001 v1.0
 ## Design Initial Loom-native Tool Registry Seed
 
+## Approved Implementation Amendment
+
+The implementation seed contains exactly four descriptors. `loom.weft.inspect` is added to the
+three originally proposed descriptors so the catalog preserves Loom's first-class Loom / Weft /
+Response vocabulary. The repeated `loom.loom` namespace/entity form remains intentional. No
+descriptor is executable.
+
 ---
 
 ## Metadata
@@ -72,8 +79,9 @@ is wired and reviewed.
 
 Recommended seeding call site:
 ```rust
-let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
-seed_builtin_tools(&mut tool_registry.write().expect("tool registry seed lock"));
+let mut tool_registry = ToolRegistry::new();
+seed_builtin_tools(&mut tool_registry);
+let tool_registry = Arc::new(RwLock::new(tool_registry));
 let state = AppState { ..., tool_registry };
 ```
 
@@ -162,16 +170,17 @@ Three enforcement layers:
 
 ## Decision Log
 
-### D1: Option B (Minimal 3-descriptor seed) selected over Option A (empty) and Option C (full catalog)
+### D1: Option B (Minimal 4-descriptor seed) selected over Option A (empty) and Option C (full catalog)
 
 **Rationale:** Option A wastes the already-gated introspection endpoint — the inspector shows
 nothing even though the gating, routing, and serialization are all working. Option C commits
 names too broadly before the domain taxonomy is fully stable (artifact ambiguity, context
-manager dependency, retrieval dependency). Option B seeds three stable, read-only descriptors
+manager dependency, retrieval dependency). Option B seeds four stable, read-only descriptors
 that prove the mechanism, establish the convention, and leave no open questions about naming.
 
-**Decisive constraint:** "semantic stability over visual richness" — the three chosen descriptors
-(`loom.runtime.status`, `loom.loom.inspect`, `loom.response.read`) are the least likely of all
+**Decisive constraint:** "semantic stability over visual richness" — the four chosen descriptors
+(`loom.runtime.status`, `loom.loom.inspect`, `loom.weft.inspect`, `loom.response.read`) preserve
+the first-class Loom domain vocabulary and are among the least likely of all
 candidates to need renaming or restructuring.
 
 ### D2: Doubled `loom.loom.inspect` accepted without alias
@@ -259,8 +268,8 @@ pub mod catalog;
 pub fn seed_builtin_tools(registry: &mut ToolRegistry) {
     // register loom.runtime.status
     // register loom.loom.inspect
+    // register loom.weft.inspect
     // register loom.response.read
-    // (optionally: register the full deferred catalog, all NotAvailable)
 }
 ```
 
@@ -271,10 +280,9 @@ No closures. No trait objects. No handlers. No imports of process/fs/net/reqwest
 `services/loom-service/src/api/mod.rs` — `router_with_experimental()`:
 
 ```rust
-let tool_registry = Arc::new(RwLock::new(ToolRegistry::new()));
-crate::agent_runtime::catalog::seed_builtin_tools(
-    &mut tool_registry.write().expect("tool registry seed lock")
-);
+let mut tool_registry = ToolRegistry::new();
+crate::agent_runtime::catalog::seed_builtin_tools(&mut tool_registry);
+let tool_registry = Arc::new(RwLock::new(tool_registry));
 let state = AppState { ..., tool_registry };
 ```
 
@@ -328,8 +336,9 @@ feat: seed built-in Loom-native tool descriptors in agent runtime catalog
 | 2026-06-14 | TOOL-RUNTIME-REGISTRY-SEED-DESIGN-001 initiated. Branch: feature/agent-runtime at b543d9d. |
 | 2026-06-14 | All domain repositories surveyed. 8 pre-design questions answered. |
 | 2026-06-14 | Naming convention finalized: `loom.{domain}.{verb}`. |
-| 2026-06-14 | All 18 candidate capabilities reviewed. Decisions: 3 in minimal seed, 10 in catalog, 3 deferred, 1 rejected, 2 renamed/split. |
-| 2026-06-14 | Option B (3 descriptors) selected. |
+| 2026-06-14 | All 18 candidate capabilities reviewed. Amended decisions: 4 in minimal seed, 9 later catalog candidates, 3 deferred, 1 rejected, 2 renamed/split. |
+| 2026-06-14 | Option B initially selected with 3 descriptors. |
+| 2026-06-14 | Approved amendment expands the initial seed to 4 descriptors by adding `loom.weft.inspect`. |
 | 2026-06-14 | MCP compatibility, versioning, permission, and deprecation models finalized. |
 | 2026-06-14 | Phase5_ToolRuntimeRegistrySeedDesign_v1.0.md written. |
 | 2026-06-14 | Task_TOOL-RUNTIME-REGISTRY-SEED-DESIGN-001_v1.0.md written. |

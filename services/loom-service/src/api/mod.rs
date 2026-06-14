@@ -90,9 +90,9 @@ pub fn router_with_experimental(
     restart: RestartState,
     experimental: ExperimentalApiConfig,
 ) -> Router {
-    let tool_registry = std::sync::Arc::new(std::sync::RwLock::new(
-        crate::agent_runtime::tool_registry::ToolRegistry::new(),
-    ));
+    let mut tool_registry = crate::agent_runtime::tool_registry::ToolRegistry::new();
+    crate::agent_runtime::catalog::seed_builtin_tools(&mut tool_registry);
+    let tool_registry = std::sync::Arc::new(std::sync::RwLock::new(tool_registry));
 
     let state = AppState {
         database,

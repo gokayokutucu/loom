@@ -111,7 +111,9 @@ impl ToolRegistry {
     }
 
     pub fn list(&self) -> Vec<RegisteredTool> {
-        self.tools.values().cloned().collect()
+        let mut tools: Vec<_> = self.tools.values().cloned().collect();
+        tools.sort_by(|left, right| left.name.as_str().cmp(right.name.as_str()));
+        tools
     }
 
     pub fn resolve(&self, tool_name: &ToolName) -> ToolRegistryResolution {
