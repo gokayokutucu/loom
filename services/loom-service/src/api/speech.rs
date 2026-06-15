@@ -1332,10 +1332,15 @@ mod tests {
     async fn test_state(speech: SpeechToTextConfig) -> AppState {
         let mut config_file = LoomServiceConfig::default();
         config_file.speech = speech;
+        let database = Database::connect_and_migrate(&DatabaseConfig::in_memory())
+            .await
+            .expect("db");
+        let agent_run_repository =
+            crate::storage::repositories::agent_runs::AgentRunRepository::from_pool(
+                database.pool(),
+            );
         AppState {
-            database: Database::connect_and_migrate(&DatabaseConfig::in_memory())
-                .await
-                .expect("db"),
+            database,
             ollama: OllamaRuntime::new(OllamaConfig {
                 base_url: "http://127.0.0.1:9".to_string(),
                 request_timeout: std::time::Duration::from_millis(10),
@@ -1351,6 +1356,7 @@ mod tests {
             operations: OperationTracker::default(),
             restart: RestartState::default(),
             agent_runs: Default::default(),
+            agent_run_repository,
             tool_registry: std::sync::Arc::new(std::sync::RwLock::new(
                 crate::agent_runtime::tool_registry::ToolRegistry::new(),
             )),

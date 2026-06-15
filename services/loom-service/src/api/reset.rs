@@ -258,6 +258,10 @@ mod tests {
 
     async fn test_state() -> AppState {
         let database = test_database().await;
+        let agent_run_repository =
+            crate::storage::repositories::agent_runs::AgentRunRepository::from_pool(
+                database.pool(),
+            );
         AppState {
             database,
             ollama: OllamaRuntime::new(OllamaConfig {
@@ -275,6 +279,7 @@ mod tests {
             operations: OperationTracker::default(),
             restart: RestartState::default(),
             agent_runs: Default::default(),
+            agent_run_repository,
             tool_registry: std::sync::Arc::new(std::sync::RwLock::new(
                 crate::agent_runtime::tool_registry::ToolRegistry::new(),
             )),

@@ -32,7 +32,7 @@ mod wefts;
 use crate::config::ConfigManager;
 use crate::providers::{ollama::OllamaRuntime, secret_store::ProviderSecretStore};
 use crate::runtime::{OperationTracker, RestartState};
-use crate::storage::db::Database;
+use crate::storage::{db::Database, repositories::agent_runs::AgentRunRepository};
 use axum::{
     body::Body,
     extract::DefaultBodyLimit,
@@ -94,6 +94,7 @@ pub fn router_with_experimental(
     crate::agent_runtime::catalog::seed_builtin_tools(&mut tool_registry);
     let tool_registry = std::sync::Arc::new(std::sync::RwLock::new(tool_registry));
 
+    let agent_run_repository = AgentRunRepository::from_pool(database.pool());
     let state = AppState {
         database,
         ollama,
@@ -102,6 +103,7 @@ pub fn router_with_experimental(
         operations,
         restart,
         agent_runs: crate::agent_runtime::runtime::AgentRunStore::new(),
+        agent_run_repository,
         tool_registry,
     };
 
@@ -119,6 +121,22 @@ pub fn router_with_experimental(
             .route(
                 agent_experimental::EXPERIMENTAL_AGENT_TOOLS_PATH,
                 get(agent_experimental::list_tools),
+            )
+            .route(
+                agent_experimental::EXPERIMENTAL_AGENT_RUNS_PATH,
+                get(agent_experimental::list_runs),
+            )
+            .route(
+                agent_experimental::EXPERIMENTAL_AGENT_RUN_GET_PATH,
+                get(agent_experimental::get_run_history),
+            )
+            .route(
+                agent_experimental::EXPERIMENTAL_AGENT_RUN_STEPS_PATH,
+                get(agent_experimental::list_steps),
+            )
+            .route(
+                agent_experimental::EXPERIMENTAL_AGENT_RUN_EVENTS_PATH,
+                get(agent_experimental::list_events),
             )
     } else {
         Router::new()

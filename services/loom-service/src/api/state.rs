@@ -3,7 +3,7 @@ use crate::{
     config::ConfigManager,
     providers::{ollama::OllamaRuntime, secret_store::ProviderSecretStore},
     runtime::{OperationTracker, RestartState},
-    storage::db::Database,
+    storage::{db::Database, repositories::agent_runs::AgentRunRepository},
 };
 
 #[derive(Debug, Clone)]
@@ -14,28 +14,24 @@ pub struct AppState {
     pub secret_store: ProviderSecretStore,
     pub operations: OperationTracker,
     pub restart: RestartState,
-    /// Process-lifetime in-memory agent run state. It is reachable only through
-    /// the gated experimental Agent Runtime routes.
+    /// Process-lifetime in-memory agent run state (cancellation authority).
     pub agent_runs: AgentRunStore,
+    /// Durable agent run history repository (SQLite source of truth).
+    pub agent_run_repository: AgentRunRepository,
     pub tool_registry:
         std::sync::Arc<std::sync::RwLock<crate::agent_runtime::tool_registry::ToolRegistry>>,
 }
 
 impl AppState {
-    /// Internal Agent Runtime boundary. Mirrors the per-call
-    /// `ProviderPipeline::new(state.ollama.clone())` idiom used by product
-    /// paths while sharing the process-lifetime run store. HTTP exposure is
-    /// restricted to the explicitly gated experimental route module.
-    ///
-    /// Each HTTP request may construct a new service instance. Cancellation
-    /// still reaches an active provider request because `OllamaRuntime` clones
-    /// share one Arc-backed `CancellationRegistry`. Any change to those clone
-    /// semantics requires revisiting the Agent Runtime cancellation design.
+    /// Internal Agent Runtime boundary. Each HTTP request constructs a new
+    /// service instance; cancellation still reaches active provider requests
+    /// because `OllamaRuntime` clones share one Arc-backed `CancellationRegistry`.
     pub fn agent_runtime(&self) -> AgentRuntimeService {
-        AgentRuntimeService::from_ollama_with_store_and_registry(
+        AgentRuntimeService::from_ollama_with_store_registry_and_repo(
             self.ollama.clone(),
             self.agent_runs.clone(),
             self.tool_registry.clone(),
+            self.agent_run_repository.clone(),
         )
     }
 }

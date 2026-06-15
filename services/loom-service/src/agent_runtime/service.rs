@@ -8,6 +8,7 @@ use crate::agent_runtime::types::{AgentRunId, AgentRuntimeRequest};
 use crate::providers::adapter::ProviderRegistry;
 use crate::providers::ollama::OllamaRuntime;
 use crate::providers::pipeline::{ProviderPipeline, ProviderPipelineRegistry};
+use crate::storage::repositories::agent_runs::AgentRunRepository;
 
 /// Internal service boundary for the Loom-native Agent Runtime.
 ///
@@ -39,6 +40,21 @@ impl AgentRuntimeService<ProviderRegistry> {
     ) -> Self {
         Self::with_run_store_and_registry(ProviderPipeline::new(ollama), run_store, tool_registry)
     }
+
+    /// Production constructor with durable persistence enabled.
+    pub fn from_ollama_with_store_registry_and_repo(
+        ollama: OllamaRuntime,
+        run_store: AgentRunStore,
+        tool_registry: Arc<std::sync::RwLock<crate::agent_runtime::tool_registry::ToolRegistry>>,
+        repo: AgentRunRepository,
+    ) -> Self {
+        Self::with_run_store_registry_and_repo(
+            ProviderPipeline::new(ollama),
+            run_store,
+            tool_registry,
+            repo,
+        )
+    }
 }
 
 impl<R> AgentRuntimeService<R>
@@ -68,6 +84,20 @@ where
                 run_store,
                 tool_registry,
             )),
+        }
+    }
+
+    pub fn with_run_store_registry_and_repo(
+        pipeline: ProviderPipeline<R>,
+        run_store: AgentRunStore,
+        tool_registry: Arc<std::sync::RwLock<crate::agent_runtime::tool_registry::ToolRegistry>>,
+        repo: AgentRunRepository,
+    ) -> Self {
+        Self {
+            runtime: Arc::new(
+                AgentRuntime::with_run_store_and_registry(pipeline, run_store, tool_registry)
+                    .with_repository(repo),
+            ),
         }
     }
 
@@ -128,6 +158,13 @@ mod tests {
         ]
     }
 
+    fn extract_run_id(events: &[AgentEvent]) -> String {
+        match events.first() {
+            Some(AgentEvent::RunStarted { run_id, .. }) => run_id.clone(),
+            _ => panic!("expected RunStarted as first event"),
+        }
+    }
+
     #[tokio::test]
     async fn test_service_executes_run_and_shares_store() {
         let (service, _) = make_test_service(completed_events());
@@ -144,10 +181,10 @@ mod tests {
             Some(AgentEvent::RunCompleted { .. })
         ));
 
-        // The same store instance the service exposes observed the run.
+        let run_id = AgentRunId::from(extract_run_id(&events));
         let run = service
             .run_store()
-            .get(&AgentRunId::from("service-run"))
+            .get(&run_id)
             .expect("run recorded through service boundary");
         assert_eq!(run.status, AgentRunStatus::Completed);
         assert_eq!(run.usage.and_then(|u| u.total_tokens), Some(30));
@@ -166,11 +203,13 @@ mod tests {
             .collect::<Vec<_>>()
             .await;
 
-        // The externally owned store (app-state pattern) sees the run.
+        // The externally owned store (app-state pattern) observes the run.
+        // run_id is a UUID so we verify count and status, not a specific ID.
         assert_eq!(run_store.len(), 1);
-        assert!(run_store
-            .get(&AgentRunId::from("external-store-run"))
-            .is_some());
+        let run_ids = run_store.all_run_ids();
+        let run = run_store.get(&run_ids[0]).expect("run in external store");
+        assert_eq!(run.status, AgentRunStatus::Completed);
+        assert_eq!(run.response_id.as_deref(), Some("external-store-run"));
     }
 
     #[tokio::test]
@@ -210,11 +249,8 @@ mod tests {
             );
         }
 
-        // The store keeps metadata only — no prompt, payloads, or headers.
-        let run = service
-            .run_store()
-            .get(&AgentRunId::from("service-privacy"))
-            .expect("run recorded");
+        let run_id = AgentRunId::from(extract_run_id(&stream_events));
+        let run = service.run_store().get(&run_id).expect("run recorded");
         let run_serialized = serde_json::to_string(&run).expect("serialize run");
         assert!(!run_serialized.contains("ping"), "prompt leaked into store");
         assert!(!run_serialized
@@ -227,18 +263,21 @@ mod tests {
         let (service, state) = make_pending_test_service(vec![ProviderContractEvent::Delta {
             text: "partial".to_string(),
         }]);
-        let run_id = AgentRunId::from("service-cancel");
 
         let collect = service
             .execute(make_request("service-cancel"))
             .collect::<Vec<_>>();
         let cancel = async {
-            while service.run_store().get(&run_id).is_none() {
+            // Wait for the UUID run to appear in the store (run_id is unknown until RunStarted).
+            loop {
+                let run_ids = service.run_store().all_run_ids();
+                if let Some(run_id) = run_ids.into_iter().next() {
+                    return (run_id.clone(), service.cancel(&run_id));
+                }
                 tokio::task::yield_now().await;
             }
-            service.cancel(&run_id)
         };
-        let (events, outcome) = tokio::join!(collect, cancel);
+        let (events, (actual_run_id, outcome)) = tokio::join!(collect, cancel);
 
         assert!(matches!(
             outcome,
@@ -247,19 +286,23 @@ mod tests {
                 ..
             }
         ));
+        // The pipeline cancel uses the UUID run_id (= provider request_id).
         assert_eq!(
             state.lock().unwrap().cancel_called_with.as_deref(),
-            Some("service-cancel")
+            Some(actual_run_id.as_str())
         );
-        let run = service.run_store().get(&run_id).expect("run recorded");
+        let run = service
+            .run_store()
+            .get(&actual_run_id)
+            .expect("run recorded");
         assert!(run.cancel_requested);
         assert_eq!(run.status, AgentRunStatus::Cancelled);
         assert!(matches!(
             events.last(),
-            Some(AgentEvent::RunCancelled { run_id }) if run_id == "service-cancel"
+            Some(AgentEvent::RunCancelled { run_id }) if run_id == actual_run_id.as_str()
         ));
 
-        let repeated = service.cancel(&run_id);
+        let repeated = service.cancel(&actual_run_id);
         assert!(matches!(
             repeated,
             AgentCancellationOutcome::Cancelled {
@@ -272,12 +315,12 @@ mod tests {
     #[tokio::test]
     async fn test_service_cancel_preserves_completed_run() {
         let (service, state) = make_test_service(completed_events());
-        let run_id = AgentRunId::from("service-completed");
-        let _ = service
+        let events = service
             .execute(make_request("service-completed"))
             .collect::<Vec<_>>()
             .await;
 
+        let run_id = AgentRunId::from(extract_run_id(&events));
         let outcome = service.cancel(&run_id);
 
         assert!(matches!(
@@ -292,12 +335,12 @@ mod tests {
     async fn test_service_cancel_preserves_failed_run() {
         let error = ProviderError::new(ProviderErrorKind::RuntimeUnavailable, ProviderKind::Ollama);
         let (service, state) = make_test_service(vec![ProviderContractEvent::Error { error }]);
-        let run_id = AgentRunId::from("service-failed");
-        let _ = service
+        let events = service
             .execute(make_request("service-failed"))
             .collect::<Vec<_>>()
             .await;
 
+        let run_id = AgentRunId::from(extract_run_id(&events));
         let outcome = service.cancel(&run_id);
 
         assert!(matches!(
@@ -310,7 +353,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_service_provider_options_flow_through() {
-        // Defaults flow through the service boundary unchanged.
         let (service, state) = make_test_service(completed_events());
         let _ = service
             .execute(make_request("service-default-opts"))
@@ -320,7 +362,6 @@ mod tests {
         assert_eq!(captured.options.temperature, Some(0.7));
         assert_eq!(captured.options.max_tokens, Some(1024));
 
-        // Custom options flow through as well.
         let (service, state) = make_test_service(completed_events());
         let mut request = make_request("service-custom-opts");
         request.provider_options = Some(AgentRuntimeProviderOptions {
@@ -335,9 +376,6 @@ mod tests {
 
     #[test]
     fn test_product_paths_do_not_call_agent_runtime() {
-        // Static guard: Main generation and Quick Ask sources must not invoke
-        // the agent runtime. (The AppState `agent_runs` store field is allowed;
-        // calling the runtime is not.)
         let orchestration = include_str!("../api/orchestration.rs");
         let ask = include_str!("../api/ask.rs");
         for source in [orchestration, ask] {

@@ -15,6 +15,7 @@ mod runtime;
 mod speech;
 mod storage;
 
+use storage::repositories::agent_runs::AgentRunRepository;
 use storage::repositories::code_blocks::cleanup_pseudo_artifact_blocks;
 use storage::repositories::orchestration::cleanup_orphaned_workflows;
 use storage::repositories::tags_graph::cleanup_orphaned_code_language_tags;
@@ -86,6 +87,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         Err(error) => tracing::warn!(
             %error,
             "loom-service orphaned workflow cleanup failed; continuing"
+        ),
+    }
+
+    match AgentRunRepository::from_pool(database.pool())
+        .recover_interrupted_runs()
+        .await
+    {
+        Ok(0) => {}
+        Ok(count) => tracing::info!(
+            count,
+            "loom-service marked interrupted agent runs from unclean shutdown"
+        ),
+        Err(error) => tracing::warn!(
+            %error,
+            "loom-service agent run recovery failed; continuing"
         ),
     }
 

@@ -6,13 +6,14 @@ use futures_util::Stream;
 use futures_util::StreamExt;
 use tokio::sync::watch;
 
+use crate::agent_runtime::event_writer::event_to_safe_record;
 use crate::agent_runtime::events::AgentEvent;
 use crate::agent_runtime::tools::{
     SafeToolArguments, ToolCallId, ToolInvocationRequest, ToolName, ToolRuntimeBoundary,
 };
 use crate::agent_runtime::types::{
-    AgentRun, AgentRunId, AgentRunStatus, AgentRuntimeProviderOptions, AgentRuntimeRequest,
-    AgentStepId, AgentStepKind, AgentUsage,
+    new_agent_run_id, AgentRun, AgentRunId, AgentRunStatus, AgentRuntimeProviderOptions,
+    AgentRuntimeRequest, AgentStepId, AgentStepKind, AgentUsage,
 };
 use crate::providers::adapter::ProviderRegistry;
 use crate::providers::contract::{
@@ -20,6 +21,7 @@ use crate::providers::contract::{
     ProviderContractOptions, ProviderContractRequest,
 };
 use crate::providers::pipeline::{ProviderPipeline, ProviderPipelineRegistry};
+use crate::storage::repositories::agent_runs::{AgentRunRepository, NewAgentEvent, NewAgentRun};
 
 fn now_epoch_ms() -> u64 {
     std::time::SystemTime::now()
@@ -28,8 +30,8 @@ fn now_epoch_ms() -> u64 {
         .as_millis() as u64
 }
 
-/// In-memory run state. No persistence, no SQLite schema — run history is
-/// internal/dev-only in this phase (AGENT-RUN-PERSISTENCE-001 is deferred).
+/// In-memory run state. Process-lifetime cache; `AgentRunRepository` is the
+/// durable history source. The store owns cancellation signals.
 #[derive(Debug, Clone, Default)]
 pub struct AgentRunStore {
     runs: Arc<Mutex<HashMap<AgentRunId, AgentRun>>>,
@@ -92,6 +94,12 @@ impl AgentRunStore {
         self.runs.lock().unwrap().is_empty()
     }
 
+    /// Returns all stored run IDs. Useful for tests and introspection — the
+    /// store never evicts, so this includes both active and terminal runs.
+    pub fn all_run_ids(&self) -> Vec<AgentRunId> {
+        self.runs.lock().unwrap().keys().cloned().collect()
+    }
+
     pub fn request_cancel(&self, run_id: &AgentRunId) -> AgentCancellationOutcome {
         let outcome = {
             let mut runs = self.runs.lock().unwrap();
@@ -114,7 +122,9 @@ impl AgentRunStore {
                     run: run.clone(),
                     newly_requested: false,
                 },
-                AgentRunStatus::Completed | AgentRunStatus::Failed => {
+                AgentRunStatus::Completed
+                | AgentRunStatus::Failed
+                | AgentRunStatus::Interrupted => {
                     AgentCancellationOutcome::Terminal { run: run.clone() }
                 }
             }
@@ -154,7 +164,10 @@ impl AgentRunStore {
 
             if matches!(
                 run.status,
-                AgentRunStatus::Completed | AgentRunStatus::Failed | AgentRunStatus::Cancelled
+                AgentRunStatus::Completed
+                    | AgentRunStatus::Failed
+                    | AgentRunStatus::Cancelled
+                    | AgentRunStatus::Interrupted
             ) {
                 AgentTerminalTransition::Preserved(run.clone())
             } else {
@@ -186,16 +199,36 @@ fn terminal_event(
         Some(AgentRunStatus::Cancelled) => AgentEvent::RunCancelled {
             run_id: run_id.to_string(),
         },
-        Some(AgentRunStatus::Failed) | Some(AgentRunStatus::Pending | AgentRunStatus::Running) => {
-            AgentEvent::RunFailed {
-                run_id: run_id.to_string(),
-                error_message: failure_message.into(),
-            }
-        }
+        Some(
+            AgentRunStatus::Failed
+            | AgentRunStatus::Pending
+            | AgentRunStatus::Running
+            | AgentRunStatus::Interrupted,
+        ) => AgentEvent::RunFailed {
+            run_id: run_id.to_string(),
+            error_message: failure_message.into(),
+        },
         None => AgentEvent::RunFailed {
             run_id: run_id.to_string(),
             error_message: "Agent run state was unavailable during terminal transition".to_string(),
         },
+    }
+}
+
+fn terminal_status_str(transition: &AgentTerminalTransition) -> AgentRunStatus {
+    match transition {
+        AgentTerminalTransition::Applied(run) | AgentTerminalTransition::Preserved(run) => {
+            run.status
+        }
+        AgentTerminalTransition::Missing => AgentRunStatus::Failed,
+    }
+}
+
+fn terminal_event_type(transition: &AgentTerminalTransition) -> &'static str {
+    match terminal_status_str(transition) {
+        AgentRunStatus::Completed => "run_completed",
+        AgentRunStatus::Cancelled => "run_cancelled",
+        _ => "run_failed",
     }
 }
 
@@ -204,6 +237,7 @@ pub struct AgentRuntime<R = ProviderRegistry> {
     pipeline: ProviderPipeline<R>,
     run_store: AgentRunStore,
     tool_registry: Arc<std::sync::RwLock<crate::agent_runtime::tool_registry::ToolRegistry>>,
+    run_repository: Option<AgentRunRepository>,
 }
 
 impl<R> AgentRuntime<R>
@@ -221,6 +255,7 @@ where
             tool_registry: Arc::new(std::sync::RwLock::new(
                 crate::agent_runtime::tool_registry::ToolRegistry::new(),
             )),
+            run_repository: None,
         }
     }
 
@@ -233,7 +268,16 @@ where
             pipeline,
             run_store,
             tool_registry,
+            run_repository: None,
         }
+    }
+
+    /// Attaches a durable repository for run persistence. The in-memory store
+    /// remains the cancellation and cache authority; the repository is the
+    /// history source of truth.
+    pub fn with_repository(mut self, repo: AgentRunRepository) -> Self {
+        self.run_repository = Some(repo);
+        self
     }
 
     pub fn run_store(&self) -> &AgentRunStore {
@@ -249,9 +293,6 @@ where
                 ..
             }
         ) {
-            // The runtime-owned signal is authoritative. Provider cancellation
-            // is best-effort because some adapters cancel by dropping the
-            // stream rather than exposing an active request registry.
             self.pipeline.cancel_generation(run_id.as_str());
         }
         outcome
@@ -261,10 +302,12 @@ where
         let pipeline = self.pipeline.clone();
         let run_store = self.run_store.clone();
         let tool_registry = self.tool_registry.clone();
+        let run_repository = self.run_repository.clone();
         stream! {
-            let run_id = request.response_id.clone().unwrap_or_else(|| {
-                format!("agent-run-{}", now_epoch_ms())
-            });
+            // AgentRunId is an independent UUID v4 — never derived from response_id.
+            let run_id = new_agent_run_id().0;
+            let now_ms = now_epoch_ms();
+            let started_at_str = now_ms.to_string();
 
             let profile = pipeline.default_generation_profile();
             let provider_kind = profile.provider_kind;
@@ -280,8 +323,11 @@ where
                 loom_id: request.loom_id.clone(),
                 response_id: request.response_id.clone(),
                 parent_response_id: request.parent_response_id.clone(),
+                correlation_id: run_id.clone(),
+                causation_id: request.parent_response_id.clone(),
+                context_snapshot_id: request.context_snapshot_id.clone(),
                 status: AgentRunStatus::Running,
-                started_at: now_epoch_ms(),
+                started_at: now_ms,
                 completed_at: None,
                 cancel_requested: false,
                 provider_profile_id: Some(provider_profile_id.clone()),
@@ -290,27 +336,48 @@ where
             });
             let store_run_id = AgentRunId::from(run_id.clone());
 
-            yield AgentEvent::RunStarted {
+            // Persist run start
+            if let Some(ref repo) = run_repository {
+                let _ = repo.insert_run(&NewAgentRun {
+                    agent_run_id: &run_id,
+                    loom_id: request.loom_id.as_deref(),
+                    response_id: request.response_id.as_deref(),
+                    parent_response_id: request.parent_response_id.as_deref(),
+                    correlation_id: &run_id,
+                    causation_id: request.parent_response_id.as_deref(),
+                    context_snapshot_id: request.context_snapshot_id.as_deref(),
+                    provider_profile_id: Some(provider_profile_id.as_str()),
+                    model_id: Some(model_id.as_str()),
+                    started_at: &started_at_str,
+                }).await;
+            }
+
+            let run_started = AgentEvent::RunStarted {
                 run_id: run_id.clone(),
                 loom_id: request.loom_id.clone(),
             };
+            persist_event(&run_repository, &run_id, &run_started).await;
+            yield run_started;
 
-            // 1. ContextBuild step — placeholder only. The Context Manager
-            // (AGENT-CONTEXT-MANAGER-001) will own context assembly later.
+            // 1. ContextBuild step — placeholder only.
             let context_step_id = format!("{}-context-build", run_id);
-            yield AgentEvent::StepStarted {
+            let context_step_started = AgentEvent::StepStarted {
                 run_id: run_id.clone(),
                 step_id: context_step_id.clone(),
                 kind: AgentStepKind::ContextBuild,
             };
+            persist_event(&run_repository, &run_id, &context_step_started).await;
+            yield context_step_started;
 
-            // 2. ProviderCall step (LLM generation via existing ProviderPipeline)
+            // 2. ProviderCall step
             let provider_step_id = format!("{}-provider-call", run_id);
-            yield AgentEvent::StepStarted {
+            let provider_step_started = AgentEvent::StepStarted {
                 run_id: run_id.clone(),
                 step_id: provider_step_id.clone(),
                 kind: AgentStepKind::ProviderCall,
             };
+            persist_event(&run_repository, &run_id, &provider_step_started).await;
+            yield provider_step_started;
 
             let default_opts = AgentRuntimeProviderOptions::default();
             let provider_opts = request.provider_options.as_ref();
@@ -362,12 +429,21 @@ where
                                 AgentRunStatus::Cancelled,
                                 None,
                             );
-                            yield terminal_event(
+                            let t_event = terminal_event(
                                 &run_id,
                                 &transition,
                                 start_time.elapsed().as_millis() as u64,
                                 "Agent run cancelled",
                             );
+                            finish_run_in_repo(
+                                &run_repository,
+                                &run_id,
+                                &transition,
+                                None,
+                                Some("Agent run cancelled"),
+                                start_time.elapsed().as_millis() as u64,
+                            ).await;
+                            yield t_event;
                             return;
                         }
                         continue;
@@ -380,6 +456,7 @@ where
                 };
                 match event {
                     ProviderContractEvent::Delta { text } => {
+                        // ProviderDelta is NOT persisted (delta text excluded).
                         yield AgentEvent::provider_delta(
                             run_id.clone(),
                             provider_step_id.clone(),
@@ -395,12 +472,14 @@ where
                     ProviderContractEvent::Completed { done_reason, usage }
                     | ProviderContractEvent::Truncated { done_reason, usage } => {
                         run_usage = AgentUsage::from_provider(&usage);
-                        yield AgentEvent::ProviderCompleted {
+                        let completed_event = AgentEvent::ProviderCompleted {
                             run_id: run_id.clone(),
                             step_id: provider_step_id.clone(),
                             done_reason,
                             usage: run_usage,
                         };
+                        persist_event(&run_repository, &run_id, &completed_event).await;
+                        yield completed_event;
                         completed_successfully = true;
                         break;
                     }
@@ -410,12 +489,21 @@ where
                             AgentRunStatus::Failed,
                             None,
                         );
-                        yield terminal_event(
+                        let t_event = terminal_event(
                             &run_id,
                             &transition,
                             start_time.elapsed().as_millis() as u64,
-                            error.user_message,
+                            error.user_message.clone(),
                         );
+                        finish_run_in_repo(
+                            &run_repository,
+                            &run_id,
+                            &transition,
+                            None,
+                            Some(error.user_message.as_str()),
+                            start_time.elapsed().as_millis() as u64,
+                        ).await;
+                        yield t_event;
                         return;
                     }
                     ProviderContractEvent::Cancelled => {
@@ -424,12 +512,21 @@ where
                             AgentRunStatus::Cancelled,
                             None,
                         );
-                        yield terminal_event(
+                        let t_event = terminal_event(
                             &run_id,
                             &transition,
                             start_time.elapsed().as_millis() as u64,
                             "Agent run cancelled",
                         );
+                        finish_run_in_repo(
+                            &run_repository,
+                            &run_id,
+                            &transition,
+                            None,
+                            Some("Agent run cancelled"),
+                            start_time.elapsed().as_millis() as u64,
+                        ).await;
+                        yield t_event;
                         return;
                     }
                 }
@@ -441,12 +538,21 @@ where
                     AgentRunStatus::Failed,
                     None,
                 );
-                yield terminal_event(
+                let t_event = terminal_event(
                     &run_id,
                     &transition,
                     start_time.elapsed().as_millis() as u64,
                     "Provider stream ended abruptly without completion event",
                 );
+                finish_run_in_repo(
+                    &run_repository,
+                    &run_id,
+                    &transition,
+                    None,
+                    Some("Provider stream ended abruptly without completion event"),
+                    start_time.elapsed().as_millis() as u64,
+                ).await;
+                yield t_event;
                 return;
             }
 
@@ -456,23 +562,34 @@ where
                     AgentRunStatus::Cancelled,
                     None,
                 );
-                yield terminal_event(
+                let t_event = terminal_event(
                     &run_id,
                     &transition,
                     start_time.elapsed().as_millis() as u64,
                     "Agent run cancelled",
                 );
+                finish_run_in_repo(
+                    &run_repository,
+                    &run_id,
+                    &transition,
+                    None,
+                    Some("Agent run cancelled"),
+                    start_time.elapsed().as_millis() as u64,
+                ).await;
+                yield t_event;
                 return;
             }
 
-            // 3. ToolCallPlaceholder step — tool execution is deferred to
-            // TOOL-RUNTIME-BOUNDARY-001; nothing is ever executed here.
+            // 3. ToolCallPlaceholder step
             let tool_step_id = format!("{}-tool-call", run_id);
-            yield AgentEvent::StepStarted {
+            let tool_step_started = AgentEvent::StepStarted {
                 run_id: run_id.clone(),
                 step_id: tool_step_id.clone(),
                 kind: AgentStepKind::ToolCallPlaceholder,
             };
+            persist_event(&run_repository, &run_id, &tool_step_started).await;
+            yield tool_step_started;
+
             let tool_boundary = ToolRuntimeBoundary::with_shared_registry(tool_registry);
             let tool_request = ToolInvocationRequest {
                 call_id: ToolCallId::from(format!("{tool_step_id}-call")),
@@ -483,20 +600,26 @@ where
                 requested_at: now_epoch_ms(),
                 origin: Some("placeholder".to_string()),
             };
-            yield AgentEvent::ToolCallRequested {
+            let tool_call_requested = AgentEvent::ToolCallRequested {
                 run_id: run_id.clone(),
                 step_id: tool_step_id.clone(),
                 tool_name: tool_request.tool_name.to_string(),
             };
+            persist_event(&run_repository, &run_id, &tool_call_requested).await;
+            yield tool_call_requested;
+
             let tool_result = tool_boundary.invoke(&tool_request);
-            yield AgentEvent::ToolPermissionEvaluated {
+            let tool_perm = AgentEvent::ToolPermissionEvaluated {
                 run_id: run_id.clone(),
                 step_id: tool_step_id.clone(),
                 tool_name: tool_result.tool_name.to_string(),
                 status: tool_result.permission.status,
                 reason: tool_result.permission.reason.clone(),
             };
-            yield AgentEvent::ToolCallSkipped {
+            persist_event(&run_repository, &run_id, &tool_perm).await;
+            yield tool_perm;
+
+            let tool_skipped = AgentEvent::ToolCallSkipped {
                 run_id: run_id.clone(),
                 step_id: tool_step_id.clone(),
                 tool_name: tool_result.tool_name.to_string(),
@@ -507,40 +630,116 @@ where
                     .or_else(|| tool_result.permission.reason.clone())
                     .unwrap_or_else(|| "tool execution not implemented".to_string()),
             };
+            persist_event(&run_repository, &run_id, &tool_skipped).await;
+            yield tool_skipped;
 
             // 4. ArtifactPlaceholder step
             let artifact_step_id = format!("{}-artifact", run_id);
-            yield AgentEvent::StepStarted {
+            let artifact_step_started = AgentEvent::StepStarted {
                 run_id: run_id.clone(),
                 step_id: artifact_step_id.clone(),
                 kind: AgentStepKind::ArtifactPlaceholder,
             };
-            yield AgentEvent::ArtifactCreated {
+            persist_event(&run_repository, &run_id, &artifact_step_started).await;
+            yield artifact_step_started;
+
+            let artifact_created = AgentEvent::ArtifactCreated {
                 run_id: run_id.clone(),
                 step_id: artifact_step_id.clone(),
                 artifact_id: "dummy_placeholder_artifact".to_string(),
             };
+            persist_event(&run_repository, &run_id, &artifact_created).await;
+            yield artifact_created;
 
             // 5. ValidationPlaceholder step
             let validation_step_id = format!("{}-validation", run_id);
-            yield AgentEvent::StepStarted {
+            let validation_step_started = AgentEvent::StepStarted {
                 run_id: run_id.clone(),
                 step_id: validation_step_id.clone(),
                 kind: AgentStepKind::ValidationPlaceholder,
             };
+            persist_event(&run_repository, &run_id, &validation_step_started).await;
+            yield validation_step_started;
 
             let transition = run_store.transition_terminal(
                 &store_run_id,
                 AgentRunStatus::Completed,
                 run_usage,
             );
-            yield terminal_event(
+            let t_event = terminal_event(
                 &run_id,
                 &transition,
                 start_time.elapsed().as_millis() as u64,
                 "Agent run failed",
             );
+            finish_run_in_repo(
+                &run_repository,
+                &run_id,
+                &transition,
+                run_usage,
+                None,
+                start_time.elapsed().as_millis() as u64,
+            ).await;
+            yield t_event;
         }
+    }
+}
+
+/// Appends a non-terminal event to the repository if persistence is enabled.
+async fn persist_event(
+    run_repository: &Option<AgentRunRepository>,
+    run_id: &str,
+    event: &AgentEvent,
+) {
+    if let Some(ref repo) = run_repository {
+        if let Some((event_type, payload_json)) = event_to_safe_record(event) {
+            let event_id = uuid::Uuid::new_v4().to_string();
+            let seq = repo.next_sequence();
+            let _ = repo
+                .append_event(&NewAgentEvent {
+                    agent_event_id: &event_id,
+                    agent_run_id: run_id,
+                    agent_step_id: None,
+                    sequence_number: seq,
+                    event_type,
+                    payload_json,
+                })
+                .await;
+        }
+    }
+}
+
+/// Atomically persists the terminal status and event via finish_run.
+async fn finish_run_in_repo(
+    run_repository: &Option<AgentRunRepository>,
+    run_id: &str,
+    transition: &AgentTerminalTransition,
+    usage: Option<AgentUsage>,
+    error_message: Option<&str>,
+    elapsed_ms: u64,
+) {
+    if let Some(ref repo) = run_repository {
+        let status = terminal_status_str(transition);
+        let event_type = terminal_event_type(transition);
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let seq = repo.next_sequence();
+        let payload = serde_json::json!({
+            "runId": run_id,
+            "elapsedMs": elapsed_ms,
+        })
+        .to_string();
+        let _ = repo
+            .finish_run(
+                run_id,
+                status,
+                usage,
+                error_message,
+                &event_id,
+                event_type,
+                seq,
+                Some(payload),
+            )
+            .await;
     }
 }
 
@@ -573,6 +772,9 @@ mod tests {
             loom_id: Some("test-loom".to_string()),
             response_id: Some(run_id.to_string()),
             parent_response_id: None,
+            correlation_id: run_id.to_string(),
+            causation_id: None,
+            context_snapshot_id: None,
             status: AgentRunStatus::Running,
             started_at: now_epoch_ms(),
             completed_at: None,
@@ -580,6 +782,17 @@ mod tests {
             provider_profile_id: Some("fake-agent-provider".to_string()),
             model_id: Some("test-model".to_string()),
             usage: None,
+        }
+    }
+
+    /// Extracts the run_id from the first RunStarted event in a stream.
+    fn extract_run_id(events: &[AgentEvent]) -> String {
+        match events.first() {
+            Some(AgentEvent::RunStarted { run_id, .. }) => run_id.clone(),
+            _ => panic!(
+                "expected RunStarted as first event, got: {:?}",
+                events.first()
+            ),
         }
     }
 
@@ -683,6 +896,20 @@ mod tests {
         );
     }
 
+    #[test]
+    fn interrupted_run_in_store_is_terminal_for_cancel() {
+        let store = AgentRunStore::new();
+        let run_id = AgentRunId::from("interrupted-run");
+        let mut run = make_stored_run(run_id.as_str());
+        run.status = AgentRunStatus::Interrupted;
+        let _ = store.insert(run);
+
+        assert!(matches!(
+            store.request_cancel(&run_id),
+            AgentCancellationOutcome::Terminal { .. }
+        ));
+    }
+
     #[tokio::test]
     async fn test_agent_runtime_lifecycle_event_order() {
         let events = vec![
@@ -703,10 +930,13 @@ mod tests {
 
         let stream_events = runtime.execute_run(request).collect::<Vec<_>>().await;
 
+        // Extract the actual UUID run_id from the RunStarted event.
+        let run_id = extract_run_id(&stream_events);
+
         assert!(matches!(
             stream_events[0],
-            AgentEvent::RunStarted { ref run_id, ref loom_id }
-            if run_id == "test-response" && loom_id.as_deref() == Some("test-loom")
+            AgentEvent::RunStarted { ref loom_id, .. }
+            if loom_id.as_deref() == Some("test-loom")
         ));
         assert!(matches!(
             stream_events[1],
@@ -777,9 +1007,10 @@ mod tests {
                 ..
             }
         ));
+        // Terminal event must carry the same run_id as RunStarted.
         assert!(matches!(
             stream_events[12],
-            AgentEvent::RunCompleted { ref run_id, .. } if run_id == "test-response"
+            AgentEvent::RunCompleted { run_id: ref actual, .. } if actual == &run_id
         ));
         assert_eq!(stream_events.len(), 13);
         assert_eq!(terminal_event_count(&stream_events), 1);
@@ -803,11 +1034,12 @@ mod tests {
         let (runtime, _) = make_test_runtime(events);
         let request = make_request("test-response-store");
 
-        let _ = runtime.execute_run(request).collect::<Vec<_>>().await;
+        let stream_events = runtime.execute_run(request).collect::<Vec<_>>().await;
+        let run_id = AgentRunId::from(extract_run_id(&stream_events));
 
         let run = runtime
             .run_store()
-            .get(&AgentRunId::from("test-response-store"))
+            .get(&run_id)
             .expect("run recorded in store");
         assert_eq!(run.status, AgentRunStatus::Completed);
         assert!(run.completed_at.is_some());
@@ -817,6 +1049,22 @@ mod tests {
             run.provider_profile_id.as_deref(),
             Some("fake-agent-provider")
         );
+    }
+
+    #[tokio::test]
+    async fn test_agent_runtime_run_has_correlation_id_equal_to_run_id() {
+        let events = vec![ProviderContractEvent::Completed {
+            done_reason: Some("stop".to_string()),
+            usage: ProviderUsageMetadata::unavailable("no-usage"),
+        }];
+        let (runtime, _) = make_test_runtime(events);
+        let stream_events = runtime
+            .execute_run(make_request("r"))
+            .collect::<Vec<_>>()
+            .await;
+        let run_id = AgentRunId::from(extract_run_id(&stream_events));
+        let run = runtime.run_store().get(&run_id).expect("run");
+        assert_eq!(run.correlation_id, run_id.as_str());
     }
 
     #[tokio::test]
@@ -843,9 +1091,9 @@ mod tests {
         let request = make_request("test-response-privacy");
 
         let stream_events = runtime.execute_run(request).collect::<Vec<_>>().await;
+        let run_id = AgentRunId::from(extract_run_id(&stream_events));
         let serialized = serde_json::to_string(&stream_events).expect("serialize");
 
-        // Raw thinking deltas/status are dropped and delta text is sanitized.
         for forbidden in [
             "let me think",
             "raw_thinking",
@@ -867,11 +1115,7 @@ mod tests {
             assert_eq!(delta, "[sanitized thinking]");
         }
 
-        // Run store must not retain thinking either.
-        let run = runtime
-            .run_store()
-            .get(&AgentRunId::from("test-response-privacy"))
-            .expect("run recorded");
+        let run = runtime.run_store().get(&run_id).expect("run recorded");
         let run_serialized = serde_json::to_string(&run).expect("serialize run");
         for forbidden in [
             "let me think",
@@ -883,7 +1127,6 @@ mod tests {
             assert!(!run_serialized.contains(forbidden));
         }
 
-        // Unavailable usage maps to None.
         assert!(stream_events
             .iter()
             .any(|e| matches!(e, AgentEvent::ProviderCompleted { usage: None, .. })));
@@ -906,10 +1149,8 @@ mod tests {
             if error_message == "Provider authentication failed."
         ));
 
-        let run = runtime
-            .run_store()
-            .get(&AgentRunId::from("test-response-error"))
-            .expect("run recorded");
+        let run_id = AgentRunId::from(extract_run_id(&stream_events));
+        let run = runtime.run_store().get(&run_id).expect("run recorded");
         assert_eq!(run.status, AgentRunStatus::Failed);
         assert_eq!(terminal_event_count(&stream_events), 1);
     }
@@ -928,14 +1169,16 @@ mod tests {
         let stream_events = runtime.execute_run(request).collect::<Vec<_>>().await;
         // RunStarted -> ContextBuild StepStarted -> ProviderCall StepStarted -> ProviderDelta -> RunCancelled
         assert_eq!(stream_events.len(), 5);
+
+        let run_id = extract_run_id(&stream_events);
         assert!(matches!(
             stream_events[4],
-            AgentEvent::RunCancelled { ref run_id } if run_id == "test-response-cancel"
+            AgentEvent::RunCancelled { run_id: ref actual } if actual == &run_id
         ));
 
         let run = runtime
             .run_store()
-            .get(&AgentRunId::from("test-response-cancel"))
+            .get(&AgentRunId::from(run_id))
             .expect("run recorded");
         assert_eq!(run.status, AgentRunStatus::Cancelled);
         assert_eq!(terminal_event_count(&stream_events), 1);
@@ -967,14 +1210,11 @@ mod tests {
         assert_eq!(permission, requested + 1, "permission follows request");
         assert_eq!(skipped, permission + 1, "skip follows permission decision");
 
-        // The fake adapter saw no side effects beyond the single chat stream.
         assert!(state.lock().unwrap().cancel_called_with.is_none());
     }
 
     #[test]
     fn test_agent_event_serialization_has_no_thinking_fields() {
-        // Exhaustive variant sweep: serialized AgentEvents must be free of
-        // forbidden thinking keys regardless of variant.
         let usage = Some(AgentUsage {
             input_tokens: Some(1),
             output_tokens: Some(2),
@@ -1112,5 +1352,32 @@ mod tests {
         let captured_req = state.lock().unwrap().last_request.clone().unwrap();
         assert_eq!(captured_req.options.temperature, Some(0.4));
         assert_eq!(captured_req.options.max_tokens, Some(512));
+    }
+
+    #[tokio::test]
+    async fn test_execute_run_uses_uuid_run_id_not_response_id() {
+        let events = vec![ProviderContractEvent::Completed {
+            done_reason: Some("stop".to_string()),
+            usage: ProviderUsageMetadata::unavailable("no-usage"),
+        }];
+        let (runtime, _) = make_test_runtime(events);
+        let request = make_request("my-response-id");
+
+        let stream_events = runtime.execute_run(request).collect::<Vec<_>>().await;
+        let run_id = extract_run_id(&stream_events);
+
+        // The run_id must be a UUID v4, not derived from response_id.
+        assert_ne!(run_id, "my-response-id");
+        assert!(
+            uuid::Uuid::parse_str(&run_id).is_ok(),
+            "run_id must be a valid UUID: {run_id}"
+        );
+
+        // The stored run retains the response_id as a separate product reference.
+        let stored = runtime
+            .run_store()
+            .get(&AgentRunId::from(run_id))
+            .expect("run in store");
+        assert_eq!(stored.response_id.as_deref(), Some("my-response-id"));
     }
 }

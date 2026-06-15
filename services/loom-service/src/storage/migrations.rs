@@ -113,6 +113,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "cleanup_orphaned_code_language_tags",
         sql: include_str!("../../migrations/0021_cleanup_orphaned_code_language_tags.sql"),
     },
+    Migration {
+        version: 22,
+        name: "agent_run_persistence",
+        sql: include_str!("../../migrations/0022_agent_run_persistence.sql"),
+    },
 ];
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
@@ -362,6 +367,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migration_0022_creates_agent_run_persistence_tables() {
+        let database = test_database().await;
+        for table in ["agent_runs", "agent_steps", "agent_events"] {
+            let count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            )
+            .bind(table)
+            .fetch_one(database.pool())
+            .await
+            .expect("table query");
+            assert_eq!(count, 1, "{table} should exist after migration 0022");
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_runs_status_check_accepts_all_valid_statuses() {
+        let database = test_database().await;
+        let now = "2026-01-01T00:00:00Z";
+        for status in [
+            "pending",
+            "running",
+            "completed",
+            "failed",
+            "cancelled",
+            "interrupted",
+        ] {
+            let run_id = format!("test-status-{status}");
+            sqlx::query(
+                "INSERT INTO agent_runs
+                 (agent_run_id, correlation_id, status, started_at, cancel_requested, created_at)
+                 VALUES (?1, ?2, ?3, ?4, 0, ?4)",
+            )
+            .bind(&run_id)
+            .bind(&run_id)
+            .bind(status)
+            .bind(now)
+            .execute(database.pool())
+            .await
+            .unwrap_or_else(|e| panic!("status '{status}' should be valid: {e}"));
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_runs_status_check_rejects_invalid_status() {
+        let database = test_database().await;
+        let result = sqlx::query(
+            "INSERT INTO agent_runs
+             (agent_run_id, correlation_id, status, started_at, cancel_requested, created_at)
+             VALUES ('bad', 'bad', 'thinking', '2026-01-01T00:00:00Z', 0, '2026-01-01T00:00:00Z')",
+        )
+        .execute(database.pool())
+        .await;
+        assert!(
+            result.is_err(),
+            "invalid status 'thinking' must be rejected"
+        );
+    }
+
+    #[tokio::test]
+    async fn agent_events_is_append_only_by_convention_no_raw_thinking() {
+        let database = test_database().await;
+        let now = "2026-01-01T00:00:00Z";
+        sqlx::query(
+            "INSERT INTO agent_runs
+             (agent_run_id, correlation_id, status, started_at, cancel_requested, created_at)
+             VALUES ('run-evt-test', 'run-evt-test', 'completed', ?1, 0, ?1)",
+        )
+        .bind(now)
+        .execute(database.pool())
+        .await
+        .expect("insert run");
+
+        sqlx::query(
+            "INSERT INTO agent_events
+             (agent_event_id, agent_run_id, sequence_number, event_type, payload_json, created_at)
+             VALUES ('evt-1', 'run-evt-test', 0, 'run_started', '{\"runId\":\"run-evt-test\"}', ?1)",
+        )
+        .bind(now)
+        .execute(database.pool())
+        .await
+        .expect("insert event");
+
+        // Verify no thinking columns exist on agent_events
+        let columns = sqlx::query_scalar::<_, String>(
+            "SELECT lower(name) FROM pragma_table_info('agent_events')",
+        )
+        .fetch_all(database.pool())
+        .await
+        .expect("column query");
+        for forbidden in [
+            "thinking_text",
+            "raw_thinking",
+            "chain_of_thought",
+            "hidden_reasoning",
+            "prompt",
+            "messages",
+            "authorization",
+            "bearer",
+            "api_key",
+        ] {
+            assert!(
+                !columns.iter().any(|c| c == forbidden),
+                "forbidden column '{forbidden}' found in agent_events"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn schema_has_no_raw_thinking_columns() {
         let database = test_database().await;
         let mut columns = Vec::new();
@@ -396,6 +509,9 @@ mod tests {
             "attachment_parse_artifact_summaries",
             "search_documents",
             "search_index_state",
+            "agent_runs",
+            "agent_steps",
+            "agent_events",
         ] {
             columns.extend(
                 sqlx::query_scalar::<_, String>(&format!(

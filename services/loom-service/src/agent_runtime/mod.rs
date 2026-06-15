@@ -6,6 +6,7 @@
 #![allow(dead_code)]
 
 pub mod catalog;
+pub mod event_writer;
 pub mod events;
 pub mod runtime;
 pub mod service;

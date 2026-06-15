@@ -201,6 +201,10 @@ mod tests {
         let mut config = LoomServiceConfig::default();
         config.providers.profiles[0].id = "openai-local".to_string();
         config.providers.profiles[0].secret_ref = Some(default_provider_secret_ref("openai-local"));
+        let agent_run_repository =
+            crate::storage::repositories::agent_runs::AgentRunRepository::from_pool(
+                database.pool(),
+            );
         AppState {
             database,
             ollama: OllamaRuntime::new(OllamaConfig {
@@ -215,6 +219,7 @@ mod tests {
             operations: OperationTracker::default(),
             restart: RestartState::default(),
             agent_runs: Default::default(),
+            agent_run_repository,
             tool_registry: std::sync::Arc::new(std::sync::RwLock::new(
                 crate::agent_runtime::tool_registry::ToolRegistry::new(),
             )),

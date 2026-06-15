@@ -4992,8 +4992,13 @@ mod tests {
     }
 
     async fn orchestration_test_state() -> AppState {
+        let database = test_database().await;
+        let agent_run_repository =
+            crate::storage::repositories::agent_runs::AgentRunRepository::from_pool(
+                database.pool(),
+            );
         AppState {
-            database: test_database().await,
+            database,
             ollama: OllamaRuntime::new(OllamaConfig {
                 base_url: "http://127.0.0.1:9".to_string(),
                 request_timeout: Duration::from_millis(200),
@@ -5009,6 +5014,7 @@ mod tests {
             operations: OperationTracker::default(),
             restart: RestartState::default(),
             agent_runs: Default::default(),
+            agent_run_repository,
             tool_registry: std::sync::Arc::new(std::sync::RwLock::new(
                 crate::agent_runtime::tool_registry::ToolRegistry::new(),
             )),

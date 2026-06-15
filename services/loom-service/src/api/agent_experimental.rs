@@ -7,7 +7,7 @@
 use std::convert::Infallible;
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, StatusCode},
     response::{IntoResponse, Response},
     Json,
@@ -21,10 +21,15 @@ use crate::agent_runtime::types::{
     AgentRunId, AgentRunStatus, AgentRuntimeProviderOptions, AgentRuntimeRequest,
 };
 use crate::api::state::AppState;
+use crate::storage::repositories::agent_runs::{AgentEventRecord, AgentRunRecord, AgentStepRecord};
 
 pub const EXPERIMENTAL_AGENT_RUN_PATH: &str = "/experimental/agent/run";
 pub const EXPERIMENTAL_AGENT_CANCEL_PATH: &str = "/experimental/agent/runs/:run_id/cancel";
 pub const EXPERIMENTAL_AGENT_TOOLS_PATH: &str = "/experimental/agent/tools";
+pub const EXPERIMENTAL_AGENT_RUNS_PATH: &str = "/experimental/agent/runs";
+pub const EXPERIMENTAL_AGENT_RUN_GET_PATH: &str = "/experimental/agent/runs/:run_id";
+pub const EXPERIMENTAL_AGENT_RUN_STEPS_PATH: &str = "/experimental/agent/runs/:run_id/steps";
+pub const EXPERIMENTAL_AGENT_RUN_EVENTS_PATH: &str = "/experimental/agent/runs/:run_id/events";
 pub const EXPERIMENTAL_AGENT_RUNTIME_ENV: &str = "LOOM_EXPERIMENTAL_AGENT_RUNTIME_API";
 
 const NDJSON_CONTENT_TYPE: &str = "application/x-ndjson";
@@ -32,6 +37,10 @@ const MAX_PROMPT_CHARS: usize = 32_768;
 const MIN_TEMPERATURE: f64 = 0.0;
 const MAX_TEMPERATURE: f64 = 2.0;
 const MAX_OUTPUT_TOKENS_CAP: u64 = 8_192;
+const DEFAULT_RUNS_LIMIT: i64 = 50;
+const MAX_RUNS_LIMIT: i64 = 100;
+const DEFAULT_EVENTS_LIMIT: i64 = 100;
+const MAX_EVENTS_LIMIT: i64 = 200;
 
 /// Route DTO, deliberately separate from the internal `AgentRuntimeRequest`.
 /// `deny_unknown_fields` rejects raw provider payloads, API keys, or
@@ -71,6 +80,42 @@ pub struct ExperimentalAgentCancelResponse {
     pub cancelled: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListRunsQuery {
+    pub loom_id: Option<String>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListEventsQuery {
+    pub since_sequence: Option<i64>,
+    pub limit: Option<i64>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRunsListResponse {
+    pub runs: Vec<AgentRunRecord>,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentStepsListResponse {
+    pub steps: Vec<AgentStepRecord>,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentEventsListResponse {
+    pub events: Vec<AgentEventRecord>,
+    pub count: usize,
+    pub has_more: bool,
 }
 
 fn bad_request(code: &str, message: &str) -> (StatusCode, Json<AgentExperimentalApiError>) {
@@ -182,6 +227,7 @@ fn status_label(status: AgentRunStatus) -> &'static str {
         AgentRunStatus::Completed => "completed",
         AgentRunStatus::Failed => "failed",
         AgentRunStatus::Cancelled => "cancelled",
+        AgentRunStatus::Interrupted => "interrupted",
     }
 }
 
@@ -251,6 +297,103 @@ pub async fn list_tools(State(state): State<AppState>) -> impl IntoResponse {
             execution_enabled: false,
         }),
     )
+}
+
+pub async fn list_runs(
+    State(state): State<AppState>,
+    Query(query): Query<ListRunsQuery>,
+) -> Response {
+    let loom_id = match query.loom_id {
+        Some(ref id) if !id.trim().is_empty() => id.trim().to_string(),
+        _ => {
+            return bad_request("LOOM_ID_REQUIRED", "loomId query parameter is required")
+                .into_response()
+        }
+    };
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_RUNS_LIMIT)
+        .clamp(1, MAX_RUNS_LIMIT);
+    match state
+        .agent_run_repository
+        .list_runs_for_loom(&loom_id, limit)
+        .await
+    {
+        Ok(runs) => {
+            let count = runs.len();
+            (StatusCode::OK, Json(AgentRunsListResponse { runs, count })).into_response()
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to list agent runs for loom");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn get_run_history(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+) -> Response {
+    match state.agent_run_repository.get_run(&run_id).await {
+        Ok(Some(run)) => (StatusCode::OK, Json(run)).into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(error) => {
+            tracing::error!(%error, "failed to get agent run");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn list_steps(State(state): State<AppState>, Path(run_id): Path<String>) -> Response {
+    match state.agent_run_repository.list_steps_for_run(&run_id).await {
+        Ok(steps) => {
+            let count = steps.len();
+            (
+                StatusCode::OK,
+                Json(AgentStepsListResponse { steps, count }),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to list agent steps for run");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn list_events(
+    State(state): State<AppState>,
+    Path(run_id): Path<String>,
+    Query(query): Query<ListEventsQuery>,
+) -> Response {
+    let since = query.since_sequence.unwrap_or(0).max(0);
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_EVENTS_LIMIT)
+        .clamp(1, MAX_EVENTS_LIMIT);
+    match state
+        .agent_run_repository
+        .list_events_for_run(&run_id, since, limit)
+        .await
+    {
+        Ok(events) => {
+            let count = events.len();
+            let has_more = count == limit as usize;
+            (
+                StatusCode::OK,
+                Json(AgentEventsListResponse {
+                    events,
+                    count,
+                    has_more,
+                }),
+            )
+                .into_response()
+        }
+        Err(error) => {
+            tracing::error!(%error, "failed to list agent events for run");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }
 
 #[cfg(test)]
@@ -414,9 +557,13 @@ mod tests {
         }
 
         // The run store keeps metadata only — never the prompt text.
+        let actual_run_id = parsed[0]["run_id"]
+            .as_str()
+            .expect("run_id in run_started event")
+            .to_string();
         let run = service
             .run_store()
-            .get(&AgentRunId::from("resp-1"))
+            .get(&AgentRunId::from(actual_run_id))
             .expect("run recorded");
         let run_serialized = serde_json::to_string(&run).expect("serialize run");
         assert!(!run_serialized.contains("route privacy prompt"));
@@ -593,19 +740,24 @@ mod tests {
                     .expect("stream body")
                     .to_bytes()
             });
-            let run_id = AgentRunId::from("route-cancel-active");
-            tokio::time::timeout(Duration::from_secs(2), async {
-                while service.run_store().get(&run_id).is_none() {
+            // run_id is a UUID — wait for any run to appear in the store
+            let actual_run_id_str = tokio::time::timeout(Duration::from_secs(2), async {
+                loop {
+                    let ids = service.run_store().all_run_ids();
+                    if let Some(id) = ids.into_iter().next() {
+                        return id.0;
+                    }
                     tokio::task::yield_now().await;
                 }
             })
             .await
             .expect("run registered");
+            let run_id = AgentRunId::from(actual_run_id_str.clone());
 
             for _ in 0..2 {
                 let cancel_response = router
                     .clone()
-                    .oneshot(cancel_request("route-cancel-active"))
+                    .oneshot(cancel_request(&actual_run_id_str))
                     .await
                     .expect("cancel response");
                 assert_eq!(cancel_response.status(), StatusCode::OK);
@@ -617,7 +769,7 @@ mod tests {
                     .to_bytes();
                 let payload: serde_json::Value =
                     serde_json::from_slice(&body).expect("cancel json");
-                assert_eq!(payload["runId"], "route-cancel-active");
+                assert_eq!(payload["runId"], actual_run_id_str);
                 assert_eq!(payload["status"], "cancelled");
                 assert_eq!(payload["cancelled"], true);
 
@@ -888,6 +1040,10 @@ mod tests {
             assert_eq!(seeded_registry.list().len(), 4);
             let tool_registry = std::sync::Arc::new(std::sync::RwLock::new(seeded_registry));
 
+            let agent_run_repository =
+                crate::storage::repositories::agent_runs::AgentRunRepository::from_pool(
+                    database.pool(),
+                );
             let state = AppState {
                 database,
                 ollama,
@@ -896,6 +1052,7 @@ mod tests {
                 operations: OperationTracker::default(),
                 restart: RestartState::default(),
                 agent_runs: crate::agent_runtime::runtime::AgentRunStore::new(),
+                agent_run_repository,
                 tool_registry: tool_registry.clone(),
             };
 
@@ -960,11 +1117,15 @@ mod tests {
                 events.last(),
                 Some(AgentEvent::RunCompleted { .. })
             ));
+            let actual_run_id = match events.first() {
+                Some(AgentEvent::RunStarted { run_id, .. }) => run_id.clone(),
+                _ => panic!("expected RunStarted as first event"),
+            };
             assert_eq!(
                 service1
                     .run_store()
                     .get(&crate::agent_runtime::types::AgentRunId::from(
-                        "shared-registry-run"
+                        actual_run_id,
                     ))
                     .expect("stored run")
                     .status,
@@ -1013,6 +1174,241 @@ mod tests {
                     !serialized_lower.contains(forbidden),
                     "found forbidden key/value: {forbidden}"
                 );
+            }
+        }
+    }
+
+    mod history_routes {
+        use super::super::{
+            EXPERIMENTAL_AGENT_RUNS_PATH, EXPERIMENTAL_AGENT_RUN_EVENTS_PATH,
+            EXPERIMENTAL_AGENT_RUN_GET_PATH, EXPERIMENTAL_AGENT_RUN_STEPS_PATH,
+        };
+        use crate::api::{router_with_experimental, ExperimentalApiConfig};
+        use crate::config::{ConfigManager, LoomServiceConfig, OllamaConfig};
+        use crate::providers::ollama::OllamaRuntime;
+        use crate::runtime::{OperationTracker, RestartState};
+        use crate::storage::db::test_database;
+        use axum::{
+            body::Body,
+            http::{Request, StatusCode},
+        };
+        use http_body_util::BodyExt;
+        use std::{path::PathBuf, time::Duration};
+        use tower::ServiceExt;
+
+        async fn history_router() -> axum::Router {
+            let database = test_database().await;
+            let ollama = OllamaRuntime::new(OllamaConfig {
+                base_url: "http://127.0.0.1:9".to_string(),
+                request_timeout: Duration::from_millis(200),
+                first_chunk_timeout: Duration::from_millis(200),
+                stream_idle_timeout: Duration::from_millis(200),
+                security: Default::default(),
+            });
+            let config = ConfigManager::new(
+                PathBuf::from("/tmp/loom-history-route-test.toml"),
+                LoomServiceConfig::default(),
+            );
+            router_with_experimental(
+                database,
+                ollama,
+                config,
+                OperationTracker::default(),
+                RestartState::default(),
+                ExperimentalApiConfig {
+                    agent_runtime_api: true,
+                },
+            )
+        }
+
+        fn get_request(uri: &str) -> Request<Body> {
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .body(Body::empty())
+                .expect("request")
+        }
+
+        #[tokio::test]
+        async fn history_routes_gated_by_default() {
+            let database = test_database().await;
+            let ollama = OllamaRuntime::new(OllamaConfig {
+                base_url: "http://127.0.0.1:9".to_string(),
+                request_timeout: Duration::from_millis(200),
+                first_chunk_timeout: Duration::from_millis(200),
+                stream_idle_timeout: Duration::from_millis(200),
+                security: Default::default(),
+            });
+            let config = ConfigManager::new(
+                PathBuf::from("/tmp/loom-history-gate-test.toml"),
+                LoomServiceConfig::default(),
+            );
+            let router = router_with_experimental(
+                database,
+                ollama,
+                config,
+                OperationTracker::default(),
+                RestartState::default(),
+                ExperimentalApiConfig::default(),
+            );
+            for uri in [
+                "/experimental/agent/runs?loomId=loom-1",
+                "/experimental/agent/runs/some-id",
+                "/experimental/agent/runs/some-id/steps",
+                "/experimental/agent/runs/some-id/events",
+            ] {
+                let response = router
+                    .clone()
+                    .oneshot(get_request(uri))
+                    .await
+                    .expect("response");
+                assert_eq!(
+                    response.status(),
+                    StatusCode::NOT_FOUND,
+                    "expected 404 for gated route: {uri}"
+                );
+            }
+        }
+
+        #[tokio::test]
+        async fn list_runs_requires_loom_id() {
+            let router = history_router().await;
+            let response = router
+                .oneshot(get_request(EXPERIMENTAL_AGENT_RUNS_PATH))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(payload["code"], "LOOM_ID_REQUIRED");
+        }
+
+        #[tokio::test]
+        async fn list_runs_returns_empty_for_unknown_loom() {
+            let router = history_router().await;
+            let response = router
+                .oneshot(get_request(&format!(
+                    "{EXPERIMENTAL_AGENT_RUNS_PATH}?loomId=no-such-loom"
+                )))
+                .await
+                .expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(payload["count"], 0);
+            assert_eq!(payload["runs"].as_array().unwrap().len(), 0);
+        }
+
+        #[tokio::test]
+        async fn get_run_returns_404_for_unknown_id() {
+            let router = history_router().await;
+            let uri = EXPERIMENTAL_AGENT_RUN_GET_PATH.replace(":run_id", "no-such-run");
+            let response = router.oneshot(get_request(&uri)).await.expect("response");
+            assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        }
+
+        #[tokio::test]
+        async fn list_steps_returns_empty_for_unknown_run() {
+            let router = history_router().await;
+            let uri = EXPERIMENTAL_AGENT_RUN_STEPS_PATH.replace(":run_id", "no-such-run");
+            let response = router.oneshot(get_request(&uri)).await.expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(payload["count"], 0);
+            assert_eq!(payload["steps"].as_array().unwrap().len(), 0);
+        }
+
+        #[tokio::test]
+        async fn list_events_returns_empty_for_unknown_run() {
+            let router = history_router().await;
+            let uri = EXPERIMENTAL_AGENT_RUN_EVENTS_PATH.replace(":run_id", "no-such-run");
+            let response = router.oneshot(get_request(&uri)).await.expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(payload["count"], 0);
+            assert_eq!(payload["hasMore"], false);
+            assert_eq!(payload["events"].as_array().unwrap().len(), 0);
+        }
+
+        #[tokio::test]
+        async fn list_events_supports_since_sequence_and_limit_params() {
+            let router = history_router().await;
+            let uri = format!(
+                "{}?sinceSequence=5&limit=10",
+                EXPERIMENTAL_AGENT_RUN_EVENTS_PATH.replace(":run_id", "no-such-run")
+            );
+            let response = router.oneshot(get_request(&uri)).await.expect("response");
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .expect("body")
+                .to_bytes();
+            let payload: serde_json::Value = serde_json::from_slice(&body).expect("json");
+            assert_eq!(payload["count"], 0);
+            assert_eq!(payload["hasMore"], false);
+        }
+
+        #[tokio::test]
+        async fn history_responses_contain_no_forbidden_fields() {
+            let router = history_router().await;
+            let endpoints = [
+                format!("{EXPERIMENTAL_AGENT_RUNS_PATH}?loomId=loom-x"),
+                EXPERIMENTAL_AGENT_RUN_GET_PATH.replace(":run_id", "run-x"),
+                EXPERIMENTAL_AGENT_RUN_STEPS_PATH.replace(":run_id", "run-x"),
+                EXPERIMENTAL_AGENT_RUN_EVENTS_PATH.replace(":run_id", "run-x"),
+            ];
+            for uri in &endpoints {
+                let response = router
+                    .clone()
+                    .oneshot(get_request(uri))
+                    .await
+                    .expect("response");
+                let body = response
+                    .into_body()
+                    .collect()
+                    .await
+                    .expect("body")
+                    .to_bytes();
+                let body_str = String::from_utf8(body.to_vec()).expect("utf8");
+                let lower = body_str.to_ascii_lowercase();
+                for forbidden in [
+                    "raw_thinking",
+                    "thinking_text",
+                    "chain_of_thought",
+                    "hidden_reasoning",
+                    "bearer",
+                    "apikey",
+                    "api_key",
+                ] {
+                    assert!(
+                        !lower.contains(forbidden),
+                        "found forbidden field '{forbidden}' in response for {uri}: {body_str}"
+                    );
+                }
             }
         }
     }

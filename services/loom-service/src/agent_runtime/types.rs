@@ -2,6 +2,21 @@ use serde::{Deserialize, Serialize};
 
 use crate::providers::contract::ProviderUsageMetadata;
 
+/// Generates a new UUID v4 agent run ID.
+pub fn new_agent_run_id() -> AgentRunId {
+    AgentRunId(uuid::Uuid::new_v4().to_string())
+}
+
+/// Generates a new UUID v4 agent step ID.
+pub fn new_agent_step_id() -> AgentStepId {
+    AgentStepId(uuid::Uuid::new_v4().to_string())
+}
+
+/// Generates a raw UUID v4 string (for event IDs, correlation IDs, etc.).
+pub fn new_uuid() -> String {
+    uuid::Uuid::new_v4().to_string()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct AgentRunId(pub String);
 
@@ -64,6 +79,8 @@ pub enum AgentRunStatus {
     Completed,
     Failed,
     Cancelled,
+    /// Service restarted while this run was active. Outcome unknown.
+    Interrupted,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,6 +132,7 @@ impl AgentUsage {
 
 /// Safe run metadata only. Must never carry raw thinking, hidden reasoning,
 /// provider secrets, Authorization headers, or full provider request payloads.
+/// Must never carry prompt text or provider request envelope.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRun {
@@ -122,6 +140,12 @@ pub struct AgentRun {
     pub loom_id: Option<String>,
     pub response_id: Option<String>,
     pub parent_response_id: Option<String>,
+    /// Groups related runs in the same user interaction.
+    pub correlation_id: String,
+    /// ID that triggered this run (parent_response_id or parent_run_id).
+    pub causation_id: Option<String>,
+    /// Context snapshot used for this run (links to context_artifacts table).
+    pub context_snapshot_id: Option<String>,
     pub status: AgentRunStatus,
     pub started_at: u64,
     pub completed_at: Option<u64>,
