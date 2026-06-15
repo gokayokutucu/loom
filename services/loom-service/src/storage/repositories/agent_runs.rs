@@ -13,8 +13,9 @@
 //! - agent_events is append-only: no UPDATE or DELETE on that table.
 
 use crate::{
-    agent_runtime::types::{AgentRunStatus, AgentStepKind, AgentUsage},
+    agent_runtime::types::{AgentRunStatus, AgentStepKind, AgentStepStatus, AgentUsage},
     error::ServiceError,
+    providers::types::sanitize_provider_text,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::SqlitePool;
@@ -29,6 +30,36 @@ const FORBIDDEN_THINKING_KEYS: [&str; 4] = [
     "chain_of_thought",
     "hidden_reasoning",
 ];
+
+fn validate_persisted_payload(payload: &str) -> Result<(), ServiceError> {
+    let lower = payload.to_ascii_lowercase();
+    for forbidden in FORBIDDEN_THINKING_KEYS {
+        if lower.contains(forbidden) {
+            return Err(ServiceError::storage(format!(
+                "agent event payload contains forbidden thinking key: {forbidden}"
+            )));
+        }
+    }
+    for forbidden in [
+        "\"authorization\"",
+        "\"bearer\"",
+        "\"apikey\"",
+        "\"api_key\"",
+        "\"password\"",
+        "\"credential\"",
+        "\"secret\"",
+        "\"prompt\"",
+        "bearer ",
+        "sk-",
+    ] {
+        if lower.contains(forbidden) {
+            return Err(ServiceError::storage(format!(
+                "agent event payload contains forbidden credential content: {forbidden}"
+            )));
+        }
+    }
+    Ok(())
+}
 
 fn now_iso() -> String {
     let ms = std::time::SystemTime::now()
@@ -76,6 +107,17 @@ fn step_kind_str(kind: AgentStepKind) -> &'static str {
         AgentStepKind::ToolCallPlaceholder => "tool_call_placeholder",
         AgentStepKind::ArtifactPlaceholder => "artifact_placeholder",
         AgentStepKind::ValidationPlaceholder => "validation_placeholder",
+    }
+}
+
+fn step_status_str(status: AgentStepStatus) -> &'static str {
+    match status {
+        AgentStepStatus::Pending => "pending",
+        AgentStepStatus::Running => "running",
+        AgentStepStatus::Completed => "completed",
+        AgentStepStatus::Failed => "failed",
+        AgentStepStatus::Cancelled => "cancelled",
+        AgentStepStatus::Skipped => "skipped",
     }
 }
 
@@ -263,17 +305,31 @@ impl AgentRunRepository {
         Ok(())
     }
 
+    pub async fn finish_step(
+        &self,
+        step_id: &str,
+        status: AgentStepStatus,
+        error: Option<&str>,
+    ) -> Result<(), ServiceError> {
+        let safe_error = error.map(sanitize_provider_text);
+        sqlx::query(
+            "UPDATE agent_steps
+             SET status = ?1, completed_at = COALESCE(completed_at, ?2), error = ?3
+             WHERE agent_step_id = ?4 AND status IN ('pending','running')",
+        )
+        .bind(step_status_str(status))
+        .bind(now_iso())
+        .bind(safe_error.as_deref())
+        .bind(step_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ServiceError::storage(format!("failed to finish agent step: {e}")))?;
+        Ok(())
+    }
+
     pub async fn append_event(&self, event: &NewAgentEvent<'_>) -> Result<(), ServiceError> {
-        // Guard: payload must never contain raw thinking markers.
         if let Some(payload) = &event.payload_json {
-            let lower = payload.to_ascii_lowercase();
-            for forbidden in FORBIDDEN_THINKING_KEYS {
-                if lower.contains(forbidden) {
-                    return Err(ServiceError::storage(format!(
-                        "agent event payload contains forbidden thinking key: {forbidden}"
-                    )));
-                }
-            }
+            validate_persisted_payload(payload)?;
         }
         sqlx::query(
             "INSERT OR IGNORE INTO agent_events
@@ -305,22 +361,34 @@ impl AgentRunRepository {
         terminal_event_type: &str,
         terminal_event_seq: i64,
         terminal_payload_json: Option<String>,
-    ) -> Result<(), ServiceError> {
+    ) -> Result<bool, ServiceError> {
         debug_assert!(matches!(
             status,
             AgentRunStatus::Completed | AgentRunStatus::Failed | AgentRunStatus::Cancelled
         ));
         let status_str = status_str(status);
+        let expected_event_type = match status {
+            AgentRunStatus::Completed => "run_completed",
+            AgentRunStatus::Failed => "run_failed",
+            AgentRunStatus::Cancelled => "run_cancelled",
+            _ => unreachable!("terminal status checked above"),
+        };
+        if terminal_event_type != expected_event_type {
+            return Err(ServiceError::storage(format!(
+                "terminal event type {terminal_event_type} does not match status {status_str}"
+            )));
+        }
         let now = now_iso();
         let input_tokens = usage.and_then(|u| u.input_tokens).map(|v| v as i64);
         let output_tokens = usage.and_then(|u| u.output_tokens).map(|v| v as i64);
         let total_tokens = usage.and_then(|u| u.total_tokens).map(|v| v as i64);
+        let safe_error_message = error_message.map(sanitize_provider_text);
 
         let mut tx = self.pool.begin().await.map_err(|e| {
             ServiceError::storage(format!("failed to begin terminal transaction: {e}"))
         })?;
 
-        sqlx::query(
+        let update = sqlx::query(
             "UPDATE agent_runs
              SET status = ?1, completed_at = COALESCE(completed_at, ?2),
                  input_tokens = ?3, output_tokens = ?4, total_tokens = ?5,
@@ -332,22 +400,21 @@ impl AgentRunRepository {
         .bind(input_tokens)
         .bind(output_tokens)
         .bind(total_tokens)
-        .bind(error_message)
+        .bind(safe_error_message.as_deref())
         .bind(run_id)
         .execute(&mut *tx)
         .await
         .map_err(|e| ServiceError::storage(format!("failed to update terminal run status: {e}")))?;
 
-        // Guard: payload must never contain raw thinking markers.
+        if update.rows_affected() == 0 {
+            tx.rollback().await.map_err(|e| {
+                ServiceError::storage(format!("failed to rollback preserved terminal run: {e}"))
+            })?;
+            return Ok(false);
+        }
+
         if let Some(payload) = &terminal_payload_json {
-            let lower = payload.to_ascii_lowercase();
-            for forbidden in FORBIDDEN_THINKING_KEYS {
-                if lower.contains(forbidden) {
-                    return Err(ServiceError::storage(format!(
-                        "terminal event payload contains forbidden thinking key: {forbidden}"
-                    )));
-                }
-            }
+            validate_persisted_payload(payload)?;
         }
 
         sqlx::query(
@@ -367,7 +434,7 @@ impl AgentRunRepository {
         tx.commit().await.map_err(|e| {
             ServiceError::storage(format!("failed to commit terminal transaction: {e}"))
         })?;
-        Ok(())
+        Ok(true)
     }
 
     pub async fn cancel_run(&self, run_id: &str) -> Result<(), ServiceError> {
@@ -605,7 +672,7 @@ mod tests {
         AgentRunRepository::new(db.pool().clone())
     }
 
-    fn run_input(run_id: &str) -> NewAgentRun {
+    fn run_input(run_id: &str) -> NewAgentRun<'_> {
         NewAgentRun {
             agent_run_id: run_id,
             loom_id: Some("loom-test"),
@@ -623,9 +690,9 @@ mod tests {
     #[tokio::test]
     async fn insert_run_is_retrievable_by_run_id() {
         let repo = make_repo().await;
-        repo.insert_run(&run_input("run-retrieve-001"))
-            .await
-            .unwrap();
+        let mut input = run_input("run-retrieve-001");
+        input.context_snapshot_id = Some("context-snapshot-001");
+        repo.insert_run(&input).await.unwrap();
         let record = repo
             .get_run("run-retrieve-001")
             .await
@@ -635,6 +702,10 @@ mod tests {
         assert_eq!(record.loom_id.as_deref(), Some("loom-test"));
         assert_eq!(record.response_id.as_deref(), Some("resp-assistant"));
         assert_eq!(record.correlation_id, "run-retrieve-001");
+        assert_eq!(
+            record.context_snapshot_id.as_deref(),
+            Some("context-snapshot-001")
+        );
         assert_eq!(record.status, "running");
         assert!(!record.cancel_requested);
     }
@@ -712,26 +783,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn append_event_rejects_credentials_in_payload() {
+        let repo = make_repo().await;
+        repo.insert_run(&run_input("run-credential-guard"))
+            .await
+            .unwrap();
+
+        for (event_id, payload) in [
+            ("evt-bearer", r#"{"message":"Bearer sk-live-secret"}"#),
+            ("evt-api-key", r#"{"api_key":"sk-live-secret"}"#),
+            ("evt-secret", r#"{"secret":"private"}"#),
+        ] {
+            let result = repo
+                .append_event(&NewAgentEvent {
+                    agent_event_id: event_id,
+                    agent_run_id: "run-credential-guard",
+                    agent_step_id: None,
+                    sequence_number: 0,
+                    event_type: "warning",
+                    payload_json: Some(payload.to_string()),
+                })
+                .await;
+            assert!(result.is_err(), "credential payload must be rejected");
+        }
+    }
+
+    #[tokio::test]
     async fn finish_run_atomically_updates_status_and_inserts_terminal_event() {
         let repo = make_repo().await;
         repo.insert_run(&run_input("run-finish-001")).await.unwrap();
 
-        repo.finish_run(
-            "run-finish-001",
-            AgentRunStatus::Completed,
-            Some(AgentUsage {
-                input_tokens: Some(10),
-                output_tokens: Some(20),
-                total_tokens: Some(30),
-            }),
-            None,
-            "evt-terminal",
-            "run_completed",
-            99,
-            Some("{\"runId\":\"run-finish-001\",\"elapsedMs\":100}".to_string()),
-        )
-        .await
-        .unwrap();
+        assert!(repo
+            .finish_run(
+                "run-finish-001",
+                AgentRunStatus::Completed,
+                Some(AgentUsage {
+                    input_tokens: Some(10),
+                    output_tokens: Some(20),
+                    total_tokens: Some(30),
+                }),
+                None,
+                "evt-terminal",
+                "run_completed",
+                99,
+                Some("{\"runId\":\"run-finish-001\",\"elapsedMs\":100}".to_string()),
+            )
+            .await
+            .unwrap());
 
         let record = repo.get_run("run-finish-001").await.unwrap().expect("run");
         assert_eq!(record.status, "completed");
@@ -752,37 +850,75 @@ mod tests {
         let repo = make_repo().await;
         repo.insert_run(&run_input("run-idempotent")).await.unwrap();
 
-        repo.finish_run(
-            "run-idempotent",
-            AgentRunStatus::Completed,
-            None,
-            None,
-            "evt-t1",
-            "run_completed",
-            0,
-            None,
-        )
-        .await
-        .unwrap();
+        assert!(repo
+            .finish_run(
+                "run-idempotent",
+                AgentRunStatus::Completed,
+                None,
+                None,
+                "evt-t1",
+                "run_completed",
+                0,
+                None,
+            )
+            .await
+            .unwrap());
 
         // Second finish call — must not change status or insert duplicate event
-        repo.finish_run(
-            "run-idempotent",
-            AgentRunStatus::Failed,
-            None,
-            Some("late error"),
-            "evt-t2",
-            "run_failed",
-            1,
-            None,
-        )
-        .await
-        .unwrap();
+        assert!(!repo
+            .finish_run(
+                "run-idempotent",
+                AgentRunStatus::Failed,
+                None,
+                Some("late error"),
+                "evt-t2",
+                "run_failed",
+                1,
+                None,
+            )
+            .await
+            .unwrap());
 
         let record = repo.get_run("run-idempotent").await.unwrap().expect("run");
         assert_eq!(
             record.status, "completed",
             "terminal status must not change"
+        );
+        let events = repo
+            .list_events_for_run("run-idempotent", 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1, "exactly one terminal event must exist");
+        assert_eq!(events[0].event_type, "run_completed");
+    }
+
+    #[tokio::test]
+    async fn finish_run_rejects_terminal_event_type_mismatch() {
+        let repo = make_repo().await;
+        repo.insert_run(&run_input("run-terminal-mismatch"))
+            .await
+            .unwrap();
+
+        let result = repo
+            .finish_run(
+                "run-terminal-mismatch",
+                AgentRunStatus::Completed,
+                None,
+                None,
+                "evt-terminal-mismatch",
+                "run_failed",
+                0,
+                None,
+            )
+            .await;
+        assert!(result.is_err());
+        assert_eq!(
+            repo.get_run("run-terminal-mismatch")
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "running"
         );
     }
 
@@ -909,7 +1045,7 @@ mod tests {
     #[tokio::test]
     async fn persisted_run_does_not_contain_prompt_text() {
         let repo = make_repo().await;
-        let mut input = run_input("run-privacy-001");
+        let input = run_input("run-privacy-001");
         // response_id and parent_response_id are IDs, not content — safe to store.
         // We verify no prompt text leaked into any persisted column by serializing the record.
         repo.insert_run(&input).await.unwrap();

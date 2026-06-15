@@ -12,6 +12,8 @@
 //! because they are persisted atomically via `AgentRunRepository::finish_run`.
 
 use crate::agent_runtime::events::AgentEvent;
+use crate::agent_runtime::tools::sanitize_tool_text;
+use crate::providers::types::sanitize_provider_text;
 
 /// Maps an AgentEvent to a safe durable record.
 /// Returns `Some((event_type, payload_json))` when the event should be appended
@@ -56,7 +58,7 @@ pub fn event_to_safe_record(event: &AgentEvent) -> Option<(&'static str, Option<
                 serde_json::json!({
                     "runId": run_id,
                     "stepId": step_id,
-                    "doneReason": done_reason,
+                    "doneReason": done_reason.as_deref().map(sanitize_provider_text),
                     "inputTokens": usage.and_then(|u| u.input_tokens),
                     "outputTokens": usage.and_then(|u| u.output_tokens),
                     "totalTokens": usage.and_then(|u| u.total_tokens),
@@ -93,7 +95,7 @@ pub fn event_to_safe_record(event: &AgentEvent) -> Option<(&'static str, Option<
                     "stepId": step_id,
                     "toolName": tool_name,
                     "status": status,
-                    "reason": reason,
+                    "reason": reason.as_deref().map(sanitize_tool_text),
                 })
                 .to_string(),
             ),
@@ -110,7 +112,7 @@ pub fn event_to_safe_record(event: &AgentEvent) -> Option<(&'static str, Option<
                     "runId": run_id,
                     "stepId": step_id,
                     "toolName": tool_name,
-                    "reason": reason,
+                    "reason": sanitize_tool_text(reason),
                 })
                 .to_string(),
             ),
@@ -175,7 +177,7 @@ pub fn event_to_safe_record(event: &AgentEvent) -> Option<(&'static str, Option<
             Some(
                 serde_json::json!({
                     "runId": run_id,
-                    "message": message,
+                    "message": sanitize_tool_text(message),
                 })
                 .to_string(),
             ),
@@ -287,6 +289,28 @@ mod tests {
             !payload_str.contains("delta"),
             "no delta text in provider_completed payload"
         );
+    }
+
+    #[test]
+    fn free_form_event_text_is_sanitized_before_persistence() {
+        for event in [
+            AgentEvent::Warning {
+                run_id: "r".to_string(),
+                message: "Authorization: Bearer sk-live-secret".to_string(),
+            },
+            AgentEvent::ToolCallSkipped {
+                run_id: "r".to_string(),
+                step_id: "s".to_string(),
+                tool_name: "safe_tool".to_string(),
+                reason: "api_key=sk-live-secret".to_string(),
+            },
+        ] {
+            let (_, payload) = event_to_safe_record(&event).expect("safe record");
+            let payload = payload.expect("payload");
+            assert!(payload.contains("[redacted]"));
+            assert!(!payload.contains("sk-live-secret"));
+            assert!(!payload.to_ascii_lowercase().contains("bearer "));
+        }
     }
 
     #[test]

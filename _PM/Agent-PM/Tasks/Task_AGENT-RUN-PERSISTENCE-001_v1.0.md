@@ -46,3 +46,7 @@
 - AGENT-UI-RUN-INSPECTOR-001
 - AGENT-CONTEXT-MANAGER-001
 - RETRIEVAL-ARCH-001
+
+## Post-Implementation Validation
+
+Strict validation found that the initial commit did not persist runtime step rows and could append a second terminal event after a run was already terminal. These findings are addressed by the dedicated post-validation follow-up documented in `Task_AGENT-RUN-PERSISTENCE-001_POST-VALIDATION_v1.0.md`.

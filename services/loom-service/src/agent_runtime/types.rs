@@ -101,6 +101,7 @@ pub enum AgentStepStatus {
     Completed,
     Failed,
     Cancelled,
+    Skipped,
 }
 
 /// Structured provider usage. Carries token counts only — never provider

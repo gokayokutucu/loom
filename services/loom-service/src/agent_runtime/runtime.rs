@@ -13,7 +13,7 @@ use crate::agent_runtime::tools::{
 };
 use crate::agent_runtime::types::{
     new_agent_run_id, AgentRun, AgentRunId, AgentRunStatus, AgentRuntimeProviderOptions,
-    AgentRuntimeRequest, AgentStepId, AgentStepKind, AgentUsage,
+    AgentRuntimeRequest, AgentStepId, AgentStepKind, AgentStepStatus, AgentUsage,
 };
 use crate::providers::adapter::ProviderRegistry;
 use crate::providers::contract::{
@@ -21,7 +21,9 @@ use crate::providers::contract::{
     ProviderContractOptions, ProviderContractRequest,
 };
 use crate::providers::pipeline::{ProviderPipeline, ProviderPipelineRegistry};
-use crate::storage::repositories::agent_runs::{AgentRunRepository, NewAgentEvent, NewAgentRun};
+use crate::storage::repositories::agent_runs::{
+    AgentRunRepository, NewAgentEvent, NewAgentRun, NewAgentStep,
+};
 
 fn now_epoch_ms() -> u64 {
     std::time::SystemTime::now()
@@ -366,8 +368,9 @@ where
                 step_id: context_step_id.clone(),
                 kind: AgentStepKind::ContextBuild,
             };
-            persist_event(&run_repository, &run_id, &context_step_started).await;
+            persist_step_started(&run_repository, &run_id, &context_step_id, AgentStepKind::ContextBuild, 0, &started_at_str, &context_step_started).await;
             yield context_step_started;
+            finish_step_in_repo(&run_repository, &context_step_id, AgentStepStatus::Completed, None).await;
 
             // 2. ProviderCall step
             let provider_step_id = format!("{}-provider-call", run_id);
@@ -376,7 +379,7 @@ where
                 step_id: provider_step_id.clone(),
                 kind: AgentStepKind::ProviderCall,
             };
-            persist_event(&run_repository, &run_id, &provider_step_started).await;
+            persist_step_started(&run_repository, &run_id, &provider_step_id, AgentStepKind::ProviderCall, 1, &started_at_str, &provider_step_started).await;
             yield provider_step_started;
 
             let default_opts = AgentRuntimeProviderOptions::default();
@@ -443,6 +446,7 @@ where
                                 Some("Agent run cancelled"),
                                 start_time.elapsed().as_millis() as u64,
                             ).await;
+                            finish_step_in_repo(&run_repository, &provider_step_id, AgentStepStatus::Cancelled, None).await;
                             yield t_event;
                             return;
                         }
@@ -479,6 +483,7 @@ where
                             usage: run_usage,
                         };
                         persist_event(&run_repository, &run_id, &completed_event).await;
+                        finish_step_in_repo(&run_repository, &provider_step_id, AgentStepStatus::Completed, None).await;
                         yield completed_event;
                         completed_successfully = true;
                         break;
@@ -503,6 +508,7 @@ where
                             Some(error.user_message.as_str()),
                             start_time.elapsed().as_millis() as u64,
                         ).await;
+                        finish_step_in_repo(&run_repository, &provider_step_id, AgentStepStatus::Failed, Some(error.user_message.as_str())).await;
                         yield t_event;
                         return;
                     }
@@ -526,6 +532,7 @@ where
                             Some("Agent run cancelled"),
                             start_time.elapsed().as_millis() as u64,
                         ).await;
+                        finish_step_in_repo(&run_repository, &provider_step_id, AgentStepStatus::Cancelled, None).await;
                         yield t_event;
                         return;
                     }
@@ -552,6 +559,7 @@ where
                     Some("Provider stream ended abruptly without completion event"),
                     start_time.elapsed().as_millis() as u64,
                 ).await;
+                finish_step_in_repo(&run_repository, &provider_step_id, AgentStepStatus::Failed, Some("Provider stream ended abruptly without completion event")).await;
                 yield t_event;
                 return;
             }
@@ -576,6 +584,7 @@ where
                     Some("Agent run cancelled"),
                     start_time.elapsed().as_millis() as u64,
                 ).await;
+                finish_step_in_repo(&run_repository, &provider_step_id, AgentStepStatus::Cancelled, None).await;
                 yield t_event;
                 return;
             }
@@ -587,7 +596,7 @@ where
                 step_id: tool_step_id.clone(),
                 kind: AgentStepKind::ToolCallPlaceholder,
             };
-            persist_event(&run_repository, &run_id, &tool_step_started).await;
+            persist_step_started(&run_repository, &run_id, &tool_step_id, AgentStepKind::ToolCallPlaceholder, 2, &started_at_str, &tool_step_started).await;
             yield tool_step_started;
 
             let tool_boundary = ToolRuntimeBoundary::with_shared_registry(tool_registry);
@@ -632,6 +641,7 @@ where
             };
             persist_event(&run_repository, &run_id, &tool_skipped).await;
             yield tool_skipped;
+            finish_step_in_repo(&run_repository, &tool_step_id, AgentStepStatus::Skipped, None).await;
 
             // 4. ArtifactPlaceholder step
             let artifact_step_id = format!("{}-artifact", run_id);
@@ -640,7 +650,7 @@ where
                 step_id: artifact_step_id.clone(),
                 kind: AgentStepKind::ArtifactPlaceholder,
             };
-            persist_event(&run_repository, &run_id, &artifact_step_started).await;
+            persist_step_started(&run_repository, &run_id, &artifact_step_id, AgentStepKind::ArtifactPlaceholder, 3, &started_at_str, &artifact_step_started).await;
             yield artifact_step_started;
 
             let artifact_created = AgentEvent::ArtifactCreated {
@@ -650,6 +660,7 @@ where
             };
             persist_event(&run_repository, &run_id, &artifact_created).await;
             yield artifact_created;
+            finish_step_in_repo(&run_repository, &artifact_step_id, AgentStepStatus::Completed, None).await;
 
             // 5. ValidationPlaceholder step
             let validation_step_id = format!("{}-validation", run_id);
@@ -658,8 +669,9 @@ where
                 step_id: validation_step_id.clone(),
                 kind: AgentStepKind::ValidationPlaceholder,
             };
-            persist_event(&run_repository, &run_id, &validation_step_started).await;
+            persist_step_started(&run_repository, &run_id, &validation_step_id, AgentStepKind::ValidationPlaceholder, 4, &started_at_str, &validation_step_started).await;
             yield validation_step_started;
+            finish_step_in_repo(&run_repository, &validation_step_id, AgentStepStatus::Completed, None).await;
 
             let transition = run_store.transition_terminal(
                 &store_run_id,
@@ -685,6 +697,40 @@ where
     }
 }
 
+async fn persist_step_started(
+    run_repository: &Option<AgentRunRepository>,
+    run_id: &str,
+    step_id: &str,
+    kind: AgentStepKind,
+    sequence_index: i64,
+    started_at: &str,
+    event: &AgentEvent,
+) {
+    if let Some(repo) = run_repository {
+        let _ = repo
+            .insert_step(&NewAgentStep {
+                agent_step_id: step_id,
+                agent_run_id: run_id,
+                kind,
+                sequence_index,
+                started_at: Some(started_at),
+            })
+            .await;
+    }
+    persist_event(run_repository, run_id, event).await;
+}
+
+async fn finish_step_in_repo(
+    run_repository: &Option<AgentRunRepository>,
+    step_id: &str,
+    status: AgentStepStatus,
+    error: Option<&str>,
+) {
+    if let Some(repo) = run_repository {
+        let _ = repo.finish_step(step_id, status, error).await;
+    }
+}
+
 /// Appends a non-terminal event to the repository if persistence is enabled.
 async fn persist_event(
     run_repository: &Option<AgentRunRepository>,
@@ -695,17 +741,37 @@ async fn persist_event(
         if let Some((event_type, payload_json)) = event_to_safe_record(event) {
             let event_id = uuid::Uuid::new_v4().to_string();
             let seq = repo.next_sequence();
+            let step_id = event_step_id(event);
             let _ = repo
                 .append_event(&NewAgentEvent {
                     agent_event_id: &event_id,
                     agent_run_id: run_id,
-                    agent_step_id: None,
+                    agent_step_id: step_id,
                     sequence_number: seq,
                     event_type,
                     payload_json,
                 })
                 .await;
         }
+    }
+}
+
+fn event_step_id(event: &AgentEvent) -> Option<&str> {
+    match event {
+        AgentEvent::StepStarted { step_id, .. }
+        | AgentEvent::ProviderDelta { step_id, .. }
+        | AgentEvent::ProviderCompleted { step_id, .. }
+        | AgentEvent::ToolCallRequested { step_id, .. }
+        | AgentEvent::ToolPermissionEvaluated { step_id, .. }
+        | AgentEvent::ToolCallSkipped { step_id, .. }
+        | AgentEvent::ToolCallCompleted { step_id, .. }
+        | AgentEvent::ToolCallFailed { step_id, .. }
+        | AgentEvent::ArtifactCreated { step_id, .. } => Some(step_id),
+        AgentEvent::RunStarted { .. }
+        | AgentEvent::Warning { .. }
+        | AgentEvent::RunCompleted { .. }
+        | AgentEvent::RunFailed { .. }
+        | AgentEvent::RunCancelled { .. } => None,
     }
 }
 
@@ -1352,6 +1418,61 @@ mod tests {
         let captured_req = state.lock().unwrap().last_request.clone().unwrap();
         assert_eq!(captured_req.options.temperature, Some(0.4));
         assert_eq!(captured_req.options.max_tokens, Some(512));
+    }
+
+    #[tokio::test]
+    async fn test_agent_runtime_persists_step_lifecycle_and_safe_events() {
+        let events = vec![ProviderContractEvent::Completed {
+            done_reason: Some("stop".to_string()),
+            usage: ProviderUsageMetadata::unavailable("no-usage"),
+        }];
+        let (pipeline, _) = crate::agent_runtime::test_support::make_test_pipeline(events);
+        let database = crate::storage::db::test_database().await;
+        let repo = AgentRunRepository::from_pool(database.pool());
+        let runtime = AgentRuntime::new(pipeline).with_repository(repo.clone());
+
+        let stream_events = runtime
+            .execute_run(make_request("persisted-response"))
+            .collect::<Vec<_>>()
+            .await;
+        let run_id = stream_events
+            .iter()
+            .find_map(|event| match event {
+                AgentEvent::RunStarted { run_id, .. } => Some(run_id.clone()),
+                _ => None,
+            })
+            .expect("run id");
+
+        let steps = repo.list_steps_for_run(&run_id).await.unwrap();
+        assert_eq!(steps.len(), 5);
+        assert_eq!(steps[0].kind, "context_build");
+        assert_eq!(steps[0].status, "completed");
+        assert_eq!(steps[1].kind, "provider_call");
+        assert_eq!(steps[1].status, "completed");
+        assert_eq!(steps[2].kind, "tool_call_placeholder");
+        assert_eq!(steps[2].status, "skipped");
+        assert!(steps.iter().all(|step| step.completed_at.is_some()));
+
+        let durable_events = repo.list_events_for_run(&run_id, 0, 100).await.unwrap();
+        assert_eq!(
+            durable_events
+                .iter()
+                .filter(|event| event.event_type.starts_with("run_")
+                    && event.event_type != "run_started")
+                .count(),
+            1
+        );
+        assert!(durable_events.iter().all(|event| {
+            event
+                .payload_json
+                .as_deref()
+                .map(|payload| !payload.contains("persisted-response"))
+                .unwrap_or(true)
+        }));
+        assert!(durable_events
+            .iter()
+            .filter(|event| event.event_type == "step_started")
+            .all(|event| event.agent_step_id.is_some()));
     }
 
     #[tokio::test]
