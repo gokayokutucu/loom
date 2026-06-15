@@ -1,4 +1,4 @@
-# Phase 5: Tool Runtime Boundary Plan v1.0
+# Agent Phase 1A: Tool Runtime Boundary Plan v1.0
 
 ## Objective
 Define the first Loom-native Tool Runtime boundary inside `loom-service` so AgentRuntime can model tool requests, permission decisions, and safe outcomes before any tool execution exists.

@@ -1,4 +1,4 @@
-# Phase 5: Agent Runtime Experimental Route Plan v1.0
+# Agent Phase 1A: Agent Runtime Experimental Route Plan v1.0
 
 ## Objective
 Expose the internal `AgentRuntimeService` through a gated, experimental HTTP route in `loom-service` for service-level stream proof — with zero default behavior change.

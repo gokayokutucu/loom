@@ -1,4 +1,4 @@
-# Phase 5 — Tool Runtime Registry Seed Design v1.0
+# Agent Phase 1A: Tool Runtime Registry Seed Design v1.0
 # TOOL-RUNTIME-REGISTRY-SEED-DESIGN-001
 
 ## Approved Amendment: Four-Descriptor Initial Catalog

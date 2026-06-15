@@ -1,4 +1,4 @@
-# Phase 5 Tool Runtime Registry Seed Plan
+# Agent Phase 1A: Tool Runtime Registry Seed Plan v1.0
 
 ## Objective
 

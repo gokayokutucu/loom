@@ -1,4 +1,4 @@
-# Phase 5: Tool Runtime Registry Introspection Plan v1.0
+# Agent Phase 1A: Tool Runtime Registry Introspection Plan v1.0
 
 ## Objective
 Expose a gated, read-only experimental HTTP introspection route for the Loom-native Tool Registry so developers can inspect registered tool metadata, availability, and permission requirements without executing any tools.

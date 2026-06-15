@@ -1,4 +1,4 @@
-# Phase 5: Agent Runtime Internal Boundary Plan v1.0
+# Agent Phase 1A: Agent Runtime Internal Boundary Plan v1.0
 
 ## Objective
 Wire the Loom-native AgentRuntime foundation into `loom-service` as an internal service boundary (`AgentRuntimeService`) without exposing any product surface.

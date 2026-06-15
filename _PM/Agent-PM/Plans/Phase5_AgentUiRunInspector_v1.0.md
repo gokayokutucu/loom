@@ -1,4 +1,4 @@
-# Phase 5: Experimental Agent Run Inspector Plan v1.0
+# Agent Phase 1B: Experimental Agent Run Inspector Plan v1.0
 
 ## Objective
 

@@ -1,4 +1,4 @@
-# Phase 5: Tool Runtime Registry Shared State Plan v1.0
+# Agent Phase 1A: Tool Runtime Registry Shared State Plan v1.0
 
 ## Objective
 Ensure both the `AgentRuntime` execution flow and the experimental introspection route `GET /experimental/agent/tools` query the exact same process-local `ToolRegistry` instance.

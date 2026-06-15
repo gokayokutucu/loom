@@ -1,4 +1,4 @@
-# Phase 5: Tool Runtime Registry Plan v1.0
+# Agent Phase 1A: Tool Runtime Registry Plan v1.0
 
 ## Objective
 Build on `TOOL-RUNTIME-BOUNDARY-001` by adding a Loom-native Tool Registry contract inside `loom-service`. The registry models what tools exist, their metadata, availability, permission requirements, and execution readiness without executing real tools.

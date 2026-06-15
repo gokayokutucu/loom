@@ -1,4 +1,4 @@
-# Phase 5: Agent Runtime Foundation Plan v1.0
+# Agent Phase 1A: Agent Runtime Foundation Plan v1.0
 
 ## Objective
 Establish the foundation of a Loom-native event-driven, cancellable, raw-thinking-safe Agent Runtime inside `loom-service` in Rust.

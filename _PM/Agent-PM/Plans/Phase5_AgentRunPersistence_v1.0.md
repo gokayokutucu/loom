@@ -1,4 +1,4 @@
-# Phase 5: Agent Run Persistence Plan v1.0
+# Agent Phase 1B: Agent Run Persistence, Tracing, and Durable Event Log Plan v1.0
 
 ## Objective
 Add durable, append-only persistence for Agent Runs, Steps, and Events to the Loom-native Agent Runtime. After this phase, all agent runs are recorded in SQLite for history, audit, and future UI inspection — with strict privacy guarantees that raw thinking, delta text, prompts, and secrets are never stored.

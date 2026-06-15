@@ -1,4 +1,4 @@
-# Phase 5: Agent Runtime Cleanup Plan v1.0
+# Agent Phase 1A: Agent Runtime Cleanup Plan v1.0
 
 ## Objective
 Refine the Loom-native experimental Agent Runtime foundation by narrowing compiler warning exclusions and moving hard-coded provider options to a configurable structure.
