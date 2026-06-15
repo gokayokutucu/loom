@@ -14,6 +14,44 @@ function loomTab(page: Page, loomId: string) {
 }
 
 test.describe("[pure-ui-rendering] Sidebar session restore", () => {
+  test("keeps the tab title layer beneath the close action", async ({ page }) => {
+    await openApp(page);
+
+    const tab = page.locator(".conversation-tab").first();
+    await tab.hover();
+
+    const geometry = await tab.evaluate((element) => {
+      const main = element.querySelector<HTMLElement>(".conversation-tab-main");
+      const copy = element.querySelector<HTMLElement>(".conversation-tab-copy");
+      const actions = element.querySelector<HTMLElement>(".conversation-tab-actions");
+      const closeButton = element.querySelector<HTMLElement>(".conversation-tab-actions button");
+      if (!main || !copy || !actions || !closeButton) return null;
+
+      const tabRect = element.getBoundingClientRect();
+      const mainRect = main.getBoundingClientRect();
+      const copyRect = copy.getBoundingClientRect();
+      const actionsRect = actions.getBoundingClientRect();
+      return {
+        tabRight: tabRect.right,
+        mainRight: mainRect.right,
+        copyRight: copyRect.right,
+        actionsLeft: actionsRect.left,
+        mainZIndex: Number.parseInt(getComputedStyle(main).zIndex, 10),
+        actionsZIndex: Number.parseInt(getComputedStyle(actions).zIndex, 10),
+        closeBackground: getComputedStyle(closeButton).backgroundColor,
+        fadeBackground: getComputedStyle(actions, "::before").backgroundImage,
+      };
+    });
+
+    expect(geometry).not.toBeNull();
+    expect(geometry!.mainRight).toBeCloseTo(geometry!.tabRight, 0);
+    expect(geometry!.copyRight).toBeGreaterThan(geometry!.actionsLeft);
+    expect(geometry!.actionsZIndex).toBeGreaterThan(geometry!.mainZIndex);
+    expect(geometry!.closeBackground).not.toBe("rgba(0, 0, 0, 0)");
+    expect(geometry!.closeBackground).not.toBe("transparent");
+    expect(geometry!.fadeBackground).toContain("linear-gradient");
+  });
+
   test("falls back to New Loom when no valid session exists", async ({ page }) => {
     await page.addInitScript((storageKey) => {
       window.localStorage.clear();
