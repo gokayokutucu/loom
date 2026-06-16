@@ -11,6 +11,7 @@ mod exports;
 mod graph;
 mod orchestration;
 mod providers;
+mod retrieval;
 mod runtime;
 mod speech;
 mod storage;
