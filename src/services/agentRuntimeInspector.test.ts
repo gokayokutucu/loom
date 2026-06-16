@@ -3,7 +3,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   AgentInspectorStreamError,
   EXPERIMENTAL_AGENT_RUN_ENDPOINT,
+  EXPERIMENTAL_AGENT_RUNS_ENDPOINT,
+  listAgentRunEvents,
+  listAgentRunHistory,
+  listAgentRunSteps,
   isExperimentalAgentInspectorEnabled,
+  sanitizeAgentHistoryPayload,
   sanitizeAgentRuntimeEvent,
   streamExperimentalAgentRun,
   type AgentInspectorEventRow,
@@ -20,6 +25,13 @@ function ndjsonResponse(chunks: string[], status = 200): Response {
     }),
     { status, headers: { "Content-Type": "application/x-ndjson" } }
   );
+}
+
+function jsonResponse(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 describe("experimental agent inspector gate", () => {
@@ -60,6 +72,18 @@ describe("sanitizeAgentRuntimeEvent", () => {
     expect(JSON.stringify(event)).not.toContain("must-not-render");
   });
 
+  it("does not render live provider delta text in the inspector row", () => {
+    const event = sanitizeAgentRuntimeEvent({
+      type: "provider_delta",
+      run_id: "run-1",
+      step_id: "step-1",
+      delta: "provider text should not be rendered here",
+    });
+
+    expect(event.detail).toBe("Visible answer delta");
+    expect(JSON.stringify(event)).not.toContain("provider text should not be rendered here");
+  });
+
   it("redacts forbidden thinking and credential markers in allowed text fields", () => {
     const forbidden = [
       "raw_thinking",
@@ -75,10 +99,10 @@ describe("sanitizeAgentRuntimeEvent", () => {
 
     forbidden.forEach((value) => {
       const event = sanitizeAgentRuntimeEvent({
-        type: "provider_delta",
+        type: "warning",
         run_id: "run-1",
         step_id: "step-1",
-        delta: value,
+        message: value,
       });
       expect(event.detail).toBe("[redacted]");
     });
@@ -96,6 +120,153 @@ describe("sanitizeAgentRuntimeEvent", () => {
     expect(
       sanitizeAgentRuntimeEvent({ type: "run_cancelled", run_id: "run-3" }).terminalStatus
     ).toBe("cancelled");
+  });
+});
+
+describe("agent run history helpers", () => {
+  it("loads Loom-scoped durable run summaries from the experimental history endpoint", async () => {
+    const fetchImpl = vi.fn(async (_input: RequestInfo | URL) =>
+      jsonResponse({
+        runs: [
+          {
+            agentRunId: "run-1",
+            loomId: "loom-1",
+            responseId: "resp-1",
+            parentResponseId: null,
+            correlationId: "corr-1",
+            causationId: null,
+            contextSnapshotId: "ctx-1",
+            providerProfileId: "ollama",
+            modelId: "qwen",
+            status: "completed",
+            cancelRequested: false,
+            startedAt: "2026-01-01T00:00:00Z",
+            completedAt: "2026-01-01T00:00:01Z",
+            inputTokens: 4,
+            outputTokens: 8,
+            totalTokens: 12,
+            errorMessage: null,
+            createdAt: "2026-01-01T00:00:00Z",
+          },
+        ],
+        count: 1,
+      })
+    );
+
+    const result = await listAgentRunHistory({ loomId: "loom-1", limit: 25, fetchImpl });
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      `${EXPERIMENTAL_AGENT_RUNS_ENDPOINT}?loomId=loom-1&limit=25`
+    );
+    expect(result.runs).toHaveLength(1);
+    expect(result.runs[0]).toMatchObject({
+      agentRunId: "run-1",
+      loomId: "loom-1",
+      responseId: "resp-1",
+      providerProfileId: "ollama",
+      modelId: "qwen",
+      totalTokens: 12,
+    });
+  });
+
+  it("loads steps and sanitized durable events for a selected run", async () => {
+    const fetchImpl = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/steps")) {
+        return jsonResponse({
+          steps: [
+            {
+              agentStepId: "step-1",
+              agentRunId: "run-1",
+              kind: "provider",
+              status: "completed",
+              sequenceIndex: 1,
+              startedAt: "2026-01-01T00:00:00Z",
+              completedAt: "2026-01-01T00:00:01Z",
+              error: null,
+              createdAt: "2026-01-01T00:00:00Z",
+            },
+          ],
+          count: 1,
+        });
+      }
+      return jsonResponse({
+        events: [
+          {
+            agentEventId: "event-1",
+            agentRunId: "run-1",
+            agentStepId: "step-1",
+            sequenceNumber: 3,
+            eventType: "provider_delta",
+            payloadJson: JSON.stringify({
+              delta: "provider delta must not render",
+              prompt: "prompt must not render",
+              doneReason: "stop",
+              totalTokens: 9,
+              Authorization: "Bearer secret",
+            }),
+            createdAt: "2026-01-01T00:00:01Z",
+          },
+        ],
+        count: 1,
+        hasMore: false,
+      });
+    });
+
+    const steps = await listAgentRunSteps("run-1", { fetchImpl });
+    const events = await listAgentRunEvents("run-1", { limit: 100, fetchImpl });
+
+    expect(steps.steps[0]).toMatchObject({ agentStepId: "step-1", kind: "provider" });
+    expect(events.events[0]).toMatchObject({
+      agentEventId: "event-1",
+      eventType: "provider_delta",
+      payload: { doneReason: "stop", totalTokens: 9 },
+    });
+    expect(JSON.stringify(events)).not.toContain("provider delta must not render");
+    expect(JSON.stringify(events)).not.toContain("prompt must not render");
+    expect(JSON.stringify(events)).not.toContain("Bearer secret");
+  });
+
+  it("surfaces disabled experimental history as a safe unavailable state", async () => {
+    await expect(
+      listAgentRunHistory({
+        loomId: "loom-1",
+        fetchImpl: async () => jsonResponse({ code: "NOT_FOUND" }, 404),
+      })
+    ).rejects.toThrow("Experimental Agent Runtime history is not enabled in loom-service.");
+  });
+
+  it("requires a Loom ID before calling the history endpoint", async () => {
+    const fetchImpl = vi.fn();
+
+    await expect(listAgentRunHistory({ loomId: " ", fetchImpl })).rejects.toThrow(
+      "Enter a Loom ID"
+    );
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("allowlists durable payload fields and strips sensitive or verbose fields", () => {
+    const payload = sanitizeAgentHistoryPayload(
+      JSON.stringify({
+        runId: "run-1",
+        toolName: "loom.runtime.status",
+        reason: "safe reason",
+        totalTokens: 12,
+        delta: "must-not-render",
+        outputSummary: "must-not-render",
+        raw_thinking: "must-not-render",
+        apiKey: "must-not-render",
+        provider_payload: "must-not-render",
+      })
+    );
+
+    expect(payload).toEqual({
+      runId: "run-1",
+      toolName: "loom.runtime.status",
+      reason: "safe reason",
+      totalTokens: 12,
+    });
+    expect(JSON.stringify(payload)).not.toContain("must-not-render");
   });
 });
 
@@ -129,6 +300,7 @@ describe("streamExperimentalAgentRun", () => {
       "provider_delta",
       "run_completed",
     ]);
+    expect(JSON.stringify(events)).not.toContain("Hello");
     expect(result).toEqual({ terminalStatus: "completed", runId: "run-1" });
   });
 
@@ -162,6 +334,7 @@ describe("streamExperimentalAgentRun", () => {
   it("keeps the inspector client isolated from Main and Quick endpoints", () => {
     const source = readFileSync(new URL("./agentRuntimeInspector.ts", import.meta.url), "utf8");
     expect(source).toContain('/__loom/experimental/agent/run');
+    expect(source).toContain('/__loom/experimental/agent/runs');
     expect(source).not.toContain('/orchestration/execute');
     expect(source).not.toContain('/ask/quick');
   });

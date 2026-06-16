@@ -11,6 +11,9 @@ describe("AgentRunInspector", () => {
     const markup = renderToStaticMarkup(<AgentRunInspector enabled />);
     expect(markup).toContain("Agent Run Inspector");
     expect(markup).toContain("Experimental");
+    expect(markup).toContain("Recent Runs");
+    expect(markup).toContain("Durable run metadata only");
+    expect(markup).toContain("Load history");
     expect(markup).toContain('data-testid="agent-run-inspector"');
   });
 });
