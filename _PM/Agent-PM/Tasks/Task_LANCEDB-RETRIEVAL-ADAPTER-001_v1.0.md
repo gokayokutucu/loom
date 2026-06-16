@@ -26,7 +26,7 @@ Implement a LanceDB-backed semantic/vector retrieval projection adapter.
 - [x] Run full validation.
 - [x] Run Electron package build validation.
 - [x] Run packaged sidecar launch validation.
-- [ ] Commit with `feat: add lancedb retrieval adapter`.
+- [x] Commit with `feat: add lancedb retrieval adapter`.
 
 ## Scope Guard
 

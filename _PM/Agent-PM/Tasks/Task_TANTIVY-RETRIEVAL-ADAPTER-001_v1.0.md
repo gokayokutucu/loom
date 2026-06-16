@@ -22,7 +22,7 @@ Implement a Tantivy-backed lexical retrieval projection adapter.
 - [x] Add privacy tests for raw thinking and agent audit exclusion.
 - [x] Run full validation.
 - [x] Run Electron packaged validation.
-- [ ] Commit with `feat: add tantivy retrieval adapter`.
+- [x] Commit with `feat: add tantivy retrieval adapter`.
 
 ## Scope Guard
 
