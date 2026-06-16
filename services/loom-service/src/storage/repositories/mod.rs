@@ -12,6 +12,7 @@ pub mod orchestration;
 pub mod parts;
 pub mod references;
 pub mod responses;
+pub mod retrieval_projection;
 pub mod search_index;
 pub mod tags_graph;
 pub mod ui_state;

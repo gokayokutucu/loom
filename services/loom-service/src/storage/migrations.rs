@@ -118,6 +118,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "agent_run_persistence",
         sql: include_str!("../../migrations/0022_agent_run_persistence.sql"),
     },
+    Migration {
+        version: 23,
+        name: "retrieval_projection_contracts",
+        sql: include_str!("../../migrations/0023_retrieval_projection_contracts.sql"),
+    },
 ];
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
