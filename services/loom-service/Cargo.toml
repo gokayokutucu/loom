@@ -19,7 +19,7 @@ sha2 = "0.10"
 uuid = { version = "1", features = ["v4"] }
 hashbrown = "=0.15.2"
 idna_adapter = "=1.0.0"
-indexmap = "=2.7.1"
+indexmap = "=2.14.0"
 sqlx = { version = "0.6", default-features = false, features = ["sqlite", "runtime-tokio-rustls"] }
 unicode-segmentation = "=1.12.0"
 tokio = { version = "1", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
@@ -29,6 +29,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 zip = { version = "0.6", default-features = false, features = ["deflate"] }
 tantivy = "0.26.1"
 paste = "1.0.15"
+lancedb = "0.26.0"
+arrow-array = "57.2"
+arrow-schema = "57.2"
 
 [dev-dependencies]
 http-body-util = "0.1"

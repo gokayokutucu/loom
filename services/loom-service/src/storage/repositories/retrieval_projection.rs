@@ -822,10 +822,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn no_lancedb_or_embedding_dependencies_are_introduced() {
+    async fn no_embedding_provider_dependencies_are_introduced() {
         let cargo_lock = include_str!("../../../Cargo.lock");
-        assert!(!cargo_lock.contains("name = \"lancedb\""));
+        assert!(cargo_lock.contains("name = \"lancedb\""));
         assert!(!cargo_lock.contains("name = \"fastembed\""));
+        assert!(!cargo_lock.contains("name = \"ollama-rs\""));
     }
 
     async fn response_digest(repository: &RetrievalProjectionRepository) -> String {
