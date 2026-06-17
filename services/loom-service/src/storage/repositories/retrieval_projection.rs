@@ -62,6 +62,12 @@ pub struct RetrievalProjectionStoredChunk {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RetrievalProjectionChunkScopeMetadata {
+    pub loom_id: Option<String>,
+    pub response_id: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievalProjectionRebuildPlan {
     pub active_chunks: usize,
     pub changed_chunks: usize,
@@ -196,6 +202,39 @@ impl RetrievalProjectionRepository {
                     is_deleted: row.get::<i64, _>("is_deleted") != 0,
                 })
                 .collect()
+        })
+    }
+
+    pub async fn get_chunk_scope_metadata(
+        &self,
+        source_kind: &str,
+        source_id: &str,
+        chunk_ref: &str,
+        projection_version: &str,
+    ) -> Result<Option<RetrievalProjectionChunkScopeMetadata>, ServiceError> {
+        sqlx::query(
+            "SELECT loom_id, response_id
+             FROM retrieval_projection_chunks
+             WHERE source_kind = ?1 AND source_id = ?2
+               AND chunk_ref = ?3 AND projection_version = ?4
+               AND is_deleted = 0",
+        )
+        .bind(source_kind)
+        .bind(source_id)
+        .bind(chunk_ref)
+        .bind(projection_version)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!(
+                "failed to read retrieval projection chunk scope metadata: {error}"
+            ))
+        })
+        .map(|row| {
+            row.map(|row| RetrievalProjectionChunkScopeMetadata {
+                loom_id: row.get("loom_id"),
+                response_id: row.get("response_id"),
+            })
         })
     }
 

@@ -34,6 +34,7 @@ pub struct TantivySearchRequest {
     pub query: String,
     pub limit: usize,
     pub source_kinds: Vec<String>,
+    pub loom_ids: Vec<String>,
     pub exact: bool,
 }
 
@@ -43,6 +44,7 @@ impl TantivySearchRequest {
             query: query.into(),
             limit: 10,
             source_kinds: Vec::new(),
+            loom_ids: Vec::new(),
             exact: false,
         }
     }
@@ -52,6 +54,7 @@ impl TantivySearchRequest {
             query: query.into(),
             limit: 10,
             source_kinds: Vec::new(),
+            loom_ids: Vec::new(),
             exact: true,
         }
     }
@@ -64,6 +67,8 @@ pub struct TantivySearchCandidate {
     pub chunk_ref: String,
     pub content_digest: String,
     pub projection_version: String,
+    pub loom_id: Option<String>,
+    pub response_id: Option<String>,
     pub bm25_score: f32,
 }
 
@@ -278,7 +283,7 @@ impl TantivyRetrievalAdapter {
         Ok(diagnostics)
     }
 
-    pub fn search(
+    pub async fn search(
         &self,
         request: &TantivySearchRequest,
     ) -> Result<TantivySearchResult, ServiceError> {
@@ -311,11 +316,15 @@ impl TantivyRetrievalAdapter {
             })?
         };
 
+        let top_docs_limit = if request.loom_ids.is_empty() {
+            request.limit.saturating_mul(4).max(request.limit)
+        } else {
+            request.limit.saturating_mul(16).max(request.limit)
+        };
         let top_docs = searcher
             .search(
                 &query,
-                &TopDocs::with_limit(request.limit.saturating_mul(4).max(request.limit))
-                    .order_by_score(),
+                &TopDocs::with_limit(top_docs_limit).order_by_score(),
             )
             .map_err(|error| {
                 ServiceError::storage(format!("failed to search Tantivy index: {error}"))
@@ -326,15 +335,55 @@ impl TantivyRetrievalAdapter {
             .iter()
             .map(|source| source.as_str())
             .collect::<HashSet<_>>();
+        let loom_filter = request
+            .loom_ids
+            .iter()
+            .map(|loom_id| loom_id.as_str())
+            .collect::<HashSet<_>>();
         let mut candidates = Vec::new();
         for (score, address) in top_docs {
             let doc: TantivyDocument = searcher.doc(address).map_err(|error| {
                 ServiceError::storage(format!("failed to read Tantivy document: {error}"))
             })?;
-            let candidate = candidate_from_doc(&doc, &self.manager.fields, score)?;
+            let mut candidate = candidate_from_doc(&doc, &self.manager.fields, score)?;
             if !source_filter.is_empty() && !source_filter.contains(candidate.source_kind.as_str())
             {
                 continue;
+            }
+            if !loom_filter.is_empty() {
+                let Some(metadata) = self
+                    .projection
+                    .get_chunk_scope_metadata(
+                        &candidate.source_kind,
+                        &candidate.source_id,
+                        &candidate.chunk_ref,
+                        &candidate.projection_version,
+                    )
+                    .await?
+                else {
+                    continue;
+                };
+                if !metadata
+                    .loom_id
+                    .as_deref()
+                    .is_some_and(|loom_id| loom_filter.contains(loom_id))
+                {
+                    continue;
+                }
+                candidate.loom_id = metadata.loom_id;
+                candidate.response_id = metadata.response_id;
+            } else if let Some(metadata) = self
+                .projection
+                .get_chunk_scope_metadata(
+                    &candidate.source_kind,
+                    &candidate.source_id,
+                    &candidate.chunk_ref,
+                    &candidate.projection_version,
+                )
+                .await?
+            {
+                candidate.loom_id = metadata.loom_id;
+                candidate.response_id = metadata.response_id;
             }
             candidates.push(candidate);
             if candidates.len() >= request.limit {
@@ -344,7 +393,7 @@ impl TantivyRetrievalAdapter {
         Ok(TantivySearchResult { candidates })
     }
 
-    pub fn exact_term_search(
+    pub async fn exact_term_search(
         &self,
         term: &str,
         limit: usize,
@@ -353,8 +402,10 @@ impl TantivyRetrievalAdapter {
             query: term.to_string(),
             limit,
             source_kinds: Vec::new(),
+            loom_ids: Vec::new(),
             exact: true,
         })
+        .await
     }
 
     pub fn diagnostics(&self) -> Result<TantivyIndexDiagnostics, ServiceError> {
@@ -439,6 +490,8 @@ fn candidate_from_doc(
         chunk_ref: stored_text(doc, fields.chunk_ref, "chunk_ref")?,
         content_digest: stored_text(doc, fields.content_digest, "content_digest")?,
         projection_version: stored_text(doc, fields.projection_version, "projection_version")?,
+        loom_id: None,
+        response_id: None,
         bm25_score: score,
     })
 }
@@ -526,6 +579,7 @@ mod tests {
 
         let result = adapter
             .search(&TantivySearchRequest::keyword("projection"))
+            .await
             .expect("search");
         let mut kinds = result
             .candidates
@@ -553,11 +607,13 @@ mod tests {
         let first = adapter.rebuild_full().await.expect("first rebuild");
         let first_results = adapter
             .search(&TantivySearchRequest::keyword("response"))
+            .await
             .expect("first search")
             .candidates;
         let second = adapter.rebuild_full().await.expect("second rebuild");
         let second_results = adapter
             .search(&TantivySearchRequest::keyword("response"))
+            .await
             .expect("second search")
             .candidates;
         assert_eq!(first.chunk_count, second.chunk_count);
@@ -572,6 +628,7 @@ mod tests {
         assert_eq!(
             adapter
                 .search(&TantivySearchRequest::keyword("original"))
+                .await
                 .expect("original search")
                 .candidates
                 .len(),
@@ -590,6 +647,7 @@ mod tests {
         assert_eq!(
             adapter
                 .search(&TantivySearchRequest::keyword("updated"))
+                .await
                 .expect("updated search")
                 .candidates
                 .len(),
@@ -598,6 +656,7 @@ mod tests {
         assert_eq!(
             adapter
                 .search(&TantivySearchRequest::keyword("original"))
+                .await
                 .expect("old search")
                 .candidates
                 .len(),
@@ -617,6 +676,7 @@ mod tests {
         adapter.upsert_incremental().await.expect("incremental");
         let result = adapter
             .search(&TantivySearchRequest::keyword("original"))
+            .await
             .expect("search");
         assert!(result.candidates.is_empty());
     }
@@ -628,6 +688,7 @@ mod tests {
         adapter.rebuild_full().await.expect("rebuild");
         let bm25 = adapter
             .search(&TantivySearchRequest::keyword("original"))
+            .await
             .expect("bm25");
         assert_eq!(bm25.candidates.len(), 1);
         let candidate = &bm25.candidates[0];
@@ -640,7 +701,10 @@ mod tests {
         );
         assert!(candidate.bm25_score > 0.0);
 
-        let exact = adapter.exact_term_search("original", 10).expect("exact");
+        let exact = adapter
+            .exact_term_search("original", 10)
+            .await
+            .expect("exact");
         assert_eq!(exact.candidates[0].source_id, "resp-a");
     }
 
@@ -651,7 +715,7 @@ mod tests {
         adapter.rebuild_full().await.expect("rebuild");
         let mut request = TantivySearchRequest::keyword("projection");
         request.source_kinds = vec!["memory".to_string()];
-        let result = adapter.search(&request).expect("filtered search");
+        let result = adapter.search(&request).await.expect("filtered search");
         assert_eq!(result.candidates.len(), 1);
         assert_eq!(result.candidates[0].source_kind, "memory");
     }
@@ -669,6 +733,7 @@ mod tests {
         assert_eq!(adapter.diagnostics().expect("diagnostics"), first);
         let first_digest = adapter
             .search(&TantivySearchRequest::keyword("original"))
+            .await
             .expect("search")
             .candidates[0]
             .content_digest
@@ -684,6 +749,7 @@ mod tests {
         adapter.upsert_incremental().await.expect("incremental");
         let second_digest = adapter
             .search(&TantivySearchRequest::keyword("updated"))
+            .await
             .expect("search updated")
             .candidates[0]
             .content_digest
@@ -699,6 +765,7 @@ mod tests {
         adapter.rebuild_full().await.expect("rebuild");
         assert!(adapter
             .search(&TantivySearchRequest::keyword("agent event text"))
+            .await
             .expect("agent event search")
             .candidates
             .is_empty());

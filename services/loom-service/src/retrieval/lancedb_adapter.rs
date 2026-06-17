@@ -42,6 +42,7 @@ pub struct LanceDbSearchRequest {
     pub query: String,
     pub limit: usize,
     pub source_kinds: Vec<String>,
+    pub loom_ids: Vec<String>,
 }
 
 impl LanceDbSearchRequest {
@@ -50,6 +51,7 @@ impl LanceDbSearchRequest {
             query: query.into(),
             limit: 10,
             source_kinds: Vec::new(),
+            loom_ids: Vec::new(),
         }
     }
 }
@@ -61,6 +63,8 @@ pub struct LanceDbSearchCandidate {
     pub chunk_ref: String,
     pub content_digest: String,
     pub projection_version: String,
+    pub loom_id: Option<String>,
+    pub response_id: Option<String>,
     pub vector_score: f32,
     pub vector_distance: f32,
     pub embedding_provider_id: String,
@@ -343,10 +347,17 @@ impl LanceDbRetrievalAdapter {
             .iter()
             .map(|source| source.as_str())
             .collect::<HashSet<_>>();
-        let search_limit = request
-            .limit
-            .saturating_mul(DEFAULT_SEARCH_OVERSAMPLE)
-            .max(request.limit);
+        let loom_filter = request
+            .loom_ids
+            .iter()
+            .map(|loom_id| loom_id.as_str())
+            .collect::<HashSet<_>>();
+        let oversample = if loom_filter.is_empty() {
+            DEFAULT_SEARCH_OVERSAMPLE
+        } else {
+            DEFAULT_SEARCH_OVERSAMPLE.saturating_mul(4)
+        };
+        let search_limit = request.limit.saturating_mul(oversample).max(request.limit);
         let batches = table
             .query()
             .limit(search_limit)
@@ -361,11 +372,46 @@ impl LanceDbRetrievalAdapter {
         let mut candidates = Vec::new();
         for batch in batches {
             for row in 0..batch.num_rows() {
-                let candidate = candidate_from_batch(&batch, row)?;
+                let mut candidate = candidate_from_batch(&batch, row)?;
                 if !source_filter.is_empty()
                     && !source_filter.contains(candidate.source_kind.as_str())
                 {
                     continue;
+                }
+                if !loom_filter.is_empty() {
+                    let Some(metadata) = self
+                        .projection
+                        .get_chunk_scope_metadata(
+                            &candidate.source_kind,
+                            &candidate.source_id,
+                            &candidate.chunk_ref,
+                            &candidate.projection_version,
+                        )
+                        .await?
+                    else {
+                        continue;
+                    };
+                    if !metadata
+                        .loom_id
+                        .as_deref()
+                        .is_some_and(|loom_id| loom_filter.contains(loom_id))
+                    {
+                        continue;
+                    }
+                    candidate.loom_id = metadata.loom_id;
+                    candidate.response_id = metadata.response_id;
+                } else if let Some(metadata) = self
+                    .projection
+                    .get_chunk_scope_metadata(
+                        &candidate.source_kind,
+                        &candidate.source_id,
+                        &candidate.chunk_ref,
+                        &candidate.projection_version,
+                    )
+                    .await?
+                {
+                    candidate.loom_id = metadata.loom_id;
+                    candidate.response_id = metadata.response_id;
                 }
                 candidates.push(candidate);
                 if candidates.len() >= request.limit {
@@ -539,6 +585,8 @@ fn candidate_from_batch(
         chunk_ref: string_at(batch, "chunk_ref", row)?,
         content_digest: string_at(batch, "content_digest", row)?,
         projection_version: string_at(batch, "projection_version", row)?,
+        loom_id: None,
+        response_id: None,
         vector_score: 1.0 / (1.0 + distance.max(0.0)),
         vector_distance: distance,
         embedding_provider_id: string_at(batch, "embedding_provider_id", row)?,

@@ -13,6 +13,7 @@ mod orchestration;
 mod providers;
 mod retrieval;
 mod runtime;
+mod scope_resolution;
 mod speech;
 mod storage;
 

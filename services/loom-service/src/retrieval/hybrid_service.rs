@@ -27,6 +27,7 @@ pub struct RetrievalQuery {
     pub mode: RetrievalMode,
     pub max_candidates: usize,
     pub source_kinds: Vec<String>,
+    pub loom_ids: Vec<String>,
 }
 
 impl RetrievalQuery {
@@ -36,7 +37,13 @@ impl RetrievalQuery {
             mode: RetrievalMode::Hybrid,
             max_candidates: 10,
             source_kinds: Vec::new(),
+            loom_ids: Vec::new(),
         }
+    }
+
+    pub fn with_loom_ids(mut self, loom_ids: Vec<String>) -> Self {
+        self.loom_ids = normalize_loom_ids(loom_ids);
+        self
     }
 }
 
@@ -325,9 +332,10 @@ impl HybridRetrievalSource for TantivyHybridSource {
                 query: query.query.clone(),
                 limit: query.max_candidates,
                 source_kinds: query.source_kinds.clone(),
+                loom_ids: query.loom_ids.clone(),
                 exact: false,
             };
-            let result = self.adapter.search(&request)?;
+            let result = self.adapter.search(&request).await?;
             let diagnostics = self.adapter.diagnostics()?;
             let candidate_count = result.candidates.len();
             Ok(SourceSearchOutcome {
@@ -341,8 +349,8 @@ impl HybridRetrievalSource for TantivyHybridSource {
                         chunk_ref: candidate.chunk_ref,
                         projection_version: candidate.projection_version,
                         content_digest: candidate.content_digest,
-                        loom_id: None,
-                        response_id: None,
+                        loom_id: candidate.loom_id,
+                        response_id: candidate.response_id,
                         native_score: candidate.bm25_score,
                         text_preview: None,
                     })
@@ -374,6 +382,7 @@ impl HybridRetrievalSource for LanceDbHybridSource {
                 query: query.query.clone(),
                 limit: query.max_candidates,
                 source_kinds: query.source_kinds.clone(),
+                loom_ids: query.loom_ids.clone(),
             };
             let result = self.adapter.search(&request).await?;
             let diagnostics = self.adapter.diagnostics()?;
@@ -389,8 +398,8 @@ impl HybridRetrievalSource for LanceDbHybridSource {
                         chunk_ref: candidate.chunk_ref,
                         projection_version: candidate.projection_version,
                         content_digest: candidate.content_digest,
-                        loom_id: None,
-                        response_id: None,
+                        loom_id: candidate.loom_id,
+                        response_id: candidate.response_id,
                         native_score: candidate.vector_score,
                         text_preview: None,
                     })
@@ -583,6 +592,16 @@ fn allowed_source_kind(source_kind: &str) -> bool {
             | "checkpoint"
             | "unknown"
     )
+}
+
+fn normalize_loom_ids(loom_ids: Vec<String>) -> Vec<String> {
+    let mut loom_ids = loom_ids
+        .into_iter()
+        .filter(|loom_id| !loom_id.trim().is_empty())
+        .collect::<Vec<_>>();
+    loom_ids.sort();
+    loom_ids.dedup();
+    loom_ids
 }
 
 fn contains_forbidden_marker(value: &str) -> bool {
