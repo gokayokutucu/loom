@@ -143,6 +143,10 @@ pub enum SourceStatus {
 pub enum DegradationReason {
     SourceUnavailable,
     SearchFailed,
+    MissingIndex,
+    StaleProjection,
+    CorruptIndex,
+    VersionMismatch,
 }
 
 #[derive(Clone)]
