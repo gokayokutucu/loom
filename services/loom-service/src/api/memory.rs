@@ -42,6 +42,12 @@ pub struct CreateMemoryRequest {
     pub source_response_id: Option<String>,
     pub user_confirmed: Option<bool>,
     pub metadata: Option<Value>,
+    pub supersedes_id: Option<String>,
+    pub always_include: Option<bool>,
+    pub origin_response_id: Option<String>,
+    pub extraction_method: Option<String>,
+    pub confidence: Option<f64>,
+    pub topic_key: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -53,9 +59,15 @@ pub struct UpdateMemoryRequest {
     pub source_response_id: Option<Option<String>>,
     pub user_confirmed: Option<bool>,
     pub metadata: Option<Option<Value>>,
+    pub supersedes_id: Option<Option<String>>,
+    pub always_include: Option<bool>,
+    pub origin_response_id: Option<Option<String>>,
+    pub extraction_method: Option<Option<String>>,
+    pub confidence: Option<Option<f64>>,
+    pub topic_key: Option<Option<String>>,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryDto {
     pub memory_id: String,
@@ -68,15 +80,21 @@ pub struct MemoryDto {
     pub source_response_id: Option<String>,
     pub user_confirmed: bool,
     pub metadata: Option<Value>,
+    pub supersedes_id: Option<String>,
+    pub always_include: bool,
+    pub origin_response_id: Option<String>,
+    pub extraction_method: Option<String>,
+    pub confidence: Option<f64>,
+    pub topic_key: Option<String>,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryEnvelope {
     pub memory: MemoryDto,
 }
 
-#[derive(Debug, Serialize, PartialEq, Eq)]
+#[derive(Debug, Serialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct MemoryListResponse {
     pub memories: Vec<MemoryDto>,
@@ -143,6 +161,12 @@ pub async fn create_memory(
             source_response_id: empty_string_to_none(input.source_response_id),
             user_confirmed: input.user_confirmed.unwrap_or(true),
             metadata_json,
+            supersedes_id: empty_string_to_none(input.supersedes_id),
+            always_include: input.always_include.unwrap_or(false),
+            origin_response_id: empty_string_to_none(input.origin_response_id),
+            extraction_method: empty_string_to_none(input.extraction_method),
+            confidence: input.confidence,
+            topic_key: empty_string_to_none(input.topic_key),
         })
         .await
         .map_err(storage_error)?;
@@ -212,6 +236,12 @@ pub async fn patch_memory(
                 source_response_id: input.source_response_id.map(empty_string_to_none),
                 user_confirmed: input.user_confirmed,
                 metadata_json,
+                supersedes_id: input.supersedes_id.map(empty_string_to_none),
+                always_include: input.always_include,
+                origin_response_id: input.origin_response_id.map(empty_string_to_none),
+                extraction_method: input.extraction_method.map(empty_string_to_none),
+                confidence: input.confidence,
+                topic_key: input.topic_key.map(empty_string_to_none),
             },
         )
         .await
@@ -264,6 +294,12 @@ fn memory_to_dto(memory: MemoryRecord) -> MemoryDto {
         source_response_id: memory.source_response_id,
         user_confirmed: memory.user_confirmed,
         metadata: parse_metadata(memory.metadata_json.as_deref()),
+        supersedes_id: memory.supersedes_id,
+        always_include: memory.always_include,
+        origin_response_id: memory.origin_response_id,
+        extraction_method: memory.extraction_method,
+        confidence: memory.confidence,
+        topic_key: memory.topic_key,
     }
 }
 
@@ -435,6 +471,12 @@ mod tests {
                 source_response_id: Some("response-1".to_string()),
                 user_confirmed: Some(true),
                 metadata: Some(json!({ "savedFrom": "Loom X" })),
+                supersedes_id: None,
+                always_include: None,
+                origin_response_id: None,
+                extraction_method: None,
+                confidence: None,
+                topic_key: None,
             }),
         )
         .await
@@ -468,6 +510,12 @@ mod tests {
                 source_response_id: None,
                 user_confirmed: Some(true),
                 metadata: None,
+                supersedes_id: None,
+                always_include: None,
+                origin_response_id: None,
+                extraction_method: None,
+                confidence: None,
+                topic_key: None,
             }),
         )
         .await
@@ -504,6 +552,12 @@ mod tests {
                 source_response_id: None,
                 user_confirmed: Some(true),
                 metadata: None,
+                supersedes_id: None,
+                always_include: None,
+                origin_response_id: None,
+                extraction_method: None,
+                confidence: None,
+                topic_key: None,
             }),
         )
         .await

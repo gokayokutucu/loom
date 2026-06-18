@@ -128,6 +128,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "context_snapshots",
         sql: include_str!("../../migrations/0024_context_snapshots.sql"),
     },
+    Migration {
+        version: 25,
+        name: "memory_policy_foundation",
+        sql: include_str!("../../migrations/0025_memory_policy_foundation.sql"),
+    },
 ];
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
@@ -209,6 +214,8 @@ fn ensure_fts5_compileoption_enabled(enabled: i64) -> Result<(), ServiceError> {
 
 #[cfg(test)]
 mod tests {
+    use sqlx::Row;
+
     use crate::storage::{
         db::test_database,
         migrations::{ensure_fts5_available, ensure_fts5_compileoption_enabled},
@@ -225,6 +232,122 @@ mod tests {
         .expect("table query should work");
 
         assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn migration_0025_extends_existing_memories_with_policy_constraints() {
+        let database = test_database().await;
+        let pool = database.pool();
+        let columns = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM pragma_table_info('memories') ORDER BY cid",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        for expected in [
+            "supersedes_id",
+            "always_include",
+            "origin_response_id",
+            "extraction_method",
+            "confidence",
+            "topic_key",
+        ] {
+            assert!(columns.iter().any(|column| column == expected));
+        }
+        for forbidden in [
+            "raw_thinking",
+            "thinking_text",
+            "chain_of_thought",
+            "hidden_reasoning",
+            "prompt",
+            "provider_payload",
+            "provider_response",
+        ] {
+            assert!(!columns.iter().any(|column| column == forbidden));
+        }
+
+        sqlx::query(
+            "INSERT INTO memories
+             (memory_id, memory_type, content, normalized_content)
+             VALUES ('memory-policy-base', 'explicit_user_memory', 'safe', 'safe')",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+        let default_always = sqlx::query_scalar::<_, i64>(
+            "SELECT always_include FROM memories WHERE memory_id = 'memory-policy-base'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(default_always, 0);
+
+        for (index, method, confidence) in [
+            (0, Some("explicit"), Some(0.0)),
+            (1, Some("llm_extraction"), Some(1.0)),
+            (2, Some("system"), None),
+            (3, None, Some(0.5)),
+        ] {
+            sqlx::query(
+                "INSERT INTO memories
+                 (memory_id, memory_type, content, normalized_content, supersedes_id,
+                  always_include, origin_response_id, extraction_method, confidence, topic_key)
+                 VALUES (?1, 'explicit_user_memory', 'safe', 'safe',
+                         'memory-policy-base', 1, 'origin-response', ?2, ?3, 'topic-a')",
+            )
+            .bind(format!("memory-policy-{index}"))
+            .bind(method)
+            .bind(confidence)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        let stored = sqlx::query(
+            "SELECT supersedes_id, origin_response_id, topic_key
+             FROM memories WHERE memory_id = 'memory-policy-0'",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            stored.get::<String, _>("supersedes_id"),
+            "memory-policy-base"
+        );
+        assert_eq!(
+            stored.get::<String, _>("origin_response_id"),
+            "origin-response"
+        );
+        assert_eq!(stored.get::<String, _>("topic_key"), "topic-a");
+
+        for (id, method, confidence) in [
+            ("memory-policy-confidence-low", Some("explicit"), Some(-0.1)),
+            ("memory-policy-confidence-high", Some("explicit"), Some(1.1)),
+            ("memory-policy-method-invalid", Some("unknown"), None),
+        ] {
+            let result = sqlx::query(
+                "INSERT INTO memories
+                 (memory_id, memory_type, content, normalized_content,
+                  extraction_method, confidence)
+                 VALUES (?1, 'explicit_user_memory', 'safe', 'safe', ?2, ?3)",
+            )
+            .bind(id)
+            .bind(method)
+            .bind(confidence)
+            .execute(pool)
+            .await;
+            assert!(
+                result.is_err(),
+                "invalid policy value should be rejected: {id}"
+            );
+        }
+
+        let provenance_tables = sqlx::query_scalar::<_, String>(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'memory_provenance'",
+        )
+        .fetch_all(pool)
+        .await
+        .unwrap();
+        assert!(provenance_tables.is_empty());
     }
 
     #[tokio::test]

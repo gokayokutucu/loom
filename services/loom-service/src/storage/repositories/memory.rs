@@ -14,7 +14,7 @@ const FORBIDDEN_THINKING_KEYS: [&str; 8] = [
     "hiddenReasoning",
 ];
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MemoryRecord {
     pub memory_id: String,
     pub memory_type: String,
@@ -27,6 +27,12 @@ pub struct MemoryRecord {
     pub user_confirmed: bool,
     pub deleted_at: Option<String>,
     pub metadata_json: Option<String>,
+    pub supersedes_id: Option<String>,
+    pub always_include: bool,
+    pub origin_response_id: Option<String>,
+    pub extraction_method: Option<String>,
+    pub confidence: Option<f64>,
+    pub topic_key: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +56,12 @@ pub struct NewMemory {
     pub source_response_id: Option<String>,
     pub user_confirmed: bool,
     pub metadata_json: Option<String>,
+    pub supersedes_id: Option<String>,
+    pub always_include: bool,
+    pub origin_response_id: Option<String>,
+    pub extraction_method: Option<String>,
+    pub confidence: Option<f64>,
+    pub topic_key: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -61,6 +73,12 @@ pub struct MemoryUpdate {
     pub source_response_id: Option<Option<String>>,
     pub user_confirmed: Option<bool>,
     pub metadata_json: Option<Option<String>>,
+    pub supersedes_id: Option<Option<String>>,
+    pub always_include: Option<bool>,
+    pub origin_response_id: Option<Option<String>>,
+    pub extraction_method: Option<Option<String>>,
+    pub confidence: Option<Option<f64>>,
+    pub topic_key: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -99,8 +117,14 @@ impl MemoryRepository {
                 source_loom_id,
                 source_response_id,
                 user_confirmed,
-                metadata_json
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                metadata_json,
+                supersedes_id,
+                always_include,
+                origin_response_id,
+                extraction_method,
+                confidence,
+                topic_key
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         )
         .bind(&memory.memory_id)
         .bind(&memory.memory_type)
@@ -112,6 +136,12 @@ impl MemoryRepository {
         .bind(&memory.source_response_id)
         .bind(memory.user_confirmed)
         .bind(&memory.metadata_json)
+        .bind(&memory.supersedes_id)
+        .bind(memory.always_include)
+        .bind(&memory.origin_response_id)
+        .bind(&memory.extraction_method)
+        .bind(memory.confidence)
+        .bind(&memory.topic_key)
         .execute(&self.pool)
         .await
         .map_err(|error| ServiceError::storage(format!("failed to insert Memory: {error}")))?;
@@ -186,6 +216,24 @@ impl MemoryRepository {
         if let Some(metadata_json) = update.metadata_json {
             current.metadata_json = metadata_json;
         }
+        if let Some(supersedes_id) = update.supersedes_id {
+            current.supersedes_id = supersedes_id;
+        }
+        if let Some(always_include) = update.always_include {
+            current.always_include = always_include;
+        }
+        if let Some(origin_response_id) = update.origin_response_id {
+            current.origin_response_id = origin_response_id;
+        }
+        if let Some(extraction_method) = update.extraction_method {
+            current.extraction_method = extraction_method;
+        }
+        if let Some(confidence) = update.confidence {
+            current.confidence = confidence;
+        }
+        if let Some(topic_key) = update.topic_key {
+            current.topic_key = topic_key;
+        }
         reject_forbidden_payload(Some(&current.content))?;
         reject_forbidden_payload(Some(&current.normalized_content))?;
         reject_forbidden_payload(current.metadata_json.as_deref())?;
@@ -199,7 +247,13 @@ impl MemoryRepository {
                 source_loom_id = ?5,
                 source_response_id = ?6,
                 user_confirmed = ?7,
-                metadata_json = ?8
+                metadata_json = ?8,
+                supersedes_id = ?9,
+                always_include = ?10,
+                origin_response_id = ?11,
+                extraction_method = ?12,
+                confidence = ?13,
+                topic_key = ?14
              WHERE memory_id = ?1 AND deleted_at IS NULL",
         )
         .bind(memory_id)
@@ -210,6 +264,12 @@ impl MemoryRepository {
         .bind(&current.source_response_id)
         .bind(current.user_confirmed)
         .bind(&current.metadata_json)
+        .bind(&current.supersedes_id)
+        .bind(current.always_include)
+        .bind(&current.origin_response_id)
+        .bind(&current.extraction_method)
+        .bind(current.confidence)
+        .bind(&current.topic_key)
         .execute(&self.pool)
         .await
         .map_err(|error| ServiceError::storage(format!("failed to update Memory: {error}")))?;
@@ -289,6 +349,12 @@ fn memory_from_row(row: sqlx::sqlite::SqliteRow) -> MemoryRecord {
         user_confirmed: row.get::<bool, _>("user_confirmed"),
         deleted_at: row.get("deleted_at"),
         metadata_json: row.get("metadata_json"),
+        supersedes_id: row.get("supersedes_id"),
+        always_include: row.get::<bool, _>("always_include"),
+        origin_response_id: row.get("origin_response_id"),
+        extraction_method: row.get("extraction_method"),
+        confidence: row.get("confidence"),
+        topic_key: row.get("topic_key"),
     }
 }
 
@@ -340,6 +406,12 @@ mod tests {
                 source_response_id: Some("response-1".to_string()),
                 user_confirmed: true,
                 metadata_json: Some(r#"{"origin":"test"}"#.to_string()),
+                supersedes_id: None,
+                always_include: false,
+                origin_response_id: None,
+                extraction_method: None,
+                confidence: None,
+                topic_key: None,
             })
             .await
             .expect("insert memory");
@@ -353,6 +425,42 @@ mod tests {
             })
             .await
             .expect("insert event");
+
+        memories
+            .insert_memory(&NewMemory {
+                memory_id: "memory-2".to_string(),
+                memory_type: "explicit_user_memory".to_string(),
+                content: "The replacement project codename is Indigo.".to_string(),
+                normalized_content: "the replacement project codename is indigo.".to_string(),
+                created_at: "2026-05-21T00:00:00Z".to_string(),
+                updated_at: "2026-05-21T00:00:00Z".to_string(),
+                source_loom_id: Some("loom-1".to_string()),
+                source_response_id: Some("response-1".to_string()),
+                user_confirmed: true,
+                metadata_json: None,
+                supersedes_id: Some("memory-1".to_string()),
+                always_include: true,
+                origin_response_id: Some("response-1".to_string()),
+                extraction_method: Some("explicit".to_string()),
+                confidence: Some(1.0),
+                topic_key: Some("project-codename".to_string()),
+            })
+            .await
+            .expect("insert policy memory");
+        let policy_memory = memories
+            .get_memory("memory-2")
+            .await
+            .expect("get policy memory")
+            .expect("policy memory exists");
+        assert_eq!(policy_memory.supersedes_id.as_deref(), Some("memory-1"));
+        assert!(policy_memory.always_include);
+        assert_eq!(
+            policy_memory.origin_response_id.as_deref(),
+            Some("response-1")
+        );
+        assert_eq!(policy_memory.extraction_method.as_deref(), Some("explicit"));
+        assert_eq!(policy_memory.confidence, Some(1.0));
+        assert_eq!(policy_memory.topic_key.as_deref(), Some("project-codename"));
 
         let listed = memories
             .list_memories(Some("blue otter"))
@@ -412,6 +520,12 @@ mod tests {
                 source_response_id: None,
                 user_confirmed: true,
                 metadata_json: None,
+                supersedes_id: None,
+                always_include: false,
+                origin_response_id: None,
+                extraction_method: None,
+                confidence: None,
+                topic_key: None,
             })
             .await
             .expect_err("raw thinking rejected");

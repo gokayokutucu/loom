@@ -6992,6 +6992,12 @@ mod tests {
                 source_response_id: None,
                 user_confirmed: true,
                 metadata_json: None,
+                supersedes_id: None,
+                always_include: false,
+                origin_response_id: None,
+                extraction_method: None,
+                confidence: None,
+                topic_key: None,
             })
             .await
             .expect("insert memory");
@@ -7031,6 +7037,12 @@ mod tests {
                 source_response_id: None,
                 user_confirmed: true,
                 metadata_json: None,
+                supersedes_id: None,
+                always_include: false,
+                origin_response_id: None,
+                extraction_method: None,
+                confidence: None,
+                topic_key: None,
             })
             .await
             .expect("insert memory");
