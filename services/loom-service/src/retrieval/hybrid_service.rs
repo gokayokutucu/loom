@@ -9,6 +9,8 @@ use std::{
     time::Instant,
 };
 
+use serde::Serialize;
+
 use crate::{
     error::ServiceError,
     retrieval::{
@@ -75,7 +77,8 @@ pub struct RetrievalCandidate {
     pub contributing_sources: Vec<RetrievalSourceId>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct RankSignals {
     pub bm25_rank: Option<usize>,
     pub bm25_score: Option<f32>,

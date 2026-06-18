@@ -3,6 +3,7 @@ mod api;
 mod capabilities;
 mod config;
 mod context;
+mod context_selection;
 mod display_code;
 mod domain;
 mod error;
