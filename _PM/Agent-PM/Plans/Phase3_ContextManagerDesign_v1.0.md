@@ -1,160 +1,145 @@
-# Agent Phase 3A: Context Manager Design Plan v1.0
+# Agent Phase 3: Context Manager Design v1.0
 
-## Objective
+## 1. Architecture Overview
 
-Design the Agent Context Manager — the layer that receives a typed `ContextPayload` from
-Context Selection and produces a token-budgeted, prompt-ready context assembly.
+The Agent Context Manager is the decisive component in the Loom context pipeline. Sitting between Context Selection and Provider Prompt Assembly, it takes a prioritized list of `ContextCandidate`s (the `ContextPayload`), fetches the canonical full content from SQLite, applies the token budget, decides the inclusion mode for each item, updates the Context Snapshot with final decisions, and assembles the context sections for the provider prompt.
 
-The Context Manager owns:
-- Token budget allocation across context categories
-- Full content resolution from SQLite by candidate identity
-- `ContextRetrievalIncludeMode` decisions (Full / Capsule / ReferenceOnly / CodeExact /
-  CodeSummary) per candidate
-- Prompt assembly order and format
-- The `agent_runs.context_snapshot_id` audit seam
+## 2. Responsibility Boundary
 
-This document is **design only**. Implementation is Agent Phase 3B (AGENT-CONTEXT-MANAGER-001).
+To maintain clear separation of concerns, the Context Manager's responsibilities are strictly bounded:
 
-## Status
+### What Context Manager Owns:
+- **Token Budgeting**: Allocates token budgets across context tiers.
+- **Content Resolution**: Fetches actual content from SQLite based on candidate identity.
+- **Inclusion Decisions**: Decides whether a candidate is fully included, summarized, truncated, or dropped based on the budget.
+- **Section Assembly**: Groups resolved context into logical prompt sections.
+- **Snapshot Updating**: Enriches the Context Snapshot with final budgeting outcomes and diagnostics.
 
-Deferred. Depends on AGENT-CONTEXT-SELECTION-ARCH-001 (Agent Phase 2G).
+### What Context Manager Does NOT Own:
+- **Scope Resolution**: Traversal of the graph to find available context boundaries.
+- **Retrieval**: Querying Tantivy/LanceDB or calculating relevance scores.
+- **Context Selection**: Prioritizing candidates or deciding initial tiers.
+- **Provider Prompt Assembly**: Translating the structured prompt sections into provider-specific (e.g., OpenAI, Ollama) JSON payloads.
 
-## Changelog
-- **v1.0**: Initial Context Manager design (AGENT-CONTEXT-MANAGER-DESIGN-001).
+## 3. Input / Output Contracts
 
----
+### Inputs
+- **ContextPayload**: The ordered, tiered list of `ContextCandidate`s from Context Selection.
+- **Token Budget**: The total allowed token limit and reserve ratios for the current run, derived from the provider/model profile.
+- **Agent Run/Context Snapshot IDs**: Identifiers to link telemetry and auditing.
+- **Diagnostics**: `ScopeResolutionDiagnostics`, `RetrievalDiagnostics`, and `ContextSelectionDiagnostics`.
+- **Active Context**: `loom_id` and `response_id` / `parent_response_id`.
 
-## 1. Boundary with Context Selection
+### Outputs
+- **ResolvedPromptContext**: The structured, sectioned context ready for Provider Prompt Assembly.
+- **ContextBudgetSnapshot**: Telemetry describing tokens consumed, dropped candidates, and budget math.
+- **Updated Context Snapshot**: Finalized `inclusion_status` for all candidates written back to SQLite.
 
-Context Selection (Phase 2G) produces a typed `ContextPayload` with:
-- Priority-ordered entries across 11 source categories
-- Per-entry: `(source_kind, source_id)` reference, estimated token cost, retrieval score,
-  and a short text preview
-- `ContextSelectionDiagnostics` (no content; audit-safe)
+## 4. Content Resolution Model
 
-Context Manager receives this payload and:
-1. Resolves full content from SQLite for each entry by `(source_kind, source_id)` — this is
-   the only place full content is fetched from SQLite in the context pipeline
-2. Applies `ContextRetrievalIncludeMode` to each resolved entry
-3. Allocates token budget across categories using `ContextBudgetPlan`
-4. Assembles the final prompt context string (or structured sections) for provider dispatch
+Context Manager iterates through the `ContextPayload` and resolves full content from SQLite by `(source_kind, source_id, chunk_ref)`.
 
-Context Manager never:
-- Calls Hybrid Retrieval directly (it receives retrieval candidates through `ContextPayload`)
-- Makes source priority decisions (those are Context Selection's responsibility)
-- Stores prompt text in SQLite (only the `context_snapshot_id` seam is recorded)
-- Includes raw thinking, provider payloads, secrets, or agent audit trail content
+Resolution behavior by source kind:
+- **`response`**: Fetches canonical markdown from `responses`. Applies raw-thinking rejection natively.
+- **`memory`**: Fetches confirmed user memory from the `memories` table. Unconfirmed memory is skipped.
+- **`attachment_chunk`**: Fetches parsed text chunks from `attachment_chunks`. Skips if missing or failed to parse.
+- **`reference`**: Fetches the targeted entity (e.g., response, external link) ensuring explicit focus.
+- **`response_capsule`**: Fetches condensed capsule text from `response_capsules`.
+- **`checkpoint`**: Fetches rolling summaries from `loom_checkpoints`.
+- **`weft_origin_context`**: Fetches origin context but enforces the hidden background rule (will not render as visible transcript).
+- **`tool_artifact` (future)**: Fetches verified outputs from tool runs, skipping raw/unverified telemetry.
 
----
+## 5. Include Mode Model
 
-## 2. Token Budget Allocation
+Candidates are assigned an inclusion mode to maximize signal within the token budget:
 
-The existing `ContextBudgetPlan` (already implemented for non-agent generation) allocates
-token budget across context contributors. The Agent Context Manager reuses this model and
-extends it for agent turns.
+- **`Full`**: The entire source text is included. Used for the current active thread, mandatory policy, and explicit references.
+- **`Summary`**: A summarized version (e.g., capsule) is used. Applied to older responses or lower-priority retrieval candidates when budget is tight.
+- **`ReferenceOnly`**: Only the metadata (e.g., title, ID) is included to inform the model that the concept exists without full text.
+- **`Capsule`**: Direct usage of a pre-computed response capsule.
+- **`HiddenBackground`**: Included in the prompt for model grounding but excluded from the visible user transcript (e.g., Weft origins).
+- **`CodeExact`**: The exact fenced code block text is fetched directly from `response_code_blocks`.
+- **`CodeSummary`**: Only the function signature or high-level description is included.
+- **`MetadataOnly`**: Used for diagnostic tracing or tags without body text.
 
-Budget allocation order follows Context Selection priority:
-1. Policy entries (mandatory; budget must accommodate or turn is rejected)
-2. Conversation turns (recent window; older turns use capsule/checkpoint budget)
-3. Weft origin context (hidden; fixed budget allocation)
-4. Scoped memories (scored; trim lowest-scored first when over budget)
-5. Retrieval candidates (scored; trim lowest-scored first when over budget)
+## 6. Token Budget Model
 
-The output reserve (tokens budgeted for the assistant response) is calculated first and
-subtracted from the total context window before any source allocation begins — matching
-the existing `ContextBudgetPlan` behavior.
+The Token Budget allocates capacity across tiers safely.
 
----
+### Structure
+- **Hard Budget**: Absolute max tokens allowed by the model/provider minus output reserve.
+- **System Reserved Budget**: Reserved for system prompts and active generation instructions.
+- **Core Reserved Budget**: Reserved for the active conversation thread and explicit references.
+- **Flexible Budget**: Remaining tokens allocated to attachments, retrieved memories, and background context.
 
-## 3. Include Mode Decisions
+### Overflow Behavior
+- **Tier 1 (Mandatory / Core) Exceeds Budget**: The system throws a `TokenOverflowError`. Mandatory context is never silently dropped.
+- **Current Conversation Exceeds Budget**: The oldest turns are downgraded to `Capsule` or `Summary` mode until they fit.
+- **Attachments Exceed Budget**: Truncated or downgraded to `Summary` / `ReferenceOnly`.
+- **Retrieved Memory Exceeds Budget**: Lower-scoring candidates are dropped entirely. The drop is explicitly recorded in the snapshot as `dropped_budget`.
 
-`ContextRetrievalIncludeMode` determines how much of each resolved source is included:
+## 7. Prompt Section Model
 
-| Mode | When to apply |
-|---|---|
-| `Full` | Short content, explicitly referenced, or code source kinds |
-| `Capsule` | Older responses where a capsule/checkpoint is available |
-| `ReferenceOnly` | Items present for navigation/tracing but not needing full text |
-| `CodeExact` | `response_code_blocks` when code relevance is detected |
-| `CodeSummary` | Code blocks when only a summary is within budget |
+The Context Manager organizes the resolved text into structured sections. (No raw prompt strings are generated here, only logical blocks).
 
-The existing `code_relevance_detected` logic (from `CODE-CONTEXT-RETRIEVAL-001`) applies.
-Context Manager carries this logic forward; Context Selection does not evaluate code
-relevance.
+- **`Section::SystemPolicy`**: Core rules, formatting constraints, and safety instructions.
+- **`Section::HiddenBackground`**: Weft origin context and other background knowledge not visible in the UI.
+- **`Section::RetrievedKnowledge`**: Scoped memories, retrieved chunks, and attachments (budget permitting).
+- **`Section::ExplicitReferences`**: User-selected fragments and explicitly linked context.
+- **`Section::ConversationHistory`**: The recent transcript, ending with the immediate user prompt.
 
----
+## 8. Snapshot Interaction Model
 
-## 4. Prompt Assembly Contract
+The Context Snapshot acts as the audit log.
 
-The Context Manager produces a structured context assembly, not a raw string. Each section
-is labeled by source category and include mode:
+- **Read**: Context Manager reads the `ContextPayload` metadata already planned by Context Selection.
+- **Write/Update**: For every candidate, Context Manager updates the `inclusion_status` (`included`, `dropped_budget`, `dropped_policy`, `error`).
+- **Telemetry**: Writes the `ContextBudgetSnapshot` (token counts, rejection reasons) into the parent `context_snapshots` JSON blob.
+- **Foreign Key**: `agent_runs.context_snapshot_id` ensures the run is forever linked to this exact resolution outcome.
 
-- Policy entries: injected first, without label (they appear as system-level context)
-- Weft origin context: injected as hidden background (marked not to render as transcript)
-- Conversation turns: recent turns in role-labeled order (user/assistant)
-- Compressed capsules and checkpoints: as background summary sections
-- Memory entries: labeled as background knowledge
-- Retrieval candidates: labeled by source kind
+## 9. Replay / Explainability Model
 
-The exact prompt format (XML tags, Markdown sections, or plain text delimiters) is deferred
-to Phase 3B implementation and depends on provider contract requirements at that time.
+The Agent Run Inspector will use the Snapshot to explain the run without storing duplicate content.
 
----
+- **Which context was used**: Inspector queries `context_snapshot_candidates` where `inclusion_status = 'included'`.
+- **Why it was used**: Driven by the `tier` and `retrieval_score` columns in the snapshot.
+- **What was dropped**: Queries candidates with `inclusion_status = 'dropped_budget'`.
+- **Budget decisions**: Reads the `budget_json` from the `context_snapshots` root row.
+- **Hidden background**: Identified by the `is_hidden_background = true` flag.
 
-## 5. Context Snapshot Audit Seam
+## 10. Privacy / Safety Model
 
-`agent_runs.context_snapshot_id` (nullable column, migration 0022) is the reserved seam
-for attaching a context snapshot to an agent run.
+- **Raw Thinking**: Rejected at the SQLite read boundary. The Context Manager structurally cannot load raw thinking fields into memory.
+- **Secrets/Credentials**: Automatically scrubbed. Service config and secrets do not exist in the candidate lookup tables.
+- **Provider Payloads**: Never flow into Context Manager.
+- **Raw Tool Output**: Deferred to Phase 5, but will require explicit verification before context inclusion.
+- **Unconfirmed Memory / Failed Parses**: Soft-deleted or unconfirmed rows resolve to `None` and are marked `error` in the snapshot.
 
-When the Context Manager assembles context for an agent turn, it writes a minimal, content-
-free context snapshot:
-- Which source categories were included and how many items from each
-- Total token allocation per category
-- `RetrievalDiagnostics` summary (counts and health only, no content)
-- `ContextSelectionDiagnostics` summary
+## 11. Failure Mode Model
 
-This snapshot is stored by reference in `agent_runs.context_snapshot_id`. It is not a copy
-of the prompt — it is a diagnostic artifact, following the same privacy model as
-`agent_events`: counts, types, and latency only.
+- **Source Record Missing**: SQLite lookup returns empty. Candidate marked `error: not_found`. Continues to next.
+- **Candidate Stale**: Version mismatch between projection and SQLite. Marked `error: stale`. Continues.
+- **Deleted Response**: SQLite lookup fails. Marked `error: deleted`. Continues.
+- **Token Budget Overflow**: Drops optional tiers. If Tier 1 overflows, aborts the Agent Run with a `TokenOverflowError`.
+- **Snapshot Missing**: Context Manager logs a severe warning but proceeds with transient budgeting.
+- **SQLite Read Error**: Bubbles up the error, failing the run safely without generating a hallucinated response.
 
----
+## 12. Future Compatibility
 
-## 6. Relationship to Existing ContextManager
+- **Memory Policy Engine**: Dynamic overrides can be injected during Context Selection, and the Context Manager will respect the resulting `is_mandatory` flags.
+- **Tool/MCP Artifacts**: A new `source_kind = tool_artifact` seamlessly fits the content resolution model.
+- **Agent Behavior**: Multi-agent setups will generate isolated snapshots per sub-agent, preventing cross-contamination.
+- **Reranking**: Future cross-encoder reranking occurs in Context Selection; Context Manager blindly trusts the finalized `ContextPayload` ordering.
 
-The existing `src/context/manager.rs` is the non-agent production implementation. The Agent
-Context Manager (Phase 3B) will:
-- Share the `ContextBudgetPlan` contract
-- Reuse capsule/checkpoint loading repositories
-- Reuse `ContextRetrievalIncludeMode` logic
-- Not replace or duplicate the existing ContextManager for non-agent generation flows
+## 13. Implementation Rollout Plan
 
-The two managers coexist. The Agent Context Manager is an agent-turn-specific implementation
-that consumes the Context Selection `ContextPayload` interface. The non-agent ContextManager
-continues to serve Main composer and Quick Ask generation unchanged.
+1. Define Rust models for `ResolvedPromptContext`, `ContextBudgetPlan`, and `ContextRetrievalIncludeMode`.
+2. Implement SQLite content resolution mapping for `source_kind`.
+3. Implement the token math and budget enforcement loop.
+4. Integrate with `ContextSnapshot` to write back inclusion decisions.
+5. Create unit tests mocking `ContextPayload` and SQLite to prove deterministic budget dropping and privacy boundary enforcement.
+6. (Main/Quick Ask generation remain untouched throughout rollout).
 
----
+## 14. Final Recommendation
 
-## 7. Privacy Invariants
-
-- Raw thinking must never enter the assembled context.
-- Provider payloads, prompt envelopes, secrets, credentials, and raw reasoning are excluded
-  structurally (SQLite never stored them; full content resolution from SQLite inherits the
-  write-time guards).
-- Agent run/event/step audit data is never a content source.
-- Context snapshots stored via `context_snapshot_id` contain no prompt text, no content, and
-  no source identifiers — only counts, types, and diagnostics.
-- Weft origin context injected as hidden background must never appear in visible transcript
-  hydration or agent event payloads.
-
----
-
-## 8. Rollout Notes
-
-This plan defines the design only. Implementation is Agent Phase 3B
-(AGENT-CONTEXT-MANAGER-001), which depends on:
-- AGENT-CONTEXT-SELECTION-ARCH-001 (Phase 2G) — design accepted
-- HYBRID-RETRIEVAL-SERVICE-001 (Phase 2E) — complete
-- RETRIEVAL-DIAGNOSTICS-001 (Phase 2F) — complete
-
-Memory write policy (AGENT-MEMORY-001) and attachment implementation tasks are separate
-and explicitly deferred beyond Phase 3.
+Adopt this architectural boundary for the Agent Context Manager. It enforces strong decoupling between retrieval (finding data), selection (prioritizing data), and management (budgeting and resolving data). By keeping SQLite as the source of truth and writing inclusion decisions back to the Context Snapshot, we guarantee that runs remain fully auditable and replayable without violating privacy or duplicating storage.
