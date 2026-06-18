@@ -123,6 +123,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "retrieval_projection_contracts",
         sql: include_str!("../../migrations/0023_retrieval_projection_contracts.sql"),
     },
+    Migration {
+        version: 24,
+        name: "context_snapshots",
+        sql: include_str!("../../migrations/0024_context_snapshots.sql"),
+    },
 ];
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
@@ -387,6 +392,53 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn migration_0024_creates_context_snapshot_tables() {
+        let database = test_database().await;
+        for table in ["context_snapshots", "context_snapshot_candidates"] {
+            let count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            )
+            .bind(table)
+            .fetch_one(database.pool())
+            .await
+            .expect("table query");
+            assert_eq!(count, 1, "{table} should exist after migration 0024");
+        }
+
+        let mut columns = Vec::new();
+        for table in ["context_snapshots", "context_snapshot_candidates"] {
+            columns.extend(
+                sqlx::query_scalar::<_, String>(&format!(
+                    "SELECT lower(name) FROM pragma_table_info('{table}')"
+                ))
+                .fetch_all(database.pool())
+                .await
+                .expect("column query"),
+            );
+        }
+        for forbidden in [
+            "content",
+            "full_content",
+            "prompt",
+            "provider_payload",
+            "provider_delta",
+            "raw_thinking",
+            "thinking_text",
+            "chain_of_thought",
+            "hidden_reasoning",
+            "secret",
+            "credential",
+            "vector",
+            "raw_tool_output",
+        ] {
+            assert!(
+                !columns.iter().any(|column| column == forbidden),
+                "forbidden column '{forbidden}' found in context snapshot schema"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn agent_runs_status_check_accepts_all_valid_statuses() {
         let database = test_database().await;
         let now = "2026-01-01T00:00:00Z";
@@ -517,6 +569,8 @@ mod tests {
             "agent_runs",
             "agent_steps",
             "agent_events",
+            "context_snapshots",
+            "context_snapshot_candidates",
         ] {
             columns.extend(
                 sqlx::query_scalar::<_, String>(&format!(
