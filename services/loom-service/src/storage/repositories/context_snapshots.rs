@@ -105,6 +105,17 @@ pub struct ContextSnapshotCandidateCreateRequest {
 }
 
 #[derive(Debug, Clone)]
+pub struct ContextSnapshotCandidateDecision<'a> {
+    pub source_kind: &'a str,
+    pub source_id: &'a str,
+    pub chunk_ref: &'a str,
+    pub include_mode: &'a str,
+    pub estimated_tokens: i64,
+    pub included: bool,
+    pub exclusion_reason: Option<&'a str>,
+}
+
+#[derive(Debug, Clone)]
 pub struct ContextSnapshotRepository {
     pool: SqlitePool,
 }
@@ -224,6 +235,109 @@ impl ContextSnapshotRepository {
         .map_err(|error| {
             ServiceError::storage(format!(
                 "failed to list context snapshot candidates: {error}"
+            ))
+        })
+    }
+
+    pub async fn finalize_context_manager(
+        &self,
+        snapshot_id: &str,
+        decisions: &[ContextSnapshotCandidateDecision<'_>],
+        budget_json: &str,
+        diagnostics_json: &str,
+    ) -> Result<(), ServiceError> {
+        validate_safe_json("budget_json", budget_json)?;
+        validate_safe_json("diagnostics_json", diagnostics_json)?;
+        for decision in decisions {
+            if decision.estimated_tokens < 0 {
+                return Err(ServiceError::storage(
+                    "context snapshot decision has invalid token count",
+                ));
+            }
+            if let Some(reason) = decision.exclusion_reason {
+                reject_marker("exclusion_reason", reason)?;
+            }
+        }
+
+        let mut transaction = self.pool.begin().await.map_err(|error| {
+            ServiceError::storage(format!(
+                "failed to begin context snapshot finalization: {error}"
+            ))
+        })?;
+        for decision in decisions {
+            let update = sqlx::query(
+                "UPDATE context_snapshot_candidates
+                 SET include_mode_hint = ?1, estimated_tokens = ?2,
+                     is_selected = ?3, rejection_reason = ?4
+                 WHERE snapshot_id = ?5 AND source_kind = ?6 AND source_id = ?7
+                   AND chunk_ref = ?8",
+            )
+            .bind(decision.include_mode)
+            .bind(decision.estimated_tokens)
+            .bind(i64::from(decision.included))
+            .bind(decision.exclusion_reason)
+            .bind(snapshot_id)
+            .bind(decision.source_kind)
+            .bind(decision.source_id)
+            .bind(decision.chunk_ref)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| {
+                ServiceError::storage(format!(
+                    "failed to update context snapshot candidate decision: {error}"
+                ))
+            })?;
+            if update.rows_affected() != 1 {
+                return Err(ServiceError::storage(
+                    "context snapshot candidate decision target not found",
+                ));
+            }
+        }
+
+        let selected_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM context_snapshot_candidates
+             WHERE snapshot_id = ?1 AND is_selected = 1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to count included context: {error}"))
+        })?;
+        let candidate_count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM context_snapshot_candidates WHERE snapshot_id = ?1",
+        )
+        .bind(snapshot_id)
+        .fetch_one(&mut *transaction)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to count context candidates: {error}"))
+        })?;
+        let update = sqlx::query(
+            "UPDATE context_snapshots
+             SET budget_json = ?1, diagnostics_json = ?2,
+                 candidate_count = ?3, selected_count = ?4, rejected_count = ?5
+             WHERE snapshot_id = ?6",
+        )
+        .bind(budget_json)
+        .bind(diagnostics_json)
+        .bind(candidate_count)
+        .bind(selected_count)
+        .bind(candidate_count - selected_count)
+        .bind(snapshot_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to finalize context snapshot: {error}"))
+        })?;
+        if update.rows_affected() != 1 {
+            return Err(ServiceError::storage(
+                "Context Snapshot not found for finalization",
+            ));
+        }
+        transaction.commit().await.map_err(|error| {
+            ServiceError::storage(format!(
+                "failed to commit context snapshot finalization: {error}"
             ))
         })
     }

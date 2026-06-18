@@ -453,6 +453,85 @@ impl AgentRunRepository {
         Ok(())
     }
 
+    /// Links an existing Context Snapshot to an existing Agent Run.
+    ///
+    /// This mutation updates only `agent_runs.context_snapshot_id`. Snapshot
+    /// creation and runtime integration remain separate responsibilities.
+    pub async fn link_context_snapshot(
+        &self,
+        run_id: &str,
+        snapshot_id: &str,
+    ) -> Result<(), ServiceError> {
+        let mut tx = self.pool.begin().await.map_err(|error| {
+            ServiceError::storage(format!(
+                "failed to begin context snapshot link transaction: {error}"
+            ))
+        })?;
+
+        let current_snapshot_id = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT context_snapshot_id FROM agent_runs WHERE agent_run_id = ?1",
+        )
+        .bind(run_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!(
+                "failed to inspect Agent Run snapshot link: {error}"
+            ))
+        })?
+        .ok_or_else(|| ServiceError::storage("Agent Run not found for context snapshot link"))?;
+
+        let snapshot_owner = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT agent_run_id FROM context_snapshots WHERE snapshot_id = ?1",
+        )
+        .bind(snapshot_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to inspect Context Snapshot link: {error}"))
+        })?
+        .ok_or_else(|| ServiceError::storage("Context Snapshot not found for Agent Run link"))?;
+
+        if snapshot_owner
+            .as_deref()
+            .is_some_and(|owner_run_id| owner_run_id != run_id)
+        {
+            return Err(ServiceError::storage(
+                "Context Snapshot belongs to a different Agent Run",
+            ));
+        }
+        if let Some(current_snapshot_id) = current_snapshot_id {
+            if current_snapshot_id == snapshot_id {
+                tx.commit().await.map_err(|error| {
+                    ServiceError::storage(format!(
+                        "failed to commit idempotent context snapshot link: {error}"
+                    ))
+                })?;
+                return Ok(());
+            }
+            return Err(ServiceError::storage(
+                "Agent Run is already linked to a different Context Snapshot",
+            ));
+        }
+
+        sqlx::query("UPDATE agent_runs SET context_snapshot_id = ?1 WHERE agent_run_id = ?2")
+            .bind(snapshot_id)
+            .bind(run_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| {
+                ServiceError::storage(format!(
+                    "failed to link Context Snapshot to Agent Run: {error}"
+                ))
+            })?;
+
+        tx.commit().await.map_err(|error| {
+            ServiceError::storage(format!(
+                "failed to commit Context Snapshot Agent Run link: {error}"
+            ))
+        })
+    }
+
     /// Marks all pending/running runs as interrupted (service restart recovery).
     /// Returns the count of runs recovered.
     pub async fn recover_interrupted_runs(&self) -> Result<usize, ServiceError> {
@@ -687,6 +766,34 @@ mod tests {
         }
     }
 
+    async fn seed_snapshot(
+        repo: &AgentRunRepository,
+        snapshot_id: &str,
+        owner_run_id: Option<&str>,
+    ) {
+        sqlx::query(
+            "INSERT OR IGNORE INTO looms (
+                loom_id, title, summary, code, canonical_uri, kind, created_at, updated_at
+             ) VALUES ('loom-test', 'Test Loom', NULL, NULL, '/loom/test', 'loom', '1', '1')",
+        )
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO context_snapshots (
+                snapshot_id, agent_run_id, loom_id, response_id, scope_context_id,
+                created_at, policy_version, selection_version, budget_json,
+                diagnostics_json, candidate_count, selected_count, rejected_count
+             ) VALUES (?1, ?2, 'loom-test', NULL, NULL, '1', 'policy-v1',
+                       'selection-v1', '{}', '{}', 0, 0, 0)",
+        )
+        .bind(snapshot_id)
+        .bind(owner_run_id)
+        .execute(&repo.pool)
+        .await
+        .unwrap();
+    }
+
     #[tokio::test]
     async fn insert_run_is_retrievable_by_run_id() {
         let repo = make_repo().await;
@@ -708,6 +815,117 @@ mod tests {
         );
         assert_eq!(record.status, "running");
         assert!(!record.cancel_requested);
+    }
+
+    #[tokio::test]
+    async fn link_context_snapshot_is_idempotent_and_preserves_run_state() {
+        let repo = make_repo().await;
+        repo.insert_run(&run_input("run-link-snapshot"))
+            .await
+            .unwrap();
+        seed_snapshot(&repo, "snapshot-link", Some("run-link-snapshot")).await;
+        let before = repo.get_run("run-link-snapshot").await.unwrap().unwrap();
+
+        repo.link_context_snapshot("run-link-snapshot", "snapshot-link")
+            .await
+            .unwrap();
+        repo.link_context_snapshot("run-link-snapshot", "snapshot-link")
+            .await
+            .unwrap();
+
+        let after = repo.get_run("run-link-snapshot").await.unwrap().unwrap();
+        assert_eq!(after.context_snapshot_id.as_deref(), Some("snapshot-link"));
+        assert_eq!(after.status, before.status);
+        assert_eq!(after.cancel_requested, before.cancel_requested);
+        assert_eq!(after.completed_at, before.completed_at);
+        assert_eq!(after.provider_profile_id, before.provider_profile_id);
+        assert_eq!(after.model_id, before.model_id);
+        let serialized = serde_json::to_string(&after).unwrap();
+        for forbidden in [
+            "raw_thinking",
+            "thinking_text",
+            "chain_of_thought",
+            "hidden_reasoning",
+            "provider_payload",
+            "prompt",
+            "content",
+        ] {
+            assert!(!serialized.contains(forbidden));
+        }
+    }
+
+    #[tokio::test]
+    async fn link_context_snapshot_rejects_unknown_run_and_snapshot() {
+        let repo = make_repo().await;
+        repo.insert_run(&run_input("run-known-snapshot-link"))
+            .await
+            .unwrap();
+        seed_snapshot(&repo, "snapshot-known-link", None).await;
+
+        let unknown_run = repo
+            .link_context_snapshot("run-missing", "snapshot-known-link")
+            .await
+            .unwrap_err();
+        assert!(unknown_run.to_string().contains("Agent Run not found"));
+
+        let unknown_snapshot = repo
+            .link_context_snapshot("run-known-snapshot-link", "snapshot-missing")
+            .await
+            .unwrap_err();
+        assert!(unknown_snapshot
+            .to_string()
+            .contains("Context Snapshot not found"));
+        let run = repo
+            .get_run("run-known-snapshot-link")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(run.context_snapshot_id, None);
+        assert_eq!(run.status, "running");
+    }
+
+    #[tokio::test]
+    async fn link_context_snapshot_rejects_conflicting_owner_and_replacement() {
+        let repo = make_repo().await;
+        repo.insert_run(&run_input("run-link-owner")).await.unwrap();
+        repo.insert_run(&run_input("run-link-other")).await.unwrap();
+        seed_snapshot(&repo, "snapshot-other-owner", Some("run-link-other")).await;
+
+        let owner_error = repo
+            .link_context_snapshot("run-link-owner", "snapshot-other-owner")
+            .await
+            .unwrap_err();
+        assert!(owner_error.to_string().contains("different Agent Run"));
+
+        seed_snapshot(&repo, "snapshot-first", None).await;
+        seed_snapshot(&repo, "snapshot-second", None).await;
+        repo.link_context_snapshot("run-link-owner", "snapshot-first")
+            .await
+            .unwrap();
+        let replacement_error = repo
+            .link_context_snapshot("run-link-owner", "snapshot-second")
+            .await
+            .unwrap_err();
+        assert!(replacement_error
+            .to_string()
+            .contains("already linked to a different Context Snapshot"));
+        let run = repo.get_run("run-link-owner").await.unwrap().unwrap();
+        assert_eq!(run.context_snapshot_id.as_deref(), Some("snapshot-first"));
+        assert_eq!(run.status, "running");
+    }
+
+    #[tokio::test]
+    async fn context_snapshot_forward_link_is_repository_validated_not_database_fk() {
+        let repo = make_repo().await;
+        let foreign_tables = sqlx::query_scalar::<_, String>(
+            "SELECT \"table\" FROM pragma_foreign_key_list('agent_runs')",
+        )
+        .fetch_all(&repo.pool)
+        .await
+        .unwrap();
+        assert!(!foreign_tables
+            .iter()
+            .any(|table| table == "context_snapshots"));
     }
 
     #[tokio::test]
