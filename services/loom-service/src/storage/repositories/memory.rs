@@ -107,6 +107,13 @@ pub enum ExplicitMemoryCreateResult {
     Duplicate(MemoryRecord),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ForgetMemoryResult {
+    Forgotten,
+    AlreadyForgotten,
+    NotFound,
+}
+
 #[derive(Debug, Clone)]
 pub struct MemoryRepository {
     pool: SqlitePool,
@@ -308,6 +315,18 @@ impl MemoryRepository {
             .map_err(|error| ServiceError::storage(format!("failed to get Memory: {error}")))
     }
 
+    pub async fn get_memory_any_status(
+        &self,
+        memory_id: &str,
+    ) -> Result<Option<MemoryRecord>, ServiceError> {
+        sqlx::query("SELECT * FROM memories WHERE memory_id = ?1")
+            .bind(memory_id)
+            .fetch_optional(&self.pool)
+            .await
+            .map(|row| row.map(memory_from_row))
+            .map_err(|error| ServiceError::storage(format!("failed to inspect Memory: {error}")))
+    }
+
     pub async fn update_memory(
         &self,
         memory_id: &str,
@@ -410,6 +429,62 @@ impl MemoryRepository {
         .map_err(|error| ServiceError::storage(format!("failed to delete Memory: {error}")))?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    pub async fn forget_memory(
+        &self,
+        memory_id: &str,
+        event: &NewMemoryEvent,
+    ) -> Result<ForgetMemoryResult, ServiceError> {
+        validate_event(event)?;
+        let mut transaction = self.pool.begin().await.map_err(|error| {
+            ServiceError::storage(format!(
+                "failed to begin Memory forget transaction: {error}"
+            ))
+        })?;
+        let deleted_at = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT deleted_at FROM memories WHERE memory_id = ?1",
+        )
+        .bind(memory_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to inspect Memory forget state: {error}"))
+        })?;
+        let Some(deleted_at) = deleted_at else {
+            transaction.rollback().await.map_err(|error| {
+                ServiceError::storage(format!("failed to rollback missing Memory forget: {error}"))
+            })?;
+            return Ok(ForgetMemoryResult::NotFound);
+        };
+        if deleted_at.is_some() {
+            transaction.commit().await.map_err(|error| {
+                ServiceError::storage(format!(
+                    "failed to commit idempotent Memory forget: {error}"
+                ))
+            })?;
+            return Ok(ForgetMemoryResult::AlreadyForgotten);
+        }
+
+        let update = sqlx::query(
+            "UPDATE memories
+             SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP
+             WHERE memory_id = ?1 AND deleted_at IS NULL",
+        )
+        .bind(memory_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| ServiceError::storage(format!("failed to forget Memory: {error}")))?;
+        if update.rows_affected() != 1 {
+            return Err(ServiceError::storage(
+                "Memory forget state changed concurrently",
+            ));
+        }
+        insert_event_on(&mut transaction, event, memory_id).await?;
+        transaction.commit().await.map_err(|error| {
+            ServiceError::storage(format!("failed to commit Memory forget: {error}"))
+        })?;
+        Ok(ForgetMemoryResult::Forgotten)
     }
 
     pub async fn insert_event(&self, event: &NewMemoryEvent) -> Result<(), ServiceError> {

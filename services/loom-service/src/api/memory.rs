@@ -3,8 +3,8 @@ use crate::{
     capabilities::repository::{new_id, timestamp},
     error::ServiceError,
     storage::repositories::memory::{
-        normalize_content, ExplicitMemoryCreateResult, MemoryRecord, MemoryRepository,
-        MemoryUpdate, NewMemory, NewMemoryEvent,
+        normalize_content, ExplicitMemoryCreateResult, ForgetMemoryResult, MemoryRecord,
+        MemoryRepository, MemoryUpdate, NewMemory, NewMemoryEvent,
     },
 };
 use axum::{
@@ -324,20 +324,27 @@ pub async fn delete_memory(
     Path(memory_id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<MemoryApiError>)> {
     let repository = MemoryRepository::new(&state.database);
-    let deleted = repository
-        .soft_delete_memory(&memory_id)
+    let result = repository
+        .forget_memory(
+            &memory_id,
+            &NewMemoryEvent {
+                event_id: new_id("memory-event"),
+                memory_id: memory_id.clone(),
+                event_type: "explicit_forget".to_string(),
+                payload_json: json!({
+                    "source": "memory_api",
+                    "operation": "explicit_forget",
+                    "memoryId": memory_id
+                })
+                .to_string(),
+                created_at: timestamp(),
+            },
+        )
         .await
         .map_err(storage_error)?;
-    if !deleted {
+    if result == ForgetMemoryResult::NotFound {
         return Err(not_found());
     }
-    insert_event(
-        &repository,
-        &memory_id,
-        "deleted",
-        json!({ "source": "memory_api" }),
-    )
-    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -596,7 +603,50 @@ mod tests {
             .await
             .expect("delete memory");
         assert_eq!(status, StatusCode::NO_CONTENT);
-        assert!(get_memory(State(state), Path(memory_id)).await.is_err());
+        let second_status = delete_memory(State(state.clone()), Path(memory_id.clone()))
+            .await
+            .expect("idempotent delete memory");
+        assert_eq!(second_status, StatusCode::NO_CONTENT);
+        assert!(get_memory(State(state.clone()), Path(memory_id.clone()))
+            .await
+            .is_err());
+        let stored = MemoryRepository::new(&state.database)
+            .get_memory_any_status(&memory_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored.deleted_at.is_some());
+        let events = MemoryRepository::new(&state.database)
+            .list_events(&memory_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| event.event_type == "explicit_forget")
+                .count(),
+            1
+        );
+        let forget_event = events
+            .iter()
+            .find(|event| event.event_type == "explicit_forget")
+            .unwrap();
+        for forbidden in [
+            "Prefer concise Turkish answers",
+            "raw_thinking",
+            "provider_payload",
+            "secret",
+        ] {
+            assert!(!forget_event.payload_json.contains(forbidden));
+        }
+        assert!(
+            list_memory(State(state), Query(ListMemoryQuery { query: None }))
+                .await
+                .unwrap()
+                .0
+                .memories
+                .is_empty()
+        );
     }
 
     #[tokio::test]
@@ -742,6 +792,53 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    #[tokio::test]
+    async fn forget_unknown_memory_returns_not_found() {
+        let state = test_state().await;
+        let error = delete_memory(State(state), Path("memory-missing".to_string()))
+            .await
+            .unwrap_err();
+        assert_eq!(error.0, StatusCode::NOT_FOUND);
+        assert_eq!(error.1 .0.code, "MEMORY_NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn exact_duplicate_can_be_created_again_after_forget() {
+        let state = test_state().await;
+        let first = create_memory(
+            State(state.clone()),
+            Json(explicit_request("Remember replaceable exact text.")),
+        )
+        .await
+        .unwrap();
+        delete_memory(
+            State(state.clone()),
+            Path(first.1 .0.memory.memory_id.clone()),
+        )
+        .await
+        .unwrap();
+        let replacement = create_memory(
+            State(state.clone()),
+            Json(explicit_request("Remember replaceable exact text.")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(replacement.0, StatusCode::CREATED);
+        assert!(!replacement.1 .0.reused);
+        assert_ne!(
+            replacement.1 .0.memory.memory_id,
+            first.1 .0.memory.memory_id
+        );
+        assert_eq!(
+            MemoryRepository::new(&state.database)
+                .list_memories(None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]
