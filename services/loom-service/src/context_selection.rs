@@ -385,8 +385,12 @@ impl ContextSelectionService {
             .or_default() += policy_entries.len();
 
         let mut mandatory_references = self
-            .mandatory_references(&request.scope_context, &mut accounting)
+            .always_include_memories(&request.active_loom_id, &mut accounting)
             .await?;
+        mandatory_references.extend(
+            self.mandatory_references(&request.scope_context, &mut accounting)
+                .await?,
+        );
         retain_new_identities(&mut mandatory_references, &mut seen);
         let mut conversation_turns = self
             .conversation_turns(&request.active_loom_id, &budget, &mut accounting)
@@ -598,6 +602,54 @@ impl ContextSelectionService {
             });
         }
         Ok(candidates)
+    }
+
+    async fn always_include_memories(
+        &self,
+        active_loom_id: &str,
+        accounting: &mut SelectionAccounting,
+    ) -> Result<Vec<ContextCandidate>, ServiceError> {
+        let rows = sqlx::query(
+            "SELECT memory_id, LENGTH(content) AS content_length
+             FROM memories
+             WHERE always_include = 1 AND user_confirmed = 1 AND deleted_at IS NULL
+               AND memory_type IN ('explicit_user_memory', 'profile_preference')
+               AND (source_loom_id IS NULL OR source_loom_id = ?1)
+             ORDER BY CASE WHEN source_loom_id = ?1 THEN 0 ELSE 1 END,
+                      memory_type ASC, created_at ASC, memory_id ASC",
+        )
+        .bind(active_loom_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!(
+                "failed to load always-include Memory metadata: {error}"
+            ))
+        })?;
+        *accounting
+            .evaluated
+            .entry(ContextSourceTier::PolicyAlwaysInclude)
+            .or_default() += rows.len();
+        Ok(rows
+            .into_iter()
+            .enumerate()
+            .map(|(index, row)| ContextCandidate {
+                source_kind: "memory".to_string(),
+                source_id: row.get("memory_id"),
+                chunk_ref: None,
+                tier: ContextSourceTier::PolicyAlwaysInclude,
+                tier_priority: ContextSourceTier::PolicyAlwaysInclude.priority(),
+                retrieval_score: None,
+                within_tier_rank: index as u32 + 1,
+                estimated_tokens: estimate_tokens(row.get::<i64, _>("content_length") as usize),
+                include_mode_hint: ContextIncludeModeHint::Full,
+                is_hidden_background: false,
+                is_mandatory: true,
+                is_explicit_reference: false,
+                text_preview: None,
+                rank_signals: None,
+            })
+            .collect())
     }
 
     async fn conversation_turns(
@@ -1143,7 +1195,11 @@ fn candidate_identity(candidate: &ContextCandidate) -> (String, String, Option<S
     (
         candidate.source_kind.clone(),
         candidate.source_id.clone(),
-        candidate.chunk_ref.clone(),
+        if candidate.source_kind == "memory" {
+            None
+        } else {
+            candidate.chunk_ref.clone()
+        },
     )
 }
 
@@ -1293,6 +1349,25 @@ mod tests {
         .bind(memory_id)
         .bind(memory_type)
         .bind(loom_id)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn mark_always_include(
+        database: &Database,
+        memory_id: &str,
+        user_confirmed: bool,
+        deleted_at: Option<&str>,
+    ) {
+        sqlx::query(
+            "UPDATE memories
+             SET always_include = 1, user_confirmed = ?2, deleted_at = ?3
+             WHERE memory_id = ?1",
+        )
+        .bind(memory_id)
+        .bind(user_confirmed)
+        .bind(deleted_at)
         .execute(database.pool())
         .await
         .unwrap();
@@ -1539,6 +1614,104 @@ mod tests {
                     diagnostic.tier == tier && diagnostic.status == TierDiagnosticStatus::Reserved
                 }));
         }
+    }
+
+    #[tokio::test]
+    async fn always_include_memories_are_tier_one_mandatory_deduplicated_and_snapshotted() {
+        let database = test_database().await;
+        seed_loom(&database, "loom-always", None, None, false).await;
+        for (id, memory_type, loom_id) in [
+            (
+                "memory-always-scoped",
+                "explicit_user_memory",
+                Some("loom-always"),
+            ),
+            ("memory-always-global", "profile_preference", None),
+            (
+                "memory-always-deleted",
+                "explicit_user_memory",
+                Some("loom-always"),
+            ),
+            (
+                "memory-always-unconfirmed",
+                "explicit_user_memory",
+                Some("loom-always"),
+            ),
+            (
+                "memory-ordinary",
+                "explicit_user_memory",
+                Some("loom-always"),
+            ),
+        ] {
+            seed_memory(&database, id, memory_type, loom_id).await;
+        }
+        mark_always_include(&database, "memory-always-scoped", true, None).await;
+        mark_always_include(&database, "memory-always-global", true, None).await;
+        mark_always_include(&database, "memory-always-deleted", true, Some("deleted")).await;
+        mark_always_include(&database, "memory-always-unconfirmed", false, None).await;
+
+        let scope_context = scope(&database, "loom-always", Vec::new()).await;
+        let candidates = vec![
+            retrieval_candidate("memory", "memory-always-scoped", Some("loom-always"), 0.01),
+            retrieval_candidate("memory", "memory-ordinary", Some("loom-always"), 0.90),
+        ];
+        let mut selection_request = request(scope_context, retrieval_result(candidates));
+        selection_request.persist_snapshot = true;
+        selection_request.snapshot_id = Some("snapshot-always".to_string());
+        let payload = ContextSelectionService::new(&database)
+            .select(selection_request)
+            .await
+            .unwrap();
+
+        let always = payload
+            .mandatory_references
+            .iter()
+            .filter(|candidate| candidate.source_kind == "memory")
+            .collect::<Vec<_>>();
+        assert_eq!(always.len(), 2);
+        assert!(always.iter().all(|candidate| {
+            candidate.tier == ContextSourceTier::PolicyAlwaysInclude
+                && candidate.is_mandatory
+                && !candidate.is_hidden_background
+                && candidate.text_preview.is_none()
+        }));
+        assert!(always
+            .iter()
+            .any(|candidate| candidate.source_id == "memory-always-scoped"));
+        assert!(always
+            .iter()
+            .any(|candidate| candidate.source_id == "memory-always-global"));
+        let selected_ids = payload
+            .candidates_in_tier_order()
+            .into_iter()
+            .map(|candidate| candidate.source_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            selected_ids
+                .iter()
+                .filter(|id| **id == "memory-always-scoped")
+                .count(),
+            1
+        );
+        assert!(!selected_ids.contains(&"memory-always-deleted"));
+        assert!(!selected_ids.contains(&"memory-always-unconfirmed"));
+        assert_eq!(payload.scoped_memories[0].source_id, "memory-ordinary");
+
+        let snapshot_rows = ContextSnapshotRepository::new(&database)
+            .list_candidates("snapshot-always")
+            .await
+            .unwrap();
+        let always_row = snapshot_rows
+            .iter()
+            .find(|row| row.source_id == "memory-always-scoped")
+            .unwrap();
+        assert_eq!(always_row.tier, "policy_always_include");
+        assert!(always_row.is_mandatory);
+        assert!(!always_row.is_hidden_background);
+        let persisted = serde_json::to_string(&snapshot_rows).unwrap();
+        assert!(!persisted.contains("safe memory"));
+        assert!(!persisted.contains("raw_thinking"));
+        assert!(!persisted.contains("provider_payload"));
     }
 
     #[tokio::test]

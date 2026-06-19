@@ -62,7 +62,7 @@ pub struct CreateMemoryRequest {
     pub topic_key: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateMemoryRequest {
     pub memory_type: Option<String>,
@@ -283,6 +283,19 @@ pub async fn patch_memory(
         .transpose()?;
 
     let repository = MemoryRepository::new(&state.database);
+    let current = repository
+        .get_memory(&memory_id)
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(not_found)?;
+    let final_memory_type = input.memory_type.as_deref().unwrap_or(&current.memory_type);
+    let final_user_confirmed = input.user_confirmed.unwrap_or(current.user_confirmed);
+    let final_always_include = input.always_include.unwrap_or(current.always_include);
+    validate_always_include(
+        final_memory_type,
+        final_user_confirmed,
+        final_always_include,
+    )?;
     let memory = repository
         .update_memory(
             &memory_id,
@@ -421,6 +434,23 @@ fn validate_memory_type(memory_type: &str) -> Result<(), (StatusCode, Json<Memor
         "INVALID_MEMORY_TYPE",
         "memoryType must be explicit_user_memory or profile_preference.",
     ))
+}
+
+fn validate_always_include(
+    memory_type: &str,
+    user_confirmed: bool,
+    always_include: bool,
+) -> Result<(), (StatusCode, Json<MemoryApiError>)> {
+    if always_include
+        && (!user_confirmed
+            || !matches!(memory_type, "explicit_user_memory" | "profile_preference"))
+    {
+        return Err(bad_request(
+            "INVALID_ALWAYS_INCLUDE",
+            "alwaysInclude requires a confirmed explicit user Memory or profile preference.",
+        ));
+    }
+    Ok(())
 }
 
 fn validate_content(content: &str) -> Result<(), (StatusCode, Json<MemoryApiError>)> {
@@ -771,6 +801,78 @@ mod tests {
             .await
             .unwrap_err();
         assert_eq!(error.1 .0.code, "INVALID_ALWAYS_INCLUDE");
+
+        let state = test_state().await;
+        let mut unconfirmed = explicit_request("Do not include unconfirmed state.");
+        unconfirmed.always_include = Some(true);
+        unconfirmed.user_confirmed = Some(false);
+        let error = create_memory(State(state.clone()), Json(unconfirmed))
+            .await
+            .unwrap_err();
+        assert_eq!(error.1 .0.code, "INVALID_EXPLICIT_MEMORY_FIELDS");
+
+        let mut system_note = explicit_request("Do not include unsupported state.");
+        system_note.memory_type = Some("system_note".to_string());
+        system_note.always_include = Some(true);
+        let error = create_memory(State(state), Json(system_note))
+            .await
+            .unwrap_err();
+        assert_eq!(error.1 .0.code, "INVALID_MEMORY_TYPE");
+    }
+
+    #[tokio::test]
+    async fn patch_validates_always_include_final_state() {
+        let state = test_state().await;
+        let created = create_memory(
+            State(state.clone()),
+            Json(explicit_request(
+                "Keep this confirmed preference available.",
+            )),
+        )
+        .await
+        .unwrap();
+        let memory_id = created.1 .0.memory.memory_id;
+        let enabled = patch_memory(
+            State(state.clone()),
+            Path(memory_id.clone()),
+            Json(UpdateMemoryRequest {
+                always_include: Some(true),
+                ..UpdateMemoryRequest::default()
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(enabled.0.memory.always_include);
+
+        let error = patch_memory(
+            State(state.clone()),
+            Path(memory_id.clone()),
+            Json(UpdateMemoryRequest {
+                user_confirmed: Some(false),
+                ..UpdateMemoryRequest::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.1 .0.code, "INVALID_ALWAYS_INCLUDE");
+
+        let events = MemoryRepository::new(&state.database)
+            .list_events(&memory_id)
+            .await
+            .unwrap();
+        let persisted = events
+            .iter()
+            .map(|event| event.payload_json.as_str())
+            .collect::<Vec<_>>()
+            .join("");
+        for forbidden in [
+            "Keep this confirmed preference available",
+            "raw_thinking",
+            "provider_payload",
+            "secret",
+        ] {
+            assert!(!persisted.contains(forbidden));
+        }
     }
 
     #[tokio::test]

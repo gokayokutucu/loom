@@ -374,6 +374,11 @@ impl MemoryRepository {
         if let Some(topic_key) = update.topic_key {
             current.topic_key = topic_key;
         }
+        validate_always_include_state(
+            &current.memory_type,
+            current.user_confirmed,
+            current.always_include,
+        )?;
         reject_forbidden_payload(Some(&current.content))?;
         reject_forbidden_payload(Some(&current.normalized_content))?;
         reject_forbidden_payload(current.metadata_json.as_deref())?;
@@ -608,6 +613,22 @@ fn validate_explicit_memory(memory: &NewMemory) -> Result<(), ServiceError> {
         || memory.supersedes_id.is_some()
     {
         return Err(ServiceError::storage("invalid explicit Memory defaults"));
+    }
+    Ok(())
+}
+
+fn validate_always_include_state(
+    memory_type: &str,
+    user_confirmed: bool,
+    always_include: bool,
+) -> Result<(), ServiceError> {
+    if always_include
+        && (!user_confirmed
+            || !matches!(memory_type, "explicit_user_memory" | "profile_preference"))
+    {
+        return Err(ServiceError::storage(
+            "always_include requires a confirmed explicit or profile Memory",
+        ));
     }
     Ok(())
 }

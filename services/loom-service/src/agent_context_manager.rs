@@ -688,6 +688,21 @@ mod tests {
             .bind(id).bind(content).bind(sequence).execute(database.pool()).await.unwrap();
     }
 
+    async fn seed_always_include_memory(database: &Database, id: &str, content: &str) {
+        sqlx::query(
+            "INSERT INTO memories (
+                memory_id, memory_type, content, normalized_content, created_at, updated_at,
+                source_loom_id, user_confirmed, always_include
+             ) VALUES (?1, 'explicit_user_memory', ?2, ?2, '1', '1',
+                       'loom-context-manager', 1, 1)",
+        )
+        .bind(id)
+        .bind(content)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    }
+
     fn budget(max: usize) -> ContextBudgetPlan {
         ContextBudgetPlan {
             reserved_system_tokens: 2,
@@ -775,6 +790,24 @@ mod tests {
             .await
             .unwrap_err();
         assert!(error.to_string().contains("TokenOverflowError"));
+    }
+
+    #[tokio::test]
+    async fn always_include_memory_uses_sqlite_content_and_mandatory_overflow() {
+        let database = setup().await;
+        seed_always_include_memory(&database, "memory-always", &"m".repeat(100)).await;
+        let mut mandatory = candidate("memory-always", true, false, ContextIncludeModeHint::Full);
+        mandatory.source_kind = "memory".to_string();
+        mandatory.tier = ContextSourceTier::PolicyAlwaysInclude;
+        mandatory.tier_priority = ContextSourceTier::PolicyAlwaysInclude.priority();
+        mandatory.is_explicit_reference = false;
+
+        let error = AgentContextManager::new(&database)
+            .build(&payload(vec![mandatory]), &budget(10))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("TokenOverflowError"));
+        assert!(!error.to_string().contains(&"m".repeat(100)));
     }
 
     #[tokio::test]
