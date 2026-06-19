@@ -3,7 +3,7 @@
 use crate::{error::ServiceError, storage::db::Database};
 use sqlx::{Row, SqlitePool};
 
-const FORBIDDEN_THINKING_KEYS: [&str; 8] = [
+const FORBIDDEN_CONTENT_MARKERS: [&str; 19] = [
     "raw_thinking",
     "thinking_text",
     "chain_of_thought",
@@ -12,6 +12,17 @@ const FORBIDDEN_THINKING_KEYS: [&str; 8] = [
     "thinkingText",
     "chainOfThought",
     "hiddenReasoning",
+    "provider_payload",
+    "provider_delta",
+    "prompt_envelope",
+    "promptEnvelope",
+    "authorization",
+    "bearer ",
+    "api_key",
+    "apiKey",
+    "credential",
+    "secret",
+    "raw_tool_output",
 ];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -90,6 +101,12 @@ pub struct NewMemoryEvent {
     pub created_at: String,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExplicitMemoryCreateResult {
+    Created(MemoryRecord),
+    Duplicate(MemoryRecord),
+}
+
 #[derive(Debug, Clone)]
 pub struct MemoryRepository {
     pool: SqlitePool,
@@ -147,6 +164,110 @@ impl MemoryRepository {
         .map_err(|error| ServiceError::storage(format!("failed to insert Memory: {error}")))?;
 
         Ok(())
+    }
+
+    pub async fn find_exact_duplicate(
+        &self,
+        normalized_content: &str,
+        source_loom_id: Option<&str>,
+        memory_type: &str,
+    ) -> Result<Option<MemoryRecord>, ServiceError> {
+        sqlx::query(
+            "SELECT * FROM memories
+             WHERE normalized_content = ?1 AND memory_type = ?2 AND deleted_at IS NULL
+               AND (source_loom_id = ?3 OR (source_loom_id IS NULL AND ?3 IS NULL))
+             ORDER BY created_at ASC, memory_id ASC LIMIT 1",
+        )
+        .bind(normalized_content)
+        .bind(memory_type)
+        .bind(source_loom_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map(|row| row.map(memory_from_row))
+        .map_err(|error| ServiceError::storage(format!("failed to find duplicate Memory: {error}")))
+    }
+
+    pub async fn create_explicit_memory(
+        &self,
+        memory: &NewMemory,
+        created_event: &NewMemoryEvent,
+        duplicate_event: &NewMemoryEvent,
+    ) -> Result<ExplicitMemoryCreateResult, ServiceError> {
+        validate_explicit_memory(memory)?;
+        validate_event(created_event)?;
+        validate_event(duplicate_event)?;
+        let mut transaction = self.pool.begin().await.map_err(|error| {
+            ServiceError::storage(format!(
+                "failed to begin explicit Memory transaction: {error}"
+            ))
+        })?;
+
+        let duplicate = sqlx::query(
+            "SELECT * FROM memories
+             WHERE normalized_content = ?1 AND memory_type = ?2 AND deleted_at IS NULL
+               AND (source_loom_id = ?3 OR (source_loom_id IS NULL AND ?3 IS NULL))
+             ORDER BY created_at ASC, memory_id ASC LIMIT 1",
+        )
+        .bind(&memory.normalized_content)
+        .bind(&memory.memory_type)
+        .bind(&memory.source_loom_id)
+        .fetch_optional(&mut *transaction)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to inspect duplicate Memory: {error}"))
+        })?;
+
+        if let Some(row) = duplicate {
+            let existing = memory_from_row(row);
+            insert_event_on(&mut transaction, duplicate_event, &existing.memory_id).await?;
+            transaction.commit().await.map_err(|error| {
+                ServiceError::storage(format!("failed to commit duplicate Memory event: {error}"))
+            })?;
+            return Ok(ExplicitMemoryCreateResult::Duplicate(existing));
+        }
+
+        sqlx::query(
+            "INSERT INTO memories (
+                memory_id, memory_type, content, normalized_content, created_at, updated_at,
+                source_loom_id, source_response_id, user_confirmed, metadata_json,
+                supersedes_id, always_include, origin_response_id, extraction_method,
+                confidence, topic_key
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+        )
+        .bind(&memory.memory_id)
+        .bind(&memory.memory_type)
+        .bind(&memory.content)
+        .bind(&memory.normalized_content)
+        .bind(&memory.created_at)
+        .bind(&memory.updated_at)
+        .bind(&memory.source_loom_id)
+        .bind(&memory.source_response_id)
+        .bind(memory.user_confirmed)
+        .bind(&memory.metadata_json)
+        .bind(&memory.supersedes_id)
+        .bind(memory.always_include)
+        .bind(&memory.origin_response_id)
+        .bind(&memory.extraction_method)
+        .bind(memory.confidence)
+        .bind(&memory.topic_key)
+        .execute(&mut *transaction)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to insert explicit Memory: {error}"))
+        })?;
+        insert_event_on(&mut transaction, created_event, &memory.memory_id).await?;
+        let record = sqlx::query("SELECT * FROM memories WHERE memory_id = ?1")
+            .bind(&memory.memory_id)
+            .fetch_one(&mut *transaction)
+            .await
+            .map(memory_from_row)
+            .map_err(|error| {
+                ServiceError::storage(format!("failed to read explicit Memory: {error}"))
+            })?;
+        transaction.commit().await.map_err(|error| {
+            ServiceError::storage(format!("failed to commit explicit Memory: {error}"))
+        })?;
+        Ok(ExplicitMemoryCreateResult::Created(record))
     }
 
     pub async fn list_memories(
@@ -373,15 +494,71 @@ fn reject_forbidden_payload(payload: Option<&str>) -> Result<(), ServiceError> {
         return Ok(());
     };
     let lower = payload.to_ascii_lowercase();
-    for forbidden in FORBIDDEN_THINKING_KEYS {
+    for forbidden in FORBIDDEN_CONTENT_MARKERS {
         if lower.contains(&forbidden.to_ascii_lowercase()) {
             return Err(ServiceError::storage(format!(
-                "Memory payload contains forbidden raw thinking key {forbidden}"
+                "Memory payload failed privacy sanitization"
             )));
         }
     }
 
     Ok(())
+}
+
+fn validate_explicit_memory(memory: &NewMemory) -> Result<(), ServiceError> {
+    reject_forbidden_payload(Some(&memory.content))?;
+    reject_forbidden_payload(Some(&memory.normalized_content))?;
+    reject_forbidden_payload(memory.metadata_json.as_deref())?;
+    if !matches!(
+        memory.memory_type.as_str(),
+        "explicit_user_memory" | "profile_preference"
+    ) {
+        return Err(ServiceError::storage(
+            "explicit Memory type must be explicit_user_memory or profile_preference",
+        ));
+    }
+    if memory.always_include
+        && !matches!(
+            memory.memory_type.as_str(),
+            "explicit_user_memory" | "profile_preference"
+        )
+    {
+        return Err(ServiceError::storage(
+            "always_include is not allowed for this Memory type",
+        ));
+    }
+    if !memory.user_confirmed
+        || memory.extraction_method.as_deref() != Some("explicit")
+        || memory.confidence != Some(1.0)
+        || memory.supersedes_id.is_some()
+    {
+        return Err(ServiceError::storage("invalid explicit Memory defaults"));
+    }
+    Ok(())
+}
+
+fn validate_event(event: &NewMemoryEvent) -> Result<(), ServiceError> {
+    reject_forbidden_payload(Some(&event.payload_json))
+}
+
+async fn insert_event_on(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    event: &NewMemoryEvent,
+    memory_id: &str,
+) -> Result<(), ServiceError> {
+    sqlx::query(
+        "INSERT INTO memory_events (event_id, memory_id, event_type, payload_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+    )
+    .bind(&event.event_id)
+    .bind(memory_id)
+    .bind(&event.event_type)
+    .bind(&event.payload_json)
+    .bind(&event.created_at)
+    .execute(&mut **transaction)
+    .await
+    .map(|_| ())
+    .map_err(|error| ServiceError::storage(format!("failed to append Memory event: {error}")))
 }
 
 #[cfg(test)]
@@ -530,7 +707,8 @@ mod tests {
             .await
             .expect_err("raw thinking rejected");
 
-        assert!(error.to_string().contains("raw_thinking"));
+        assert!(error.to_string().contains("privacy sanitization"));
+        assert!(!error.to_string().contains("raw_thinking"));
     }
 
     async fn insert_origin(database: &crate::storage::db::Database) {

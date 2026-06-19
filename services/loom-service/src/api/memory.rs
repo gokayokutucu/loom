@@ -3,7 +3,8 @@ use crate::{
     capabilities::repository::{new_id, timestamp},
     error::ServiceError,
     storage::repositories::memory::{
-        normalize_content, MemoryRecord, MemoryRepository, MemoryUpdate, NewMemory, NewMemoryEvent,
+        normalize_content, ExplicitMemoryCreateResult, MemoryRecord, MemoryRepository,
+        MemoryUpdate, NewMemory, NewMemoryEvent,
     },
 };
 use axum::{
@@ -14,7 +15,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-const FORBIDDEN_THINKING_KEYS: [&str; 8] = [
+const FORBIDDEN_CONTENT_MARKERS: [&str; 19] = [
     "raw_thinking",
     "thinking_text",
     "chain_of_thought",
@@ -23,6 +24,17 @@ const FORBIDDEN_THINKING_KEYS: [&str; 8] = [
     "thinkingText",
     "chainOfThought",
     "hiddenReasoning",
+    "provider_payload",
+    "provider_delta",
+    "prompt_envelope",
+    "promptEnvelope",
+    "authorization",
+    "bearer ",
+    "api_key",
+    "apiKey",
+    "credential",
+    "secret",
+    "raw_tool_output",
 ];
 
 const SUPPORTED_MEMORY_TYPES: [&str; 2] = ["explicit_user_memory", "profile_preference"];
@@ -36,7 +48,7 @@ pub struct ListMemoryQuery {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateMemoryRequest {
-    pub memory_type: String,
+    pub memory_type: Option<String>,
     pub content: String,
     pub source_loom_id: Option<String>,
     pub source_response_id: Option<String>,
@@ -92,6 +104,7 @@ pub struct MemoryDto {
 #[serde(rename_all = "camelCase")]
 pub struct MemoryEnvelope {
     pub memory: MemoryDto,
+    pub reused: bool,
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -133,6 +146,7 @@ pub async fn get_memory(
         .ok_or_else(not_found)?;
     Ok(Json(MemoryEnvelope {
         memory: memory_to_dto(memory),
+        reused: false,
     }))
 }
 
@@ -140,53 +154,97 @@ pub async fn create_memory(
     State(state): State<AppState>,
     Json(input): Json<CreateMemoryRequest>,
 ) -> Result<(StatusCode, Json<MemoryEnvelope>), (StatusCode, Json<MemoryApiError>)> {
-    validate_memory_type(&input.memory_type)?;
+    let memory_type = input
+        .memory_type
+        .unwrap_or_else(|| "explicit_user_memory".to_string());
+    if input.user_confirmed == Some(false)
+        || input
+            .extraction_method
+            .as_deref()
+            .is_some_and(|method| method != "explicit")
+        || input.confidence.is_some_and(|confidence| confidence != 1.0)
+        || input
+            .supersedes_id
+            .as_deref()
+            .is_some_and(|id| !id.trim().is_empty())
+    {
+        return Err(bad_request(
+            "INVALID_EXPLICIT_MEMORY_FIELDS",
+            "Explicit saves require user confirmation, explicit extraction, confidence 1.0, and no supersession.",
+        ));
+    }
+    if input.always_include == Some(true) && memory_type == "inferred_preference" {
+        return Err(bad_request(
+            "INVALID_ALWAYS_INCLUDE",
+            "alwaysInclude is allowed only for explicit user memory or profile preference.",
+        ));
+    }
+    validate_memory_type(&memory_type)?;
     validate_content(&input.content)?;
+    let normalized_content = normalize_content(&input.content);
+    validate_content(&normalized_content)?;
     reject_forbidden_value(input.metadata.as_ref())?;
     reject_forbidden_text(input.source_loom_id.as_deref())?;
     reject_forbidden_text(input.source_response_id.as_deref())?;
+    reject_forbidden_text(input.origin_response_id.as_deref())?;
+    reject_forbidden_text(input.topic_key.as_deref())?;
     let metadata_json = metadata_json(input.metadata)?;
     let now = timestamp();
     let memory_id = new_id("memory");
+    let source_response_id = empty_string_to_none(input.source_response_id);
+    let origin_response_id =
+        empty_string_to_none(input.origin_response_id).or_else(|| source_response_id.clone());
+    let memory = NewMemory {
+        memory_id: memory_id.clone(),
+        memory_type,
+        normalized_content,
+        content: input.content,
+        created_at: now.clone(),
+        updated_at: now.clone(),
+        source_loom_id: empty_string_to_none(input.source_loom_id),
+        source_response_id,
+        user_confirmed: true,
+        metadata_json,
+        supersedes_id: None,
+        always_include: input.always_include.unwrap_or(false),
+        origin_response_id,
+        extraction_method: Some("explicit".to_string()),
+        confidence: Some(1.0),
+        topic_key: empty_string_to_none(input.topic_key),
+    };
     let repository = MemoryRepository::new(&state.database);
-    repository
-        .insert_memory(&NewMemory {
-            memory_id: memory_id.clone(),
-            memory_type: input.memory_type,
-            normalized_content: normalize_content(&input.content),
-            content: input.content,
-            created_at: now.clone(),
-            updated_at: now.clone(),
-            source_loom_id: empty_string_to_none(input.source_loom_id),
-            source_response_id: empty_string_to_none(input.source_response_id),
-            user_confirmed: input.user_confirmed.unwrap_or(true),
-            metadata_json,
-            supersedes_id: empty_string_to_none(input.supersedes_id),
-            always_include: input.always_include.unwrap_or(false),
-            origin_response_id: empty_string_to_none(input.origin_response_id),
-            extraction_method: empty_string_to_none(input.extraction_method),
-            confidence: input.confidence,
-            topic_key: empty_string_to_none(input.topic_key),
-        })
+    let result = repository
+        .create_explicit_memory(
+            &memory,
+            &NewMemoryEvent {
+                event_id: new_id("memory-event"),
+                memory_id: memory_id.clone(),
+                event_type: "explicit_created".to_string(),
+                payload_json: json!({ "source": "memory_api", "operation": "explicit_save" })
+                    .to_string(),
+                created_at: now.clone(),
+            },
+            &NewMemoryEvent {
+                event_id: new_id("memory-event"),
+                memory_id: memory_id,
+                event_type: "duplicate_skipped".to_string(),
+                payload_json: json!({ "source": "memory_api", "operation": "exact_duplicate" })
+                    .to_string(),
+                created_at: now,
+            },
+        )
         .await
         .map_err(storage_error)?;
-    insert_event(
-        &repository,
-        &memory_id,
-        "created",
-        json!({ "source": "memory_api" }),
-    )
-    .await?;
-    let memory = repository
-        .get_memory(&memory_id)
-        .await
-        .map_err(storage_error)?
-        .ok_or_else(|| storage_error(ServiceError::storage("created Memory was not found")))?;
+    let (memory, reused, status) = match result {
+        ExplicitMemoryCreateResult::Created(memory) => (memory, false, StatusCode::CREATED),
+        ExplicitMemoryCreateResult::Duplicate(memory) => (memory, true, StatusCode::OK),
+    };
 
     Ok((
-        StatusCode::CREATED,
+        status,
         Json(MemoryEnvelope {
             memory: memory_to_dto(memory),
+            reused,
         }),
     ))
 }
@@ -257,6 +315,7 @@ pub async fn patch_memory(
 
     Ok(Json(MemoryEnvelope {
         memory: memory_to_dto(memory),
+        reused: false,
     }))
 }
 
@@ -393,8 +452,8 @@ fn reject_forbidden_text(value: Option<&str>) -> Result<(), (StatusCode, Json<Me
     };
     if contains_forbidden_text(value) {
         return Err(bad_request(
-            "RAW_THINKING_REJECTED",
-            "Memory payload contains forbidden raw thinking fields.",
+            "MEMORY_SANITIZATION_REJECTED",
+            "Memory payload contains forbidden private fields.",
         ));
     }
     Ok(())
@@ -402,7 +461,7 @@ fn reject_forbidden_text(value: Option<&str>) -> Result<(), (StatusCode, Json<Me
 
 fn contains_forbidden_text(value: &str) -> bool {
     let lower = value.to_ascii_lowercase();
-    FORBIDDEN_THINKING_KEYS
+    FORBIDDEN_CONTENT_MARKERS
         .iter()
         .any(|key| lower.contains(&key.to_ascii_lowercase()))
 }
@@ -465,7 +524,7 @@ mod tests {
         let created = create_memory(
             State(state.clone()),
             Json(CreateMemoryRequest {
-                memory_type: "explicit_user_memory".to_string(),
+                memory_type: Some("explicit_user_memory".to_string()),
                 content: "The project codename is Blue Otter.".to_string(),
                 source_loom_id: Some("loom-1".to_string()),
                 source_response_id: Some("response-1".to_string()),
@@ -546,7 +605,7 @@ mod tests {
         let error = create_memory(
             State(state),
             Json(CreateMemoryRequest {
-                memory_type: "explicit_user_memory".to_string(),
+                memory_type: Some("explicit_user_memory".to_string()),
                 content: "chain_of_thought should never be stored".to_string(),
                 source_loom_id: None,
                 source_response_id: None,
@@ -564,7 +623,149 @@ mod tests {
         .expect_err("raw thinking rejected");
 
         assert_eq!(error.0, StatusCode::BAD_REQUEST);
-        assert_eq!(error.1 .0.code, "RAW_THINKING_REJECTED");
+        assert_eq!(error.1 .0.code, "MEMORY_SANITIZATION_REJECTED");
+    }
+
+    #[tokio::test]
+    async fn explicit_save_applies_defaults_and_appends_safe_event() {
+        let state = test_state().await;
+        let created = create_memory(
+            State(state.clone()),
+            Json(explicit_request("Remember deterministic SQLite state.")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(created.0, StatusCode::CREATED);
+        assert!(!created.1 .0.reused);
+        let memory = created.1 .0.memory;
+        assert_eq!(memory.memory_type, "explicit_user_memory");
+        assert!(memory.user_confirmed);
+        assert!(!memory.always_include);
+        assert_eq!(memory.extraction_method.as_deref(), Some("explicit"));
+        assert_eq!(memory.confidence, Some(1.0));
+
+        let events = MemoryRepository::new(&state.database)
+            .list_events(&memory.memory_id)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "explicit_created");
+        for forbidden in [
+            "deterministic SQLite state",
+            "raw_thinking",
+            "provider_payload",
+            "secret",
+        ] {
+            assert!(!events[0].payload_json.contains(forbidden));
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_duplicate_reuses_active_memory_in_same_scope() {
+        let state = test_state().await;
+        let first = create_memory(
+            State(state.clone()),
+            Json(explicit_request("Use compact response summaries.")),
+        )
+        .await
+        .unwrap();
+        let second = create_memory(
+            State(state.clone()),
+            Json(explicit_request("  Use   compact response summaries.  ")),
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.0, StatusCode::OK);
+        assert!(second.1 .0.reused);
+        assert_eq!(second.1 .0.memory.memory_id, first.1 .0.memory.memory_id);
+        assert_eq!(
+            MemoryRepository::new(&state.database)
+                .list_memories(None)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        let events = MemoryRepository::new(&state.database)
+            .list_events(&first.1 .0.memory.memory_id)
+            .await
+            .unwrap();
+        assert_eq!(events[1].event_type, "duplicate_skipped");
+    }
+
+    #[tokio::test]
+    async fn explicit_save_accepts_allowed_always_include_and_caller_topic_key() {
+        let state = test_state().await;
+        for (memory_type, content) in [
+            ("explicit_user_memory", "Always use SQLite authority."),
+            ("profile_preference", "Always answer concisely."),
+        ] {
+            let mut request = explicit_request(content);
+            request.memory_type = Some(memory_type.to_string());
+            request.always_include = Some(true);
+            request.topic_key = Some("response-style".to_string());
+            let created = create_memory(State(state.clone()), Json(request))
+                .await
+                .unwrap();
+            assert!(created.1 .0.memory.always_include);
+            assert_eq!(
+                created.1 .0.memory.topic_key.as_deref(),
+                Some("response-style")
+            );
+        }
+
+        let mut inferred = explicit_request("Do not promote inferred state.");
+        inferred.memory_type = Some("inferred_preference".to_string());
+        inferred.always_include = Some(true);
+        let error = create_memory(State(state), Json(inferred))
+            .await
+            .unwrap_err();
+        assert_eq!(error.1 .0.code, "INVALID_ALWAYS_INCLUDE");
+    }
+
+    #[tokio::test]
+    async fn explicit_save_rejects_private_marker_categories_without_writes() {
+        let state = test_state().await;
+        for content in [
+            "raw_thinking must not persist",
+            "provider_payload must not persist",
+            "Authorization Bearer credential secret must not persist",
+            "raw_tool_output must not persist",
+        ] {
+            let error = create_memory(State(state.clone()), Json(explicit_request(content)))
+                .await
+                .unwrap_err();
+            assert_eq!(error.1 .0.code, "MEMORY_SANITIZATION_REJECTED");
+        }
+        assert!(MemoryRepository::new(&state.database)
+            .list_memories(None)
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn explicit_pipeline_does_not_depend_on_generation_or_quick_ask() {
+        let source = include_str!("memory.rs");
+        assert!(!source.contains(&["api", "::orchestration"].concat()));
+        assert!(!source.contains(&["api", "::ask"].concat()));
+    }
+
+    fn explicit_request(content: &str) -> CreateMemoryRequest {
+        CreateMemoryRequest {
+            memory_type: None,
+            content: content.to_string(),
+            source_loom_id: None,
+            source_response_id: None,
+            user_confirmed: None,
+            metadata: None,
+            supersedes_id: None,
+            always_include: None,
+            origin_response_id: None,
+            extraction_method: None,
+            confidence: None,
+            topic_key: None,
+        }
     }
 
     async fn test_state() -> AppState {
