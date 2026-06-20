@@ -46,7 +46,7 @@ pub struct ListMemoryQuery {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CreateMemoryRequest {
     pub memory_type: Option<String>,
     pub content: String,
@@ -63,7 +63,7 @@ pub struct CreateMemoryRequest {
 }
 
 #[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct UpdateMemoryRequest {
     pub memory_type: Option<String>,
     pub content: Option<String>,
@@ -1138,6 +1138,49 @@ mod tests {
                 .unwrap_err();
             assert_eq!(error.1 .0.code, "INVALID_TOPIC_KEY");
         }
+    }
+
+    #[tokio::test]
+    async fn manual_topic_key_wire_contract_is_optional_and_camel_case_only() {
+        let without_topic: CreateMemoryRequest = serde_json::from_value(json!({
+            "content": "Keep manual topic keys optional."
+        }))
+        .expect("request without topicKey");
+        assert_eq!(without_topic.topic_key, None);
+
+        let with_topic: CreateMemoryRequest = serde_json::from_value(json!({
+            "content": "Keep manual topic keys explicit.",
+            "topicKey": "user.response.format"
+        }))
+        .expect("camelCase topicKey request");
+        assert_eq!(
+            with_topic.topic_key.as_deref(),
+            Some("user.response.format")
+        );
+
+        let snake_case = serde_json::from_value::<CreateMemoryRequest>(json!({
+            "content": "Reject noncanonical casing.",
+            "topic_key": "user.response.format"
+        }))
+        .expect_err("snake_case topic_key must be rejected");
+        assert!(snake_case.to_string().contains("unknown field `topic_key`"));
+
+        let state = test_state().await;
+        let created_without_topic = create_memory(State(state.clone()), Json(without_topic))
+            .await
+            .expect("create without topicKey");
+        assert_eq!(created_without_topic.1 .0.memory.topic_key, None);
+
+        let created_with_topic = create_memory(State(state), Json(with_topic))
+            .await
+            .expect("create with topicKey");
+        let response =
+            serde_json::to_value(&created_with_topic.1 .0).expect("serialize Memory response");
+        assert_eq!(
+            response["memory"]["topicKey"],
+            json!("user.response.format")
+        );
+        assert!(response["memory"].get("topic_key").is_none());
     }
 
     #[tokio::test]
