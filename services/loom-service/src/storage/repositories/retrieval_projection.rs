@@ -59,6 +59,7 @@ pub struct RetrievalProjectionStoredChunk {
     pub projection_version: String,
     pub content_digest: String,
     pub is_deleted: bool,
+    pub invalidation_state: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,7 +150,9 @@ impl RetrievalProjectionRepository {
             let changed = existing_by_key
                 .remove(&key)
                 .map(|stored| {
-                    stored.content_digest != candidate.identity.content_digest || stored.is_deleted
+                    stored.content_digest != candidate.identity.content_digest
+                        || stored.is_deleted
+                        || stored.invalidation_state != "current"
                 })
                 .unwrap_or(true);
             if changed {
@@ -180,7 +183,7 @@ impl RetrievalProjectionRepository {
     ) -> Result<Vec<RetrievalProjectionStoredChunk>, ServiceError> {
         sqlx::query(
             "SELECT source_kind, source_id, chunk_ref, projection_version,
-                    content_digest, is_deleted
+                    content_digest, is_deleted, invalidation_state
              FROM retrieval_projection_chunks
              ORDER BY source_kind ASC, source_id ASC, chunk_ref ASC, projection_version ASC",
         )
@@ -200,6 +203,7 @@ impl RetrievalProjectionRepository {
                     projection_version: row.get("projection_version"),
                     content_digest: row.get("content_digest"),
                     is_deleted: row.get::<i64, _>("is_deleted") != 0,
+                    invalidation_state: row.get("invalidation_state"),
                 })
                 .collect()
         })
@@ -538,15 +542,18 @@ impl RetrievalProjectionRepository {
         sqlx::query(
             "INSERT INTO retrieval_projection_sources (
                 source_kind, source_id, projection_version, loom_id, response_id,
-                source_digest, is_deleted, source_updated_at, indexed_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8)
+                source_digest, is_deleted, source_updated_at, indexed_at,
+                invalidation_state, invalidated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, 'current', NULL)
              ON CONFLICT(source_kind, source_id, projection_version) DO UPDATE SET
                 loom_id = excluded.loom_id,
                 response_id = excluded.response_id,
                 source_digest = excluded.source_digest,
                 is_deleted = 0,
                 source_updated_at = excluded.source_updated_at,
-                indexed_at = excluded.indexed_at",
+                indexed_at = excluded.indexed_at,
+                invalidation_state = 'current',
+                invalidated_at = NULL",
         )
         .bind(&candidate.identity.source_kind)
         .bind(&candidate.identity.source_id)
@@ -568,8 +575,9 @@ impl RetrievalProjectionRepository {
             "INSERT INTO retrieval_projection_chunks (
                 source_kind, source_id, chunk_ref, projection_version, loom_id,
                 response_id, content_digest, is_deleted, source_updated_at,
-                indexed_at, metadata_json
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10)
+                indexed_at, metadata_json, invalidation_state, invalidated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10,
+                       'current', NULL)
              ON CONFLICT(source_kind, source_id, chunk_ref, projection_version) DO UPDATE SET
                 loom_id = excluded.loom_id,
                 response_id = excluded.response_id,
@@ -577,7 +585,9 @@ impl RetrievalProjectionRepository {
                 is_deleted = 0,
                 source_updated_at = excluded.source_updated_at,
                 indexed_at = excluded.indexed_at,
-                metadata_json = excluded.metadata_json",
+                metadata_json = excluded.metadata_json,
+                invalidation_state = 'current',
+                invalidated_at = NULL",
         )
         .bind(&candidate.identity.source_kind)
         .bind(&candidate.identity.source_id)
@@ -609,7 +619,8 @@ impl RetrievalProjectionRepository {
     ) -> Result<(), ServiceError> {
         sqlx::query(
             "UPDATE retrieval_projection_chunks
-             SET is_deleted = 1, indexed_at = ?5
+             SET is_deleted = 1, indexed_at = ?5,
+                 invalidation_state = 'tombstoned', invalidated_at = ?5
              WHERE source_kind = ?1 AND source_id = ?2
                AND chunk_ref = ?3 AND projection_version = ?4",
         )
@@ -627,7 +638,8 @@ impl RetrievalProjectionRepository {
         })?;
         sqlx::query(
             "UPDATE retrieval_projection_sources
-             SET is_deleted = 1, indexed_at = ?4
+             SET is_deleted = 1, indexed_at = ?4,
+                 invalidation_state = 'tombstoned', invalidated_at = ?4
              WHERE source_kind = ?1 AND source_id = ?2 AND projection_version = ?3
                AND NOT EXISTS (
                  SELECT 1 FROM retrieval_projection_chunks
@@ -648,6 +660,114 @@ impl RetrievalProjectionRepository {
         })?;
         Ok(())
     }
+}
+
+pub(crate) async fn mark_memory_projection_stale_on(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    memory_id: &str,
+    loom_id: Option<&str>,
+    response_id: Option<&str>,
+    source_updated_at: &str,
+) -> Result<(), ServiceError> {
+    mark_memory_projection_state_on(
+        transaction,
+        memory_id,
+        loom_id,
+        response_id,
+        source_updated_at,
+        false,
+        "stale",
+    )
+    .await
+}
+
+pub(crate) async fn mark_memory_projection_tombstoned_on(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    memory_id: &str,
+    loom_id: Option<&str>,
+    response_id: Option<&str>,
+    source_updated_at: &str,
+) -> Result<(), ServiceError> {
+    mark_memory_projection_state_on(
+        transaction,
+        memory_id,
+        loom_id,
+        response_id,
+        source_updated_at,
+        true,
+        "tombstoned",
+    )
+    .await
+}
+
+async fn mark_memory_projection_state_on(
+    transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    memory_id: &str,
+    loom_id: Option<&str>,
+    response_id: Option<&str>,
+    source_updated_at: &str,
+    is_deleted: bool,
+    invalidation_state: &str,
+) -> Result<(), ServiceError> {
+    let chunk_ref = format!("memory:{memory_id}:content");
+    sqlx::query(
+        "INSERT INTO retrieval_projection_sources (
+            source_kind, source_id, projection_version, loom_id, response_id,
+            source_digest, is_deleted, source_updated_at, indexed_at,
+            invalidation_state, invalidated_at
+         ) VALUES ('memory', ?1, ?2, ?3, ?4, 'pending', ?5, ?6, '', ?7, ?6)
+         ON CONFLICT(source_kind, source_id, projection_version) DO UPDATE SET
+            loom_id = excluded.loom_id,
+            response_id = excluded.response_id,
+            is_deleted = excluded.is_deleted,
+            source_updated_at = excluded.source_updated_at,
+            invalidation_state = excluded.invalidation_state,
+            invalidated_at = excluded.invalidated_at",
+    )
+    .bind(memory_id)
+    .bind(RETRIEVAL_PROJECTION_VERSION)
+    .bind(loom_id)
+    .bind(response_id)
+    .bind(is_deleted)
+    .bind(source_updated_at)
+    .bind(invalidation_state)
+    .execute(&mut **transaction)
+    .await
+    .map_err(|error| {
+        ServiceError::storage(format!(
+            "failed to invalidate Memory projection source: {error}"
+        ))
+    })?;
+    sqlx::query(
+        "INSERT INTO retrieval_projection_chunks (
+            source_kind, source_id, chunk_ref, projection_version, loom_id,
+            response_id, content_digest, is_deleted, source_updated_at,
+            indexed_at, metadata_json, invalidation_state, invalidated_at
+         ) VALUES ('memory', ?1, ?2, ?3, ?4, ?5, 'pending', ?6, ?7, '', NULL, ?8, ?7)
+         ON CONFLICT(source_kind, source_id, chunk_ref, projection_version) DO UPDATE SET
+            loom_id = excluded.loom_id,
+            response_id = excluded.response_id,
+            is_deleted = excluded.is_deleted,
+            source_updated_at = excluded.source_updated_at,
+            invalidation_state = excluded.invalidation_state,
+            invalidated_at = excluded.invalidated_at",
+    )
+    .bind(memory_id)
+    .bind(&chunk_ref)
+    .bind(RETRIEVAL_PROJECTION_VERSION)
+    .bind(loom_id)
+    .bind(response_id)
+    .bind(is_deleted)
+    .bind(source_updated_at)
+    .bind(invalidation_state)
+    .execute(&mut **transaction)
+    .await
+    .map(|_| ())
+    .map_err(|error| {
+        ServiceError::storage(format!(
+            "failed to invalidate Memory projection chunk: {error}"
+        ))
+    })
 }
 
 fn candidate(

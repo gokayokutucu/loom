@@ -1,6 +1,14 @@
 #![allow(dead_code)]
 
-use crate::{error::ServiceError, storage::db::Database};
+use crate::{
+    error::ServiceError,
+    storage::{
+        db::Database,
+        repositories::retrieval_projection::{
+            mark_memory_projection_stale_on, mark_memory_projection_tombstoned_on,
+        },
+    },
+};
 use sqlx::{Row, SqlitePool};
 
 const FORBIDDEN_CONTENT_MARKERS: [&str; 19] = [
@@ -300,6 +308,14 @@ impl MemoryRepository {
         .map_err(|error| {
             ServiceError::storage(format!("failed to insert explicit Memory: {error}"))
         })?;
+        mark_memory_projection_stale_on(
+            &mut transaction,
+            &memory.memory_id,
+            memory.source_loom_id.as_deref(),
+            memory.source_response_id.as_deref(),
+            &memory.updated_at,
+        )
+        .await?;
         insert_event_on(&mut transaction, created_event, &memory.memory_id).await?;
         if let Some(existing) = conflict.as_ref() {
             let update = sqlx::query(
@@ -319,6 +335,14 @@ impl MemoryRepository {
                     "active Memory conflict changed concurrently",
                 ));
             }
+            mark_memory_projection_tombstoned_on(
+                &mut transaction,
+                &existing.memory_id,
+                existing.source_loom_id.as_deref(),
+                existing.source_response_id.as_deref(),
+                &memory.updated_at,
+            )
+            .await?;
             insert_event_on(&mut transaction, superseded_event, &existing.memory_id).await?;
         }
         let record = sqlx::query("SELECT * FROM memories WHERE memory_id = ?1")
@@ -506,8 +530,9 @@ impl MemoryRepository {
                 "failed to begin Memory forget transaction: {error}"
             ))
         })?;
-        let deleted_at = sqlx::query_scalar::<_, Option<String>>(
-            "SELECT deleted_at FROM memories WHERE memory_id = ?1",
+        let state = sqlx::query(
+            "SELECT deleted_at, source_loom_id, source_response_id
+             FROM memories WHERE memory_id = ?1",
         )
         .bind(memory_id)
         .fetch_optional(&mut *transaction)
@@ -515,12 +540,13 @@ impl MemoryRepository {
         .map_err(|error| {
             ServiceError::storage(format!("failed to inspect Memory forget state: {error}"))
         })?;
-        let Some(deleted_at) = deleted_at else {
+        let Some(state) = state else {
             transaction.rollback().await.map_err(|error| {
                 ServiceError::storage(format!("failed to rollback missing Memory forget: {error}"))
             })?;
             return Ok(ForgetMemoryResult::NotFound);
         };
+        let deleted_at = state.get::<Option<String>, _>("deleted_at");
         if deleted_at.is_some() {
             transaction.commit().await.map_err(|error| {
                 ServiceError::storage(format!(
@@ -544,6 +570,16 @@ impl MemoryRepository {
                 "Memory forget state changed concurrently",
             ));
         }
+        let source_loom_id = state.get::<Option<String>, _>("source_loom_id");
+        let source_response_id = state.get::<Option<String>, _>("source_response_id");
+        mark_memory_projection_tombstoned_on(
+            &mut transaction,
+            memory_id,
+            source_loom_id.as_deref(),
+            source_response_id.as_deref(),
+            &event.created_at,
+        )
+        .await?;
         insert_event_on(&mut transaction, event, memory_id).await?;
         transaction.commit().await.map_err(|error| {
             ServiceError::storage(format!("failed to commit Memory forget: {error}"))

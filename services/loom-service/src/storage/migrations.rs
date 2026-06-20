@@ -133,6 +133,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "memory_policy_foundation",
         sql: include_str!("../../migrations/0025_memory_policy_foundation.sql"),
     },
+    Migration {
+        version: 26,
+        name: "memory_projection_invalidation",
+        sql: include_str!("../../migrations/0026_memory_projection_invalidation.sql"),
+    },
 ];
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
@@ -348,6 +353,46 @@ mod tests {
         .await
         .unwrap();
         assert!(provenance_tables.is_empty());
+    }
+
+    #[tokio::test]
+    async fn migration_0026_adds_metadata_only_projection_invalidation_state() {
+        let database = test_database().await;
+        for table in [
+            "retrieval_projection_sources",
+            "retrieval_projection_chunks",
+        ] {
+            let columns = sqlx::query_scalar::<_, String>(&format!(
+                "SELECT name FROM pragma_table_info('{table}') ORDER BY cid"
+            ))
+            .fetch_all(database.pool())
+            .await
+            .unwrap();
+            assert!(columns.iter().any(|column| column == "invalidation_state"));
+            assert!(columns.iter().any(|column| column == "invalidated_at"));
+            for forbidden in [
+                "content",
+                "prompt",
+                "provider_payload",
+                "raw_thinking",
+                "thinking_text",
+                "secret",
+                "vector",
+            ] {
+                assert!(!columns.iter().any(|column| column == forbidden));
+            }
+        }
+
+        let source_error = sqlx::query(
+            "INSERT INTO retrieval_projection_sources (
+                source_kind, source_id, projection_version, source_digest,
+                source_updated_at, indexed_at, invalidation_state
+             ) VALUES ('memory', 'invalid-state', 'v1', 'pending', '1', '', 'unknown')",
+        )
+        .execute(database.pool())
+        .await
+        .unwrap_err();
+        assert!(source_error.to_string().contains("CHECK constraint failed"));
     }
 
     #[tokio::test]

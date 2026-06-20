@@ -577,7 +577,12 @@ mod tests {
         config::{ConfigManager, LoomServiceConfig, OllamaConfig},
         providers::ollama::OllamaRuntime,
         runtime::{OperationTracker, RestartState},
-        storage::{db::test_database, repositories::memory::MemoryRepository},
+        storage::{
+            db::test_database,
+            repositories::{
+                memory::MemoryRepository, retrieval_projection::RetrievalProjectionRepository,
+            },
+        },
     };
     use axum::{
         extract::{Path, Query, State},
@@ -585,6 +590,7 @@ mod tests {
         Json,
     };
     use serde_json::json;
+    use sqlx::Row;
     use std::{path::PathBuf, time::Duration};
 
     #[tokio::test]
@@ -909,6 +915,133 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn memory_lifecycle_updates_projection_invalidation_without_over_indexing() {
+        let state = test_state().await;
+        let created = create_memory(
+            State(state.clone()),
+            Json(explicit_request("Remember projection lifecycle state.")),
+        )
+        .await
+        .unwrap();
+        let memory_id = created.1 .0.memory.memory_id;
+        let projection = sqlx::query(
+            "SELECT chunk_ref, content_digest, is_deleted, invalidation_state,
+                    invalidated_at, metadata_json
+             FROM retrieval_projection_chunks
+             WHERE source_kind = 'memory' AND source_id = ?1",
+        )
+        .bind(&memory_id)
+        .fetch_one(state.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(
+            projection.get::<String, _>("chunk_ref"),
+            format!("memory:{memory_id}:content")
+        );
+        assert_eq!(projection.get::<String, _>("content_digest"), "pending");
+        assert_eq!(projection.get::<i64, _>("is_deleted"), 0);
+        assert_eq!(projection.get::<String, _>("invalidation_state"), "stale");
+        assert_eq!(projection.get::<Option<String>, _>("metadata_json"), None);
+        let invalidated_at = projection.get::<Option<String>, _>("invalidated_at");
+        assert!(invalidated_at.is_some());
+
+        let duplicate = create_memory(
+            State(state.clone()),
+            Json(explicit_request("  Remember projection lifecycle state.  ")),
+        )
+        .await
+        .unwrap();
+        assert!(duplicate.1 .0.reused);
+        let after_duplicate = sqlx::query(
+            "SELECT COUNT(*) AS chunk_count, invalidation_state, invalidated_at
+             FROM retrieval_projection_chunks
+             WHERE source_kind = 'memory' AND source_id = ?1",
+        )
+        .bind(&memory_id)
+        .fetch_one(state.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(after_duplicate.get::<i64, _>("chunk_count"), 1);
+        assert_eq!(
+            after_duplicate.get::<String, _>("invalidation_state"),
+            "stale"
+        );
+        assert_eq!(
+            after_duplicate.get::<Option<String>, _>("invalidated_at"),
+            invalidated_at
+        );
+
+        let _ = patch_memory(
+            State(state.clone()),
+            Path(memory_id.clone()),
+            Json(UpdateMemoryRequest {
+                always_include: Some(true),
+                ..UpdateMemoryRequest::default()
+            }),
+        )
+        .await
+        .unwrap();
+        let after_pin = sqlx::query(
+            "SELECT invalidation_state, invalidated_at
+             FROM retrieval_projection_chunks
+             WHERE source_kind = 'memory' AND source_id = ?1",
+        )
+        .bind(&memory_id)
+        .fetch_one(state.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(after_pin.get::<String, _>("invalidation_state"), "stale");
+        assert_eq!(
+            after_pin.get::<Option<String>, _>("invalidated_at"),
+            invalidated_at
+        );
+
+        let plan = RetrievalProjectionRepository::new(&state.database)
+            .plan_full_rebuild()
+            .await
+            .unwrap();
+        assert_eq!(plan.changed_chunks, 1);
+        let planned_state = sqlx::query_scalar::<_, String>(
+            "SELECT invalidation_state FROM retrieval_projection_chunks
+             WHERE source_kind = 'memory' AND source_id = ?1",
+        )
+        .bind(&memory_id)
+        .fetch_one(state.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(planned_state, "current");
+
+        delete_memory(State(state.clone()), Path(memory_id.clone()))
+            .await
+            .unwrap();
+        let forgotten = sqlx::query(
+            "SELECT is_deleted, invalidation_state, metadata_json
+             FROM retrieval_projection_chunks
+             WHERE source_kind = 'memory' AND source_id = ?1",
+        )
+        .bind(&memory_id)
+        .fetch_one(state.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(forgotten.get::<i64, _>("is_deleted"), 1);
+        assert_eq!(
+            forgotten.get::<String, _>("invalidation_state"),
+            "tombstoned"
+        );
+        let metadata = forgotten
+            .get::<Option<String>, _>("metadata_json")
+            .unwrap_or_default();
+        for forbidden in [
+            "projection lifecycle state",
+            "raw_thinking",
+            "provider_payload",
+            "secret",
+        ] {
+            assert!(!metadata.contains(forbidden));
+        }
+    }
+
+    #[tokio::test]
     async fn explicit_save_rejects_private_marker_categories_without_writes() {
         let state = test_state().await;
         for content in [
@@ -1076,6 +1209,29 @@ mod tests {
             .1
              .0
             .memory;
+        let projection_states = sqlx::query(
+            "SELECT source_id, is_deleted, invalidation_state
+             FROM retrieval_projection_chunks
+             WHERE source_kind = 'memory' AND source_id IN (?1, ?2)
+             ORDER BY source_id",
+        )
+        .bind(&original.memory_id)
+        .bind(&replacement.memory_id)
+        .fetch_all(state.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(projection_states.len(), 2);
+        for row in projection_states {
+            let source_id = row.get::<String, _>("source_id");
+            if source_id == original.memory_id {
+                assert_eq!(row.get::<i64, _>("is_deleted"), 1);
+                assert_eq!(row.get::<String, _>("invalidation_state"), "tombstoned");
+            } else {
+                assert_eq!(source_id, replacement.memory_id);
+                assert_eq!(row.get::<i64, _>("is_deleted"), 0);
+                assert_eq!(row.get::<String, _>("invalidation_state"), "stale");
+            }
+        }
         assert_eq!(
             replacement.supersedes_id.as_deref(),
             Some(original.memory_id.as_str())
