@@ -188,6 +188,7 @@ pub async fn create_memory(
     reject_forbidden_text(input.source_response_id.as_deref())?;
     reject_forbidden_text(input.origin_response_id.as_deref())?;
     reject_forbidden_text(input.topic_key.as_deref())?;
+    validate_topic_key(input.topic_key.as_deref())?;
     let metadata_json = metadata_json(input.metadata)?;
     let now = timestamp();
     let memory_id = new_id("memory");
@@ -232,6 +233,17 @@ pub async fn create_memory(
                     .to_string(),
                 created_at: now,
             },
+            &NewMemoryEvent {
+                event_id: new_id("memory-event"),
+                memory_id: String::new(),
+                event_type: "superseded".to_string(),
+                payload_json: json!({
+                    "source": "memory_api",
+                    "operation": "topic_key_supersession"
+                })
+                .to_string(),
+                created_at: timestamp(),
+            },
         )
         .await
         .map_err(storage_error)?;
@@ -259,6 +271,9 @@ pub async fn patch_memory(
     }
     if let Some(content) = &input.content {
         validate_content(content)?;
+    }
+    if let Some(topic_key) = input.topic_key.as_ref().and_then(|value| value.as_deref()) {
+        validate_topic_key(Some(topic_key))?;
     }
     reject_forbidden_text(
         input
@@ -448,6 +463,24 @@ fn validate_always_include(
         return Err(bad_request(
             "INVALID_ALWAYS_INCLUDE",
             "alwaysInclude requires a confirmed explicit user Memory or profile preference.",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_topic_key(topic_key: Option<&str>) -> Result<(), (StatusCode, Json<MemoryApiError>)> {
+    let Some(topic_key) = topic_key else {
+        return Ok(());
+    };
+    if topic_key.is_empty()
+        || !topic_key.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'.'
+        })
+        || topic_key.split('.').any(str::is_empty)
+    {
+        return Err(bad_request(
+            "INVALID_TOPIC_KEY",
+            "topicKey must contain lowercase dot-separated tokens using [a-z0-9_].",
         ));
     }
     Ok(())
@@ -783,14 +816,14 @@ mod tests {
             let mut request = explicit_request(content);
             request.memory_type = Some(memory_type.to_string());
             request.always_include = Some(true);
-            request.topic_key = Some("response-style".to_string());
+            request.topic_key = Some("response.style".to_string());
             let created = create_memory(State(state.clone()), Json(request))
                 .await
                 .unwrap();
             assert!(created.1 .0.memory.always_include);
             assert_eq!(
                 created.1 .0.memory.topic_key.as_deref(),
-                Some("response-style")
+                Some("response.style")
             );
         }
 
@@ -943,6 +976,207 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn topic_key_validation_accepts_only_lowercase_dot_separated_tokens() {
+        let state = test_state().await;
+        let mut valid = explicit_request("Prefer deterministic conflict handling.");
+        valid.topic_key = Some("user.preference_style.v1".to_string());
+        let created = create_memory(State(state.clone()), Json(valid))
+            .await
+            .unwrap();
+        assert_eq!(
+            created.1 .0.memory.topic_key.as_deref(),
+            Some("user.preference_style.v1")
+        );
+
+        for topic_key in [
+            "",
+            "User.preference",
+            "user preference",
+            "user/preference",
+            ".user.preference",
+            "user.preference.",
+            "user..preference",
+        ] {
+            let mut invalid = explicit_request("Reject invalid topic syntax.");
+            invalid.topic_key = Some(topic_key.to_string());
+            let error = create_memory(State(state.clone()), Json(invalid))
+                .await
+                .unwrap_err();
+            assert_eq!(error.1 .0.code, "INVALID_TOPIC_KEY");
+        }
+    }
+
+    #[tokio::test]
+    async fn exact_duplicate_precedes_topic_key_supersession() {
+        let state = test_state().await;
+        let mut first = explicit_request("Use deterministic conflict ordering.");
+        first.topic_key = Some("memory.conflict.order".to_string());
+        let first = create_memory(State(state.clone()), Json(first))
+            .await
+            .unwrap();
+
+        let mut duplicate = explicit_request("  Use deterministic conflict ordering.  ");
+        duplicate.topic_key = Some("memory.conflict.replacement".to_string());
+        let duplicate = create_memory(State(state.clone()), Json(duplicate))
+            .await
+            .unwrap();
+        assert_eq!(duplicate.0, StatusCode::OK);
+        assert!(duplicate.1 .0.reused);
+        assert_eq!(duplicate.1 .0.memory.memory_id, first.1 .0.memory.memory_id);
+        assert!(MemoryRepository::new(&state.database)
+            .get_memory(&first.1 .0.memory.memory_id)
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn same_scope_topic_conflict_supersedes_atomically_without_inheriting_pin() {
+        let state = test_state().await;
+        let mut original = explicit_request("Prefer expanded explanations.");
+        original.topic_key = Some("user.response.detail".to_string());
+        original.always_include = Some(true);
+        let original = create_memory(State(state.clone()), Json(original))
+            .await
+            .unwrap()
+            .1
+             .0
+            .memory;
+        insert_loom(&state.database, "loom-memory-conflict").await;
+        sqlx::query(
+            "INSERT INTO context_snapshots (
+                snapshot_id, loom_id, created_at, policy_version, selection_version,
+                budget_json, diagnostics_json, candidate_count, selected_count, rejected_count
+             ) VALUES ('snapshot-memory-conflict', 'loom-memory-conflict', '1',
+                       'policy-v1', 'selection-v1', '{}', '{}', 1, 1, 0)",
+        )
+        .execute(state.database.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO context_snapshot_candidates (
+                snapshot_candidate_id, snapshot_id, source_kind, source_id, chunk_ref,
+                tier, include_mode_hint, estimated_tokens, final_rank, is_mandatory,
+                is_hidden_background, is_selected, metadata_json
+             ) VALUES ('snapshot-memory-candidate', 'snapshot-memory-conflict', 'memory', ?1,
+                       '', 'policy_always_include', 'full', 8, 1, 1, 0, 1, '{}')",
+        )
+        .bind(&original.memory_id)
+        .execute(state.database.pool())
+        .await
+        .unwrap();
+
+        let mut replacement = explicit_request("Prefer concise explanations.");
+        replacement.memory_type = Some("profile_preference".to_string());
+        replacement.topic_key = Some("user.response.detail".to_string());
+        let replacement = create_memory(State(state.clone()), Json(replacement))
+            .await
+            .unwrap()
+            .1
+             .0
+            .memory;
+        assert_eq!(
+            replacement.supersedes_id.as_deref(),
+            Some(original.memory_id.as_str())
+        );
+        assert!(!replacement.always_include);
+        let stored_old = MemoryRepository::new(&state.database)
+            .get_memory_any_status(&original.memory_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(stored_old.deleted_at.is_some());
+        assert!(MemoryRepository::new(&state.database)
+            .get_memory(&replacement.memory_id)
+            .await
+            .unwrap()
+            .is_some());
+        let active = list_memory(State(state.clone()), Query(ListMemoryQuery { query: None }))
+            .await
+            .unwrap()
+            .0;
+        assert_eq!(active.memories.len(), 1);
+        assert_eq!(active.memories[0].memory_id, replacement.memory_id);
+        let snapshot_source = sqlx::query_scalar::<_, String>(
+            "SELECT source_id FROM context_snapshot_candidates
+             WHERE snapshot_candidate_id = 'snapshot-memory-candidate'",
+        )
+        .fetch_one(state.database.pool())
+        .await
+        .unwrap();
+        assert_eq!(snapshot_source, original.memory_id);
+
+        let events = MemoryRepository::new(&state.database)
+            .list_events(&original.memory_id)
+            .await
+            .unwrap();
+        let superseded = events
+            .iter()
+            .find(|event| event.event_type == "superseded")
+            .unwrap();
+        for forbidden in [
+            "expanded explanations",
+            "concise explanations",
+            "raw_thinking",
+            "provider_payload",
+            "secret",
+        ] {
+            assert!(!superseded.payload_json.contains(forbidden));
+        }
+    }
+
+    #[tokio::test]
+    async fn topic_conflicts_are_isolated_by_exact_scope_including_global() {
+        let state = test_state().await;
+        insert_loom(&state.database, "loom-scope-a").await;
+        insert_loom(&state.database, "loom-scope-b").await;
+        for (content, loom_id) in [
+            ("Global response preference.", None),
+            ("Loom A response preference.", Some("loom-scope-a")),
+            ("Loom B response preference.", Some("loom-scope-b")),
+        ] {
+            let mut request = explicit_request(content);
+            request.topic_key = Some("user.response.scope".to_string());
+            request.source_loom_id = loom_id.map(str::to_string);
+            let _ = create_memory(State(state.clone()), Json(request))
+                .await
+                .unwrap();
+        }
+        let active = MemoryRepository::new(&state.database)
+            .list_memories(None)
+            .await
+            .unwrap();
+        assert_eq!(active.len(), 3);
+        assert!(active.iter().all(|memory| memory.supersedes_id.is_none()));
+    }
+
+    #[tokio::test]
+    async fn forgotten_topic_key_does_not_block_new_explicit_save() {
+        let state = test_state().await;
+        let mut original = explicit_request("Remember the first scoped preference.");
+        original.topic_key = Some("user.preference.reusable".to_string());
+        let original = create_memory(State(state.clone()), Json(original))
+            .await
+            .unwrap()
+            .1
+             .0
+            .memory;
+        delete_memory(State(state.clone()), Path(original.memory_id.clone()))
+            .await
+            .unwrap();
+
+        let mut replacement = explicit_request("Remember the replacement scoped preference.");
+        replacement.topic_key = Some("user.preference.reusable".to_string());
+        let replacement = create_memory(State(state), Json(replacement))
+            .await
+            .unwrap()
+            .1
+             .0
+            .memory;
+        assert!(replacement.supersedes_id.is_none());
+    }
+
     #[test]
     fn explicit_pipeline_does_not_depend_on_generation_or_quick_ask() {
         let source = include_str!("memory.rs");
@@ -995,6 +1229,18 @@ mod tests {
                 crate::agent_runtime::tool_registry::ToolRegistry::new(),
             )),
         }
+    }
+
+    async fn insert_loom(database: &crate::storage::db::Database, loom_id: &str) {
+        sqlx::query(
+            "INSERT INTO looms (loom_id, title, canonical_uri, kind, created_at, updated_at)
+             VALUES (?1, ?1, ?2, 'loom', '1', '1')",
+        )
+        .bind(loom_id)
+        .bind(format!("/loom/{loom_id}"))
+        .execute(database.pool())
+        .await
+        .unwrap();
     }
 
     async fn insert_origin(database: &crate::storage::db::Database) {

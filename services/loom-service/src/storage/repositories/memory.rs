@@ -108,6 +108,12 @@ pub enum ExplicitMemoryCreateResult {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SupersessionDecision {
+    Supersede,
+    RejectIncoming,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ForgetMemoryResult {
     Forgotten,
     AlreadyForgotten,
@@ -177,16 +183,14 @@ impl MemoryRepository {
         &self,
         normalized_content: &str,
         source_loom_id: Option<&str>,
-        memory_type: &str,
     ) -> Result<Option<MemoryRecord>, ServiceError> {
         sqlx::query(
             "SELECT * FROM memories
-             WHERE normalized_content = ?1 AND memory_type = ?2 AND deleted_at IS NULL
-               AND (source_loom_id = ?3 OR (source_loom_id IS NULL AND ?3 IS NULL))
+             WHERE normalized_content = ?1 AND deleted_at IS NULL
+               AND (source_loom_id = ?2 OR (source_loom_id IS NULL AND ?2 IS NULL))
              ORDER BY created_at ASC, memory_id ASC LIMIT 1",
         )
         .bind(normalized_content)
-        .bind(memory_type)
         .bind(source_loom_id)
         .fetch_optional(&self.pool)
         .await
@@ -199,10 +203,12 @@ impl MemoryRepository {
         memory: &NewMemory,
         created_event: &NewMemoryEvent,
         duplicate_event: &NewMemoryEvent,
+        superseded_event: &NewMemoryEvent,
     ) -> Result<ExplicitMemoryCreateResult, ServiceError> {
         validate_explicit_memory(memory)?;
         validate_event(created_event)?;
         validate_event(duplicate_event)?;
+        validate_event(superseded_event)?;
         let mut transaction = self.pool.begin().await.map_err(|error| {
             ServiceError::storage(format!(
                 "failed to begin explicit Memory transaction: {error}"
@@ -211,12 +217,11 @@ impl MemoryRepository {
 
         let duplicate = sqlx::query(
             "SELECT * FROM memories
-             WHERE normalized_content = ?1 AND memory_type = ?2 AND deleted_at IS NULL
-               AND (source_loom_id = ?3 OR (source_loom_id IS NULL AND ?3 IS NULL))
+             WHERE normalized_content = ?1 AND deleted_at IS NULL
+               AND (source_loom_id = ?2 OR (source_loom_id IS NULL AND ?2 IS NULL))
              ORDER BY created_at ASC, memory_id ASC LIMIT 1",
         )
         .bind(&memory.normalized_content)
-        .bind(&memory.memory_type)
         .bind(&memory.source_loom_id)
         .fetch_optional(&mut *transaction)
         .await
@@ -231,6 +236,39 @@ impl MemoryRepository {
                 ServiceError::storage(format!("failed to commit duplicate Memory event: {error}"))
             })?;
             return Ok(ExplicitMemoryCreateResult::Duplicate(existing));
+        }
+
+        let conflict = if let Some(topic_key) = memory.topic_key.as_deref() {
+            sqlx::query(
+                "SELECT * FROM memories
+                 WHERE topic_key = ?1 AND deleted_at IS NULL
+                   AND (source_loom_id = ?2 OR (source_loom_id IS NULL AND ?2 IS NULL))
+                 ORDER BY updated_at DESC, created_at DESC, memory_id ASC LIMIT 1",
+            )
+            .bind(topic_key)
+            .bind(&memory.source_loom_id)
+            .fetch_optional(&mut *transaction)
+            .await
+            .map_err(|error| {
+                ServiceError::storage(format!("failed to inspect Memory conflict: {error}"))
+            })?
+            .map(memory_from_row)
+        } else {
+            None
+        };
+        if let Some(existing) = conflict.as_ref() {
+            if supersession_decision(&memory.memory_type, &existing.memory_type)
+                == SupersessionDecision::RejectIncoming
+            {
+                return Err(ServiceError::storage(
+                    "incoming Memory type cannot supersede the active topic key",
+                ));
+            }
+        }
+
+        let mut memory = memory.clone();
+        if let Some(existing) = conflict.as_ref() {
+            memory.supersedes_id = Some(existing.memory_id.clone());
         }
 
         sqlx::query(
@@ -263,6 +301,26 @@ impl MemoryRepository {
             ServiceError::storage(format!("failed to insert explicit Memory: {error}"))
         })?;
         insert_event_on(&mut transaction, created_event, &memory.memory_id).await?;
+        if let Some(existing) = conflict.as_ref() {
+            let update = sqlx::query(
+                "UPDATE memories
+                 SET deleted_at = ?2, updated_at = ?2
+                 WHERE memory_id = ?1 AND deleted_at IS NULL",
+            )
+            .bind(&existing.memory_id)
+            .bind(&memory.created_at)
+            .execute(&mut *transaction)
+            .await
+            .map_err(|error| {
+                ServiceError::storage(format!("failed to supersede Memory: {error}"))
+            })?;
+            if update.rows_affected() != 1 {
+                return Err(ServiceError::storage(
+                    "active Memory conflict changed concurrently",
+                ));
+            }
+            insert_event_on(&mut transaction, superseded_event, &existing.memory_id).await?;
+        }
         let record = sqlx::query("SELECT * FROM memories WHERE memory_id = ?1")
             .bind(&memory.memory_id)
             .fetch_one(&mut *transaction)
@@ -379,6 +437,7 @@ impl MemoryRepository {
             current.user_confirmed,
             current.always_include,
         )?;
+        validate_topic_key(current.topic_key.as_deref())?;
         reject_forbidden_payload(Some(&current.content))?;
         reject_forbidden_payload(Some(&current.normalized_content))?;
         reject_forbidden_payload(current.metadata_json.as_deref())?;
@@ -589,6 +648,7 @@ fn validate_explicit_memory(memory: &NewMemory) -> Result<(), ServiceError> {
     reject_forbidden_payload(Some(&memory.content))?;
     reject_forbidden_payload(Some(&memory.normalized_content))?;
     reject_forbidden_payload(memory.metadata_json.as_deref())?;
+    validate_topic_key(memory.topic_key.as_deref())?;
     if !matches!(
         memory.memory_type.as_str(),
         "explicit_user_memory" | "profile_preference"
@@ -615,6 +675,34 @@ fn validate_explicit_memory(memory: &NewMemory) -> Result<(), ServiceError> {
         return Err(ServiceError::storage("invalid explicit Memory defaults"));
     }
     Ok(())
+}
+
+fn validate_topic_key(topic_key: Option<&str>) -> Result<(), ServiceError> {
+    let Some(topic_key) = topic_key else {
+        return Ok(());
+    };
+    if topic_key.is_empty()
+        || !topic_key.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_' || byte == b'.'
+        })
+        || topic_key.split('.').any(str::is_empty)
+    {
+        return Err(ServiceError::storage(
+            "topic_key must contain lowercase dot-separated tokens using [a-z0-9_]",
+        ));
+    }
+    Ok(())
+}
+
+fn supersession_decision(incoming_type: &str, existing_type: &str) -> SupersessionDecision {
+    match (incoming_type, existing_type) {
+        ("explicit_user_memory" | "profile_preference", "system_note")
+        | ("system_note", _)
+        | ("inferred_preference", "explicit_user_memory" | "profile_preference") => {
+            SupersessionDecision::RejectIncoming
+        }
+        _ => SupersessionDecision::Supersede,
+    }
 }
 
 fn validate_always_include_state(
@@ -659,7 +747,10 @@ async fn insert_event_on(
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_content, MemoryRepository, MemoryUpdate, NewMemory, NewMemoryEvent};
+    use super::{
+        normalize_content, supersession_decision, MemoryRepository, MemoryUpdate, NewMemory,
+        NewMemoryEvent, SupersessionDecision,
+    };
     use crate::storage::db::test_database;
 
     #[tokio::test]
@@ -839,5 +930,37 @@ mod tests {
         .execute(database.pool())
         .await
         .expect("insert origin Response");
+    }
+
+    #[test]
+    fn supersession_priority_rejects_inferred_or_system_overrides() {
+        for existing in [
+            "inferred_preference",
+            "explicit_user_memory",
+            "profile_preference",
+        ] {
+            assert_eq!(
+                supersession_decision("explicit_user_memory", existing),
+                SupersessionDecision::Supersede
+            );
+            assert_eq!(
+                supersession_decision("profile_preference", existing),
+                SupersessionDecision::Supersede
+            );
+        }
+        for existing in ["explicit_user_memory", "profile_preference"] {
+            assert_eq!(
+                supersession_decision("inferred_preference", existing),
+                SupersessionDecision::RejectIncoming
+            );
+        }
+        assert_eq!(
+            supersession_decision("explicit_user_memory", "system_note"),
+            SupersessionDecision::RejectIncoming
+        );
+        assert_eq!(
+            supersession_decision("system_note", "explicit_user_memory"),
+            SupersessionDecision::RejectIncoming
+        );
     }
 }
