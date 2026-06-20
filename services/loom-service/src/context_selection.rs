@@ -7,7 +7,7 @@
 
 use std::{
     cmp::Ordering,
-    collections::{BTreeMap, HashSet},
+    collections::{BTreeMap, HashMap, HashSet},
     time::{Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -277,6 +277,12 @@ pub struct ContextSelectionDiagnostics {
     pub scoped_memory_candidates: usize,
     pub global_memory_candidates: usize,
     pub memory_type_weight_applied: bool,
+    pub memory_active_considered: usize,
+    pub memory_scoped_selected: usize,
+    pub memory_global_selected: usize,
+    pub memory_global_masked: usize,
+    pub memory_always_include_selected: usize,
+    pub memory_deleted_unconfirmed_excluded: usize,
     pub attachment_candidates: usize,
     pub attachment_parse_status_drops: usize,
     pub scope_resolution_latency_ms: u64,
@@ -352,6 +358,24 @@ struct SelectionAccounting {
     memory_weight_applied: bool,
 }
 
+#[derive(Debug, Clone)]
+struct MemoryReadMetadata {
+    memory_id: String,
+    memory_type: String,
+    source_loom_id: Option<String>,
+    always_include: bool,
+    content_length: usize,
+}
+
+#[derive(Debug, Clone, Default)]
+struct MemoryReadPolicy {
+    eligible_by_id: HashMap<String, MemoryReadMetadata>,
+    always_include: Vec<MemoryReadMetadata>,
+    active_considered: usize,
+    global_masked: usize,
+    deleted_unconfirmed_excluded: usize,
+}
+
 impl ContextSelectionService {
     pub fn new(database: &Database) -> Self {
         Self {
@@ -377,6 +401,7 @@ impl ContextSelectionService {
             || request.mode == ContextSelectionMode::CodeFocused;
         let mut accounting = SelectionAccounting::default();
         let mut seen = HashSet::new();
+        let memory_read_policy = self.memory_read_policy(&request.active_loom_id).await?;
 
         let policy_entries = validate_policy_entries(request.mandatory_policy_entries.clone())?;
         *accounting
@@ -384,9 +409,8 @@ impl ContextSelectionService {
             .entry(ContextSourceTier::PolicyAlwaysInclude)
             .or_default() += policy_entries.len();
 
-        let mut mandatory_references = self
-            .always_include_memories(&request.active_loom_id, &mut accounting)
-            .await?;
+        let mut mandatory_references =
+            self.always_include_memories(&memory_read_policy, &mut accounting);
         mandatory_references.extend(
             self.mandatory_references(&request.scope_context, &mut accounting)
                 .await?,
@@ -410,7 +434,13 @@ impl ContextSelectionService {
 
         for retrieval in &request.retrieval_result.candidates {
             let Some(ranked) = self
-                .transform_retrieval_candidate(retrieval, &request, code_relevance, &mut accounting)
+                .transform_retrieval_candidate(
+                    retrieval,
+                    &request,
+                    code_relevance,
+                    &memory_read_policy,
+                    &mut accounting,
+                )
                 .await?
             else {
                 continue;
@@ -520,6 +550,7 @@ impl ContextSelectionService {
             scoped_memories.len(),
             global_memories.len(),
             conversation_attachments.len(),
+            &memory_read_policy,
             selection_latency,
         );
 
@@ -604,17 +635,15 @@ impl ContextSelectionService {
         Ok(candidates)
     }
 
-    async fn always_include_memories(
+    async fn memory_read_policy(
         &self,
         active_loom_id: &str,
-        accounting: &mut SelectionAccounting,
-    ) -> Result<Vec<ContextCandidate>, ServiceError> {
+    ) -> Result<MemoryReadPolicy, ServiceError> {
         let rows = sqlx::query(
-            "SELECT memory_id, LENGTH(content) AS content_length
+            "SELECT memory_id, memory_type, source_loom_id, topic_key, always_include,
+                    user_confirmed, deleted_at, LENGTH(content) AS content_length
              FROM memories
-             WHERE always_include = 1 AND user_confirmed = 1 AND deleted_at IS NULL
-               AND memory_type IN ('explicit_user_memory', 'profile_preference')
-               AND (source_loom_id IS NULL OR source_loom_id = ?1)
+             WHERE source_loom_id IS NULL OR source_loom_id = ?1
              ORDER BY CASE WHEN source_loom_id = ?1 THEN 0 ELSE 1 END,
                       memory_type ASC, created_at ASC, memory_id ASC",
         )
@@ -623,25 +652,100 @@ impl ContextSelectionService {
         .await
         .map_err(|error| {
             ServiceError::storage(format!(
-                "failed to load always-include Memory metadata: {error}"
+                "failed to load Memory read-policy metadata: {error}"
             ))
         })?;
+        let deleted_unconfirmed_excluded = rows
+            .iter()
+            .filter(|row| {
+                !row.get::<bool, _>("user_confirmed")
+                    || row.get::<Option<String>, _>("deleted_at").is_some()
+            })
+            .count();
+        let active_rows = rows
+            .into_iter()
+            .filter(|row| {
+                row.get::<bool, _>("user_confirmed")
+                    && row.get::<Option<String>, _>("deleted_at").is_none()
+            })
+            .collect::<Vec<_>>();
+        let active_considered = active_rows.len();
+        let scoped_topic_keys = active_rows
+            .iter()
+            .filter(|row| row.get::<Option<String>, _>("source_loom_id").is_some())
+            .filter_map(|row| row.get::<Option<String>, _>("topic_key"))
+            .collect::<HashSet<_>>();
+        let global_masked = active_rows
+            .iter()
+            .filter(|row| row.get::<Option<String>, _>("source_loom_id").is_none())
+            .filter_map(|row| row.get::<Option<String>, _>("topic_key"))
+            .filter(|topic_key| scoped_topic_keys.contains(topic_key))
+            .count();
+        let eligible = active_rows
+            .into_iter()
+            .filter(|row| {
+                let global_topic_key = row
+                    .get::<Option<String>, _>("source_loom_id")
+                    .is_none()
+                    .then(|| row.get::<Option<String>, _>("topic_key"))
+                    .flatten();
+                global_topic_key
+                    .as_ref()
+                    .is_none_or(|topic_key| !scoped_topic_keys.contains(topic_key))
+            })
+            .map(|row| MemoryReadMetadata {
+                memory_id: row.get("memory_id"),
+                memory_type: row.get("memory_type"),
+                source_loom_id: row.get("source_loom_id"),
+                always_include: row.get("always_include"),
+                content_length: row.get::<i64, _>("content_length") as usize,
+            })
+            .collect::<Vec<_>>();
+        let always_include = eligible
+            .iter()
+            .filter(|memory| {
+                memory.always_include
+                    && matches!(
+                        memory.memory_type.as_str(),
+                        "explicit_user_memory" | "profile_preference"
+                    )
+            })
+            .cloned()
+            .collect();
+        Ok(MemoryReadPolicy {
+            eligible_by_id: eligible
+                .into_iter()
+                .map(|memory| (memory.memory_id.clone(), memory))
+                .collect(),
+            always_include,
+            active_considered,
+            global_masked,
+            deleted_unconfirmed_excluded,
+        })
+    }
+
+    fn always_include_memories(
+        &self,
+        policy: &MemoryReadPolicy,
+        accounting: &mut SelectionAccounting,
+    ) -> Vec<ContextCandidate> {
         *accounting
             .evaluated
             .entry(ContextSourceTier::PolicyAlwaysInclude)
-            .or_default() += rows.len();
-        Ok(rows
-            .into_iter()
+            .or_default() += policy.always_include.len();
+        policy
+            .always_include
+            .iter()
             .enumerate()
-            .map(|(index, row)| ContextCandidate {
+            .map(|(index, memory)| ContextCandidate {
                 source_kind: "memory".to_string(),
-                source_id: row.get("memory_id"),
+                source_id: memory.memory_id.clone(),
                 chunk_ref: None,
                 tier: ContextSourceTier::PolicyAlwaysInclude,
                 tier_priority: ContextSourceTier::PolicyAlwaysInclude.priority(),
                 retrieval_score: None,
                 within_tier_rank: index as u32 + 1,
-                estimated_tokens: estimate_tokens(row.get::<i64, _>("content_length") as usize),
+                estimated_tokens: estimate_tokens(memory.content_length),
                 include_mode_hint: ContextIncludeModeHint::Full,
                 is_hidden_background: false,
                 is_mandatory: true,
@@ -649,7 +753,7 @@ impl ContextSelectionService {
                 text_preview: None,
                 rank_signals: None,
             })
-            .collect())
+            .collect()
     }
 
     async fn conversation_turns(
@@ -773,6 +877,7 @@ impl ContextSelectionService {
         source: &RetrievalCandidate,
         request: &ContextSelectionRequest,
         code_relevance: bool,
+        memory_read_policy: &MemoryReadPolicy,
         accounting: &mut SelectionAccounting,
     ) -> Result<Option<RankedCandidate>, ServiceError> {
         if !allowed_source_kind(&source.source_kind) {
@@ -790,21 +895,22 @@ impl ContextSelectionService {
         };
 
         if source.source_kind == "memory" {
-            let memory_type = sqlx::query_scalar::<_, String>(
-                "SELECT memory_type FROM memories
-                 WHERE memory_id = ?1 AND user_confirmed = 1 AND deleted_at IS NULL",
-            )
-            .bind(&source.source_id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(|error| {
-                ServiceError::storage(format!("failed to validate memory metadata: {error}"))
-            })?;
-            let Some(memory_type) = memory_type else {
+            let Some(memory) = memory_read_policy.eligible_by_id.get(&source.source_id) else {
                 return Ok(None);
             };
-            adjusted_score *= match memory_type.as_str() {
-                "explicit_user_memory" => self.policy.explicit_user_memory_weight,
+            let verified_tier =
+                if memory.source_loom_id.as_deref() == Some(request.active_loom_id.as_str()) {
+                    ContextSourceTier::ScopedMemory
+                } else {
+                    ContextSourceTier::GlobalMemory
+                };
+            if tier != verified_tier {
+                return Ok(None);
+            }
+            adjusted_score *= match memory.memory_type.as_str() {
+                "explicit_user_memory" | "profile_preference" => {
+                    self.policy.explicit_user_memory_weight
+                }
                 "inferred_preference" => self.policy.inferred_preference_weight,
                 _ => self.policy.other_confirmed_memory_weight,
             };
@@ -1082,6 +1188,7 @@ fn build_diagnostics(
     scoped_memory_count: usize,
     global_memory_count: usize,
     attachment_count: usize,
+    memory_read_policy: &MemoryReadPolicy,
     selection_latency_ms: u64,
 ) -> ContextSelectionDiagnostics {
     let all_tiers = [
@@ -1159,6 +1266,12 @@ fn build_diagnostics(
         scoped_memory_candidates: scoped_memory_count,
         global_memory_candidates: global_memory_count,
         memory_type_weight_applied: accounting.memory_weight_applied,
+        memory_active_considered: memory_read_policy.active_considered,
+        memory_scoped_selected: scoped_memory_count,
+        memory_global_selected: global_memory_count,
+        memory_global_masked: memory_read_policy.global_masked,
+        memory_always_include_selected: memory_read_policy.always_include.len(),
+        memory_deleted_unconfirmed_excluded: memory_read_policy.deleted_unconfirmed_excluded,
         attachment_candidates: attachment_count,
         attachment_parse_status_drops: accounting.attachment_parse_status_drops,
         scope_resolution_latency_ms: scope_latency,
@@ -1366,6 +1479,29 @@ mod tests {
              WHERE memory_id = ?1",
         )
         .bind(memory_id)
+        .bind(user_confirmed)
+        .bind(deleted_at)
+        .execute(database.pool())
+        .await
+        .unwrap();
+    }
+
+    async fn configure_memory_read_policy(
+        database: &Database,
+        memory_id: &str,
+        topic_key: Option<&str>,
+        always_include: bool,
+        user_confirmed: bool,
+        deleted_at: Option<&str>,
+    ) {
+        sqlx::query(
+            "UPDATE memories
+             SET topic_key = ?2, always_include = ?3, user_confirmed = ?4, deleted_at = ?5
+             WHERE memory_id = ?1",
+        )
+        .bind(memory_id)
+        .bind(topic_key)
+        .bind(always_include)
         .bind(user_confirmed)
         .bind(deleted_at)
         .execute(database.pool())
@@ -1712,6 +1848,231 @@ mod tests {
         assert!(!persisted.contains("safe memory"));
         assert!(!persisted.contains("raw_thinking"));
         assert!(!persisted.contains("provider_payload"));
+    }
+
+    #[tokio::test]
+    async fn memory_read_policy_masks_by_topic_scope_and_persists_selected_identities_only() {
+        let database = test_database().await;
+        seed_loom(&database, "loom-read-policy", None, None, false).await;
+        seed_loom(&database, "loom-other", None, None, false).await;
+        let memories = [
+            (
+                "memory-scoped-shared",
+                "explicit_user_memory",
+                Some("loom-read-policy"),
+                Some("preference.shared"),
+                false,
+                true,
+                None,
+            ),
+            (
+                "memory-global-shared",
+                "profile_preference",
+                None,
+                Some("preference.shared"),
+                false,
+                true,
+                None,
+            ),
+            (
+                "memory-global-only",
+                "profile_preference",
+                None,
+                Some("preference.global_only"),
+                false,
+                true,
+                None,
+            ),
+            (
+                "memory-scoped-null",
+                "inferred_preference",
+                Some("loom-read-policy"),
+                None,
+                false,
+                true,
+                None,
+            ),
+            (
+                "memory-global-null",
+                "profile_preference",
+                None,
+                None,
+                false,
+                true,
+                None,
+            ),
+            (
+                "memory-scoped-different",
+                "profile_preference",
+                Some("loom-read-policy"),
+                Some("preference.scoped"),
+                false,
+                true,
+                None,
+            ),
+            (
+                "memory-global-different",
+                "profile_preference",
+                None,
+                Some("preference.global"),
+                false,
+                true,
+                None,
+            ),
+            (
+                "memory-other-loom",
+                "explicit_user_memory",
+                Some("loom-other"),
+                Some("preference.shared"),
+                false,
+                true,
+                None,
+            ),
+            (
+                "memory-deleted",
+                "explicit_user_memory",
+                Some("loom-read-policy"),
+                Some("preference.deleted"),
+                false,
+                true,
+                Some("deleted"),
+            ),
+            (
+                "memory-unconfirmed",
+                "inferred_preference",
+                Some("loom-read-policy"),
+                Some("preference.unconfirmed"),
+                false,
+                false,
+                None,
+            ),
+            (
+                "memory-superseded",
+                "explicit_user_memory",
+                None,
+                Some("preference.superseded"),
+                false,
+                true,
+                Some("superseded"),
+            ),
+            (
+                "memory-forgotten",
+                "explicit_user_memory",
+                None,
+                Some("preference.forgotten"),
+                false,
+                true,
+                Some("forgotten"),
+            ),
+            (
+                "memory-always",
+                "explicit_user_memory",
+                Some("loom-read-policy"),
+                Some("preference.always"),
+                true,
+                true,
+                None,
+            ),
+        ];
+        for (id, memory_type, loom_id, topic_key, always, confirmed, deleted_at) in memories {
+            seed_memory(&database, id, memory_type, loom_id).await;
+            configure_memory_read_policy(&database, id, topic_key, always, confirmed, deleted_at)
+                .await;
+        }
+
+        let retrieval = memories
+            .into_iter()
+            .map(|(id, _, loom_id, _, _, _, _)| retrieval_candidate("memory", id, loom_id, 0.8))
+            .collect();
+        let scope_context = scope(&database, "loom-read-policy", Vec::new()).await;
+        let mut selection_request = request(scope_context, retrieval_result(retrieval));
+        selection_request.persist_snapshot = true;
+        selection_request.snapshot_id = Some("snapshot-memory-read-policy".to_string());
+        let payload = ContextSelectionService::new(&database)
+            .select(selection_request)
+            .await
+            .unwrap();
+
+        let selected_memory_ids = payload
+            .candidates_in_tier_order()
+            .into_iter()
+            .filter(|candidate| candidate.source_kind == "memory")
+            .map(|candidate| candidate.source_id.as_str())
+            .collect::<HashSet<_>>();
+        for expected in [
+            "memory-scoped-shared",
+            "memory-global-only",
+            "memory-scoped-null",
+            "memory-global-null",
+            "memory-scoped-different",
+            "memory-global-different",
+            "memory-always",
+        ] {
+            assert!(selected_memory_ids.contains(expected));
+        }
+        for excluded in [
+            "memory-global-shared",
+            "memory-other-loom",
+            "memory-deleted",
+            "memory-unconfirmed",
+            "memory-superseded",
+            "memory-forgotten",
+        ] {
+            assert!(!selected_memory_ids.contains(excluded));
+        }
+        assert_eq!(
+            selected_memory_ids
+                .iter()
+                .filter(|id| **id == "memory-always")
+                .count(),
+            1
+        );
+        let always = payload
+            .mandatory_references
+            .iter()
+            .find(|candidate| candidate.source_id == "memory-always")
+            .unwrap();
+        assert_eq!(always.tier, ContextSourceTier::PolicyAlwaysInclude);
+        assert!(always.is_mandatory);
+        assert_eq!(payload.selection_diagnostics.memory_active_considered, 8);
+        assert_eq!(payload.selection_diagnostics.memory_scoped_selected, 3);
+        assert_eq!(
+            payload.scoped_memories.last().unwrap().source_id,
+            "memory-scoped-null"
+        );
+        assert_eq!(payload.selection_diagnostics.memory_global_selected, 3);
+        assert_eq!(payload.selection_diagnostics.memory_global_masked, 1);
+        assert_eq!(
+            payload.selection_diagnostics.memory_always_include_selected,
+            1
+        );
+        assert_eq!(
+            payload
+                .selection_diagnostics
+                .memory_deleted_unconfirmed_excluded,
+            4
+        );
+
+        let snapshot_rows = ContextSnapshotRepository::new(&database)
+            .list_candidates("snapshot-memory-read-policy")
+            .await
+            .unwrap();
+        let snapshot_memory_ids = snapshot_rows
+            .iter()
+            .filter(|row| row.source_kind == "memory" && row.is_selected)
+            .map(|row| row.source_id.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(snapshot_memory_ids, selected_memory_ids);
+        let diagnostics = serde_json::to_string(&payload.selection_diagnostics).unwrap();
+        for forbidden in [
+            "safe memory",
+            "preference.shared",
+            "preference.global_only",
+            "raw_thinking",
+            "provider_payload",
+        ] {
+            assert!(!diagnostics.contains(forbidden));
+        }
     }
 
     #[tokio::test]
