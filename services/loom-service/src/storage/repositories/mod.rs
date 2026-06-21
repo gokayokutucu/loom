@@ -16,4 +16,5 @@ pub mod responses;
 pub mod retrieval_projection;
 pub mod search_index;
 pub mod tags_graph;
+pub mod tool_scheduler;
 pub mod ui_state;

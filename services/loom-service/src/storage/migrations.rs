@@ -171,6 +171,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0027_agent_behavior_foundation.sql"),
         transactional: false,
     },
+    Migration {
+        version: 28,
+        name: "tool_scheduler_foundation",
+        sql: include_str!("../../migrations/0028_tool_scheduler_foundation.sql"),
+        transactional: true,
+    },
 ];
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
@@ -444,6 +450,74 @@ mod tests {
         .await
         .unwrap_err();
         assert!(source_error.to_string().contains("CHECK constraint failed"));
+    }
+
+    #[tokio::test]
+    async fn migration_0028_creates_tool_scheduler_tables() {
+        let database = test_database().await;
+        for table in [
+            "tool_definitions",
+            "tool_invocations",
+            "tool_artifacts",
+            "tool_permission_grants",
+        ] {
+            let count =
+                sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM sqlite_master WHERE name = ?1")
+                    .bind(table)
+                    .fetch_one(database.pool())
+                    .await
+                    .expect("table query should work");
+            assert_eq!(count, 1, "{table} should exist");
+        }
+
+        let applied = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 28 AND name = 'tool_scheduler_foundation'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .expect("schema migration query should work");
+        assert_eq!(applied, 1, "migration 0028 must be recorded");
+    }
+
+    #[tokio::test]
+    async fn migration_0028_tool_scheduler_schema_has_no_raw_payload_columns() {
+        let database = test_database().await;
+        for table in [
+            "tool_definitions",
+            "tool_invocations",
+            "tool_artifacts",
+            "tool_permission_grants",
+        ] {
+            let columns = sqlx::query_scalar::<_, String>(&format!(
+                "SELECT name FROM pragma_table_info('{table}') ORDER BY cid"
+            ))
+            .fetch_all(database.pool())
+            .await
+            .expect("column query should work");
+            for forbidden in [
+                "raw_payload",
+                "payload",
+                "raw_stdout",
+                "stdout",
+                "raw_stderr",
+                "stderr",
+                "content",
+                "file_contents",
+                "prompt",
+                "provider_payload",
+                "provider_request",
+                "provider_response",
+                "raw_thinking",
+                "thinking_text",
+                "chain_of_thought",
+                "hidden_reasoning",
+            ] {
+                assert!(
+                    !columns.iter().any(|column| column == forbidden),
+                    "{table} must not contain forbidden column {forbidden}"
+                );
+            }
+        }
     }
 
     #[tokio::test]
