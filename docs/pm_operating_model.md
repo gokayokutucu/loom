@@ -108,12 +108,7 @@ This section defines the concrete read/write contract for any PM skill or agent 
 2. If the `ACTIVE` Phase has no such Task (i.e., it's actually done), recommend promoting it to `LOCKED` per §5 and pulling the head of the `NEXT` queue (§4) as the new `ACTIVE` Phase — but do not do this promotion automatically; surface it as a recommendation for the user to confirm, consistent with `AGENTS.md`'s "no silent ledger changes" rule.
 
 ### 7.5 Generate progress reports
-A progress report must include, at minimum:
-- Current `ACTIVE` Phase and its completion % (from roadmap §2/§4.2)
-- Overall completion % (roadmap §4.1)
-- Critical path position (roadmap §4.4) — is the active work actually on the critical path?
-- Any open drift cases (roadmap §5) relevant to the work being reported on
-This mirrors the existing phase-report format in `AGENTS.md` §13, but additionally requires citing the roadmap document instead of re-deriving phase state from scratch each time.
+A progress report must strictly adhere to the structural and data requirements defined in `docs/pm_reporting_contract.md`. This includes generating the mandatory `ROADMAP STATUS` block, executing progress calculations based on physical checklist items, computing the engineering estimation, and checking for roadmap drift.
 
 ### 7.6 Detect roadmap drift
 A PM skill should flag drift whenever it observes any of the following, without trying to silently resolve them:

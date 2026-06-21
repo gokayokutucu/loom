@@ -14,8 +14,8 @@ Implement synchronous, explicit-only Memory persistence through the existing Mem
 - [x] Append metadata-only `explicit_created` and `duplicate_skipped` events.
 - [x] Support caller-provided `topic_key` and explicit `always_include` storage.
 - [x] Keep Context Manager, Retrieval, Scope Resolution, Main, and Quick Ask unchanged.
-- [ ] Complete full validation and runtime verification.
-- [ ] Commit with `feat: add explicit memory write pipeline`.
+- [x] Complete full validation and runtime verification.
+- [x] Commit with `feat: add explicit memory write pipeline`.
 
 ## Deferred
 

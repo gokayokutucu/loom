@@ -18,8 +18,8 @@ Add durable SQLite-owned retrieval projection invalidation metadata for Memory l
 - [x] Make the shared projection rebuild plan recognize stale chunks.
 - [x] Keep Tantivy/LanceDB rebuild execution outside Memory requests.
 - [x] Keep Retrieval ranking, Context Selection, Context Manager, Main, and Quick Ask unchanged.
-- [ ] Complete full validation and live runtime verification.
-- [ ] Commit with `feat: invalidate memory retrieval projections`.
+- [x] Complete full validation and live runtime verification.
+- [x] Commit with `feat: invalidate memory retrieval projections`.
 
 ## Invalidation Model
 

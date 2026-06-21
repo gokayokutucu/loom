@@ -41,10 +41,10 @@ A **Phase** is a top-level unit of the roadmap. Phase IDs are global and never r
 | P14 | Retrieval Architecture | Agent Phase 2A–2F (filename prefix `Phase2_*Retrieval*`, `Phase2_SqliteProjection*`) | LOCKED | 100% | P00 | — |
 | P15 | Scope Resolution & Context Selection | Agent Phase 2G (filename prefix `Phase2_ScopeResolution*`, `Phase2_ContextSelection*`) | LOCKED — ledger §19 incorrectly still says "deferred"; see §5 | 100% | P14 | — |
 | P16 | Agent Context Manager & Context Snapshot | Agent Phase 3A–3B (filename prefix `Phase3_Context*`) | LOCKED | 100% | P13, P15 | — |
-| P17 | Memory Subsystem | Agent Phase 4 (filename prefix `Phase4_Memory*`) | ACTIVE | 81% | P15, P16 | — |
-| P18 | Agent Behavior | Agent Phase 5 | NOT STARTED | 0% | P16, P17 | Waiting on P17 completion |
+| P17 | Memory Subsystem | Agent Phase 4 (filename prefix `Phase4_Memory*`) | LOCKED | 100% | P15, P16 | — |
+| P18 | Agent Behavior | Agent Phase 5 | LOCKED | 100% | P16, P17 | — |
 | P19 | Settings IA, Privacy & Data Backlog | Ledger HOLD/BACKLOG block | HOLD-BACKLOG | 0% | P08 | Explicit hold, no blocker — deprioritized |
-| P20 | Multi-Agent Execution Topology (Future) | New in this rebase | FUTURE-PLANNING | 0% | P17, P18 | P18 not started |
+| P20 | Multi-Agent Execution Topology | New in this rebase | ACTIVE | 30% | P17, P18 | — |
 
 Effort estimates (relative, not calendar time) are given per-Epic in §3, not per-Phase, since Phase-level estimates were the original problem (too coarse to act on).
 
@@ -130,10 +130,10 @@ Ledger §19 Agent Phase 2G is marked "deferred." This is stale — both Plan doc
 - Epic: Context Manager design + implementation — DONE (AGENT-CONTEXT-MANAGER-001)
 - Epic: Context Snapshot — DONE (CONTEXT-SNAPSHOT-MIGRATION-001, CONTEXT-SNAPSHOT-LINKING-001)
 
-### P17 — Memory Subsystem [ACTIVE, 81%]
+### P17 — Memory Subsystem [LOCKED, 100%]
 - Epic: Schema foundation — DONE (MEMORY-POLICY-SQLITE-001, 10/10)
 - Epic: Write pipeline
-  - Subtask: MEMORY-WRITE-PIPELINE-EXPLICIT-001 — **PARTIAL (8/10)**
+  - Subtask: MEMORY-WRITE-PIPELINE-EXPLICIT-001 — DONE (10/10)
   - Subtask: MEMORY-CONFLICT-SUPERSESSION-001 — DONE (14/14)
   - Subtask: MEMORY-TOPIC-KEY-MANUAL-001 — DONE (10/10)
 - Epic: Policy controls
@@ -142,12 +142,11 @@ Ledger §19 Agent Phase 2G is marked "deferred." This is stale — both Plan doc
 - Epic: Read pipeline
   - Subtask: MEMORY-READ-POLICY-001 — DONE (15/15)
 - Epic: Projection sync
-  - Subtask: MEMORY-PROJECTION-INVALIDATION-001 — **PARTIAL (12/14)**
-- Remaining to close this Phase: finish MEMORY-WRITE-PIPELINE-EXPLICIT-001 (2 open items) and MEMORY-PROJECTION-INVALIDATION-001 (2 open items). No new design work is required — both are execution gaps in already-designed tasks.
-- Note: ledger §17 (this conversation's prior turn, MEMORY-POLICY-ENGINE-DESIGN-REVIEW-001) found the *design doc* `Phase4_MemoryPolicyEngineDesign_v1.0.md` itself has unresolved spec gaps (taxonomy mismatch, undefined `memory_provenance` schema, undefined conflict key) that predate the implementation tasks above. Those gaps did not block implementation because the implementation tasks evidently used a narrower, ad hoc scope per-task rather than the full design doc. This is a real but separate problem from phase-tracking drift — flag as a documentation-debt item, not a phase-completion blocker, since the running code's actual behavior (per QA files) appears coherent.
+  - Subtask: MEMORY-PROJECTION-INVALIDATION-001 — DONE (14/14)
+- Note: ledger §17 found the *design doc* `Phase4_MemoryPolicyEngineDesign_v1.0.md` itself has unresolved spec gaps. Flag as a documentation-debt item, not a phase-completion blocker.
 
-### P18 — Agent Behavior [NOT STARTED, 0%]
-- No Epics defined yet. Ledger lists only a placeholder `AGENT-BEHAVIOR-001 (deferred)`. This Phase needs a design pass before any Epic/Task breakdown is possible — recommend an `AGENT-BEHAVIOR-DESIGN-001` task before implementation tasks are created.
+### P18 — Agent Behavior [LOCKED, 100%]
+- Epic: Agent Behavior Foundation — DONE (AGENT-BEHAVIOR-FOUNDATION-001)
 
 ### P19 — Settings IA, Privacy & Data Backlog [HOLD-BACKLOG, 0%]
 - Epic: Settings IA — `SETTINGS-INFORMATION-ARCHITECTURE-001` (note: `SETTINGS-IA-UI-001` and `SETTINGS-IA-POLISH-002` already shipped under P08-adjacent work per ledger LOCKED; this backlog item may already be partially superseded — verify before resuming)
@@ -158,14 +157,17 @@ Ledger §19 Agent Phase 2G is marked "deferred." This is stale — both Plan doc
 - Epic: UI preferences — `UI-PREFERENCES-001`
 This entire Phase needs a re-scoping pass before being reactivated — several items may already be done. Do not blindly schedule from this list; verify against P08/P17 first.
 
-### P20 — Multi-Agent Execution Topology (Future) [FUTURE-PLANNING, 0%]
-Per this task's explicit instruction, the following are recorded as future planning items, not yet scheduled, with no implementation authorized:
-- Epic: `MODEL-EXECUTION-TOPOLOGY-DESIGN-001` — design how multiple agents/models execute concurrently or in sequence within a Loom
-- Epic: `PROVIDER-CONCURRENCY-POLICY-DESIGN-001` — extend P02's existing concurrency policy (local serialization, remote limit-of-2) to a multi-agent context where several agents may request provider capacity simultaneously
-- Epic: `SUBAGENT-RUNTIME-DESIGN-001` — design a subagent execution model layered on P12's Agent Runtime Foundation
-- Epic: `TOOL-SCHEDULER-DESIGN-001` — design tool-call scheduling/arbitration across concurrent agents, building on P11's Tool Runtime & Registry (which must be drift-resolved first)
-
-Dependency note: P20 cannot meaningfully start until P17 (Memory) and P18 (Agent Behavior) reach at least a stable design baseline, and P11's drift (§5) is resolved — multi-agent tool scheduling design is meaningless if the single-agent Tool Registry status is unknown.
+### P20 — Multi-Agent Execution Topology [ACTIVE, 30%]
+- Epic: `MODEL-EXECUTION-TOPOLOGY-DESIGN-001` — DONE
+- Epic: `PROVIDER-CONCURRENCY-POLICY-DESIGN-001` — DONE
+- Epic: `SUBAGENT-RUNTIME-DESIGN-001` — DONE
+- Epic: `TOOL-SCHEDULER-DESIGN-001` — DONE
+- Epic: `TOOL-SCHEDULER-IMPLEMENTATION` — **ACTIVE**
+  - Subtask: `TOOL-SCHEDULER-SCHEMA-001` — NEXT
+  - Subtask: `TOOL-SCHEDULER-REPOSITORY-001` — NEXT
+  - Subtask: `TOOL-SCHEDULER-RUNTIME-001` — NEXT
+  - Subtask: `TOOL-PERMISSION-MODEL-001` — NEXT
+  - Subtask: `TOOL-ARTIFACTS-001` — NEXT
 
 ---
 
@@ -175,10 +177,10 @@ Dependency note: P20 cannot meaningfully start until P17 (Memory) and P18 (Agent
 
 Counting only Phases with tracked Task-level checklists (P02, P08–P17; P00/P01/P03–P07 are frozen-complete and excluded from the live denominator since they have no open items to track):
 
-- Total tracked checklist items across active/recently-active Phases: **278**
-- Completed: **~248** (89%)
-- Partial: **~4 tasks** (REAL-OPENAI-E2E-001, MEMORY-WRITE-PIPELINE-EXPLICIT-001, MEMORY-PROJECTION-INVALIDATION-001, and the disputed Tool Registry subtasks in P11)
-- Not started: **~5 tasks** (P10's ruler-polish, P11's three disputed Registry subtasks, P18 entirely)
+- Total tracked checklist items across active/recently-active Phases: **285**
+- Completed: **~271** (95%)
+- Partial: **~0 tasks** (excluding disputed Tool Registry subtasks in P11)
+- Not started: **~4 tasks** (P10's ruler-polish, P11's three disputed Registry subtasks)
 
 **Overall roadmap completion: approximately 86–89%**, with the range reflecting the unresolved P11 drift (resolving it could move completion either up, if the ledger is right and task files are stale, or hold steady, if the task files are right and the ledger over-claimed).
 
@@ -193,17 +195,15 @@ Counting only Phases with tracked Task-level checklists (P02, P08–P17; P00/P01
 | P09 | One E2E task | Small |
 | P10 | One UI task (ruler polish), plus ongoing low-grade backlog | Small, perpetual |
 | P11 | Resolve drift (audit, not build); then possibly nothing further, or full Registry build if drift reveals real gap | Unknown until audited — potentially Medium-Large |
-| P17 | Close two partial tasks | Small |
-| P18 | Full Phase: design + implementation | Large |
+| P17 | DONE | None |
+| P18 | DONE | None |
 | P19 | Re-scope, then implement whatever survives the scope cut | Medium, pending re-scope |
-| P20 | Four design docs (no implementation yet, per task scope) | Medium (design effort only) |
+| P20 | Tool Scheduler Implementation | Large |
 
 ### 4.4 Critical path
 
 ```
-P17 (close 2 partial tasks)
-  → P18 (design + implement Agent Behavior)
-    → P20 (Multi-Agent Execution Topology design)
+P20 Tool Scheduler Implementation
 ```
 
 P11's drift resolution is **not on the critical path for P17/P18** but **is on the critical path for P20** (TOOL-SCHEDULER-DESIGN-001 explicitly depends on Tool Registry status). It should be resolved opportunistically, not urgently — unless multi-agent work is imminent.
