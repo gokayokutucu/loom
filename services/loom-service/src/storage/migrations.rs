@@ -5,6 +5,7 @@ struct Migration {
     version: i64,
     name: &'static str,
     sql: &'static str,
+    transactional: bool,
 }
 
 const MIGRATIONS: &[Migration] = &[
@@ -12,131 +13,163 @@ const MIGRATIONS: &[Migration] = &[
         version: 1,
         name: "initial_schema",
         sql: include_str!("../../migrations/0001_initial_schema.sql"),
+        transactional: true,
     },
     Migration {
         version: 2,
         name: "orchestration_workflow",
         sql: include_str!("../../migrations/0002_orchestration_workflow.sql"),
+        transactional: true,
     },
     Migration {
         version: 3,
         name: "capabilities",
         sql: include_str!("../../migrations/0003_capabilities.sql"),
+        transactional: true,
     },
     Migration {
         version: 4,
         name: "community_model_benchmarks",
         sql: include_str!("../../migrations/0004_community_model_benchmarks.sql"),
+        transactional: true,
     },
     Migration {
         version: 5,
         name: "loom_metadata",
         sql: include_str!("../../migrations/0005_loom_metadata.sql"),
+        transactional: true,
     },
     Migration {
         version: 6,
         name: "response_code_blocks",
         sql: include_str!("../../migrations/0006_response_code_blocks.sql"),
+        transactional: true,
     },
     Migration {
         version: 7,
         name: "response_parts",
         sql: include_str!("../../migrations/0007_response_parts.sql"),
+        transactional: true,
     },
     Migration {
         version: 8,
         name: "response_tags_graph",
         sql: include_str!("../../migrations/0008_response_tags_graph.sql"),
+        transactional: true,
     },
     Migration {
         version: 9,
         name: "navigation_history",
         sql: include_str!("../../migrations/0009_navigation_history.sql"),
+        transactional: true,
     },
     Migration {
         version: 10,
         name: "response_soft_delete",
         sql: include_str!("../../migrations/0010_response_soft_delete.sql"),
+        transactional: true,
     },
     Migration {
         version: 11,
         name: "loom_soft_delete",
         sql: include_str!("../../migrations/0011_loom_soft_delete.sql"),
+        transactional: true,
     },
     Migration {
         version: 12,
         name: "ui_state",
         sql: include_str!("../../migrations/0012_ui_state.sql"),
+        transactional: true,
     },
     Migration {
         version: 13,
         name: "memory",
         sql: include_str!("../../migrations/0013_memory.sql"),
+        transactional: true,
     },
     Migration {
         version: 14,
         name: "model_runtime",
         sql: include_str!("../../migrations/0014_model_runtime.sql"),
+        transactional: true,
     },
     Migration {
         version: 15,
         name: "attachments",
         sql: include_str!("../../migrations/0015_attachments.sql"),
+        transactional: true,
     },
     Migration {
         version: 16,
         name: "attachment_parse_pipeline",
         sql: include_str!("../../migrations/0016_attachment_parse_pipeline.sql"),
+        transactional: true,
     },
     Migration {
         version: 17,
         name: "attachment_checksum_dedupe",
         sql: include_str!("../../migrations/0017_attachment_checksum_dedupe.sql"),
+        transactional: true,
     },
     Migration {
         version: 18,
         name: "search_fts",
         sql: include_str!("../../migrations/0018_search_fts.sql"),
+        transactional: true,
     },
     Migration {
         version: 19,
         name: "cleanup_pseudo_artifact_code_blocks",
         sql: include_str!("../../migrations/0019_cleanup_pseudo_artifact_code_blocks.sql"),
+        transactional: true,
     },
     Migration {
         version: 20,
         name: "response_attachment_references",
         sql: include_str!("../../migrations/0020_response_attachment_references.sql"),
+        transactional: true,
     },
     Migration {
         version: 21,
         name: "cleanup_orphaned_code_language_tags",
         sql: include_str!("../../migrations/0021_cleanup_orphaned_code_language_tags.sql"),
+        transactional: true,
     },
     Migration {
         version: 22,
         name: "agent_run_persistence",
         sql: include_str!("../../migrations/0022_agent_run_persistence.sql"),
+        transactional: true,
     },
     Migration {
         version: 23,
         name: "retrieval_projection_contracts",
         sql: include_str!("../../migrations/0023_retrieval_projection_contracts.sql"),
+        transactional: true,
     },
     Migration {
         version: 24,
         name: "context_snapshots",
         sql: include_str!("../../migrations/0024_context_snapshots.sql"),
+        transactional: true,
     },
     Migration {
         version: 25,
         name: "memory_policy_foundation",
         sql: include_str!("../../migrations/0025_memory_policy_foundation.sql"),
+        transactional: true,
     },
     Migration {
         version: 26,
         name: "memory_projection_invalidation",
         sql: include_str!("../../migrations/0026_memory_projection_invalidation.sql"),
+        transactional: true,
+    },
+    Migration {
+        version: 27,
+        name: "agent_behavior_foundation",
+        sql: include_str!("../../migrations/0027_agent_behavior_foundation.sql"),
+        transactional: false,
     },
 ];
 
@@ -168,29 +201,47 @@ pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
             continue;
         }
 
-        let mut transaction = pool.begin().await.map_err(|error| {
-            ServiceError::storage(format!("failed to start migration transaction: {error}"))
-        })?;
-
-        transaction.execute(migration.sql).await.map_err(|error| {
-            ServiceError::storage(format!(
-                "failed to apply migration {} {}: {error}",
-                migration.version, migration.name
-            ))
-        })?;
-
-        sqlx::query("INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)")
-            .bind(migration.version)
-            .bind(migration.name)
-            .execute(&mut *transaction)
-            .await
-            .map_err(|error| {
-                ServiceError::storage(format!("failed to record migration: {error}"))
+        if migration.transactional {
+            let mut transaction = pool.begin().await.map_err(|error| {
+                ServiceError::storage(format!("failed to start migration transaction: {error}"))
             })?;
 
-        transaction.commit().await.map_err(|error| {
-            ServiceError::storage(format!("failed to commit migration transaction: {error}"))
-        })?;
+            transaction.execute(migration.sql).await.map_err(|error| {
+                ServiceError::storage(format!(
+                    "failed to apply migration {} {}: {error}",
+                    migration.version, migration.name
+                ))
+            })?;
+
+            sqlx::query("INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)")
+                .bind(migration.version)
+                .bind(migration.name)
+                .execute(&mut *transaction)
+                .await
+                .map_err(|error| {
+                    ServiceError::storage(format!("failed to record migration: {error}"))
+                })?;
+
+            transaction.commit().await.map_err(|error| {
+                ServiceError::storage(format!("failed to commit migration transaction: {error}"))
+            })?;
+        } else {
+            pool.execute(migration.sql).await.map_err(|error| {
+                ServiceError::storage(format!(
+                    "failed to apply migration {} {}: {error}",
+                    migration.version, migration.name
+                ))
+            })?;
+
+            sqlx::query("INSERT INTO schema_migrations (version, name) VALUES (?1, ?2)")
+                .bind(migration.version)
+                .bind(migration.name)
+                .execute(pool)
+                .await
+                .map_err(|error| {
+                    ServiceError::storage(format!("failed to record migration: {error}"))
+                })?;
+        }
     }
 
     Ok(())
@@ -611,11 +662,15 @@ mod tests {
         let database = test_database().await;
         let now = "2026-01-01T00:00:00Z";
         for status in [
-            "pending",
+            "created",
+            "queued",
             "running",
+            "waiting_tool",
+            "waiting_subagent",
             "completed",
             "failed",
             "cancelled",
+            // Recovery compatibility state from the frozen canonical contract.
             "interrupted",
         ] {
             let run_id = format!("test-status-{status}");

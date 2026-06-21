@@ -222,8 +222,12 @@ pub async fn run(
 
 fn status_label(status: AgentRunStatus) -> &'static str {
     match status {
+        AgentRunStatus::Created => "created",
+        AgentRunStatus::Queued => "queued",
         AgentRunStatus::Pending => "pending",
         AgentRunStatus::Running => "running",
+        AgentRunStatus::WaitingTool => "waiting_tool",
+        AgentRunStatus::WaitingSubagent => "waiting_subagent",
         AgentRunStatus::Completed => "completed",
         AgentRunStatus::Failed => "failed",
         AgentRunStatus::Cancelled => "cancelled",

@@ -50,6 +50,8 @@ tree_loom.txt
 
 # Claude Code local settings (machine-specific, should not be committed).
 .claude/settings.local.json
+CLAUDE.md
+scratch/
 
 # target folder is ignored for cross platform build
 # and services/loom-service/target folder is always ignored

@@ -79,8 +79,12 @@ fn str_to_epoch_ms(s: &str) -> u64 {
 
 fn status_str(status: AgentRunStatus) -> &'static str {
     match status {
+        AgentRunStatus::Created => "created",
+        AgentRunStatus::Queued => "queued",
         AgentRunStatus::Pending => "pending",
         AgentRunStatus::Running => "running",
+        AgentRunStatus::WaitingTool => "waiting_tool",
+        AgentRunStatus::WaitingSubagent => "waiting_subagent",
         AgentRunStatus::Completed => "completed",
         AgentRunStatus::Failed => "failed",
         AgentRunStatus::Cancelled => "cancelled",
@@ -90,8 +94,12 @@ fn status_str(status: AgentRunStatus) -> &'static str {
 
 fn status_from_str(s: &str) -> AgentRunStatus {
     match s {
+        "created" => AgentRunStatus::Created,
+        "queued" => AgentRunStatus::Queued,
         "pending" => AgentRunStatus::Pending,
         "running" => AgentRunStatus::Running,
+        "waiting_tool" => AgentRunStatus::WaitingTool,
+        "waiting_subagent" => AgentRunStatus::WaitingSubagent,
         "completed" => AgentRunStatus::Completed,
         "failed" => AgentRunStatus::Failed,
         "cancelled" => AgentRunStatus::Cancelled,
@@ -131,11 +139,15 @@ fn step_status_str(status: AgentStepStatus) -> &'static str {
 #[serde(rename_all = "camelCase")]
 pub struct AgentRunRecord {
     pub agent_run_id: String,
+    pub agent_id: Option<String>,
+    pub agent_revision: Option<String>,
     pub loom_id: Option<String>,
     pub response_id: Option<String>,
     pub parent_response_id: Option<String>,
     pub correlation_id: String,
     pub causation_id: Option<String>,
+    pub root_run_id: Option<String>,
+    pub parent_run_id: Option<String>,
     pub context_snapshot_id: Option<String>,
     pub provider_profile_id: Option<String>,
     pub model_id: Option<String>,
@@ -180,21 +192,119 @@ pub struct AgentEventRecord {
     pub created_at: String,
 }
 
+/// Immutable Agent definition metadata. Instruction bodies and executable
+/// behavior are deliberately referenced, not stored here.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentDefinitionRecord {
+    pub agent_id: String,
+    pub revision: String,
+    pub name: String,
+    pub role: String,
+    pub instruction_set_ref: Option<String>,
+    pub capability_profile_ref: Option<String>,
+    pub context_policy_ref: Option<String>,
+    pub tool_policy_ref: Option<String>,
+    pub provider_policy_ref: Option<String>,
+    pub enabled: bool,
+    pub metadata_json: Option<String>,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
 // ---------------------------------------------------------------------------
 // Input types
 // ---------------------------------------------------------------------------
 
 pub struct NewAgentRun<'a> {
     pub agent_run_id: &'a str,
+    pub agent_id: Option<&'a str>,
+    pub agent_revision: Option<&'a str>,
     pub loom_id: Option<&'a str>,
     pub response_id: Option<&'a str>,
     pub parent_response_id: Option<&'a str>,
     pub correlation_id: &'a str,
     pub causation_id: Option<&'a str>,
+    pub root_run_id: Option<&'a str>,
+    pub parent_run_id: Option<&'a str>,
     pub context_snapshot_id: Option<&'a str>,
     pub provider_profile_id: Option<&'a str>,
     pub model_id: Option<&'a str>,
     pub started_at: &'a str,
+}
+
+pub struct NewAgentDefinition<'a> {
+    pub agent_id: &'a str,
+    pub revision: &'a str,
+    pub name: &'a str,
+    pub role: &'a str,
+    pub instruction_set_ref: Option<&'a str>,
+    pub capability_profile_ref: Option<&'a str>,
+    pub context_policy_ref: Option<&'a str>,
+    pub tool_policy_ref: Option<&'a str>,
+    pub provider_policy_ref: Option<&'a str>,
+    pub enabled: bool,
+    pub metadata_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AgentRunTransition {
+    Queue,
+    Start,
+    WaitTool,
+    ResumeFromTool,
+    WaitSubagent,
+    ResumeFromSubagent,
+    Complete,
+    Fail,
+}
+
+impl AgentRunTransition {
+    fn event_type(self) -> &'static str {
+        match self {
+            AgentRunTransition::Queue => "run_queued",
+            AgentRunTransition::Start => "run_started",
+            AgentRunTransition::WaitTool => "run_waiting_tool",
+            AgentRunTransition::ResumeFromTool => "run_started",
+            AgentRunTransition::WaitSubagent => "run_waiting_subagent",
+            AgentRunTransition::ResumeFromSubagent => "run_started",
+            AgentRunTransition::Complete => "run_completed",
+            AgentRunTransition::Fail => "run_failed",
+        }
+    }
+
+    fn from_state(self) -> &'static str {
+        match self {
+            AgentRunTransition::Queue => "created",
+            AgentRunTransition::Start => "queued",
+            AgentRunTransition::WaitTool => "running",
+            AgentRunTransition::ResumeFromTool => "waiting_tool",
+            AgentRunTransition::WaitSubagent => "running",
+            AgentRunTransition::ResumeFromSubagent => "waiting_subagent",
+            AgentRunTransition::Complete => "running",
+            AgentRunTransition::Fail => "running",
+        }
+    }
+
+    fn to_state(self) -> &'static str {
+        match self {
+            AgentRunTransition::Queue => "queued",
+            AgentRunTransition::Start => "running",
+            AgentRunTransition::WaitTool => "waiting_tool",
+            AgentRunTransition::ResumeFromTool => "running",
+            AgentRunTransition::WaitSubagent => "waiting_subagent",
+            AgentRunTransition::ResumeFromSubagent => "running",
+            AgentRunTransition::Complete => "completed",
+            AgentRunTransition::Fail => "failed",
+        }
+    }
+
+    fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            AgentRunTransition::Complete | AgentRunTransition::Fail
+        )
+    }
 }
 
 pub struct NewAgentStep<'a> {
@@ -262,21 +372,59 @@ impl AgentRunRepository {
     // Writes
     // -----------------------------------------------------------------------
 
+    pub async fn insert_agent_definition(
+        &self,
+        definition: &NewAgentDefinition<'_>,
+    ) -> Result<(), ServiceError> {
+        if let Some(payload) = &definition.metadata_json {
+            validate_persisted_payload(payload)?;
+        }
+        let enabled = if definition.enabled { 1 } else { 0 };
+        sqlx::query(
+            "INSERT INTO agent_definitions
+             (agent_id, revision, name, role, instruction_set_ref,
+              capability_profile_ref, context_policy_ref, tool_policy_ref,
+              provider_policy_ref, enabled, metadata_json, created_at, updated_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)
+             ON CONFLICT(agent_id, revision) DO NOTHING",
+        )
+        .bind(definition.agent_id)
+        .bind(definition.revision)
+        .bind(definition.name)
+        .bind(definition.role)
+        .bind(definition.instruction_set_ref)
+        .bind(definition.capability_profile_ref)
+        .bind(definition.context_policy_ref)
+        .bind(definition.tool_policy_ref)
+        .bind(definition.provider_policy_ref)
+        .bind(enabled)
+        .bind(definition.metadata_json.as_deref())
+        .execute(&self.pool)
+        .await
+        .map_err(|e| ServiceError::storage(format!("failed to insert agent definition: {e}")))?;
+        Ok(())
+    }
+
     pub async fn insert_run(&self, run: &NewAgentRun<'_>) -> Result<(), ServiceError> {
+        let root_run_id = run.root_run_id.unwrap_or(run.agent_run_id);
         sqlx::query(
             "INSERT OR IGNORE INTO agent_runs
-             (agent_run_id, loom_id, response_id, parent_response_id,
-              correlation_id, causation_id, context_snapshot_id,
+             (agent_run_id, agent_id, agent_revision, loom_id, response_id, parent_response_id,
+              correlation_id, causation_id, root_run_id, parent_run_id, context_snapshot_id,
               provider_profile_id, model_id, status, cancel_requested,
               started_at, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,'running',0,?10,?10)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'running',0,?14,?14)",
         )
         .bind(run.agent_run_id)
+        .bind(run.agent_id)
+        .bind(run.agent_revision)
         .bind(run.loom_id)
         .bind(run.response_id)
         .bind(run.parent_response_id)
         .bind(run.correlation_id)
         .bind(run.causation_id)
+        .bind(root_run_id)
+        .bind(run.parent_run_id)
         .bind(run.context_snapshot_id)
         .bind(run.provider_profile_id)
         .bind(run.model_id)
@@ -285,6 +433,149 @@ impl AgentRunRepository {
         .await
         .map_err(|e| ServiceError::storage(format!("failed to insert agent run: {e}")))?;
         Ok(())
+    }
+
+    pub async fn create_run(&self, run: &NewAgentRun<'_>) -> Result<AgentRunRecord, ServiceError> {
+        let root_run_id = run.root_run_id.unwrap_or(run.agent_run_id);
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            ServiceError::storage(format!("failed to begin agent run create transaction: {e}"))
+        })?;
+
+        if let Some(parent_run_id) = run.parent_run_id {
+            let parent =
+                sqlx::query("SELECT root_run_id, status FROM agent_runs WHERE agent_run_id = ?1")
+                    .bind(parent_run_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        ServiceError::storage(format!("failed to inspect parent agent run: {e}"))
+                    })?
+                    .ok_or_else(|| ServiceError::storage("parent Agent Run not found"))?;
+            use sqlx::Row;
+            let parent_root_run_id: String = parent.get("root_run_id");
+            let parent_status: String = parent.get("status");
+            if parent_root_run_id != root_run_id {
+                return Err(ServiceError::storage(
+                    "child Agent Run root_run_id must match parent root_run_id",
+                ));
+            }
+            if is_terminal_status(&parent_status) || parent_status == "cancelled" {
+                return Err(ServiceError::storage(
+                    "child Agent Run cannot be created under a terminal parent",
+                ));
+            }
+        } else if root_run_id != run.agent_run_id {
+            return Err(ServiceError::storage(
+                "root Agent Run must use its own agent_run_id as root_run_id",
+            ));
+        }
+
+        sqlx::query(
+            "INSERT INTO agent_runs
+             (agent_run_id, agent_id, agent_revision, loom_id, response_id, parent_response_id,
+              correlation_id, causation_id, root_run_id, parent_run_id, context_snapshot_id,
+              provider_profile_id, model_id, status, cancel_requested, started_at, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'created',0,?14,?14)",
+        )
+        .bind(run.agent_run_id)
+        .bind(run.agent_id)
+        .bind(run.agent_revision)
+        .bind(run.loom_id)
+        .bind(run.response_id)
+        .bind(run.parent_response_id)
+        .bind(run.correlation_id)
+        .bind(run.causation_id)
+        .bind(root_run_id)
+        .bind(run.parent_run_id)
+        .bind(run.context_snapshot_id)
+        .bind(run.provider_profile_id)
+        .bind(run.model_id)
+        .bind(run.started_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ServiceError::storage(format!("failed to create agent run: {e}")))?;
+
+        append_lifecycle_event_tx(
+            &mut tx,
+            run.agent_run_id,
+            None,
+            "run_created",
+            serde_json::json!({
+                "runId": run.agent_run_id,
+                "rootRunId": root_run_id,
+                "parentRunId": run.parent_run_id,
+                "state": "created"
+            }),
+        )
+        .await?;
+
+        tx.commit().await.map_err(|e| {
+            ServiceError::storage(format!("failed to commit agent run create: {e}"))
+        })?;
+
+        self.get_run(run.agent_run_id)
+            .await?
+            .ok_or_else(|| ServiceError::storage("created Agent Run not found"))
+    }
+
+    pub async fn transition_run(
+        &self,
+        run_id: &str,
+        transition: AgentRunTransition,
+    ) -> Result<bool, ServiceError> {
+        let now = now_iso();
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            ServiceError::storage(format!("failed to begin agent run transition: {e}"))
+        })?;
+        let update = sqlx::query(
+            "UPDATE agent_runs
+             SET status = ?1,
+                 completed_at = CASE WHEN ?2 = 1 THEN COALESCE(completed_at, ?3) ELSE completed_at END
+             WHERE agent_run_id = ?4 AND status = ?5",
+        )
+        .bind(transition.to_state())
+        .bind(if transition.is_terminal() { 1 } else { 0 })
+        .bind(&now)
+        .bind(run_id)
+        .bind(transition.from_state())
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ServiceError::storage(format!("failed to transition agent run: {e}")))?;
+
+        if update.rows_affected() == 0 {
+            let exists = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM agent_runs WHERE agent_run_id = ?1",
+            )
+            .bind(run_id)
+            .fetch_one(&mut *tx)
+            .await
+            .map_err(|e| ServiceError::storage(format!("failed to inspect agent run: {e}")))?;
+            tx.rollback().await.map_err(|e| {
+                ServiceError::storage(format!("failed to rollback agent run transition: {e}"))
+            })?;
+            if exists == 0 {
+                return Err(ServiceError::storage("Agent Run not found for transition"));
+            }
+            return Ok(false);
+        }
+
+        append_lifecycle_event_tx(
+            &mut tx,
+            run_id,
+            None,
+            transition.event_type(),
+            serde_json::json!({
+                "runId": run_id,
+                "from": transition.from_state(),
+                "to": transition.to_state()
+            }),
+        )
+        .await?;
+
+        tx.commit().await.map_err(|e| {
+            ServiceError::storage(format!("failed to commit agent run transition: {e}"))
+        })?;
+        Ok(true)
     }
 
     pub async fn insert_step(&self, step: &NewAgentStep<'_>) -> Result<(), ServiceError> {
@@ -439,17 +730,87 @@ impl AgentRunRepository {
 
     pub async fn cancel_run(&self, run_id: &str) -> Result<(), ServiceError> {
         let now = now_iso();
-        sqlx::query(
-            "UPDATE agent_runs
-             SET status = 'cancelled', cancel_requested = 1,
-                 completed_at = COALESCE(completed_at, ?1)
-             WHERE agent_run_id = ?2 AND status IN ('pending','running')",
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            ServiceError::storage(format!("failed to begin agent run cancellation: {e}"))
+        })?;
+
+        let exists =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agent_runs WHERE agent_run_id = ?1")
+                .bind(run_id)
+                .fetch_one(&mut *tx)
+                .await
+                .map_err(|e| ServiceError::storage(format!("failed to inspect agent run: {e}")))?;
+        if exists == 0 {
+            tx.rollback().await.map_err(|e| {
+                ServiceError::storage(format!("failed to rollback missing cancellation: {e}"))
+            })?;
+            return Err(ServiceError::storage(
+                "Agent Run not found for cancellation",
+            ));
+        }
+
+        let rows = sqlx::query(
+            "WITH RECURSIVE descendants(agent_run_id, depth) AS (
+                SELECT agent_run_id, 0 FROM agent_runs WHERE agent_run_id = ?1
+                UNION ALL
+                SELECT child.agent_run_id, descendants.depth + 1
+                FROM agent_runs child
+                JOIN descendants ON child.parent_run_id = descendants.agent_run_id
+             )
+             SELECT agent_runs.agent_run_id, agent_runs.status
+             FROM agent_runs
+             JOIN descendants ON descendants.agent_run_id = agent_runs.agent_run_id
+             ORDER BY descendants.depth ASC, agent_runs.created_at ASC",
         )
-        .bind(&now)
         .bind(run_id)
-        .execute(&self.pool)
+        .fetch_all(&mut *tx)
         .await
-        .map_err(|e| ServiceError::storage(format!("failed to cancel agent run: {e}")))?;
+        .map_err(|e| ServiceError::storage(format!("failed to list cancellation subtree: {e}")))?;
+
+        for row in rows {
+            use sqlx::Row;
+            let descendant_run_id: String = row.get("agent_run_id");
+            let status: String = row.get("status");
+            if is_terminal_status(&status) {
+                continue;
+            }
+
+            let update = sqlx::query(
+                "UPDATE agent_runs
+                 SET status = 'cancelled', cancel_requested = 1,
+                     completed_at = COALESCE(completed_at, ?1)
+                 WHERE agent_run_id = ?2
+                   AND status NOT IN ('completed','failed','cancelled','interrupted')",
+            )
+            .bind(&now)
+            .bind(&descendant_run_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| {
+                ServiceError::storage(format!(
+                    "failed to cancel agent run {descendant_run_id}: {e}"
+                ))
+            })?;
+
+            if update.rows_affected() == 1 {
+                append_lifecycle_event_tx(
+                    &mut tx,
+                    &descendant_run_id,
+                    None,
+                    "run_cancelled",
+                    serde_json::json!({
+                        "runId": descendant_run_id,
+                        "requestedRunId": run_id,
+                        "scope": "run_and_descendants"
+                    }),
+                )
+                .await?;
+            }
+        }
+
+        tx.commit().await.map_err(|e| {
+            ServiceError::storage(format!("failed to commit agent run cancellation: {e}"))
+        })?;
         Ok(())
     }
 
@@ -592,10 +953,31 @@ impl AgentRunRepository {
     // Reads
     // -----------------------------------------------------------------------
 
+    pub async fn get_agent_definition(
+        &self,
+        agent_id: &str,
+        revision: &str,
+    ) -> Result<Option<AgentDefinitionRecord>, ServiceError> {
+        let row = sqlx::query(
+            "SELECT agent_id, revision, name, role, instruction_set_ref,
+                    capability_profile_ref, context_policy_ref, tool_policy_ref,
+                    provider_policy_ref, enabled, metadata_json, created_at, updated_at
+             FROM agent_definitions
+             WHERE agent_id = ?1 AND revision = ?2",
+        )
+        .bind(agent_id)
+        .bind(revision)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|e| ServiceError::storage(format!("failed to get agent definition: {e}")))?;
+
+        Ok(row.map(agent_definition_record_from_row))
+    }
+
     pub async fn get_run(&self, run_id: &str) -> Result<Option<AgentRunRecord>, ServiceError> {
         let row = sqlx::query(
-            "SELECT agent_run_id, loom_id, response_id, parent_response_id,
-                    correlation_id, causation_id, context_snapshot_id,
+            "SELECT agent_run_id, agent_id, agent_revision, loom_id, response_id, parent_response_id,
+                    correlation_id, causation_id, root_run_id, parent_run_id, context_snapshot_id,
                     provider_profile_id, model_id, status, cancel_requested,
                     started_at, completed_at, input_tokens, output_tokens, total_tokens,
                     error_message, created_at
@@ -615,8 +997,8 @@ impl AgentRunRepository {
         limit: i64,
     ) -> Result<Vec<AgentRunRecord>, ServiceError> {
         sqlx::query(
-            "SELECT agent_run_id, loom_id, response_id, parent_response_id,
-                    correlation_id, causation_id, context_snapshot_id,
+            "SELECT agent_run_id, agent_id, agent_revision, loom_id, response_id, parent_response_id,
+                    correlation_id, causation_id, root_run_id, parent_run_id, context_snapshot_id,
                     provider_profile_id, model_id, status, cancel_requested,
                     started_at, completed_at, input_tokens, output_tokens, total_tokens,
                     error_message, created_at
@@ -676,20 +1058,84 @@ impl AgentRunRepository {
     }
 }
 
+fn is_terminal_status(status: &str) -> bool {
+    matches!(status, "completed" | "failed" | "cancelled" | "interrupted")
+}
+
+async fn append_lifecycle_event_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    run_id: &str,
+    step_id: Option<&str>,
+    event_type: &str,
+    payload: serde_json::Value,
+) -> Result<(), ServiceError> {
+    let payload_json = payload.to_string();
+    validate_persisted_payload(&payload_json)?;
+    let sequence_number = sqlx::query_scalar::<_, i64>(
+        "SELECT COALESCE(MAX(sequence_number) + 1, 0)
+         FROM agent_events WHERE agent_run_id = ?1",
+    )
+    .bind(run_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| ServiceError::storage(format!("failed to allocate agent event sequence: {e}")))?;
+    let event_id = uuid::Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO agent_events
+         (agent_event_id, agent_run_id, agent_step_id, sequence_number,
+          event_type, payload_json, created_at)
+         VALUES (?1,?2,?3,?4,?5,?6,CURRENT_TIMESTAMP)",
+    )
+    .bind(event_id)
+    .bind(run_id)
+    .bind(step_id)
+    .bind(sequence_number)
+    .bind(event_type)
+    .bind(payload_json)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| ServiceError::storage(format!("failed to append lifecycle event: {e}")))?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Row mappers
 // ---------------------------------------------------------------------------
+
+fn agent_definition_record_from_row(row: sqlx::sqlite::SqliteRow) -> AgentDefinitionRecord {
+    use sqlx::Row;
+    let enabled: i64 = row.get("enabled");
+    AgentDefinitionRecord {
+        agent_id: row.get("agent_id"),
+        revision: row.get("revision"),
+        name: row.get("name"),
+        role: row.get("role"),
+        instruction_set_ref: row.get("instruction_set_ref"),
+        capability_profile_ref: row.get("capability_profile_ref"),
+        context_policy_ref: row.get("context_policy_ref"),
+        tool_policy_ref: row.get("tool_policy_ref"),
+        provider_policy_ref: row.get("provider_policy_ref"),
+        enabled: enabled != 0,
+        metadata_json: row.get("metadata_json"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
 
 fn agent_run_record_from_row(row: sqlx::sqlite::SqliteRow) -> AgentRunRecord {
     use sqlx::Row;
     let cancel_requested: i64 = row.get("cancel_requested");
     AgentRunRecord {
         agent_run_id: row.get("agent_run_id"),
+        agent_id: row.get("agent_id"),
+        agent_revision: row.get("agent_revision"),
         loom_id: row.get("loom_id"),
         response_id: row.get("response_id"),
         parent_response_id: row.get("parent_response_id"),
         correlation_id: row.get("correlation_id"),
         causation_id: row.get("causation_id"),
+        root_run_id: row.get("root_run_id"),
+        parent_run_id: row.get("parent_run_id"),
         context_snapshot_id: row.get("context_snapshot_id"),
         provider_profile_id: row.get("provider_profile_id"),
         model_id: row.get("model_id"),
@@ -754,11 +1200,15 @@ mod tests {
     fn run_input(run_id: &str) -> NewAgentRun<'_> {
         NewAgentRun {
             agent_run_id: run_id,
+            agent_id: None,
+            agent_revision: None,
             loom_id: Some("loom-test"),
             response_id: Some("resp-assistant"),
             parent_response_id: Some("resp-user"),
             correlation_id: run_id,
             causation_id: Some("resp-user"),
+            root_run_id: None,
+            parent_run_id: None,
             context_snapshot_id: None,
             provider_profile_id: Some("ollama"),
             model_id: Some("test-model"),
@@ -815,6 +1265,249 @@ mod tests {
         );
         assert_eq!(record.status, "running");
         assert!(!record.cancel_requested);
+    }
+
+    #[tokio::test]
+    async fn agent_definition_is_persisted_without_instruction_body() {
+        let repo = make_repo().await;
+        repo.insert_agent_definition(&NewAgentDefinition {
+            agent_id: "agent-foundation",
+            revision: "rev-1",
+            name: "Foundation Agent",
+            role: "runtime_foundation",
+            instruction_set_ref: Some("instructions://agent-foundation/rev-1"),
+            capability_profile_ref: Some("capability://basic"),
+            context_policy_ref: Some("context://none"),
+            tool_policy_ref: Some("tools://none"),
+            provider_policy_ref: Some("provider://unset"),
+            enabled: true,
+            metadata_json: Some(r#"{"safe":"metadata"}"#.to_string()),
+        })
+        .await
+        .unwrap();
+
+        let record = repo
+            .get_agent_definition("agent-foundation", "rev-1")
+            .await
+            .unwrap()
+            .expect("definition");
+        assert_eq!(record.agent_id, "agent-foundation");
+        assert_eq!(record.revision, "rev-1");
+        assert_eq!(
+            record.instruction_set_ref.as_deref(),
+            Some("instructions://agent-foundation/rev-1")
+        );
+        assert!(record.enabled);
+
+        let serialized = serde_json::to_string(&record).unwrap();
+        for forbidden in ["prompt", "raw_thinking", "provider_payload", "secret"] {
+            assert!(
+                !serialized.to_ascii_lowercase().contains(forbidden),
+                "forbidden content '{forbidden}' found in definition"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_definition_rejects_private_metadata() {
+        let repo = make_repo().await;
+        let result = repo
+            .insert_agent_definition(&NewAgentDefinition {
+                agent_id: "agent-private",
+                revision: "rev-1",
+                name: "Private Agent",
+                role: "runtime_foundation",
+                instruction_set_ref: None,
+                capability_profile_ref: None,
+                context_policy_ref: None,
+                tool_policy_ref: None,
+                provider_policy_ref: None,
+                enabled: true,
+                metadata_json: Some(r#"{"prompt":"do not store prompt bodies"}"#.to_string()),
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn create_run_records_root_identity_and_run_created_event() {
+        let repo = make_repo().await;
+        let input = run_input("run-created-root");
+        let record = repo.create_run(&input).await.unwrap();
+
+        assert_eq!(record.status, "created");
+        assert_eq!(record.root_run_id.as_deref(), Some("run-created-root"));
+        assert_eq!(record.parent_run_id, None);
+
+        let events = repo
+            .list_events_for_run("run-created-root", 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].sequence_number, 0);
+        assert_eq!(events[0].event_type, "run_created");
+    }
+
+    #[tokio::test]
+    async fn create_child_run_inherits_root_and_records_parent() {
+        let repo = make_repo().await;
+        repo.create_run(&run_input("run-root-tree")).await.unwrap();
+        repo.transition_run("run-root-tree", AgentRunTransition::Queue)
+            .await
+            .unwrap();
+        repo.transition_run("run-root-tree", AgentRunTransition::Start)
+            .await
+            .unwrap();
+
+        let mut child = run_input("run-child-tree");
+        child.root_run_id = Some("run-root-tree");
+        child.parent_run_id = Some("run-root-tree");
+        child.correlation_id = "run-root-tree";
+        child.causation_id = Some("run-root-tree");
+        let record = repo.create_run(&child).await.unwrap();
+
+        assert_eq!(record.status, "created");
+        assert_eq!(record.root_run_id.as_deref(), Some("run-root-tree"));
+        assert_eq!(record.parent_run_id.as_deref(), Some("run-root-tree"));
+    }
+
+    #[tokio::test]
+    async fn create_child_run_rejects_wrong_root_and_terminal_parent() {
+        let repo = make_repo().await;
+        repo.create_run(&run_input("run-root-parent"))
+            .await
+            .unwrap();
+        repo.transition_run("run-root-parent", AgentRunTransition::Queue)
+            .await
+            .unwrap();
+        repo.transition_run("run-root-parent", AgentRunTransition::Start)
+            .await
+            .unwrap();
+
+        let mut wrong_root = run_input("run-child-wrong-root");
+        wrong_root.root_run_id = Some("wrong-root");
+        wrong_root.parent_run_id = Some("run-root-parent");
+        let wrong_root_error = repo.create_run(&wrong_root).await.unwrap_err();
+        assert!(wrong_root_error.to_string().contains("root_run_id"));
+
+        repo.transition_run("run-root-parent", AgentRunTransition::Complete)
+            .await
+            .unwrap();
+        let mut late_child = run_input("run-child-late");
+        late_child.root_run_id = Some("run-root-parent");
+        late_child.parent_run_id = Some("run-root-parent");
+        let late_child_error = repo.create_run(&late_child).await.unwrap_err();
+        assert!(late_child_error.to_string().contains("terminal parent"));
+    }
+
+    #[tokio::test]
+    async fn required_state_machine_transitions_emit_ordered_events() {
+        let repo = make_repo().await;
+        repo.create_run(&run_input("run-transition-order"))
+            .await
+            .unwrap();
+
+        for transition in [
+            AgentRunTransition::Queue,
+            AgentRunTransition::Start,
+            AgentRunTransition::WaitTool,
+            AgentRunTransition::ResumeFromTool,
+            AgentRunTransition::WaitSubagent,
+            AgentRunTransition::ResumeFromSubagent,
+            AgentRunTransition::Complete,
+        ] {
+            assert!(repo
+                .transition_run("run-transition-order", transition)
+                .await
+                .unwrap());
+        }
+
+        let record = repo
+            .get_run("run-transition-order")
+            .await
+            .unwrap()
+            .expect("run");
+        assert_eq!(record.status, "completed");
+        let events = repo
+            .list_events_for_run("run-transition-order", 0, 20)
+            .await
+            .unwrap();
+        let types: Vec<&str> = events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect();
+        assert_eq!(
+            types,
+            vec![
+                "run_created",
+                "run_queued",
+                "run_started",
+                "run_waiting_tool",
+                "run_started",
+                "run_waiting_subagent",
+                "run_started",
+                "run_completed",
+            ]
+        );
+        assert!(events
+            .iter()
+            .enumerate()
+            .all(|(index, event)| event.sequence_number == index as i64));
+    }
+
+    #[tokio::test]
+    async fn invalid_state_machine_transition_is_rejected_without_event() {
+        let repo = make_repo().await;
+        repo.create_run(&run_input("run-invalid-transition"))
+            .await
+            .unwrap();
+
+        assert!(!repo
+            .transition_run("run-invalid-transition", AgentRunTransition::Start)
+            .await
+            .unwrap());
+        let record = repo
+            .get_run("run-invalid-transition")
+            .await
+            .unwrap()
+            .expect("run");
+        assert_eq!(record.status, "created");
+        let events = repo
+            .list_events_for_run("run-invalid-transition", 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, "run_created");
+    }
+
+    #[tokio::test]
+    async fn failure_transition_from_running_emits_failed_terminal_event() {
+        let repo = make_repo().await;
+        repo.create_run(&run_input("run-fails-from-running"))
+            .await
+            .unwrap();
+        repo.transition_run("run-fails-from-running", AgentRunTransition::Queue)
+            .await
+            .unwrap();
+        repo.transition_run("run-fails-from-running", AgentRunTransition::Start)
+            .await
+            .unwrap();
+        assert!(repo
+            .transition_run("run-fails-from-running", AgentRunTransition::Fail)
+            .await
+            .unwrap());
+
+        let record = repo
+            .get_run("run-fails-from-running")
+            .await
+            .unwrap()
+            .expect("run");
+        assert_eq!(record.status, "failed");
+        let events = repo
+            .list_events_for_run("run-fails-from-running", 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(events.last().unwrap().event_type, "run_failed");
     }
 
     #[tokio::test]
@@ -1150,6 +1843,64 @@ mod tests {
         assert_eq!(record.status, "cancelled");
         assert!(record.cancel_requested);
         assert!(record.completed_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn parent_cancellation_cascades_to_descendants_once() {
+        let repo = make_repo().await;
+        repo.create_run(&run_input("run-cascade-root"))
+            .await
+            .unwrap();
+        repo.transition_run("run-cascade-root", AgentRunTransition::Queue)
+            .await
+            .unwrap();
+        repo.transition_run("run-cascade-root", AgentRunTransition::Start)
+            .await
+            .unwrap();
+
+        let mut child = run_input("run-cascade-child");
+        child.root_run_id = Some("run-cascade-root");
+        child.parent_run_id = Some("run-cascade-root");
+        child.correlation_id = "run-cascade-root";
+        repo.create_run(&child).await.unwrap();
+        repo.transition_run("run-cascade-child", AgentRunTransition::Queue)
+            .await
+            .unwrap();
+        repo.transition_run("run-cascade-child", AgentRunTransition::Start)
+            .await
+            .unwrap();
+
+        let mut grandchild = run_input("run-cascade-grandchild");
+        grandchild.root_run_id = Some("run-cascade-root");
+        grandchild.parent_run_id = Some("run-cascade-child");
+        grandchild.correlation_id = "run-cascade-root";
+        repo.create_run(&grandchild).await.unwrap();
+        repo.transition_run("run-cascade-grandchild", AgentRunTransition::Queue)
+            .await
+            .unwrap();
+
+        repo.cancel_run("run-cascade-root").await.unwrap();
+        repo.cancel_run("run-cascade-root").await.unwrap();
+
+        for run_id in [
+            "run-cascade-root",
+            "run-cascade-child",
+            "run-cascade-grandchild",
+        ] {
+            let record = repo.get_run(run_id).await.unwrap().expect("run");
+            assert_eq!(record.status, "cancelled");
+            assert!(record.cancel_requested);
+
+            let events = repo.list_events_for_run(run_id, 0, 20).await.unwrap();
+            assert_eq!(
+                events
+                    .iter()
+                    .filter(|event| event.event_type == "run_cancelled")
+                    .count(),
+                1,
+                "cancellation event must be emitted exactly once for {run_id}"
+            );
+        }
     }
 
     #[tokio::test]

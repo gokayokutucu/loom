@@ -74,8 +74,12 @@ impl std::fmt::Display for AgentStepId {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum AgentRunStatus {
+    Created,
+    Queued,
     Pending,
     Running,
+    WaitingTool,
+    WaitingSubagent,
     Completed,
     Failed,
     Cancelled,

@@ -110,7 +110,12 @@ impl AgentRunStore {
             };
 
             match run.status {
-                AgentRunStatus::Pending | AgentRunStatus::Running => {
+                AgentRunStatus::Created
+                | AgentRunStatus::Queued
+                | AgentRunStatus::Pending
+                | AgentRunStatus::Running
+                | AgentRunStatus::WaitingTool
+                | AgentRunStatus::WaitingSubagent => {
                     let newly_requested = !run.cancel_requested;
                     run.cancel_requested = true;
                     run.status = AgentRunStatus::Cancelled;
@@ -203,8 +208,12 @@ fn terminal_event(
         },
         Some(
             AgentRunStatus::Failed
+            | AgentRunStatus::Created
+            | AgentRunStatus::Queued
             | AgentRunStatus::Pending
             | AgentRunStatus::Running
+            | AgentRunStatus::WaitingTool
+            | AgentRunStatus::WaitingSubagent
             | AgentRunStatus::Interrupted,
         ) => AgentEvent::RunFailed {
             run_id: run_id.to_string(),
@@ -342,11 +351,15 @@ where
             if let Some(ref repo) = run_repository {
                 let _ = repo.insert_run(&NewAgentRun {
                     agent_run_id: &run_id,
+                    agent_id: None,
+                    agent_revision: None,
                     loom_id: request.loom_id.as_deref(),
                     response_id: request.response_id.as_deref(),
                     parent_response_id: request.parent_response_id.as_deref(),
                     correlation_id: &run_id,
                     causation_id: request.parent_response_id.as_deref(),
+                    root_run_id: None,
+                    parent_run_id: None,
                     context_snapshot_id: request.context_snapshot_id.as_deref(),
                     provider_profile_id: Some(provider_profile_id.as_str()),
                     model_id: Some(model_id.as_str()),
