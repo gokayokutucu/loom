@@ -5,7 +5,7 @@ Task: PM-REPORTING-CONTRACT-001
 
 ## 1. Overview and Purpose
 
-To prevent roadmap drift, silent ledger changes, and untracked side-quests, every AI Agent (Codex, Claude, Gemini, or SubAgent) executing a task MUST emit a structured PM Report upon task completion or significant milestone. This document defines the exact schema, calculation rules, and drift detection mechanisms that must be followed in every final response.
+To prevent roadmap drift, silent ledger changes, and untracked side-quests, every AI Agent (Codex, Claude, Gemini, or SubAgent) executing a task MUST emit a structured PM Report upon task completion or significant milestone. This document defines the exact schema, calculation rules, and drift detection mechanisms that must be followed in every final response. This contract is strictly enforced according to the rules defined in `docs/pm_reporting_enforcement.md`.
 
 ## 2. Mandatory Reporting Block: ROADMAP STATUS
 
