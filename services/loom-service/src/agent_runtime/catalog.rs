@@ -7,9 +7,11 @@
 use serde_json::json;
 
 use crate::agent_runtime::tool_registry::{
-    RegisteredTool, ToolAvailability, ToolPermissionRequirement, ToolRegistry,
+    RegisteredTool, ToolAvailability, ToolPermissionRequirement, ToolRegistry, ToolRegistryBridge,
 };
 use crate::agent_runtime::tools::ToolName;
+use crate::error::ServiceError;
+use crate::storage::repositories::tool_scheduler::{ToolDefinitionRecord, ToolSchedulerRepository};
 
 /// Registers the deterministic, metadata-only Loom-native tool catalog.
 ///
@@ -19,6 +21,17 @@ pub fn seed_builtin_tools(registry: &mut ToolRegistry) {
     for tool in builtin_tools() {
         registry.register(tool);
     }
+}
+
+/// Seeds the same compatibility catalog into the canonical SQLite-backed Tool
+/// Scheduler repository and ensures the scheduler noop tool is discoverable.
+pub async fn seed_builtin_tools_to_scheduler(
+    repository: &ToolSchedulerRepository,
+) -> Result<Vec<ToolDefinitionRecord>, ServiceError> {
+    let bridge = ToolRegistryBridge::new(repository.clone());
+    let mut records = bridge.seed_registered_tools(&builtin_tools()).await?;
+    records.push(bridge.seed_noop_tool().await?);
+    Ok(records)
 }
 
 fn builtin_tools() -> [RegisteredTool; 4] {

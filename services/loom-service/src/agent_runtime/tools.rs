@@ -213,6 +213,37 @@ pub enum ToolInvocationStatus {
     Failed,
 }
 
+impl ToolInvocationStatus {
+    pub fn from_scheduler_status(
+        status: crate::storage::repositories::tool_scheduler::ToolInvocationStatus,
+    ) -> Self {
+        use crate::storage::repositories::tool_scheduler::ToolInvocationStatus as SchedulerStatus;
+        match status {
+            SchedulerStatus::Requested => Self::Requested,
+            SchedulerStatus::PermissionDenied => Self::Denied,
+            SchedulerStatus::Completed => Self::Completed,
+            SchedulerStatus::Failed | SchedulerStatus::TimedOut => Self::Failed,
+            SchedulerStatus::PermissionRequired
+            | SchedulerStatus::Queued
+            | SchedulerStatus::Running
+            | SchedulerStatus::Cancelled => Self::Skipped,
+        }
+    }
+
+    pub fn to_scheduler_status(
+        self,
+    ) -> crate::storage::repositories::tool_scheduler::ToolInvocationStatus {
+        use crate::storage::repositories::tool_scheduler::ToolInvocationStatus as SchedulerStatus;
+        match self {
+            Self::Requested => SchedulerStatus::Requested,
+            Self::Skipped => SchedulerStatus::Cancelled,
+            Self::Denied => SchedulerStatus::PermissionDenied,
+            Self::Completed => SchedulerStatus::Completed,
+            Self::Failed => SchedulerStatus::Failed,
+        }
+    }
+}
+
 /// Sanitized tool error: stable code plus a redacted message. Never carries
 /// raw provider payloads or credentials.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
