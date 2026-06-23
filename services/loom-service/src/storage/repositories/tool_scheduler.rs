@@ -122,6 +122,44 @@ impl ToolGrantStatus {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolPermissionScope {
+    OneTime,
+    Run,
+    RootRun,
+    Session,
+    Workspace,
+}
+
+impl ToolPermissionScope {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::OneTime => "one_time",
+            Self::Run => "run",
+            Self::RootRun => "root_run",
+            Self::Session => "session",
+            Self::Workspace => "workspace",
+        }
+    }
+}
+
+fn is_supported_permission_scope(scope: &str) -> bool {
+    matches!(
+        scope,
+        "one_time" | "run" | "root_run" | "session" | "workspace"
+    )
+}
+
+fn grant_is_active(grant: &ToolPermissionGrantRecord, now: &str) -> bool {
+    grant.permission_status == "granted"
+        && grant.revoked_at.is_none()
+        && grant
+            .expires_at
+            .as_deref()
+            .map(|expires_at| expires_at > now)
+            .unwrap_or(true)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolDefinitionRecord {
@@ -188,6 +226,31 @@ pub struct ToolPermissionGrantRecord {
     pub metadata_json: Option<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPermissionDiagnostics {
+    pub candidate_grant_count: i64,
+    pub active_grant_count: i64,
+    pub matching_active_grant_count: i64,
+    pub denied_grant_count: i64,
+    pub revoked_grant_count: i64,
+    pub expired_grant_count: i64,
+    pub pending_grant_count: i64,
+    pub one_time_consumption_deferred: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ToolPermissionEvaluation {
+    pub authorized: bool,
+    pub permission_required: bool,
+    pub decision_status: String,
+    pub reason_code: String,
+    pub matching_grant_id: Option<String>,
+    pub matching_scope: Option<String>,
+    pub diagnostics: ToolPermissionDiagnostics,
+}
+
 pub struct NewToolDefinition<'a> {
     pub tool_id: &'a str,
     pub tool_name: &'a str,
@@ -233,6 +296,13 @@ pub struct NewToolPermissionGrant<'a> {
     pub granted_at: Option<&'a str>,
     pub expires_at: Option<&'a str>,
     pub metadata_json: Option<&'a str>,
+}
+
+pub struct ToolPermissionLookup<'a> {
+    pub root_run_id: &'a str,
+    pub agent_run_id: &'a str,
+    pub tool_id: &'a str,
+    pub now: &'a str,
 }
 
 #[derive(Debug, Clone)]
@@ -449,6 +519,12 @@ impl ToolSchedulerRepository {
         &self,
         grant: &NewToolPermissionGrant<'_>,
     ) -> Result<ToolPermissionGrantRecord, ServiceError> {
+        if !is_supported_permission_scope(grant.permission_scope) {
+            return Err(ServiceError::storage(format!(
+                "unsupported tool permission scope: {}",
+                grant.permission_scope
+            )));
+        }
         if let Some(metadata) = grant.metadata_json {
             validate_safe_persisted_text("tool permission metadata_json", metadata)?;
         }
@@ -482,6 +558,18 @@ impl ToolSchedulerRepository {
         self.get_permission_grant(grant.grant_id)
             .await?
             .ok_or_else(|| ServiceError::storage("created tool permission grant not found"))
+    }
+
+    pub async fn create_permission_request(
+        &self,
+        request: &NewToolPermissionGrant<'_>,
+    ) -> Result<ToolPermissionGrantRecord, ServiceError> {
+        if request.permission_status != ToolGrantStatus::Pending {
+            return Err(ServiceError::storage(
+                "permission request must be created with pending status",
+            ));
+        }
+        self.create_permission_grant(request).await
     }
 
     pub async fn get_permission_grant(
@@ -533,6 +621,132 @@ impl ToolSchedulerRepository {
         Ok(false)
     }
 
+    pub async fn evaluate_permission(
+        &self,
+        lookup: &ToolPermissionLookup<'_>,
+    ) -> Result<ToolPermissionEvaluation, ServiceError> {
+        let tool_exists = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM tool_definitions WHERE tool_id = ?1",
+        )
+        .bind(lookup.tool_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to inspect tool definition: {error}"))
+        })?;
+        if tool_exists == 0 {
+            return Ok(permission_denied("unknown_tool"));
+        }
+
+        let run = sqlx::query(
+            "SELECT root_run_id, parent_run_id FROM agent_runs WHERE agent_run_id = ?1",
+        )
+        .bind(lookup.agent_run_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| ServiceError::storage(format!("failed to inspect agent run: {error}")))?;
+        let Some(run) = run else {
+            return Ok(permission_denied("unknown_run"));
+        };
+        let stored_root_run_id: String = run.get("root_run_id");
+        if stored_root_run_id != lookup.root_run_id {
+            return Ok(permission_denied("root_run_mismatch"));
+        }
+
+        let grants = sqlx::query(
+            "SELECT * FROM tool_permission_grants
+             WHERE root_run_id = ?1
+               AND (tool_id = ?2 OR tool_id IS NULL)",
+        )
+        .bind(lookup.root_run_id)
+        .bind(lookup.tool_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to list permission grants: {error}"))
+        })?
+        .into_iter()
+        .map(tool_permission_grant_from_row)
+        .collect::<Vec<_>>();
+
+        let candidate_grant_count = grants.len() as i64;
+        let mut active_grant_count = 0;
+        let mut matching_active_grant_count = 0;
+        let mut denied_grant_count = 0;
+        let mut revoked_grant_count = 0;
+        let mut expired_grant_count = 0;
+        let mut pending_grant_count = 0;
+        let mut first_match: Option<ToolPermissionGrantRecord> = None;
+
+        for grant in &grants {
+            match grant.permission_status.as_str() {
+                "pending" => pending_grant_count += 1,
+                "denied" => denied_grant_count += 1,
+                "revoked" => revoked_grant_count += 1,
+                "expired" => expired_grant_count += 1,
+                _ => {}
+            }
+
+            if grant.permission_status == "granted"
+                && grant
+                    .expires_at
+                    .as_deref()
+                    .map(|expires_at| expires_at <= lookup.now)
+                    .unwrap_or(false)
+            {
+                expired_grant_count += 1;
+            }
+
+            if !grant_is_active(grant, lookup.now) {
+                continue;
+            }
+            active_grant_count += 1;
+            if grant_matches_lookup(grant, lookup) {
+                matching_active_grant_count += 1;
+                if first_match.is_none() {
+                    first_match = Some(grant.clone());
+                }
+            }
+        }
+
+        let one_time_consumption_deferred = first_match
+            .as_ref()
+            .map(|grant| grant.permission_scope == ToolPermissionScope::OneTime.as_str())
+            .unwrap_or(false);
+        let diagnostics = ToolPermissionDiagnostics {
+            candidate_grant_count,
+            active_grant_count,
+            matching_active_grant_count,
+            denied_grant_count,
+            revoked_grant_count,
+            expired_grant_count,
+            pending_grant_count,
+            one_time_consumption_deferred,
+        };
+
+        if let Some(grant) = first_match {
+            return Ok(ToolPermissionEvaluation {
+                authorized: true,
+                permission_required: false,
+                decision_status: "granted".to_string(),
+                reason_code: "matching_active_grant".to_string(),
+                matching_grant_id: Some(grant.grant_id),
+                matching_scope: Some(grant.permission_scope),
+                diagnostics,
+            });
+        }
+
+        Ok(ToolPermissionEvaluation {
+            authorized: false,
+            permission_required: true,
+            decision_status: "permission_required".to_string(),
+            reason_code: "no_matching_active_grant".to_string(),
+            matching_grant_id: None,
+            matching_scope: None,
+            diagnostics,
+        })
+    }
+
     async fn ensure_agent_run_under_root(
         &self,
         agent_run_id: &str,
@@ -555,6 +769,52 @@ impl ToolSchedulerRepository {
             ));
         }
         Ok(())
+    }
+}
+
+fn permission_denied(reason_code: &str) -> ToolPermissionEvaluation {
+    ToolPermissionEvaluation {
+        authorized: false,
+        permission_required: true,
+        decision_status: "permission_required".to_string(),
+        reason_code: reason_code.to_string(),
+        matching_grant_id: None,
+        matching_scope: None,
+        diagnostics: ToolPermissionDiagnostics {
+            candidate_grant_count: 0,
+            active_grant_count: 0,
+            matching_active_grant_count: 0,
+            denied_grant_count: 0,
+            revoked_grant_count: 0,
+            expired_grant_count: 0,
+            pending_grant_count: 0,
+            one_time_consumption_deferred: false,
+        },
+    }
+}
+
+fn grant_matches_lookup(
+    grant: &ToolPermissionGrantRecord,
+    lookup: &ToolPermissionLookup<'_>,
+) -> bool {
+    if let Some(tool_id) = grant.tool_id.as_deref() {
+        if tool_id != lookup.tool_id {
+            return false;
+        }
+    }
+
+    match grant.permission_scope.as_str() {
+        "one_time" | "run" => grant.agent_run_id.as_deref() == Some(lookup.agent_run_id),
+        "root_run" => grant.root_run_id == lookup.root_run_id,
+        "session" | "workspace" => {
+            grant.root_run_id == lookup.root_run_id
+                && grant
+                    .agent_run_id
+                    .as_deref()
+                    .map(|agent_run_id| agent_run_id == lookup.agent_run_id)
+                    .unwrap_or(true)
+        }
+        _ => false,
     }
 }
 
@@ -660,6 +920,26 @@ mod tests {
             .await
             .unwrap();
 
+        agent_runs
+            .create_run(&NewAgentRun {
+                agent_run_id: "run-child",
+                agent_id: None,
+                agent_revision: None,
+                loom_id: None,
+                response_id: None,
+                parent_response_id: None,
+                correlation_id: "corr-tool-child",
+                causation_id: None,
+                root_run_id: Some("run-root"),
+                parent_run_id: Some("run-root"),
+                context_snapshot_id: None,
+                provider_profile_id: None,
+                model_id: None,
+                started_at: timestamp(),
+            })
+            .await
+            .unwrap();
+
         let repo = ToolSchedulerRepository::from_pool(&pool);
         repo.create_tool_definition(&NewToolDefinition {
             tool_id: "tool-readonly",
@@ -672,6 +952,15 @@ mod tests {
         .await
         .unwrap();
         (repo, pool)
+    }
+
+    fn lookup<'a>(agent_run_id: &'a str) -> ToolPermissionLookup<'a> {
+        ToolPermissionLookup {
+            root_run_id: "run-root",
+            agent_run_id,
+            tool_id: "tool-readonly",
+            now: timestamp(),
+        }
     }
 
     #[tokio::test]
@@ -858,6 +1147,269 @@ mod tests {
         let revoked = repo.get_permission_grant("grant-1").await.unwrap().unwrap();
         assert_eq!(revoked.permission_status, "revoked");
         assert!(revoked.revoked_at.is_some());
+    }
+
+    #[tokio::test]
+    async fn permission_request_is_created_as_pending_and_does_not_authorize() {
+        let (repo, _) = seeded_repo().await;
+        let request = repo
+            .create_permission_request(&NewToolPermissionGrant {
+                grant_id: "grant-request",
+                root_run_id: "run-root",
+                agent_run_id: Some("run-root"),
+                tool_id: Some("tool-readonly"),
+                permission_scope: ToolPermissionScope::Run.as_str(),
+                permission_status: ToolGrantStatus::Pending,
+                granted_by: "runtime",
+                granted_at: None,
+                expires_at: None,
+                metadata_json: Some(r#"{"requestCode":"needs_approval"}"#),
+            })
+            .await
+            .unwrap();
+        assert_eq!(request.permission_status, "pending");
+
+        let decision = repo.evaluate_permission(&lookup("run-root")).await.unwrap();
+        assert!(!decision.authorized);
+        assert!(decision.permission_required);
+        assert_eq!(decision.reason_code, "no_matching_active_grant");
+        assert_eq!(decision.diagnostics.pending_grant_count, 1);
+    }
+
+    #[tokio::test]
+    async fn granted_one_time_authorizes_with_consumption_deferred() {
+        let (repo, _) = seeded_repo().await;
+        repo.create_permission_grant(&NewToolPermissionGrant {
+            grant_id: "grant-one-time",
+            root_run_id: "run-root",
+            agent_run_id: Some("run-root"),
+            tool_id: Some("tool-readonly"),
+            permission_scope: ToolPermissionScope::OneTime.as_str(),
+            permission_status: ToolGrantStatus::Granted,
+            granted_by: "user",
+            granted_at: Some(timestamp()),
+            expires_at: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+        let first = repo.evaluate_permission(&lookup("run-root")).await.unwrap();
+        let second = repo.evaluate_permission(&lookup("run-root")).await.unwrap();
+        assert!(first.authorized);
+        assert!(second.authorized);
+        assert_eq!(first.matching_scope.as_deref(), Some("one_time"));
+        assert!(
+            first.diagnostics.one_time_consumption_deferred,
+            "schema has no consumed_at/consumed_by_invocation_id field yet"
+        );
+    }
+
+    #[tokio::test]
+    async fn granted_run_scope_authorizes_same_run_only() {
+        let (repo, _) = seeded_repo().await;
+        repo.create_permission_grant(&NewToolPermissionGrant {
+            grant_id: "grant-run",
+            root_run_id: "run-root",
+            agent_run_id: Some("run-root"),
+            tool_id: Some("tool-readonly"),
+            permission_scope: ToolPermissionScope::Run.as_str(),
+            permission_status: ToolGrantStatus::Granted,
+            granted_by: "user",
+            granted_at: Some(timestamp()),
+            expires_at: None,
+            metadata_json: None,
+        })
+        .await
+        .unwrap();
+
+        let parent_decision = repo.evaluate_permission(&lookup("run-root")).await.unwrap();
+        let child_decision = repo
+            .evaluate_permission(&lookup("run-child"))
+            .await
+            .unwrap();
+        assert!(parent_decision.authorized);
+        assert!(!child_decision.authorized);
+        assert_eq!(child_decision.reason_code, "no_matching_active_grant");
+    }
+
+    #[tokio::test]
+    async fn root_run_scope_authorizes_child_when_explicitly_delegated() {
+        let (repo, _) = seeded_repo().await;
+        repo.create_permission_grant(&NewToolPermissionGrant {
+            grant_id: "grant-root-run",
+            root_run_id: "run-root",
+            agent_run_id: None,
+            tool_id: Some("tool-readonly"),
+            permission_scope: ToolPermissionScope::RootRun.as_str(),
+            permission_status: ToolGrantStatus::Granted,
+            granted_by: "parent",
+            granted_at: Some(timestamp()),
+            expires_at: None,
+            metadata_json: Some(r#"{"delegated":true}"#),
+        })
+        .await
+        .unwrap();
+
+        let child_decision = repo
+            .evaluate_permission(&lookup("run-child"))
+            .await
+            .unwrap();
+        assert!(child_decision.authorized);
+        assert_eq!(
+            child_decision.matching_grant_id.as_deref(),
+            Some("grant-root-run")
+        );
+        assert_eq!(child_decision.matching_scope.as_deref(), Some("root_run"));
+    }
+
+    #[tokio::test]
+    async fn session_and_workspace_scopes_authorize_within_schema_root_boundary() {
+        let (repo, _) = seeded_repo().await;
+        for (grant_id, scope) in [
+            ("grant-session", ToolPermissionScope::Session),
+            ("grant-workspace", ToolPermissionScope::Workspace),
+        ] {
+            repo.create_permission_grant(&NewToolPermissionGrant {
+                grant_id,
+                root_run_id: "run-root",
+                agent_run_id: None,
+                tool_id: Some("tool-readonly"),
+                permission_scope: scope.as_str(),
+                permission_status: ToolGrantStatus::Granted,
+                granted_by: "user",
+                granted_at: Some(timestamp()),
+                expires_at: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+        }
+
+        let child_decision = repo
+            .evaluate_permission(&lookup("run-child"))
+            .await
+            .unwrap();
+        assert!(child_decision.authorized);
+        assert_eq!(child_decision.diagnostics.matching_active_grant_count, 2);
+    }
+
+    #[tokio::test]
+    async fn denied_revoked_and_expired_grants_do_not_authorize() {
+        let (repo, _) = seeded_repo().await;
+        for (grant_id, status, revoked, expires_at) in [
+            ("grant-denied", ToolGrantStatus::Denied, false, None),
+            ("grant-revoked", ToolGrantStatus::Revoked, true, None),
+            (
+                "grant-expired-status",
+                ToolGrantStatus::Expired,
+                false,
+                Some("1800000000000"),
+            ),
+            (
+                "grant-expired-time",
+                ToolGrantStatus::Granted,
+                false,
+                Some("1600000000000"),
+            ),
+        ] {
+            repo.create_permission_grant(&NewToolPermissionGrant {
+                grant_id,
+                root_run_id: "run-root",
+                agent_run_id: Some("run-root"),
+                tool_id: Some("tool-readonly"),
+                permission_scope: ToolPermissionScope::Run.as_str(),
+                permission_status: status,
+                granted_by: "user",
+                granted_at: Some(timestamp()),
+                expires_at,
+                metadata_json: None,
+            })
+            .await
+            .unwrap();
+            if revoked {
+                repo.revoke_permission_grant(grant_id).await.unwrap();
+            }
+        }
+
+        let decision = repo.evaluate_permission(&lookup("run-root")).await.unwrap();
+        assert!(!decision.authorized);
+        assert!(decision.permission_required);
+        assert_eq!(decision.diagnostics.denied_grant_count, 1);
+        assert_eq!(decision.diagnostics.revoked_grant_count, 1);
+        assert_eq!(decision.diagnostics.expired_grant_count, 2);
+    }
+
+    #[tokio::test]
+    async fn unknown_tool_or_run_does_not_authorize() {
+        let (repo, _) = seeded_repo().await;
+        let unknown_tool = repo
+            .evaluate_permission(&ToolPermissionLookup {
+                root_run_id: "run-root",
+                agent_run_id: "run-root",
+                tool_id: "unknown-tool",
+                now: timestamp(),
+            })
+            .await
+            .unwrap();
+        assert!(!unknown_tool.authorized);
+        assert_eq!(unknown_tool.reason_code, "unknown_tool");
+
+        let unknown_run = repo
+            .evaluate_permission(&ToolPermissionLookup {
+                root_run_id: "run-root",
+                agent_run_id: "unknown-run",
+                tool_id: "tool-readonly",
+                now: timestamp(),
+            })
+            .await
+            .unwrap();
+        assert!(!unknown_run.authorized);
+        assert_eq!(unknown_run.reason_code, "unknown_run");
+    }
+
+    #[tokio::test]
+    async fn permission_metadata_rejects_forbidden_markers() {
+        let (repo, _) = seeded_repo().await;
+        let error = repo
+            .create_permission_grant(&NewToolPermissionGrant {
+                grant_id: "grant-forbidden",
+                root_run_id: "run-root",
+                agent_run_id: Some("run-root"),
+                tool_id: Some("tool-readonly"),
+                permission_scope: ToolPermissionScope::Run.as_str(),
+                permission_status: ToolGrantStatus::Granted,
+                granted_by: "user",
+                granted_at: Some(timestamp()),
+                expires_at: None,
+                metadata_json: Some(r#"{"prompt":"not allowed"}"#),
+            })
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("\"prompt\""));
+    }
+
+    #[tokio::test]
+    async fn unsupported_permission_scope_is_rejected() {
+        let (repo, _) = seeded_repo().await;
+        let error = repo
+            .create_permission_grant(&NewToolPermissionGrant {
+                grant_id: "grant-bad-scope",
+                root_run_id: "run-root",
+                agent_run_id: Some("run-root"),
+                tool_id: Some("tool-readonly"),
+                permission_scope: "global_forever",
+                permission_status: ToolGrantStatus::Granted,
+                granted_by: "user",
+                granted_at: Some(timestamp()),
+                expires_at: None,
+                metadata_json: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unsupported tool permission scope"));
     }
 
     #[tokio::test]
