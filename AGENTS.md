@@ -190,35 +190,83 @@ E2E fixtures and assertions must never include:
 
 ---
 
-## 9) Output Format
+## 9) Output Format and PM Reporting Contract
 
-Responses should be:
-- concise
-- structured
-- aligned with Loom concepts
+To prevent roadmap drift and ensure consistent project tracking, every AI agent (Claude, Gemini, Codex, OpenAI agents, or future agents) MUST conclude their final response for any completed task or milestone with a strict structured PM Report.
 
-Every Codex task output must include:
+### Mandatory Report Structure
 
-- Task ID
-- Task status:
-  - completed
-  - partial
-  - blocked
-  - inspection-only
-- Summary of changes
-- Files changed
-- Behavior changed
-- Validation commands and results
-- Manual validation block with the exact commands to run next
-- Commit/push status
-- Ledger update recommendation:
-  - move from ACTIVE to LOCKED
-  - keep ACTIVE
-  - add NEXT item
-- Current ledger block:
-  - LOCKED
-  - ACTIVE
-  - NEXT
+Your output MUST include the exact sections below. A report missing any of these sections is INVALID.
+
+### ROADMAP STATUS
+- **Current Phase**: [Phase ID and Name]
+- **Current Epic**: [Epic Name]
+- **Current Task**: [Task ID]
+
+### PROGRESS
+- **Overall Project Progress**: [Z]%
+- **Current Phase Progress**: [X]%
+- **Current Epic Progress**: [Y]%
+
+### REMAINING BIG BLOCKS
+- [List of uncompleted Epics/Phases gating completion]
+
+### CRITICAL PATH
+- [Ordered list of Phases/Tasks that gate production]
+
+### ESTIMATED REMAINING WORK
+- Current Epic: [N] engineering days
+- Current Phase: [N] engineering days
+- Entire Project: [N] engineering days
+
+### LEDGER
+**LOCKED**
+- [Task IDs]
+
+**ACTIVE**
+- [Task IDs]
+
+**NEXT**
+- [Task IDs]
+
+**HOLD-BACKLOG**
+- [Task IDs]
+
+### NEXT RECOMMENDED TASK
+- [Exact Task ID]
+
+### Source-Of-Truth Rules
+Agents MUST derive all status from repository documents:
+- `docs/loom_master_roadmap.md`
+- `docs/pm_operating_model.md`
+- `docs/ledger_contract.md`
+- `docs/pm_reporting_contract.md`
+- `docs/pm_reporting_enforcement.md`
+
+Agents MUST NOT:
+- Invent percentages (calculate them from physical checklists in `_PM/Agent-PM/Tasks/`).
+- Invent ACTIVE or NEXT tasks.
+- Invent remaining work estimates.
+- Reuse stale ledger values.
+
+### Drift Detection Rules (`report_drift_detected`)
+Trigger the `report_drift_detected` state when:
+- roadmap progress differs mathematically from physical checklist counts
+- active task differs from the roadmap without formal promotion
+- phase differs
+- critical path differs from roadmap dependencies
+- remaining work differs from the established formula
+
+When triggered, you MUST halt `LOCKED` promotion, output a `### DRIFT WARNING`, and request human triage.
+
+### PM Skill Contract
+Specialized PM agents or skills determining status must do the following programmatically:
+- **current phase**: Derived from `docs/loom_master_roadmap.md` Phase mappings.
+- **current epic**: Derived from `docs/loom_master_roadmap.md` Epics lists.
+- **active task**: Selected strictly per `docs/pm_operating_model.md` priority queue logic.
+- **next task**: Evaluated from the remaining unblocked checklist items.
+- **progress**: Counted mathematically from physical `- [x]` items vs `- [ ]` items in `_PM/Agent-PM/Tasks/`.
+- **critical path**: Computed from the `Depends On` column in the roadmap.
 
 ---
 
