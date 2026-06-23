@@ -12,6 +12,7 @@ mod events;
 mod exports;
 mod graph;
 mod orchestration;
+mod provider_runtime;
 mod providers;
 mod retrieval;
 mod runtime;

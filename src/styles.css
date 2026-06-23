@@ -3377,7 +3377,9 @@ kbd {
   box-sizing: border-box;
   width: 100%;
   min-height: 70px;
-  resize: vertical;
+  max-height: 300px;
+  overflow-y: auto;
+  resize: none;
   border: 1px solid var(--loom-border-subtle);
   border-radius: 8px;
   padding: 8px 9px;
@@ -3408,6 +3410,7 @@ kbd {
   background: var(--loom-bg-surface);
   font: inherit;
   font-size: 12px;
+  user-select: none;
 }
 
 .prompt-edit-actions button:disabled,
