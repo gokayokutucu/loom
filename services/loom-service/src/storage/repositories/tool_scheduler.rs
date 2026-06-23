@@ -47,7 +47,7 @@ fn now_iso() -> String {
     format!("{ms}")
 }
 
-fn validate_safe_persisted_text(label: &str, text: &str) -> Result<(), ServiceError> {
+pub(crate) fn validate_safe_persisted_text(label: &str, text: &str) -> Result<(), ServiceError> {
     let lower = text.to_ascii_lowercase();
     for forbidden in FORBIDDEN_PERSISTED_MARKERS {
         if lower.contains(forbidden) {
@@ -515,6 +515,49 @@ impl ToolSchedulerRepository {
         .await
         .map_err(|error| {
             ServiceError::storage(format!("failed to transition tool invocation: {error}"))
+        })?;
+
+        if update.rows_affected() > 0 {
+            return Ok(true);
+        }
+
+        let exists = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM tool_invocations WHERE invocation_id = ?1",
+        )
+        .bind(invocation_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to inspect tool invocation: {error}"))
+        })?;
+        if exists == 0 {
+            return Err(ServiceError::storage("tool invocation not found"));
+        }
+        Ok(false)
+    }
+
+    pub async fn complete_invocation_with_summary(
+        &self,
+        invocation_id: &str,
+        sanitized_summary: &str,
+    ) -> Result<bool, ServiceError> {
+        validate_safe_persisted_text("tool invocation sanitized_summary", sanitized_summary)?;
+        let now = now_iso();
+        let update = sqlx::query(
+            "UPDATE tool_invocations
+             SET status = 'completed',
+                 completed_at = COALESCE(completed_at, ?1),
+                 sanitized_summary = ?2
+             WHERE invocation_id = ?3
+               AND status = 'running'",
+        )
+        .bind(&now)
+        .bind(sanitized_summary)
+        .bind(invocation_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to complete tool invocation: {error}"))
         })?;
 
         if update.rows_affected() > 0 {

@@ -18,6 +18,7 @@ mod runtime;
 mod scope_resolution;
 mod speech;
 mod storage;
+mod tool_scheduler_runtime;
 
 use storage::repositories::agent_runs::AgentRunRepository;
 use storage::repositories::code_blocks::cleanup_pseudo_artifact_blocks;
