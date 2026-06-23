@@ -12,11 +12,19 @@ use crate::error::ServiceError;
 use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqliteRow, Row, SqlitePool};
 
-const FORBIDDEN_PERSISTED_MARKERS: [&str; 16] = [
+const FORBIDDEN_PERSISTED_MARKERS: [&str; 24] = [
     "raw_thinking",
     "thinking_text",
     "chain_of_thought",
     "hidden_reasoning",
+    "raw_output",
+    "raw_stdout",
+    "raw_stderr",
+    "stdout",
+    "stderr",
+    "\"stdout\"",
+    "\"stderr\"",
+    "file_contents",
     "\"authorization\"",
     "\"bearer\"",
     "\"apikey\"",
@@ -143,11 +151,69 @@ impl ToolPermissionScope {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolArtifactKind {
+    TextSummary,
+    FileRef,
+    ImageRef,
+    JsonSummary,
+    BinaryRef,
+    LogSummary,
+}
+
+impl ToolArtifactKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::TextSummary => "text_summary",
+            Self::FileRef => "file_ref",
+            Self::ImageRef => "image_ref",
+            Self::JsonSummary => "json_summary",
+            Self::BinaryRef => "binary_ref",
+            Self::LogSummary => "log_summary",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolArtifactVisibility {
+    Private,
+    Run,
+    RootRun,
+    UserVisible,
+}
+
+impl ToolArtifactVisibility {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Private => "private",
+            Self::Run => "run",
+            Self::RootRun => "root_run",
+            Self::UserVisible => "user_visible",
+        }
+    }
+}
+
 fn is_supported_permission_scope(scope: &str) -> bool {
     matches!(
         scope,
         "one_time" | "run" | "root_run" | "session" | "workspace"
     )
+}
+
+fn is_supported_artifact_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "text_summary" | "file_ref" | "image_ref" | "json_summary" | "binary_ref" | "log_summary"
+    )
+}
+
+fn storage_visibility_for_artifact(visibility: &str) -> Option<&'static str> {
+    match visibility {
+        "private" | "run" | "agent_internal" => Some("agent_internal"),
+        "root_run" | "exportable" => Some("exportable"),
+        "user_visible" => Some("user_visible"),
+        _ => None,
+    }
 }
 
 fn grant_is_active(grant: &ToolPermissionGrantRecord, now: &str) -> bool {
@@ -474,8 +540,31 @@ impl ToolSchedulerRepository {
         &self,
         artifact: &NewToolArtifact<'_>,
     ) -> Result<ToolArtifactRecord, ServiceError> {
+        if !is_supported_artifact_kind(artifact.artifact_kind) {
+            return Err(ServiceError::storage(format!(
+                "unsupported tool artifact kind: {}",
+                artifact.artifact_kind
+            )));
+        }
+        let storage_visibility =
+            storage_visibility_for_artifact(artifact.visibility).ok_or_else(|| {
+                ServiceError::storage(format!(
+                    "unsupported tool artifact visibility: {}",
+                    artifact.visibility
+                ))
+            })?;
+        validate_safe_persisted_text("tool artifact storage_ref", artifact.storage_ref)?;
+        if let Some(content_digest) = artifact.content_digest {
+            validate_safe_persisted_text("tool artifact content_digest", content_digest)?;
+        }
         self.ensure_agent_run_under_root(artifact.agent_run_id, artifact.root_run_id)
             .await?;
+        self.ensure_invocation_under_run(
+            artifact.invocation_id,
+            artifact.agent_run_id,
+            artifact.root_run_id,
+        )
+        .await?;
 
         sqlx::query(
             "INSERT INTO tool_artifacts
@@ -489,7 +578,7 @@ impl ToolSchedulerRepository {
         .bind(artifact.agent_run_id)
         .bind(artifact.artifact_kind)
         .bind(artifact.storage_ref)
-        .bind(artifact.visibility)
+        .bind(storage_visibility)
         .bind(artifact.content_digest)
         .bind(artifact.size_bytes)
         .execute(&self.pool)
@@ -507,12 +596,110 @@ impl ToolSchedulerRepository {
         &self,
         artifact_id: &str,
     ) -> Result<Option<ToolArtifactRecord>, ServiceError> {
-        sqlx::query("SELECT * FROM tool_artifacts WHERE artifact_id = ?1")
-            .bind(artifact_id)
-            .fetch_optional(&self.pool)
+        self.get_artifact_with_deleted(artifact_id, false).await
+    }
+
+    pub async fn get_artifact_with_deleted(
+        &self,
+        artifact_id: &str,
+        include_deleted: bool,
+    ) -> Result<Option<ToolArtifactRecord>, ServiceError> {
+        sqlx::query(
+            "SELECT * FROM tool_artifacts
+             WHERE artifact_id = ?1
+               AND (?2 OR deleted_at IS NULL)",
+        )
+        .bind(artifact_id)
+        .bind(if include_deleted { 1 } else { 0 })
+        .fetch_optional(&self.pool)
+        .await
+        .map(|row| row.map(tool_artifact_from_row))
+        .map_err(|error| ServiceError::storage(format!("failed to get artifact ref: {error}")))
+    }
+
+    pub async fn list_artifacts_by_invocation(
+        &self,
+        invocation_id: &str,
+    ) -> Result<Vec<ToolArtifactRecord>, ServiceError> {
+        self.list_artifacts_by_invocation_with_deleted(invocation_id, false)
             .await
-            .map(|row| row.map(tool_artifact_from_row))
-            .map_err(|error| ServiceError::storage(format!("failed to get artifact ref: {error}")))
+    }
+
+    pub async fn list_artifacts_by_invocation_with_deleted(
+        &self,
+        invocation_id: &str,
+        include_deleted: bool,
+    ) -> Result<Vec<ToolArtifactRecord>, ServiceError> {
+        self.list_artifacts_by("invocation_id", invocation_id, include_deleted)
+            .await
+    }
+
+    pub async fn list_artifacts_by_agent_run(
+        &self,
+        agent_run_id: &str,
+    ) -> Result<Vec<ToolArtifactRecord>, ServiceError> {
+        self.list_artifacts_by_agent_run_with_deleted(agent_run_id, false)
+            .await
+    }
+
+    pub async fn list_artifacts_by_agent_run_with_deleted(
+        &self,
+        agent_run_id: &str,
+        include_deleted: bool,
+    ) -> Result<Vec<ToolArtifactRecord>, ServiceError> {
+        self.list_artifacts_by("agent_run_id", agent_run_id, include_deleted)
+            .await
+    }
+
+    pub async fn list_artifacts_by_root_run(
+        &self,
+        root_run_id: &str,
+    ) -> Result<Vec<ToolArtifactRecord>, ServiceError> {
+        self.list_artifacts_by_root_run_with_deleted(root_run_id, false)
+            .await
+    }
+
+    pub async fn list_artifacts_by_root_run_with_deleted(
+        &self,
+        root_run_id: &str,
+        include_deleted: bool,
+    ) -> Result<Vec<ToolArtifactRecord>, ServiceError> {
+        self.list_artifacts_by("root_run_id", root_run_id, include_deleted)
+            .await
+    }
+
+    pub async fn soft_delete_artifact_ref(&self, artifact_id: &str) -> Result<bool, ServiceError> {
+        let update = sqlx::query(
+            "UPDATE tool_artifacts
+             SET deleted_at = COALESCE(deleted_at, ?1)
+             WHERE artifact_id = ?2
+               AND deleted_at IS NULL",
+        )
+        .bind(now_iso())
+        .bind(artifact_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to soft delete artifact ref: {error}"))
+        })?;
+
+        if update.rows_affected() > 0 {
+            return Ok(true);
+        }
+
+        let exists = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM tool_artifacts WHERE artifact_id = ?1",
+        )
+        .bind(artifact_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to inspect artifact ref: {error}"))
+        })?;
+        if exists == 0 {
+            return Err(ServiceError::storage("tool artifact not found"));
+        }
+        Ok(false)
     }
 
     pub async fn create_permission_grant(
@@ -747,6 +934,76 @@ impl ToolSchedulerRepository {
         })
     }
 
+    async fn list_artifacts_by(
+        &self,
+        column: &str,
+        value: &str,
+        include_deleted: bool,
+    ) -> Result<Vec<ToolArtifactRecord>, ServiceError> {
+        let sql = match column {
+            "invocation_id" => {
+                "SELECT * FROM tool_artifacts
+                 WHERE invocation_id = ?1
+                   AND (?2 OR deleted_at IS NULL)
+                 ORDER BY created_at, artifact_id"
+            }
+            "agent_run_id" => {
+                "SELECT * FROM tool_artifacts
+                 WHERE agent_run_id = ?1
+                   AND (?2 OR deleted_at IS NULL)
+                 ORDER BY created_at, artifact_id"
+            }
+            "root_run_id" => {
+                "SELECT * FROM tool_artifacts
+                 WHERE root_run_id = ?1
+                   AND (?2 OR deleted_at IS NULL)
+                 ORDER BY created_at, artifact_id"
+            }
+            _ => return Err(ServiceError::storage("unsupported artifact list column")),
+        };
+
+        sqlx::query(sql)
+            .bind(value)
+            .bind(if include_deleted { 1 } else { 0 })
+            .fetch_all(&self.pool)
+            .await
+            .map(|rows| rows.into_iter().map(tool_artifact_from_row).collect())
+            .map_err(|error| {
+                ServiceError::storage(format!("failed to list artifact refs: {error}"))
+            })
+    }
+
+    async fn ensure_invocation_under_run(
+        &self,
+        invocation_id: &str,
+        agent_run_id: &str,
+        root_run_id: &str,
+    ) -> Result<(), ServiceError> {
+        let row = sqlx::query(
+            "SELECT agent_run_id, root_run_id FROM tool_invocations WHERE invocation_id = ?1",
+        )
+        .bind(invocation_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to inspect tool invocation: {error}"))
+        })?;
+        let Some(row) = row else {
+            return Err(ServiceError::storage(
+                "tool invocation not found for artifact ref",
+            ));
+        };
+
+        let stored_agent_run_id: String = row.get("agent_run_id");
+        let stored_root_run_id: String = row.get("root_run_id");
+        if stored_agent_run_id != agent_run_id || stored_root_run_id != root_run_id {
+            return Err(ServiceError::storage(
+                "tool artifact ownership must match invocation run ownership",
+            ));
+        }
+        Ok(())
+    }
+
     async fn ensure_agent_run_under_root(
         &self,
         agent_run_id: &str,
@@ -963,6 +1220,45 @@ mod tests {
         }
     }
 
+    async fn create_test_invocation(repo: &ToolSchedulerRepository, invocation_id: &str) {
+        repo.create_invocation(&NewToolInvocation {
+            invocation_id,
+            root_run_id: "run-root",
+            agent_run_id: "run-root",
+            parent_invocation_id: None,
+            tool_id: "tool-readonly",
+            permission_status: ToolInvocationPermissionStatus::Granted,
+            requested_at: timestamp(),
+            timeout_ms: None,
+            sanitized_summary: None,
+            diagnostics_json: None,
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn create_test_artifact(
+        repo: &ToolSchedulerRepository,
+        artifact_id: &str,
+        invocation_id: &str,
+        kind: ToolArtifactKind,
+        visibility: ToolArtifactVisibility,
+    ) -> ToolArtifactRecord {
+        repo.create_artifact_ref(&NewToolArtifact {
+            artifact_id,
+            invocation_id,
+            root_run_id: "run-root",
+            agent_run_id: "run-root",
+            artifact_kind: kind.as_str(),
+            storage_ref: "artifact://safe-ref",
+            visibility: visibility.as_str(),
+            content_digest: Some("sha256:abc123"),
+            size_bytes: Some(42),
+        })
+        .await
+        .unwrap()
+    }
+
     #[tokio::test]
     async fn tool_definition_can_be_created_read_and_listed() {
         let (repo, _) = seeded_repo().await;
@@ -1079,36 +1375,18 @@ mod tests {
     #[tokio::test]
     async fn artifact_ref_persists_without_content() {
         let (repo, pool) = seeded_repo().await;
-        repo.create_invocation(&NewToolInvocation {
-            invocation_id: "inv-artifact",
-            root_run_id: "run-root",
-            agent_run_id: "run-root",
-            parent_invocation_id: None,
-            tool_id: "tool-readonly",
-            permission_status: ToolInvocationPermissionStatus::Granted,
-            requested_at: timestamp(),
-            timeout_ms: None,
-            sanitized_summary: None,
-            diagnostics_json: None,
-        })
-        .await
-        .unwrap();
-        let artifact = repo
-            .create_artifact_ref(&NewToolArtifact {
-                artifact_id: "artifact-1",
-                invocation_id: "inv-artifact",
-                root_run_id: "run-root",
-                agent_run_id: "run-root",
-                artifact_kind: "file_ref",
-                storage_ref: "artifact://safe-ref",
-                visibility: "agent_internal",
-                content_digest: Some("sha256:abc123"),
-                size_bytes: Some(42),
-            })
-            .await
-            .unwrap();
+        create_test_invocation(&repo, "inv-artifact").await;
+        let artifact = create_test_artifact(
+            &repo,
+            "artifact-1",
+            "inv-artifact",
+            ToolArtifactKind::FileRef,
+            ToolArtifactVisibility::Private,
+        )
+        .await;
 
         assert_eq!(artifact.storage_ref, "artifact://safe-ref");
+        assert_eq!(artifact.visibility, "agent_internal");
         assert_eq!(artifact.content_digest.as_deref(), Some("sha256:abc123"));
         assert_eq!(artifact.size_bytes, Some(42));
 
@@ -1119,6 +1397,234 @@ mod tests {
         .await
         .unwrap();
         assert!(!columns.iter().any(|column| column == "content"));
+    }
+
+    #[tokio::test]
+    async fn artifact_ref_can_be_read_and_listed_by_invocation_agent_and_root() {
+        let (repo, _) = seeded_repo().await;
+        create_test_invocation(&repo, "inv-artifact-list").await;
+        let artifact = create_test_artifact(
+            &repo,
+            "artifact-list-1",
+            "inv-artifact-list",
+            ToolArtifactKind::JsonSummary,
+            ToolArtifactVisibility::UserVisible,
+        )
+        .await;
+
+        let fetched = repo.get_artifact("artifact-list-1").await.unwrap().unwrap();
+        assert_eq!(fetched, artifact);
+        assert_eq!(fetched.artifact_kind, "json_summary");
+        assert_eq!(fetched.visibility, "user_visible");
+
+        let by_invocation = repo
+            .list_artifacts_by_invocation("inv-artifact-list")
+            .await
+            .unwrap();
+        let by_agent = repo.list_artifacts_by_agent_run("run-root").await.unwrap();
+        let by_root = repo.list_artifacts_by_root_run("run-root").await.unwrap();
+        assert_eq!(by_invocation.len(), 1);
+        assert!(by_agent
+            .iter()
+            .any(|item| item.artifact_id == "artifact-list-1"));
+        assert!(by_root
+            .iter()
+            .any(|item| item.artifact_id == "artifact-list-1"));
+    }
+
+    #[tokio::test]
+    async fn artifact_visibility_semantics_map_to_locked_schema_values() {
+        let (repo, _) = seeded_repo().await;
+        create_test_invocation(&repo, "inv-visibility").await;
+        for (artifact_id, visibility, stored_visibility) in [
+            (
+                "artifact-private",
+                ToolArtifactVisibility::Private,
+                "agent_internal",
+            ),
+            (
+                "artifact-run",
+                ToolArtifactVisibility::Run,
+                "agent_internal",
+            ),
+            (
+                "artifact-root-run",
+                ToolArtifactVisibility::RootRun,
+                "exportable",
+            ),
+            (
+                "artifact-user-visible",
+                ToolArtifactVisibility::UserVisible,
+                "user_visible",
+            ),
+        ] {
+            let artifact = create_test_artifact(
+                &repo,
+                artifact_id,
+                "inv-visibility",
+                ToolArtifactKind::TextSummary,
+                visibility,
+            )
+            .await;
+            assert_eq!(artifact.visibility, stored_visibility);
+        }
+    }
+
+    #[tokio::test]
+    async fn soft_delete_hides_artifact_from_default_get_and_lists() {
+        let (repo, _) = seeded_repo().await;
+        create_test_invocation(&repo, "inv-artifact-delete").await;
+        create_test_artifact(
+            &repo,
+            "artifact-delete",
+            "inv-artifact-delete",
+            ToolArtifactKind::LogSummary,
+            ToolArtifactVisibility::Run,
+        )
+        .await;
+
+        assert!(repo
+            .soft_delete_artifact_ref("artifact-delete")
+            .await
+            .unwrap());
+        assert!(!repo
+            .soft_delete_artifact_ref("artifact-delete")
+            .await
+            .unwrap());
+
+        assert!(repo
+            .get_artifact("artifact-delete")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(repo
+            .list_artifacts_by_invocation("inv-artifact-delete")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(repo
+            .list_artifacts_by_agent_run("run-root")
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(repo
+            .list_artifacts_by_root_run("run-root")
+            .await
+            .unwrap()
+            .is_empty());
+
+        let deleted = repo
+            .get_artifact_with_deleted("artifact-delete", true)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(deleted.deleted_at.is_some());
+        assert_eq!(
+            repo.list_artifacts_by_invocation_with_deleted("inv-artifact-delete", true)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_invocation_fk_fails_for_artifact() {
+        let (repo, _) = seeded_repo().await;
+        let error = repo
+            .create_artifact_ref(&NewToolArtifact {
+                artifact_id: "artifact-missing-invocation",
+                invocation_id: "missing-invocation",
+                root_run_id: "run-root",
+                agent_run_id: "run-root",
+                artifact_kind: ToolArtifactKind::FileRef.as_str(),
+                storage_ref: "artifact://safe-ref",
+                visibility: ToolArtifactVisibility::Private.as_str(),
+                content_digest: None,
+                size_bytes: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("tool invocation not found for artifact ref"));
+    }
+
+    #[tokio::test]
+    async fn artifact_ref_rejects_forbidden_metadata_markers() {
+        let (repo, _) = seeded_repo().await;
+        create_test_invocation(&repo, "inv-artifact-forbidden").await;
+        for (artifact_id, storage_ref, content_digest, expected) in [
+            (
+                "artifact-forbidden-storage",
+                "artifact://stdout/raw",
+                None,
+                "stdout",
+            ),
+            (
+                "artifact-forbidden-digest",
+                "artifact://safe-ref",
+                Some("provider_payload:abc"),
+                "provider_payload",
+            ),
+        ] {
+            let error = repo
+                .create_artifact_ref(&NewToolArtifact {
+                    artifact_id,
+                    invocation_id: "inv-artifact-forbidden",
+                    root_run_id: "run-root",
+                    agent_run_id: "run-root",
+                    artifact_kind: ToolArtifactKind::BinaryRef.as_str(),
+                    storage_ref,
+                    visibility: ToolArtifactVisibility::Private.as_str(),
+                    content_digest,
+                    size_bytes: None,
+                })
+                .await
+                .unwrap_err();
+            assert!(error.to_string().contains(expected));
+        }
+    }
+
+    #[tokio::test]
+    async fn unsupported_artifact_kind_and_visibility_are_rejected() {
+        let (repo, _) = seeded_repo().await;
+        create_test_invocation(&repo, "inv-artifact-unsupported").await;
+        let bad_kind = repo
+            .create_artifact_ref(&NewToolArtifact {
+                artifact_id: "artifact-bad-kind",
+                invocation_id: "inv-artifact-unsupported",
+                root_run_id: "run-root",
+                agent_run_id: "run-root",
+                artifact_kind: "raw_output",
+                storage_ref: "artifact://safe-ref",
+                visibility: ToolArtifactVisibility::Private.as_str(),
+                content_digest: None,
+                size_bytes: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(bad_kind
+            .to_string()
+            .contains("unsupported tool artifact kind"));
+
+        let bad_visibility = repo
+            .create_artifact_ref(&NewToolArtifact {
+                artifact_id: "artifact-bad-visibility",
+                invocation_id: "inv-artifact-unsupported",
+                root_run_id: "run-root",
+                agent_run_id: "run-root",
+                artifact_kind: ToolArtifactKind::ImageRef.as_str(),
+                storage_ref: "artifact://safe-ref",
+                visibility: "world_readable",
+                content_digest: None,
+                size_bytes: None,
+            })
+            .await
+            .unwrap_err();
+        assert!(bad_visibility
+            .to_string()
+            .contains("unsupported tool artifact visibility"));
     }
 
     #[tokio::test]
