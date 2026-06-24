@@ -3,6 +3,9 @@
 ## 1. Executive Summary
 Loom is transitioning from a rigid V1 generation pipeline to a V2 Agent Runtime state machine. The V1 Context/Knowledge Layer (Context Selection, Context Manager, Context Snapshots, memory, retrieval, attachments) remains canonical. This document designs how the V2 `AgentRun` consumes the V1 Knowledge Layer, ensuring context operations remain passive (not tools) while decoupling LLM execution from the orchestration layer.
 
+> [!WARNING]
+> **AMENDED DESIGN**: This spec has been amended by [context_integration_spec_amendment.md](context_integration_spec_amendment.md). The target lifecycle relying on `AgentContextManager` is the *final* architectural state. However, the *initial* `AgentRun` migration will safely wrap the legacy `ContextManager` (Phase 1) to prevent regression. Do not wire `AgentContextManager` into production without the bridge strategy defined in the amendment.
+
 ## 2. Current V1 Context Pipeline
 In V1, the orchestration endpoint (`api/orchestration.rs`) synchronously:
 1. Receives UI submit.
