@@ -9,6 +9,10 @@ use crate::providers::types::{sanitize_provider_text, OllamaStreamChunk, OllamaW
 // - Do not add new generation features here; future main generation should route through AgentRun.
 // next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
 use crate::{
+    agent_runtime::types::{
+        new_agent_run_id, new_uuid, AgentRunStatus, AgentRuntimeProviderOptions,
+        AgentRuntimeRequest, AgentStepKind, AgentStepStatus, AgentUsage, LegacyContextRuntimeInput,
+    },
     capabilities::repository::NewModelRuntimeBenchmark,
     config::LoomServiceConfig,
     context::{
@@ -46,6 +50,9 @@ use crate::{
     },
     runtime::OperationKind,
     storage::repositories::{
+        agent_runs::{
+            AgentRunRepository, AgentRunTransition, NewAgentEvent, NewAgentRun, NewAgentStep,
+        },
         attachments::AttachmentRepository,
         looms::{LoomMetadataUpdate, LoomRepository},
         memory::MemoryRepository,
@@ -2819,6 +2826,217 @@ fn context_built_event_payload(
     })
 }
 
+#[derive(Debug, Clone)]
+struct MainGenerationAgentRunShim {
+    repository: AgentRunRepository,
+    agent_run_id: String,
+    provider_step_id: String,
+}
+
+fn main_generation_agent_runtime_request(
+    execution_input: &OrchestrationExecuteInput,
+    workflow_loom_id: &str,
+    lifecycle: Option<&PersistedResponseLifecycle>,
+    context_input: &BuildContextInput,
+) -> AgentRuntimeRequest {
+    AgentRuntimeRequest {
+        prompt: execution_input.prompt.clone(),
+        loom_id: lifecycle
+            .map(|record| record.loom_id.clone())
+            .or_else(|| Some(workflow_loom_id.to_string())),
+        response_id: lifecycle.map(|record| record.assistant_response_id.clone()),
+        parent_response_id: lifecycle.map(|record| record.user_response_id.clone()),
+        provider_profile_id: execution_input.provider_profile_id.clone(),
+        model_id: Some(execution_input.model.clone()),
+        context_snapshot_id: None,
+        legacy_context: Some(LegacyContextRuntimeInput {
+            build_input: context_input.clone(),
+        }),
+        provider_options: Some(AgentRuntimeProviderOptions {
+            temperature: execution_input
+                .options
+                .as_ref()
+                .and_then(|options| options.temperature),
+            max_output_tokens: execution_input
+                .options
+                .as_ref()
+                .and_then(|options| options.num_predict),
+        }),
+    }
+}
+
+fn main_generation_agent_context_payload(
+    agent_run_id: &str,
+    runtime_request: &AgentRuntimeRequest,
+    built_context: &crate::context::types::BuiltContext,
+) -> Value {
+    json!({
+        "runId": agent_run_id,
+        "source": "orchestration.execute_stream",
+        "contextBuilt": true,
+        "contextSource": "legacy_context_manager",
+        "agentRuntimeLegacyContextSupplied": runtime_request.legacy_context.is_some(),
+        "messageCount": built_context.messages.len(),
+        "selectedCandidateCount": built_context.budget_diagnostics.selected_candidate_count,
+        "droppedCandidateCount": built_context.budget_diagnostics.dropped_candidate_count,
+        "overflowCandidateCount": built_context.budget_diagnostics.overflow_candidate_count,
+        "recentSelectedResponses": built_context.budget_diagnostics.recent_selected_responses,
+        "referenceCapsuleCount": built_context.artifacts.reference_capsule_ids.len(),
+        "responseCapsuleCount": built_context.artifacts.response_capsule_ids.len(),
+        "hasCheckpoint": built_context.artifacts.checkpoint_id.is_some(),
+        "hasWeftOrigin": built_context.artifacts.weft_origin_context_id.is_some(),
+        "warningCount": built_context.warnings.len(),
+        "strategy": built_context.strategy,
+    })
+}
+
+async fn create_main_generation_agent_run_shim(
+    repository: AgentRunRepository,
+    execution_input: &OrchestrationExecuteInput,
+    workflow_run_id: &str,
+    workflow_loom_id: &str,
+    lifecycle: Option<&PersistedResponseLifecycle>,
+    runtime_request: &AgentRuntimeRequest,
+    built_context: &crate::context::types::BuiltContext,
+) -> Result<MainGenerationAgentRunShim, crate::error::ServiceError> {
+    let agent_run_id = new_agent_run_id().0;
+    let context_step_id = format!("{agent_run_id}-context-build");
+    let provider_step_id = format!("{agent_run_id}-provider-call");
+    let started_at = unix_timestamp_millis().to_string();
+    let loom_id = lifecycle
+        .map(|record| record.loom_id.as_str())
+        .or(Some(workflow_loom_id));
+    let response_id = lifecycle.map(|record| record.assistant_response_id.as_str());
+    let parent_response_id = lifecycle.map(|record| record.user_response_id.as_str());
+
+    repository
+        .create_run(&NewAgentRun {
+            agent_run_id: &agent_run_id,
+            agent_id: None,
+            agent_revision: None,
+            loom_id,
+            response_id,
+            parent_response_id,
+            correlation_id: workflow_run_id,
+            causation_id: parent_response_id.or(Some(workflow_run_id)),
+            root_run_id: None,
+            parent_run_id: None,
+            context_snapshot_id: runtime_request.context_snapshot_id.as_deref(),
+            provider_profile_id: execution_input.provider_profile_id.as_deref(),
+            model_id: Some(execution_input.model.as_str()),
+            started_at: &started_at,
+        })
+        .await?;
+    let _ = repository
+        .transition_run(&agent_run_id, AgentRunTransition::Queue)
+        .await?;
+    let _ = repository
+        .transition_run(&agent_run_id, AgentRunTransition::Start)
+        .await?;
+
+    repository
+        .insert_step(&NewAgentStep {
+            agent_step_id: &context_step_id,
+            agent_run_id: &agent_run_id,
+            kind: AgentStepKind::ContextBuild,
+            sequence_index: 0,
+            started_at: Some(&started_at),
+        })
+        .await?;
+    repository
+        .finish_step(&context_step_id, AgentStepStatus::Completed, None)
+        .await?;
+    let context_event_id = new_uuid();
+    repository
+        .append_event(&NewAgentEvent {
+            agent_event_id: &context_event_id,
+            agent_run_id: &agent_run_id,
+            agent_step_id: Some(&context_step_id),
+            sequence_number: 3,
+            event_type: "main_generation_context_built",
+            payload_json: Some(
+                main_generation_agent_context_payload(
+                    &agent_run_id,
+                    runtime_request,
+                    built_context,
+                )
+                .to_string(),
+            ),
+        })
+        .await?;
+
+    Ok(MainGenerationAgentRunShim {
+        repository,
+        agent_run_id,
+        provider_step_id,
+    })
+}
+
+async fn start_main_generation_agent_provider_step(shim: Option<&MainGenerationAgentRunShim>) {
+    if let Some(shim) = shim {
+        let started_at = unix_timestamp_millis().to_string();
+        let _ = shim
+            .repository
+            .insert_step(&NewAgentStep {
+                agent_step_id: &shim.provider_step_id,
+                agent_run_id: &shim.agent_run_id,
+                kind: AgentStepKind::ProviderCall,
+                sequence_index: 1,
+                started_at: Some(&started_at),
+            })
+            .await;
+    }
+}
+
+async fn finish_main_generation_agent_run(
+    shim: Option<&MainGenerationAgentRunShim>,
+    status: AgentRunStatus,
+    usage: Option<AgentUsage>,
+    error_kind: Option<&str>,
+) {
+    let Some(shim) = shim else {
+        return;
+    };
+    let step_status = match status {
+        AgentRunStatus::Completed => AgentStepStatus::Completed,
+        AgentRunStatus::Cancelled => AgentStepStatus::Cancelled,
+        _ => AgentStepStatus::Failed,
+    };
+    let _ = shim
+        .repository
+        .finish_step(&shim.provider_step_id, step_status, error_kind)
+        .await;
+    let event_type = match status {
+        AgentRunStatus::Completed => "run_completed",
+        AgentRunStatus::Cancelled => "run_cancelled",
+        _ => "run_failed",
+    };
+    let payload = json!({
+        "runId": shim.agent_run_id,
+        "source": "orchestration.execute_stream",
+        "status": match status {
+            AgentRunStatus::Completed => "completed",
+            AgentRunStatus::Cancelled => "cancelled",
+            _ => "failed",
+        },
+        "errorKind": error_kind,
+    });
+    let terminal_event_id = new_uuid();
+    let _ = shim
+        .repository
+        .finish_run(
+            &shim.agent_run_id,
+            status,
+            usage,
+            error_kind,
+            &terminal_event_id,
+            event_type,
+            4,
+            Some(payload.to_string()),
+        )
+        .await;
+}
+
 fn deterministic_e2e_answer(
     input: &OrchestrationExecuteInput,
     built_context: &crate::context::types::BuiltContext,
@@ -3529,7 +3747,10 @@ fn execute_stream(
         let context_repository = crate::storage::repositories::context_artifacts::ContextArtifactsRepository::new(&state.database);
         let context_manager = ContextManager::with_repository(Some(service_config.context.clone()), context_repository);
         let built_context = match context_manager
-            .build_context_with_repositories_and_strategy(context_input, strategy_decision.as_ref())
+            .build_context_with_repositories_and_strategy(
+                context_input.clone(),
+                strategy_decision.as_ref(),
+            )
             .await
         {
             Ok(context) => context,
@@ -3550,6 +3771,23 @@ fn execute_stream(
                 return;
             }
         };
+        let agent_runtime_request = main_generation_agent_runtime_request(
+            &execution_input,
+            &workflow_loom_id,
+            persisted_lifecycle.as_ref(),
+            &context_input,
+        );
+        let agent_run_shim = create_main_generation_agent_run_shim(
+            state.agent_run_repository.clone(),
+            &execution_input,
+            &run_id,
+            &workflow_loom_id,
+            persisted_lifecycle.as_ref(),
+            &agent_runtime_request,
+            &built_context,
+        )
+        .await
+        .ok();
         let message_count = built_context.messages.len();
         let warnings = built_context.warnings.clone();
         let _ = runner.persist_event(run_id.clone(), "context.built".to_string(), Some("prepare_context".to_string()), context_built_event_payload(
@@ -3567,6 +3805,7 @@ fn execute_stream(
                 return;
             }
         }
+        start_main_generation_agent_provider_step(agent_run_shim.as_ref()).await;
 
         if should_fail_initial_e2e_prompt(&execution_input) {
             let message = "Deterministic E2E failed placeholder requested.";
@@ -3583,6 +3822,13 @@ fn execute_stream(
                 .await;
             }
             schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
+            finish_main_generation_agent_run(
+                agent_run_shim.as_ref(),
+                AgentRunStatus::Failed,
+                None,
+                Some("e2e_failed_placeholder"),
+            )
+            .await;
             let payload = merge_response_ids(json!({
                 "runId": run_id,
                 "stage": "generate",
@@ -3739,6 +3985,13 @@ fn execute_stream(
             if let Ok(run) = complete_successful_execution_stages(&runner, &run_id).await {
                 yield Ok(progress_event(&run_id, &run));
             }
+            finish_main_generation_agent_run(
+                agent_run_shim.as_ref(),
+                AgentRunStatus::Completed,
+                None,
+                None,
+            )
+            .await;
             let payload = merge_response_ids(json!({
                 "runId": run_id,
                 "elapsedMs": started.elapsed().as_millis(),
@@ -3797,6 +4050,13 @@ fn execute_stream(
                         payload.to_string(),
                     )
                     .await;
+                finish_main_generation_agent_run(
+                    agent_run_shim.as_ref(),
+                    AgentRunStatus::Failed,
+                    None,
+                    Some("provider_resolution_error"),
+                )
+                .await;
                 yield Ok(to_sse_event(service_event(run_id.clone(), "response.error", payload)));
                 return;
             }
@@ -3909,6 +4169,7 @@ fn execute_stream(
                     yield Ok(to_sse_event(service_event(run_id.clone(), "response.delta", payload)));
                 }
                 ProviderContractEvent::Completed { done_reason, usage } => {
+                    let agent_usage = AgentUsage::from_provider(&usage);
                     let event_type = if done_reason.as_deref().is_some_and(done_reason_is_length) {
                         "response.truncated"
                     } else {
@@ -3946,6 +4207,13 @@ fn execute_stream(
                     if let Ok(run) = complete_successful_execution_stages(&runner, &run_id).await {
                         yield Ok(progress_event(&run_id, &run));
                     }
+                    finish_main_generation_agent_run(
+                        agent_run_shim.as_ref(),
+                        AgentRunStatus::Completed,
+                        agent_usage,
+                        None,
+                    )
+                    .await;
                     let payload = merge_response_ids(json!({
                         "runId": run_id,
                         "elapsedMs": started.elapsed().as_millis(),
@@ -3958,6 +4226,7 @@ fn execute_stream(
                     return;
                 }
                 ProviderContractEvent::Truncated { done_reason, usage } => {
+                    let agent_usage = AgentUsage::from_provider(&usage);
                     let event_type = "response.truncated";
                     let (prompt_token_count, eval_token_count) = match usage {
                         ProviderUsageMetadata::Available {
@@ -3991,6 +4260,13 @@ fn execute_stream(
                     if let Ok(run) = complete_successful_execution_stages(&runner, &run_id).await {
                         yield Ok(progress_event(&run_id, &run));
                     }
+                    finish_main_generation_agent_run(
+                        agent_run_shim.as_ref(),
+                        AgentRunStatus::Completed,
+                        agent_usage,
+                        None,
+                    )
+                    .await;
                     let payload = merge_response_ids(json!({
                         "runId": run_id,
                         "elapsedMs": started.elapsed().as_millis(),
@@ -4028,10 +4304,18 @@ fn execute_stream(
                             payload.to_string(),
                         )
                         .await;
+                    finish_main_generation_agent_run(
+                        agent_run_shim.as_ref(),
+                        AgentRunStatus::Cancelled,
+                        None,
+                        None,
+                    )
+                    .await;
                     yield Ok(to_sse_event(service_event(run_id.clone(), "response.cancelled", payload)));
                     return;
                 }
                 ProviderContractEvent::Error { error } => {
+                    let error_kind = format!("{:?}", error.kind);
                     let _ = runner.mark_stage_failed(&run_id, "generate", &format!("{:?}", error.kind)).await;
                     if let Some(lifecycle) = persisted_lifecycle.as_ref() {
                         let message = error
@@ -4049,6 +4333,13 @@ fn execute_stream(
                         .await;
                     }
                     schedule_context_artifact_job(&state.database, persisted_lifecycle.as_ref()).await;
+                    finish_main_generation_agent_run(
+                        agent_run_shim.as_ref(),
+                        AgentRunStatus::Failed,
+                        None,
+                        Some(&error_kind),
+                    )
+                    .await;
                     yield Ok(provider_error_event(
                         &run_id,
                         &execution_input.model,
@@ -4977,18 +5268,22 @@ mod tests {
         best_available_draft, build_generation_events, build_generation_response_state,
         build_generation_status, collect_provider_events_text, configured_quick_model,
         context_built_event_payload, context_references_for_execute, context_window_for_execution,
-        create_persisted_response_lifecycle, create_provider_pipeline_for_request,
-        ensure_main_model_configured, eval_prompt, eval_strategy_decision,
-        fallback_auto_router_decision, memory_messages_for_execution, minimum_successful_drafts,
-        parse_auto_router_decision, parse_ndjson_bytes, plan, provider_request_from_ollama_request,
+        create_main_generation_agent_run_shim, create_persisted_response_lifecycle,
+        create_provider_pipeline_for_request, ensure_main_model_configured, eval_prompt,
+        eval_strategy_decision, fallback_auto_router_decision, finish_main_generation_agent_run,
+        main_generation_agent_context_payload, main_generation_agent_runtime_request,
+        memory_messages_for_execution, minimum_successful_drafts, parse_auto_router_decision,
+        parse_ndjson_bytes, plan, provider_request_from_ollama_request,
         recent_messages_before_response, recent_messages_for_execution,
         references_from_response_metadata, resolve_context_scope, sanitize_generation_value,
-        synthesis_prompt, update_persisted_assistant_content, update_persisted_assistant_status,
-        DeepSynthesisEvalPrompt, OrchestrationExecuteInput, ResponseModeResolution,
-        AUTO_ROUTER_NUM_CTX, AUTO_ROUTER_NUM_PREDICT, DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES,
-        DEFAULT_MAX_RECENT_CONTEXT_PAIRS,
+        start_main_generation_agent_provider_step, synthesis_prompt,
+        update_persisted_assistant_content, update_persisted_assistant_status,
+        DeepSynthesisEvalPrompt, OrchestrationExecuteInput, PersistedResponseLifecycle,
+        ResponseModeResolution, AUTO_ROUTER_NUM_CTX, AUTO_ROUTER_NUM_PREDICT,
+        DEFAULT_MAX_RECENT_CANDIDATE_RESPONSES, DEFAULT_MAX_RECENT_CONTEXT_PAIRS,
     };
     use crate::{
+        agent_runtime::types::{AgentRunStatus, AgentUsage},
         api::state::AppState,
         capabilities::strategy::{ExecutionStrategy, ExecutionStrategyDecision, RequestedMode},
         config::{ConfigManager, LoomServiceConfig, OllamaConfig},
@@ -5274,6 +5569,239 @@ mod tests {
         ] {
             assert!(!serialized.contains(forbidden));
         }
+    }
+
+    #[tokio::test]
+    async fn main_generation_agent_run_shim_records_legacy_context_metadata_safely() {
+        let database = test_database().await;
+        let repository = crate::storage::repositories::agent_runs::AgentRunRepository::from_pool(
+            database.pool(),
+        );
+        LoomRepository::new(&database)
+            .insert_loom(&NewLoom {
+                loom_id: "loom-agent-shim".to_string(),
+                title: "Agent shim".to_string(),
+                summary: None,
+                code: None,
+                canonical_uri: None,
+                kind: "loom".to_string(),
+                origin_loom_id: None,
+                origin_response_id: None,
+                created_at: "1".to_string(),
+                updated_at: "1".to_string(),
+                metadata_json: None,
+            })
+            .await
+            .expect("insert loom");
+        ResponseRepository::new(&database)
+            .insert_response_pair_at_next_sequence(
+                NewResponse {
+                    response_id: "response-agent-shim-user".to_string(),
+                    loom_id: "loom-agent-shim".to_string(),
+                    role: "user".to_string(),
+                    content: "visible user prompt".to_string(),
+                    title: None,
+                    code: None,
+                    canonical_uri: None,
+                    created_at: "1".to_string(),
+                    updated_at: "1".to_string(),
+                    sequence_index: 0,
+                    metadata_json: None,
+                },
+                NewResponse {
+                    response_id: "response-agent-shim-assistant".to_string(),
+                    loom_id: "loom-agent-shim".to_string(),
+                    role: "assistant".to_string(),
+                    content: String::new(),
+                    title: None,
+                    code: None,
+                    canonical_uri: None,
+                    created_at: "2".to_string(),
+                    updated_at: "2".to_string(),
+                    sequence_index: 0,
+                    metadata_json: None,
+                },
+            )
+            .await
+            .expect("insert response pair");
+        let context_input = context_input("Explain Event Sourcing without leaking prompts.");
+        let built_context = ContextManager::default().build_context(context_input.clone());
+        let mut execution_input = execute_input(Some("loom-agent-shim"));
+        execution_input.model = "main-model".to_string();
+        execution_input.prompt = "Explain Event Sourcing without leaking prompts.".to_string();
+        let lifecycle = PersistedResponseLifecycle {
+            loom_id: "loom-agent-shim".to_string(),
+            user_response_id: "response-agent-shim-user".to_string(),
+            assistant_response_id: "response-agent-shim-assistant".to_string(),
+            assistant_content: String::new(),
+            updated_loom_title: None,
+        };
+        let runtime_request = main_generation_agent_runtime_request(
+            &execution_input,
+            "loom-agent-shim",
+            Some(&lifecycle),
+            &context_input,
+        );
+
+        assert!(runtime_request.legacy_context.is_some());
+        let context_payload =
+            main_generation_agent_context_payload("run-proof", &runtime_request, &built_context);
+        assert_eq!(context_payload["contextBuilt"], true);
+        assert_eq!(context_payload["agentRuntimeLegacyContextSupplied"], true);
+
+        let shim = create_main_generation_agent_run_shim(
+            repository.clone(),
+            &execution_input,
+            "workflow-agent-shim",
+            "loom-agent-shim",
+            Some(&lifecycle),
+            &runtime_request,
+            &built_context,
+        )
+        .await
+        .expect("agent run shim");
+        start_main_generation_agent_provider_step(Some(&shim)).await;
+        finish_main_generation_agent_run(
+            Some(&shim),
+            AgentRunStatus::Completed,
+            Some(AgentUsage {
+                input_tokens: Some(11),
+                output_tokens: Some(7),
+                total_tokens: Some(18),
+            }),
+            None,
+        )
+        .await;
+
+        let run = repository
+            .get_run(&shim.agent_run_id)
+            .await
+            .expect("get run")
+            .expect("run exists");
+        assert_eq!(run.status, "completed");
+        assert_eq!(run.loom_id.as_deref(), Some("loom-agent-shim"));
+        assert_eq!(
+            run.response_id.as_deref(),
+            Some("response-agent-shim-assistant")
+        );
+        assert_eq!(
+            run.parent_response_id.as_deref(),
+            Some("response-agent-shim-user")
+        );
+        assert_eq!(run.input_tokens, Some(11));
+        assert_eq!(run.output_tokens, Some(7));
+        assert_eq!(run.total_tokens, Some(18));
+
+        let events = repository
+            .list_events_for_run(&shim.agent_run_id, 0, 10)
+            .await
+            .expect("events");
+        let event_types = events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            event_types,
+            vec![
+                "run_created",
+                "run_queued",
+                "run_started",
+                "main_generation_context_built",
+                "run_completed",
+            ]
+        );
+        let context_event = events
+            .iter()
+            .find(|event| event.event_type == "main_generation_context_built")
+            .expect("context event");
+        let context_payload: serde_json::Value =
+            serde_json::from_str(context_event.payload_json.as_deref().unwrap())
+                .expect("context payload");
+        assert_eq!(context_payload["contextBuilt"], true);
+        assert_eq!(context_payload["contextSource"], "legacy_context_manager");
+        assert_eq!(context_payload["agentRuntimeLegacyContextSupplied"], true);
+        assert_eq!(
+            context_payload["messageCount"].as_u64(),
+            Some(built_context.messages.len() as u64)
+        );
+
+        let serialized = serde_json::to_string(&events).unwrap();
+        assert!(!serialized.contains("Explain Event Sourcing without leaking prompts."));
+        assert_no_forbidden_context_keys(&serialized);
+        assert!(!serialized.contains("providerRequest"));
+        assert!(!serialized.contains("providerResponse"));
+    }
+
+    #[tokio::test]
+    async fn main_generation_agent_run_shim_mirrors_failed_generation() {
+        let database = test_database().await;
+        let repository = crate::storage::repositories::agent_runs::AgentRunRepository::from_pool(
+            database.pool(),
+        );
+        LoomRepository::new(&database)
+            .insert_loom(&NewLoom {
+                loom_id: "loom-agent-shim-failed".to_string(),
+                title: "Agent shim failed".to_string(),
+                summary: None,
+                code: None,
+                canonical_uri: None,
+                kind: "loom".to_string(),
+                origin_loom_id: None,
+                origin_response_id: None,
+                created_at: "1".to_string(),
+                updated_at: "1".to_string(),
+                metadata_json: None,
+            })
+            .await
+            .expect("insert loom");
+        let context_input = context_input("Summarize Event Sourcing.");
+        let built_context = ContextManager::default().build_context(context_input.clone());
+        let execution_input = execute_input(Some("loom-agent-shim-failed"));
+        let runtime_request = main_generation_agent_runtime_request(
+            &execution_input,
+            "loom-agent-shim-failed",
+            None,
+            &context_input,
+        );
+        let shim = create_main_generation_agent_run_shim(
+            repository.clone(),
+            &execution_input,
+            "workflow-agent-shim-failed",
+            "loom-agent-shim-failed",
+            None,
+            &runtime_request,
+            &built_context,
+        )
+        .await
+        .expect("agent run shim");
+        start_main_generation_agent_provider_step(Some(&shim)).await;
+        finish_main_generation_agent_run(
+            Some(&shim),
+            AgentRunStatus::Failed,
+            None,
+            Some("provider_resolution_error"),
+        )
+        .await;
+
+        let run = repository
+            .get_run(&shim.agent_run_id)
+            .await
+            .expect("get run")
+            .expect("run exists");
+        assert_eq!(run.status, "failed");
+        assert_eq!(
+            run.error_message.as_deref(),
+            Some("provider_resolution_error")
+        );
+        let events = repository
+            .list_events_for_run(&shim.agent_run_id, 0, 10)
+            .await
+            .expect("events");
+        assert_eq!(
+            events.last().map(|event| event.event_type.as_str()),
+            Some("run_failed")
+        );
+        assert_no_forbidden_context_keys(&serde_json::to_string(&events).unwrap());
     }
 
     #[test]
