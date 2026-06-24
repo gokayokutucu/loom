@@ -1,5 +1,12 @@
 #![allow(dead_code)]
-
+// LOOM_BOUNDARY:
+// marker: V2_CANONICAL_RUNTIME
+// owner_layer: Tool Runtime
+// migration_status: canonical
+// rules:
+// - ToolSchedulerRuntime is the canonical tool scheduling seam.
+// - Do not execute real tools unless adapter contracts, permissions, and artifact rules are satisfied.
+// next_task: TOOL-RUNTIME-ADAPTER-CONTRACT-001
 //! Tool Scheduler runtime seam.
 //!
 //! This module coordinates tool invocation metadata, permission evaluation,
@@ -29,6 +36,14 @@ fn now_iso() -> String {
     format!("{ms}")
 }
 
+// LOOM_BOUNDARY:
+// marker: V2_CANONICAL_RUNTIME
+// owner_layer: Tool Runtime
+// migration_status: canonical
+// rules:
+// - Request carries tool invocation metadata only.
+// - Do not store raw tool payloads, stdout/stderr, file contents, prompts, or provider payloads.
+// next_task: TOOL-RUNTIME-ADAPTER-CONTRACT-001
 #[derive(Debug, Clone)]
 pub struct ToolInvocationRequest {
     pub invocation_id: String,
@@ -65,6 +80,14 @@ pub struct ToolRuntimeResult {
     pub safe_summary: Option<String>,
 }
 
+// LOOM_BOUNDARY:
+// marker: V2_CANONICAL_RUNTIME
+// owner_layer: Tool Runtime
+// migration_status: canonical
+// rules:
+// - Canonical scheduler/permission/artifact lifecycle seam for tools.
+// - Real adapters must enter through a future adapter contract, not ad hoc execution.
+// next_task: TOOL-RUNTIME-ADAPTER-CONTRACT-001
 #[derive(Debug, Clone)]
 pub struct ToolSchedulerRuntime {
     repository: ToolSchedulerRepository,
@@ -75,6 +98,11 @@ impl ToolSchedulerRuntime {
         Self { repository }
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V2_CANONICAL_RUNTIME
+    // role: schedules metadata-only tool invocation lifecycle and permission evaluation
+    // rules: No shell/filesystem/network/MCP execution here; only noop test path is allowed.
+    // next_task: TOOL-RUNTIME-ADAPTER-CONTRACT-001
     pub async fn submit_invocation(
         &self,
         request: ToolInvocationRequest,
@@ -215,12 +243,22 @@ impl ToolSchedulerRuntime {
         .await
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V2_CANONICAL_RUNTIME
+    // role: transitions an invocation into running metadata state
+    // rules: Running state does not imply real adapter execution in this module.
+    // next_task: TOOL-RUNTIME-ADAPTER-CONTRACT-001
     pub async fn start_invocation(&self, invocation_id: &str) -> Result<bool, ServiceError> {
         self.repository
             .transition_invocation_status(invocation_id, ToolInvocationStatus::Running)
             .await
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V2_CANONICAL_RUNTIME
+    // role: cancels scheduled tool invocation metadata
+    // rules: Cancellation must not read/write raw tool output or perform adapter I/O.
+    // next_task: TOOL-RUNTIME-ADAPTER-CONTRACT-001
     pub async fn cancel_invocation(
         &self,
         invocation_id: &str,
@@ -242,6 +280,11 @@ impl ToolSchedulerRuntime {
         })
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V2_CANONICAL_RUNTIME
+    // role: marks scheduled tool invocation as timed out
+    // rules: Timeout state remains metadata-only and safe.
+    // next_task: TOOL-RUNTIME-ADAPTER-CONTRACT-001
     pub async fn timeout_invocation(
         &self,
         invocation_id: &str,
@@ -263,6 +306,11 @@ impl ToolSchedulerRuntime {
         })
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V2_CANONICAL_RUNTIME
+    // role: completes built-in no-I/O noop test tool
+    // rules: No real tool execution; may write sanitized summary/artifact reference only.
+    // next_task: TOOL-RUNTIME-ADAPTER-CONTRACT-001
     async fn complete_noop(
         &self,
         invocation_id: &str,

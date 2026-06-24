@@ -1,5 +1,14 @@
 #![allow(dead_code)]
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - Memory records are canonical passive Knowledge Layer data.
+// - Passive Memory reads must not be replaced by Tool Runtime execution.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
+
 use crate::{
     error::ServiceError,
     storage::{
@@ -128,6 +137,14 @@ pub enum ForgetMemoryResult {
     NotFound,
 }
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - Repository owns explicit Memory persistence and safe passive reads.
+// - Active memory extraction/write policy may evolve separately, but passive context reads remain canonical.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 #[derive(Debug, Clone)]
 pub struct MemoryRepository {
     pool: SqlitePool,
@@ -359,6 +376,11 @@ impl MemoryRepository {
         Ok(ExplicitMemoryCreateResult::Created(record))
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: lists active Memory records for passive context and settings surfaces
+    // rules: Passive Memory reads are Knowledge Layer behavior, not tools.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     pub async fn list_memories(
         &self,
         query: Option<&str>,
@@ -388,6 +410,11 @@ impl MemoryRepository {
         .map_err(|error| ServiceError::storage(format!("failed to list Memories: {error}")))
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: reads one active Memory record
+    // rules: Do not route passive Memory lookup through Tool Runtime.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     pub async fn get_memory(&self, memory_id: &str) -> Result<Option<MemoryRecord>, ServiceError> {
         sqlx::query("SELECT * FROM memories WHERE memory_id = ?1 AND deleted_at IS NULL")
             .bind(memory_id)

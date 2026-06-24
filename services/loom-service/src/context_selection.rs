@@ -1,5 +1,12 @@
 #![allow(dead_code)]
-
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: consumed_by_v2
+// rules:
+// - Context Selection is canonical passive Knowledge Layer infrastructure.
+// - V2 AgentRuntime must consume this layer instead of duplicating ranking or treating context as tools.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 //! Metadata-only Context Selection foundation.
 //!
 //! This layer assigns source tiers and within-tier order. It does not resolve
@@ -51,6 +58,14 @@ const FORBIDDEN_TEXT_MARKERS: [&str; 17] = [
     "agentsteps",
 ];
 
+// LOOM_BOUNDARY:
+// marker: V1_CONSUMED_BY_V2
+// owner_layer: V1 Knowledge
+// migration_status: consumed_by_v2
+// rules:
+// - Request metadata is the V2-consumable context selection contract.
+// - Do not add prompt/provider payload fields here.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 #[derive(Debug, Clone)]
 pub struct ContextSelectionRequest {
     pub active_loom_id: String,
@@ -195,6 +210,14 @@ impl ContextIncludeModeHint {
     }
 }
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - Context candidates are passive context identities, not Tool invocations.
+// - Preserve source identity and privacy-safe preview boundaries.
+// next_task: none
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextCandidate {
@@ -214,6 +237,14 @@ pub struct ContextCandidate {
     pub rank_signals: Option<RankSignals>,
 }
 
+// LOOM_BOUNDARY:
+// marker: V1_CONSUMED_BY_V2
+// owner_layer: V1 Knowledge
+// migration_status: consumed_by_v2
+// rules:
+// - Payload is the canonical selected context handoff to the Context Manager and V2 AgentRuntime.
+// - Do not store full prompt text or provider payloads here.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ContextPayload {
@@ -331,6 +362,14 @@ impl Default for ContextSelectionPolicy {
     }
 }
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - Selection service owns passive context ranking only.
+// - Must not execute tools or providers.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 #[derive(Debug, Clone)]
 pub struct ContextSelectionService {
     pool: SqlitePool,
@@ -390,6 +429,11 @@ impl ContextSelectionService {
         self
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CONSUMED_BY_V2
+    // role: selects passive Knowledge Layer context identities for an AgentRun or legacy flow
+    // rules: V2 must call this instead of duplicating context ranking; no tool/provider execution here.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     pub async fn select(
         &self,
         request: ContextSelectionRequest,
@@ -586,6 +630,11 @@ impl ContextSelectionService {
         Ok(payload)
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: validates explicit Reference identities as mandatory context
+    // rules: Passive reference context loading is not a tool.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     async fn mandatory_references(
         &self,
         scope: &ScopeContext,
@@ -635,6 +684,11 @@ impl ContextSelectionService {
         Ok(candidates)
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: loads Memory read-policy metadata for passive context selection
+    // rules: Memory selection is Knowledge Layer context, not Tool Runtime execution.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     async fn memory_read_policy(
         &self,
         active_loom_id: &str,
@@ -724,6 +778,11 @@ impl ContextSelectionService {
         })
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: promotes always-include Memory records into mandatory context candidates
+    // rules: Passive memory injection must remain outside Tool Runtime.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     fn always_include_memories(
         &self,
         policy: &MemoryReadPolicy,
@@ -756,6 +815,11 @@ impl ContextSelectionService {
             .collect()
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: loads current conversation candidates for context selection
+    // rules: Passive conversation context loading is not a tool.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     async fn conversation_turns(
         &self,
         active_loom_id: &str,
@@ -807,6 +871,11 @@ impl ContextSelectionService {
             .collect())
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: loads Weft origin lineage as hidden background context
+    // rules: Weft lineage is canonical Knowledge Layer data consumed by V2.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     async fn weft_origin_chain(
         &self,
         scope: &ScopeContext,
@@ -872,6 +941,11 @@ impl ContextSelectionService {
         Ok(candidates)
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: maps retrieval projection candidates into canonical context candidates
+    // rules: Retrieval projections are rebuildable Knowledge Layer signals, not Agent state.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     async fn transform_retrieval_candidate(
         &self,
         source: &RetrievalCandidate,
@@ -969,6 +1043,11 @@ impl ContextSelectionService {
         }))
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CONSUMED_BY_V2
+    // role: persists metadata-only Context Snapshot audit records
+    // rules: Snapshot persistence is a Knowledge Layer audit seam; never persist prompt/provider payloads.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     async fn persist_snapshot(
         &self,
         request: &ContextSelectionRequest,

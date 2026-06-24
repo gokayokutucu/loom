@@ -1,3 +1,11 @@
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - Existing ContextManager is canonical Loom Knowledge Layer behavior consumed by current v1 shims.
+// - V2 should integrate with this layer instead of reimplementing context assembly.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 use crate::{
     config::ContextSection,
     context::{
@@ -17,6 +25,14 @@ use crate::{
     },
 };
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - ContextManager owns legacy context assembly and remains active Knowledge Layer infrastructure.
+// - Do not replace context assembly with Tool Runtime.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 #[derive(Debug, Clone, Default)]
 pub struct ContextManager {
     config: Option<ContextSection>,
@@ -41,10 +57,20 @@ impl ContextManager {
         }
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: builds legacy context from provided input and contributors
+    // rules: Context assembly remains Knowledge Layer behavior; no provider/tool execution here.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     pub fn build_context(&self, input: BuildContextInput) -> BuiltContext {
         self.build_context_with_contributors(input, default_contributors())
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: enriches context using repository-backed capsules/checkpoints/memory/retrieval
+    // rules: Repository context enrichment is passive Knowledge Layer loading, not Tool Runtime execution.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     pub async fn build_context_with_repositories(
         &self,
         input: BuildContextInput,
@@ -53,6 +79,11 @@ impl ContextManager {
             .await
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: builds strategy-aware repository-backed context
+    // rules: Strategy-aware context remains canonical Knowledge Layer work consumed by v1 and future v2.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     pub async fn build_context_with_repositories_and_strategy(
         &self,
         input: BuildContextInput,

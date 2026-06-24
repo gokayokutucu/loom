@@ -243,6 +243,14 @@ fn terminal_event_type(transition: &AgentTerminalTransition) -> &'static str {
     }
 }
 
+// LOOM_BOUNDARY:
+// marker: V2_CANONICAL_RUNTIME
+// owner_layer: V2 Runtime
+// migration_status: needs_bridge
+// rules:
+// - AgentRuntime owns AgentRun lifecycle, steps, cancellation, and safe events.
+// - It must consume Context Pipeline and ProviderRuntimeService through bridge tasks.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 #[derive(Debug)]
 pub struct AgentRuntime<R = ProviderRegistry> {
     pipeline: ProviderPipeline<R>,
@@ -309,6 +317,11 @@ where
         outcome
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: NEEDS_BRIDGE
+    // role: executes AgentRun lifecycle and currently calls ProviderPipeline directly
+    // rules: Preserve safe events; future provider execution must route through ProviderRuntimeService and Knowledge Layer context.
+    // next_task: PROVIDER-RUNTIME-BRIDGE-001
     pub fn execute_run(&self, request: AgentRuntimeRequest) -> impl Stream<Item = AgentEvent> {
         let pipeline = self.pipeline.clone();
         let run_store = self.run_store.clone();
@@ -745,6 +758,11 @@ async fn finish_step_in_repo(
 }
 
 /// Appends a non-terminal event to the repository if persistence is enabled.
+// LOOM_BOUNDARY_METHOD:
+// marker: V2_CANONICAL_RUNTIME
+// role: persists allowlisted AgentEvent records only
+// rules: Durable events must exclude provider deltas, prompts, raw tool output, secrets, and raw thinking.
+// next_task: none
 async fn persist_event(
     run_repository: &Option<AgentRunRepository>,
     run_id: &str,
@@ -789,6 +807,11 @@ fn event_step_id(event: &AgentEvent) -> Option<&str> {
 }
 
 /// Atomically persists the terminal status and event via finish_run.
+// LOOM_BOUNDARY_METHOD:
+// marker: V2_CANONICAL_RUNTIME
+// role: commits terminal AgentRun state and terminal event atomically
+// rules: Terminal AgentRun persistence must remain safe and idempotent.
+// next_task: none
 async fn finish_run_in_repo(
     run_repository: &Option<AgentRunRepository>,
     run_id: &str,

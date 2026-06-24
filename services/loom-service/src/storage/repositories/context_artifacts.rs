@@ -1,5 +1,14 @@
 #![allow(dead_code)]
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - Capsules, checkpoints, and Weft origin contexts are canonical passive Knowledge Layer artifacts.
+// - Context artifact reads are not Tool Runtime execution.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
+
 use crate::{error::ServiceError, storage::db::Database};
 use sqlx::{Row, SqlitePool};
 
@@ -154,6 +163,14 @@ pub struct UpsertLoomCheckpoint {
     pub updated_at: String,
 }
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - Repository owns canonical capsule/checkpoint/weft-origin context records.
+// - V2 should consume these records through Context Pipeline integration.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 #[derive(Debug, Clone)]
 pub struct ContextArtifactsRepository {
     pool: SqlitePool,
@@ -235,6 +252,11 @@ impl ContextArtifactsRepository {
         Ok(())
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: reads response capsule summaries for passive context
+    // rules: Capsules are Knowledge Layer summaries, not tool outputs injected directly into prompts.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     pub async fn get_response_capsule(
         &self,
         response_id: &str,
@@ -312,6 +334,11 @@ impl ContextArtifactsRepository {
         Ok(())
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: reads latest Loom checkpoint for passive context
+    // rules: Checkpoint reads remain canonical Knowledge Layer behavior.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     pub async fn get_latest_checkpoint_for_loom(
         &self,
         loom_id: &str,
@@ -377,6 +404,11 @@ impl ContextArtifactsRepository {
         Ok(())
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: reads hidden Weft origin context
+    // rules: Weft origin context is passive lineage context consumed by V2.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     pub async fn get_weft_origin_context(
         &self,
         weft_loom_id: &str,

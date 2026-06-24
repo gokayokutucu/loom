@@ -1,5 +1,14 @@
 #![allow(dead_code)]
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - Attachment records and parsed chunks are canonical passive context sources.
+// - Passive attachment context loading is not a tool; active reparse/extract operations may later become tools.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
+
 use crate::{config::OcrSection, error::ServiceError, storage::db::Database};
 use sha2::{Digest, Sha256};
 use sqlx::{Row, SqlitePool};
@@ -125,6 +134,14 @@ struct ParseArtifactRecord {
     metadata_json: Option<String>,
 }
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - Repository owns canonical attachment persistence and passive context reads.
+// - Do not route passive attachment context through Tool Runtime.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 #[derive(Debug, Clone)]
 pub struct AttachmentRepository {
     pool: SqlitePool,
@@ -390,6 +407,11 @@ impl AttachmentRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: loads parsed attachment content for referenced passive context
+    // rules: Passive attachment context loading is not a tool; V2 must consume this Knowledge Layer path.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     pub async fn get_referenced_attachment_content(
         &self,
         loom_id: &str,

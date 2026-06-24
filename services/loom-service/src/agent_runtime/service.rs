@@ -10,6 +10,14 @@ use crate::providers::ollama::OllamaRuntime;
 use crate::providers::pipeline::{ProviderPipeline, ProviderPipelineRegistry};
 use crate::storage::repositories::agent_runs::AgentRunRepository;
 
+// LOOM_BOUNDARY:
+// marker: V2_CANONICAL_RUNTIME
+// owner_layer: V2 Runtime
+// migration_status: needs_bridge
+// rules:
+// - AgentRuntimeService is the service-internal entry point to canonical AgentRun execution.
+// - Future product shims should call this instead of v1 orchestration loops.
+// next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
 /// Internal service boundary for the Loom-native Agent Runtime.
 ///
 /// This is the only intended entry point for service-internal callers. It is
@@ -102,6 +110,11 @@ where
     }
 
     /// Executes an agent run, yielding safe `AgentEvent`s only.
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V2_CANONICAL_RUNTIME
+    // role: service-internal AgentRun execution entrypoint
+    // rules: Product routes should migrate toward this entrypoint through shim tasks.
+    // next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
     pub fn execute(&self, request: AgentRuntimeRequest) -> impl Stream<Item = AgentEvent> {
         self.runtime.execute_run(request)
     }
@@ -110,6 +123,11 @@ where
         self.runtime.run_store()
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V2_CANONICAL_RUNTIME
+    // role: service-internal AgentRun cancellation entrypoint
+    // rules: Cancellation should be idempotent and terminal-safe.
+    // next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
     pub fn cancel(&self, run_id: &AgentRunId) -> AgentCancellationOutcome {
         self.runtime.cancel_run(run_id)
     }

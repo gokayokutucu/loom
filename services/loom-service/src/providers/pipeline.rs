@@ -1,3 +1,11 @@
+// LOOM_BOUNDARY:
+// marker: NEEDS_BRIDGE
+// owner_layer: Provider
+// migration_status: needs_bridge
+// rules:
+// - ProviderPipeline remains the low-level provider adapter boundary.
+// - AgentRuntime should route provider execution through ProviderRuntimeService before calling adapters.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 use crate::providers::{
     adapter::{ProviderAdapter, ProviderEventStream, ProviderRegistry},
     config::ProviderKind,
@@ -7,6 +15,14 @@ use crate::providers::{
 use async_stream::stream;
 use futures_util::StreamExt;
 
+// LOOM_BOUNDARY:
+// marker: NEEDS_BRIDGE
+// owner_layer: Provider
+// migration_status: needs_bridge
+// rules:
+// - Registry abstraction is low-level provider plumbing, not AgentRun lifecycle ownership.
+// - Keep adapter details behind provider contracts.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 pub trait ProviderPipelineRegistry: Clone + Send + Sync + 'static {
     type Adapter: ProviderAdapter;
 
@@ -33,6 +49,14 @@ pub struct ProviderPipelineProfile {
     pub default_model: Option<String>,
 }
 
+// LOOM_BOUNDARY:
+// marker: NEEDS_BRIDGE
+// owner_layer: Provider
+// migration_status: needs_bridge
+// rules:
+// - Low-level provider stream boundary may remain under ProviderRuntimeService.
+// - Do not let product routes or AgentRuntime bypass the canonical provider seam long-term.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 #[derive(Debug, Clone)]
 pub struct ProviderPipeline<R = ProviderRegistry> {
     registry: R,
@@ -78,6 +102,11 @@ where
         self.registry.default_generation_adapter().capabilities()
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: NEEDS_BRIDGE
+    // role: direct low-level provider streaming call
+    // rules: Future AgentRuntime execution must call this only through ProviderRuntimeService.
+    // next_task: PROVIDER-RUNTIME-BRIDGE-001
     pub fn stream_chat(&self, request: ProviderContractRequest) -> ProviderEventStream {
         let adapter = self.registry.default_generation_adapter().clone();
         Box::pin(stream! {
@@ -88,6 +117,11 @@ where
         })
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: NEEDS_BRIDGE
+    // role: direct low-level provider cancellation call
+    // rules: Future cancellation should be coordinated by AgentRun and ProviderRuntimeService.
+    // next_task: PROVIDER-RUNTIME-BRIDGE-001
     pub fn cancel_generation(&self, request_id: &str) -> bool {
         self.registry.cancel_generation(request_id)
     }

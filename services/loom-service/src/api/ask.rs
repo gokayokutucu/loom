@@ -1,3 +1,11 @@
+// LOOM_BOUNDARY:
+// marker: V1_SHIM
+// owner_layer: V1 Shim
+// migration_status: needs_bridge
+// rules:
+// - Keep Quick Ask operational for compatibility; add only bug fixes or V2 AgentRun integration work.
+// - Do not add new execution features here; future Quick Ask should route through a lightweight AgentRun.
+// next_task: QUICK-ASK-AGENTRUN-SHIM-DESIGN-001
 use crate::{
     api::state::AppState,
     providers::{
@@ -252,6 +260,11 @@ struct QuickAskFocus {
     warnings: Vec<String>,
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: Quick Ask compatibility endpoint
+// rules: Preserve fast path semantics; future execution should instantiate a lightweight AgentRun.
+// next_task: QUICK-ASK-AGENTRUN-SHIM-DESIGN-001
 pub async fn quick(
     State(state): State<AppState>,
     Json(input): Json<QuickAskRequest>,
@@ -460,6 +473,11 @@ fn quick_answer_from_ollama_body(body: &serde_json::Value) -> Option<String> {
         .map(ToString::to_string)
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: NEEDS_BRIDGE
+// role: direct provider adapter call for Quick Ask
+// rules: Keep safe collection only; future Quick Ask provider execution should flow through ProviderRuntimeService.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 async fn quick_answer_from_provider_adapter(
     state: &AppState,
     request: OllamaChatRequest,
@@ -528,6 +546,11 @@ fn quick_provider_request_from_ollama_request(
     }
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: collects assistant-visible Quick Ask provider events
+// rules: Do not persist raw thinking or provider payloads; future collection belongs behind ProviderRuntimeService.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 fn collect_quick_answer_from_provider_events(
     events: impl IntoIterator<Item = ProviderContractEvent>,
 ) -> Result<Option<String>, OllamaRuntimeError> {
@@ -595,6 +618,11 @@ fn quick_ollama_error_from_provider_error(error: ProviderError) -> OllamaRuntime
     runtime_error
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: legacy Quick Ask title generation helper
+// rules: Keep bounded/title-only behavior; no new generation features in the shim.
+// next_task: QUICK-ASK-AGENTRUN-SHIM-DESIGN-001
 async fn quick_title_from_model(
     state: &AppState,
     input: &QuickAskRequest,
@@ -943,6 +971,11 @@ fn deterministic_e2e_quick_answer(input: &QuickAskRequest) -> Option<String> {
     ))
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: builds legacy Quick Ask provider messages
+// rules: Preserve privacy guards; future prompt construction should be owned by AgentRun policy.
+// next_task: QUICK-ASK-AGENTRUN-SHIM-DESIGN-001
 fn quick_messages(input: &QuickAskRequest) -> Vec<OllamaMessage> {
     vec![
         OllamaMessage {
@@ -991,6 +1024,11 @@ fn quick_reference_warnings(input: &QuickAskRequest) -> Vec<String> {
         .collect()
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// role: resolves passive reference/source focus for Quick Ask
+// rules: Reference/source focus is Knowledge Layer context, not Tool Runtime execution.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 fn resolve_quick_ask_focus(input: &QuickAskRequest) -> QuickAskFocus {
     let selected = input.selected_text.as_deref().unwrap_or("").trim();
     let primary_reference = input
@@ -1129,6 +1167,11 @@ fn resolve_quick_ask_focus(input: &QuickAskRequest) -> QuickAskFocus {
     }
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: emits safe Quick Ask compatibility diagnostics
+// rules: Diagnostics must remain counts/status/safe metadata only.
+// next_task: QUICK-ASK-AGENTRUN-SHIM-DESIGN-001
 fn quick_diagnostics(
     input: &QuickAskRequest,
     focus: &QuickAskFocus,
@@ -1585,6 +1628,11 @@ fn quick_composed_task(input: &QuickAskRequest, focus: &QuickAskFocus) -> Option
     Some(task)
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: validates legacy Quick Ask visible answer shape
+// rules: Keep compatibility guardrails; do not grow this into a new runtime policy layer.
+// next_task: QUICK-ASK-AGENTRUN-SHIM-DESIGN-001
 fn quick_answer_validation(
     answer: &str,
     focus: &QuickAskFocus,
@@ -1989,6 +2037,11 @@ fn quick_prompt_section_order(prompt: &str) -> Vec<String> {
     .collect()
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: builds safe provider request summary for Quick Ask diagnostics
+// rules: Summary metadata only; no prompt or provider payload persistence.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 fn quick_provider_request_summary(
     input: &QuickAskRequest,
     focus: &QuickAskFocus,
@@ -2032,6 +2085,11 @@ fn quick_provider_request_summary(
     }
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: NEEDS_BRIDGE
+// role: legacy direct Ollama request builder for Quick Ask
+// rules: Future Quick Ask execution should build ProviderRuntime metadata instead of provider envelopes here.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 fn quick_ollama_request(
     input: &QuickAskRequest,
     model: String,

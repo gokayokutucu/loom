@@ -1,5 +1,14 @@
 #![allow(dead_code)]
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - References are canonical passive context/usage records.
+// - Passive Reference loading is not Tool Runtime execution.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
+
 use crate::{error::ServiceError, storage::db::Database};
 use sqlx::{Row, SqlitePool};
 
@@ -38,6 +47,14 @@ pub struct NewReference {
     pub created_at: String,
 }
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - Repository owns canonical Reference usage records for context/navigation.
+// - V2 must consume Reference context through Knowledge Layer integration.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 #[derive(Debug, Clone)]
 pub struct ReferenceRepository {
     pool: SqlitePool,
@@ -103,6 +120,11 @@ impl ReferenceRepository {
         Ok(result.rows_affected() > 0)
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: lists Loom-scoped Reference records for passive context/navigation
+    // rules: Reference list reads are not tool calls.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     pub async fn list_references_for_loom(
         &self,
         loom_id: &str,
@@ -125,6 +147,11 @@ impl ReferenceRepository {
         })
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: reads one canonical Reference record
+    // rules: Passive Reference lookup remains Knowledge Layer behavior.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     pub async fn get_reference(
         &self,
         reference_id: &str,

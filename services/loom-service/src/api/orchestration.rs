@@ -1,5 +1,13 @@
 #[cfg(test)]
 use crate::providers::types::{sanitize_provider_text, OllamaStreamChunk, OllamaWireChunk};
+// LOOM_BOUNDARY:
+// marker: V1_SHIM
+// owner_layer: V1 Shim
+// migration_status: needs_bridge
+// rules:
+// - Keep operational for compatibility; add only bug fixes or V2 AgentRun integration work.
+// - Do not add new generation features here; future main generation should route through AgentRun.
+// next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
 use crate::{
     capabilities::repository::NewModelRuntimeBenchmark,
     config::LoomServiceConfig,
@@ -77,10 +85,20 @@ const FORBIDDEN_CONTEXT_KEYS: [&str; 4] = [
 const AUTO_ROUTER_NUM_CTX: u32 = 1_024;
 const AUTO_ROUTER_NUM_PREDICT: u32 = 128;
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: deterministic planning endpoint for the legacy orchestration API
+// rules: Keep compatible; new planning behavior belongs behind the V2 AgentRun shim.
+// next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
 pub async fn plan(Json(input): Json<PlannerInput>) -> Json<AnswerPlan> {
     Json(DeterministicPlanner::plan(input))
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: compatibility dry-run endpoint for main generation planning
+// rules: Preserve response shape; do not expand this into a new execution surface.
+// next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
 pub async fn dry_run(
     State(state): State<crate::api::state::AppState>,
     Json(input): Json<OrchestrationDryRunInput>,
@@ -119,6 +137,11 @@ pub async fn dry_run(
     }))
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: main generation endpoint currently owning context build and provider streaming
+// rules: Bug fixes and V2 integration only; future execution should instantiate AgentRun.
+// next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
 pub async fn execute(
     State(state): State<crate::api::state::AppState>,
     Json(input): Json<OrchestrationExecuteInput>,
@@ -131,6 +154,11 @@ pub async fn execute(
         .into_response()
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: response regeneration compatibility endpoint
+// rules: Preserve legacy client contract while migrating execution ownership to AgentRun.
+// next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
 pub async fn regenerate_response(
     State(state): State<crate::api::state::AppState>,
     Path(response_id): Path<String>,
@@ -144,6 +172,11 @@ pub async fn regenerate_response(
         .into_response()
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: same-Loom retry compatibility endpoint
+// rules: Preserve retry semantics; do not add new orchestration behavior outside V2 runtime.
+// next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
 pub async fn retry_response(
     State(state): State<crate::api::state::AppState>,
     Path(response_id): Path<String>,
@@ -157,6 +190,11 @@ pub async fn retry_response(
         .into_response()
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: legacy workflow cancellation endpoint
+// rules: Keep terminal-safe cancellation; future cancellation should delegate to AgentRun.
+// next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
 pub async fn cancel(
     State(state): State<crate::api::state::AppState>,
     Path(run_id): Path<String>,
@@ -201,6 +239,11 @@ pub async fn cancel(
     })
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_DEPRECATED_NO_NEW_FEATURES
+// role: legacy deep synthesis streaming endpoint
+// rules: Bug fixes only until AgentRun/subagent execution owns multi-step synthesis.
+// next_task: SUBAGENT-EXECUTION-SEAM-001
 pub async fn deep_synthesis(
     State(state): State<crate::api::state::AppState>,
     Json(input): Json<DeepSynthesisRequest>,
@@ -1068,6 +1111,11 @@ impl ResponseModeResolution {
     }
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: legacy response persistence lifecycle for main generation
+// rules: Preserve persisted Response behavior while future AgentRun shim assumes execution ownership.
+// next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
 async fn create_persisted_response_lifecycle(
     database: &crate::storage::db::Database,
     input: &OrchestrationExecuteInput,
@@ -1331,6 +1379,11 @@ fn auto_router_metadata(mode_resolution: &ResponseModeResolution) -> Option<Valu
     }))
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: legacy quick/main mode resolver before direct provider execution
+// rules: Do not add new model-routing behavior here; route future policy through AgentRun.
+// next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
 async fn resolve_response_mode_for_execute(
     state: &crate::api::state::AppState,
     input: &OrchestrationExecuteInput,
@@ -1425,6 +1478,11 @@ fn ollama_profile_supports_thinking(config: &LoomServiceConfig, model: &str) -> 
         .unwrap_or(true)
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: compatibility auto-router provider call used before main generation
+// rules: Keep privacy guards; future routing should be an AgentRun/provider-runtime step.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 async fn run_auto_router(
     state: &crate::api::state::AppState,
     input: &OrchestrationExecuteInput,
@@ -1769,6 +1827,11 @@ async fn update_persisted_assistant_status(
         .await
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// role: schedules passive context artifact maintenance after persisted Responses
+// rules: Context artifacts are Knowledge Layer records, not Tool Runtime output.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 async fn schedule_context_artifact_job(
     database: &crate::storage::db::Database,
     lifecycle: Option<&PersistedResponseLifecycle>,
@@ -1837,6 +1900,11 @@ fn provider_error_event(
     ))
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// role: loads attached reference context for legacy generation
+// rules: Passive reference context loading is not a tool; V2 must consume this layer.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 async fn attached_references_for_sources(
     database: &crate::storage::db::Database,
     prompt: &str,
@@ -2257,6 +2325,11 @@ async fn context_window_before_response(
 }
 
 #[cfg(test)]
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// role: loads recent conversation context for generation
+// rules: Conversation context is canonical Knowledge Layer data consumed by V2.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 async fn recent_messages_for_execution(
     database: &crate::storage::db::Database,
     loom_id: &str,
@@ -2465,6 +2538,11 @@ fn context_window_turn_from_response(
     })
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// role: loads explicit saved Memory context for generation
+// rules: Passive memory injection is not a tool; V2 must consume this layer.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 async fn memory_messages_for_execution(
     database: &crate::storage::db::Database,
     config: &LoomServiceConfig,
@@ -3153,6 +3231,11 @@ fn timestamp() -> String {
         .unwrap_or_else(|_| "0".to_string())
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: NEEDS_BRIDGE
+// role: constructs direct ProviderPipeline for legacy generation
+// rules: Low-level provider boundary may remain; AgentRun should route through ProviderRuntimeService.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 fn create_provider_pipeline_for_request(
     ollama: OllamaRuntime,
     config: &crate::config::LoomServiceConfig,
@@ -3180,6 +3263,11 @@ fn create_provider_pipeline_for_request(
     }
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_SHIM
+// role: legacy main generation stream loop
+// rules: Do not add new features; hollow this out behind AgentRun and ProviderRuntimeService.
+// next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
 fn execute_stream(
     state: crate::api::state::AppState,
     input: OrchestrationExecuteInput,
@@ -3975,6 +4063,11 @@ fn execute_stream(
     }
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_DEPRECATED_NO_NEW_FEATURES
+// role: legacy deep synthesis stream loop
+// rules: Preserve compatibility only; V2 subagent execution should replace this path.
+// next_task: SUBAGENT-EXECUTION-SEAM-001
 fn deep_synthesis_stream(
     state: crate::api::state::AppState,
     input: DeepSynthesisRequest,
@@ -4598,6 +4691,11 @@ fn provider_request_from_ollama_request(
     }
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: NEEDS_BRIDGE
+// role: direct provider stream collector bypassing ProviderRuntimeService
+// rules: Keep safe collection; future provider execution must flow through ProviderRuntimeService.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 async fn collect_provider_pipeline_text(
     pipeline: &ProviderPipeline,
     provider_request: ProviderContractRequest,

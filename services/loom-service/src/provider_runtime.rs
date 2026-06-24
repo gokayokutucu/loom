@@ -1,5 +1,12 @@
 #![allow(dead_code)]
-
+// LOOM_BOUNDARY:
+// marker: V2_EXPERIMENTAL_DISCONNECTED
+// owner_layer: V2 Runtime
+// migration_status: disconnected
+// rules:
+// - ProviderRuntimeService is the canonical safe provider execution seam for V2.
+// - Do not persist prompts, provider payloads, raw output, tokens, secrets, or raw thinking.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 //! Provider Runtime seam.
 //!
 //! This module owns provider execution metadata and lifecycle orchestration for
@@ -63,6 +70,14 @@ fn validate_safe_provider_runtime_text(label: &str, value: &str) -> Result<(), S
     Ok(())
 }
 
+// LOOM_BOUNDARY:
+// marker: V2_CANONICAL_RUNTIME
+// owner_layer: V2 Runtime
+// migration_status: canonical
+// rules:
+// - Provider execution statuses are the canonical V2 provider lifecycle vocabulary.
+// - Do not add provider-specific wire states here.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ProviderExecutionStatus {
@@ -98,6 +113,14 @@ impl ProviderExecutionStatus {
     }
 }
 
+// LOOM_BOUNDARY:
+// marker: V2_CANONICAL_RUNTIME
+// owner_layer: V2 Runtime
+// migration_status: canonical
+// rules:
+// - Request carries metadata only for AgentRun-bound provider execution.
+// - Never add prompt text, provider envelopes, secrets, or raw thinking fields.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ProviderExecutionRequest {
@@ -234,6 +257,14 @@ impl ProviderExecutionRecord {
     }
 }
 
+// LOOM_BOUNDARY:
+// marker: V2_CANONICAL_RUNTIME
+// owner_layer: V2 Runtime
+// migration_status: needs_bridge
+// rules:
+// - Canonical safe provider execution seam; currently not wired into AgentRuntime.
+// - AgentRuntime should route provider work through this service in a bridge task.
+// next_task: PROVIDER-RUNTIME-BRIDGE-001
 #[derive(Debug, Clone, Default)]
 pub struct ProviderRuntimeService {
     records: Arc<RwLock<HashMap<String, ProviderExecutionRecord>>>,
@@ -244,6 +275,11 @@ impl ProviderRuntimeService {
         Self::default()
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V2_EXPERIMENTAL_DISCONNECTED
+    // role: test-only no-I/O provider execution lifecycle
+    // rules: Keep as metadata-only until real provider bridge is designed and implemented.
+    // next_task: PROVIDER-RUNTIME-BRIDGE-001
     pub fn submit_noop(
         &self,
         request: ProviderExecutionRequest,
@@ -332,6 +368,11 @@ impl ProviderRuntimeService {
         )
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V2_CANONICAL_RUNTIME
+    // role: idempotent provider execution cancellation metadata transition
+    // rules: Cancellation must remain metadata-only and must not attempt provider I/O here.
+    // next_task: PROVIDER-RUNTIME-BRIDGE-001
     pub fn cancel_execution(
         &self,
         execution_id: &str,
@@ -339,6 +380,11 @@ impl ProviderRuntimeService {
         self.transition(execution_id, ProviderExecutionStatus::Cancelled, None)
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V2_CANONICAL_RUNTIME
+    // role: marks provider execution timeout safely
+    // rules: Timeout state carries safe code/metadata only, never raw provider response.
+    // next_task: PROVIDER-RUNTIME-BRIDGE-001
     pub fn timeout_execution(
         &self,
         execution_id: &str,
@@ -465,6 +511,11 @@ impl ProviderRuntimeService {
     }
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V2_CANONICAL_RUNTIME
+// role: enforces provider-runtime privacy markers before metadata is stored
+// rules: Reject prompt/provider payload/secret/raw-thinking markers at the seam.
+// next_task: none
 fn validate_request(request: &ProviderExecutionRequest) -> Result<(), ServiceError> {
     validate_safe_provider_runtime_text("provider execution_id", &request.execution_id)?;
     validate_safe_provider_runtime_text("provider root_run_id", &request.root_run_id)?;

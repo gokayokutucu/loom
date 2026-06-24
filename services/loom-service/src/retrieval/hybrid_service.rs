@@ -1,5 +1,14 @@
 #![allow(dead_code)]
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - Hybrid retrieval is a rebuildable Knowledge Layer signal provider.
+// - Retrieval candidates are passive context inputs, not Agent state or Tool Runtime output.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
+
 use std::{
     cmp::Ordering,
     collections::{BTreeSet, HashMap},
@@ -23,6 +32,14 @@ const DEFAULT_RRF_K: f32 = 60.0;
 const DOMAIN_RANK_VERSION: &str = "domain-rank-shift-v1";
 const MAX_TEXT_PREVIEW_CHARS: usize = 240;
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - Retrieval queries are passive Knowledge Layer lookups.
+// - Do not add provider/tool execution semantics here.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetrievalQuery {
     pub query: String,
@@ -62,6 +79,14 @@ pub struct RetrievalResult {
     pub diagnostics: RetrievalDiagnostics,
 }
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - Retrieval candidates identify source chunks only.
+// - Full content fetch and prompt assembly belong to Context Manager.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 #[derive(Debug, Clone, PartialEq)]
 pub struct RetrievalCandidate {
     pub source_kind: String,
@@ -159,6 +184,14 @@ pub enum DegradationReason {
     VersionMismatch,
 }
 
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: canonical
+// rules:
+// - HybridRetrievalService owns passive lexical/vector projection fusion.
+// - V2 should consume RetrievalResult through Context Selection, not query indexes as tools.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 #[derive(Clone)]
 pub struct HybridRetrievalService {
     keyword_source: Option<Arc<dyn HybridRetrievalSource>>,
@@ -183,6 +216,11 @@ impl HybridRetrievalService {
         self
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: retrieves and fuses passive context candidates from rebuildable projections
+    // rules: Retrieval is a Knowledge Layer signal provider; it must not become Tool Runtime execution.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     pub async fn retrieve(&self, query: &RetrievalQuery) -> RetrievalResult {
         let started = Instant::now();
         let mut source_outputs = Vec::new();

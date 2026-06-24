@@ -1,5 +1,12 @@
 #![allow(dead_code)]
-
+// LOOM_BOUNDARY:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// owner_layer: V1 Knowledge
+// migration_status: consumed_by_v2
+// rules:
+// - Agent Context Manager is the canonical Knowledge Layer content resolver and snapshot finalizer.
+// - V2 AgentRuntime must consume this layer instead of assembling prompts or resolving content directly.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 //! Agent-only Context Manager boundary.
 //!
 //! Resolves Context Selection identities from canonical SQLite records and
@@ -119,6 +126,14 @@ pub struct FinalContext {
     pub consumed_context_tokens: usize,
 }
 
+// LOOM_BOUNDARY:
+// marker: V1_CONSUMED_BY_V2
+// owner_layer: V1 Knowledge
+// migration_status: consumed_by_v2
+// rules:
+// - This service resolves canonical SQLite content and finalizes metadata-only snapshots for V2.
+// - It must not call providers or Tool Runtime.
+// next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
 #[derive(Debug, Clone)]
 pub struct AgentContextManager {
     pool: SqlitePool,
@@ -148,6 +163,11 @@ impl AgentContextManager {
         }
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CONSUMED_BY_V2
+    // role: resolves selected context identities into bounded final context
+    // rules: V2 must call this rather than duplicate SQLite content loading or prompt assembly.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     pub async fn build(
         &self,
         payload: &ContextPayload,
@@ -279,6 +299,11 @@ impl AgentContextManager {
         })
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: resolves canonical SQLite content for one context candidate
+    // rules: Passive content resolution is not a tool and must not fetch provider/tool output.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     async fn resolve(
         &self,
         candidate: &ContextCandidate,
@@ -362,6 +387,11 @@ impl AgentContextManager {
         Ok(content.map(|content| apply_mode(content, mode)))
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CANONICAL_KNOWLEDGE_LAYER
+    // role: resolves Reference-owned context from canonical SQLite records
+    // rules: Reference context is passive Knowledge Layer data, not Tool Runtime execution.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     async fn resolve_reference(
         &self,
         candidate: &ContextCandidate,
@@ -415,6 +445,11 @@ impl AgentContextManager {
         )))
     }
 
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V1_CONSUMED_BY_V2
+    // role: finalizes metadata-only Context Snapshot decisions and diagnostics
+    // rules: Snapshot finalization must never persist prompt text, provider payloads, or raw thinking.
+    // next_task: CONTEXT-PIPELINE-AGENT-INTEGRATION-DESIGN-001
     async fn finalize_snapshot(
         &self,
         snapshot_id: &str,
@@ -540,6 +575,11 @@ fn estimate_tokens(content: &str) -> usize {
     content.chars().count().div_ceil(4).max(1)
 }
 
+// LOOM_BOUNDARY_METHOD:
+// marker: V1_CANONICAL_KNOWLEDGE_LAYER
+// role: rejects forbidden private markers before context leaves Knowledge Layer
+// rules: Raw thinking/provider payload markers must not enter V2 AgentRuntime context.
+// next_task: none
 fn validate_resolved_content(content: &str) -> Result<(), ServiceError> {
     let lower = content.to_ascii_lowercase();
     if FORBIDDEN_CONTENT_MARKERS
