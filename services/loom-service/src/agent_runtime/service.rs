@@ -156,6 +156,7 @@ mod tests {
             provider_profile_id: None,
             model_id: None,
             context_snapshot_id: None,
+            legacy_context: None,
             provider_options: None,
         }
     }

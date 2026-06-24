@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 
+use crate::context::types::BuildContextInput;
 use crate::providers::contract::ProviderUsageMetadata;
 
 /// Generates a new UUID v4 agent run ID.
@@ -189,6 +190,17 @@ impl Default for AgentRuntimeProviderOptions {
     }
 }
 
+/// Optional v1 Knowledge Layer context input for AgentRuntime.
+///
+/// This is a bridge seam only: it carries the same structured input the legacy
+/// ContextManager already consumes. It must not be persisted as an AgentRun
+/// diagnostic/event because it may contain raw prompt/context content.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyContextRuntimeInput {
+    pub build_input: BuildContextInput,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentRuntimeRequest {
@@ -200,6 +212,10 @@ pub struct AgentRuntimeRequest {
     pub model_id: Option<String>,
     /// Context Manager integration point (Phase 3). No assembly logic yet.
     pub context_snapshot_id: Option<String>,
+    /// Optional legacy ContextManager input. When present, AgentRuntime builds
+    /// provider messages through the production v1 ContextManager path.
+    /// This field may include raw context content and must never be persisted.
+    pub legacy_context: Option<LegacyContextRuntimeInput>,
     pub provider_options: Option<AgentRuntimeProviderOptions>,
 }
 

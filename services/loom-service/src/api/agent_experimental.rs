@@ -181,6 +181,7 @@ fn validate_run_request(
         provider_profile_id: request.provider_profile_id,
         model_id: request.model,
         context_snapshot_id: request.context_snapshot_id,
+        legacy_context: None,
         provider_options,
     })
 }
@@ -1089,6 +1090,7 @@ mod tests {
                     provider_profile_id: None,
                     model_id: Some("test-model".to_string()),
                     context_snapshot_id: None,
+                    legacy_context: None,
                     provider_options: None,
                 })
                 .collect::<Vec<_>>()

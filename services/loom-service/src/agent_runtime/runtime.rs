@@ -15,6 +15,7 @@ use crate::agent_runtime::types::{
     new_agent_run_id, AgentRun, AgentRunId, AgentRunStatus, AgentRuntimeProviderOptions,
     AgentRuntimeRequest, AgentStepId, AgentStepKind, AgentStepStatus, AgentUsage,
 };
+use crate::context::types::{BuiltContext, ContextMessageRole};
 use crate::providers::adapter::ProviderRegistry;
 use crate::providers::contract::{
     ProviderContractEvent, ProviderContractMessage, ProviderContractMessageRole,
@@ -243,6 +244,49 @@ fn terminal_event_type(transition: &AgentTerminalTransition) -> &'static str {
     }
 }
 
+fn provider_role_from_context(role: ContextMessageRole) -> ProviderContractMessageRole {
+    match role {
+        ContextMessageRole::System => ProviderContractMessageRole::System,
+        ContextMessageRole::User => ProviderContractMessageRole::User,
+        ContextMessageRole::Assistant => ProviderContractMessageRole::Assistant,
+    }
+}
+
+fn provider_messages_from_built_context(
+    built_context: &BuiltContext,
+) -> Vec<ProviderContractMessage> {
+    built_context
+        .messages
+        .iter()
+        .map(|message| ProviderContractMessage {
+            role: provider_role_from_context(message.role.clone()),
+            content: message.content.clone(),
+        })
+        .collect()
+}
+
+fn safe_legacy_context_metadata(
+    built_context: &BuiltContext,
+    context_snapshot_id: Option<&str>,
+) -> serde_json::Value {
+    serde_json::json!({
+        "contextBuilt": true,
+        "contextSource": "legacy_context_manager",
+        "contextSnapshotId": context_snapshot_id,
+        "messageCount": built_context.messages.len(),
+        "selectedCandidateCount": built_context.budget_diagnostics.selected_candidate_count,
+        "droppedCandidateCount": built_context.budget_diagnostics.dropped_candidate_count,
+        "overflowCandidateCount": built_context.budget_diagnostics.overflow_candidate_count,
+        "recentSelectedResponses": built_context.budget_diagnostics.recent_selected_responses,
+        "referenceCapsuleCount": built_context.artifacts.reference_capsule_ids.len(),
+        "responseCapsuleCount": built_context.artifacts.response_capsule_ids.len(),
+        "hasCheckpoint": built_context.artifacts.checkpoint_id.is_some(),
+        "hasWeftOrigin": built_context.artifacts.weft_origin_context_id.is_some(),
+        "warningCount": built_context.warnings.len(),
+        "strategy": built_context.strategy,
+    })
+}
+
 // LOOM_BOUNDARY:
 // marker: V2_CANONICAL_RUNTIME
 // owner_layer: V2 Runtime
@@ -387,7 +431,7 @@ where
             persist_event(&run_repository, &run_id, &run_started).await;
             yield run_started;
 
-            // 1. ContextBuild step — placeholder only.
+            // 1. ContextBuild step — uses legacy ContextManager when supplied.
             let context_step_id = format!("{}-context-build", run_id);
             let context_step_started = AgentEvent::StepStarted {
                 run_id: run_id.clone(),
@@ -396,6 +440,26 @@ where
             };
             persist_step_started(&run_repository, &run_id, &context_step_id, AgentStepKind::ContextBuild, 0, &started_at_str, &context_step_started).await;
             yield context_step_started;
+
+            let mut provider_messages = vec![ProviderContractMessage {
+                role: ProviderContractMessageRole::User,
+                content: request.prompt.clone(),
+            }];
+            let mut loom_context_metadata = serde_json::json!({
+                "contextBuilt": false,
+                "contextSnapshotId": request.context_snapshot_id.clone(),
+            });
+
+            if let Some(legacy_context) = request.legacy_context.clone() {
+                let built_context = crate::context::manager::ContextManager::default()
+                    .build_context(legacy_context.build_input);
+                provider_messages = provider_messages_from_built_context(&built_context);
+                loom_context_metadata = safe_legacy_context_metadata(
+                    &built_context,
+                    request.context_snapshot_id.as_deref(),
+                );
+            }
+
             finish_step_in_repo(&run_repository, &context_step_id, AgentStepStatus::Completed, None).await;
 
             // 2. ProviderCall step
@@ -421,10 +485,7 @@ where
                 provider_kind,
                 provider_profile_id,
                 model_id,
-                messages: vec![ProviderContractMessage {
-                    role: ProviderContractMessageRole::User,
-                    content: request.prompt.clone(),
-                }],
+                messages: provider_messages,
                 options: ProviderContractOptions {
                     temperature,
                     top_p: None,
@@ -437,10 +498,7 @@ where
                 runtime_metadata: serde_json::json!({
                     "source": "agent_runtime.execute_run",
                 }),
-                loom_context_metadata: serde_json::json!({
-                    "contextBuilt": false,
-                    "contextSnapshotId": request.context_snapshot_id,
-                }),
+                loom_context_metadata,
             };
 
             let start_time = std::time::Instant::now();
@@ -850,7 +908,12 @@ mod tests {
     use super::*;
     use crate::agent_runtime::test_support::make_test_runtime;
     use crate::agent_runtime::tools::ToolPermissionStatus;
-    use crate::agent_runtime::types::AgentRuntimeRequest;
+    use crate::agent_runtime::types::{AgentRuntimeRequest, LegacyContextRuntimeInput};
+    use crate::context::types::{
+        AnswerPlanSummary, ArtifactStatus, AttachedReferenceInput, BuildContextInput,
+        ContextMessage, ContextMessageRole, ContextSource, ReferenceContext,
+        ResponseContextCapsule, ResponseMode, WeftOriginContext,
+    };
     use crate::providers::config::ProviderKind;
     use crate::providers::contract::ProviderUsageMetadata;
     use crate::providers::types::{ProviderError, ProviderErrorKind};
@@ -864,6 +927,7 @@ mod tests {
             provider_profile_id: None,
             model_id: None,
             context_snapshot_id: None,
+            legacy_context: None,
             provider_options: None,
         }
     }
@@ -910,6 +974,83 @@ mod tests {
                 )
             })
             .count()
+    }
+
+    fn legacy_context_input() -> LegacyContextRuntimeInput {
+        LegacyContextRuntimeInput {
+            build_input: BuildContextInput {
+                loom_id: "test-loom".to_string(),
+                current_head_response_id: Some("current-user-response".to_string()),
+                user_prompt: "Use the legacy context.".to_string(),
+                attached_references: vec![AttachedReferenceInput {
+                    reference: ReferenceContext {
+                        reference_id: "ref-1".to_string(),
+                        target_kind: "response".to_string(),
+                        target_id: Some("source-response".to_string()),
+                        target_uri: Some("loom://test-loom/responses/source-response".to_string()),
+                        label: Some("Source response".to_string()),
+                        selected_text: Some("Selected reference fragment".to_string()),
+                        capsule_summary: Some("Reference summary".to_string()),
+                    },
+                    response_capsule: Some(ResponseContextCapsule {
+                        capsule_id: "capsule-1".to_string(),
+                        response_id: "source-response".to_string(),
+                        loom_id: "test-loom".to_string(),
+                        response_code: None,
+                        title: Some("Capsule title".to_string()),
+                        summary: "Capsule summary text".to_string(),
+                        key_points: vec!["Capsule key point".to_string()],
+                        keywords: vec!["capsule".to_string()],
+                        entities: vec![],
+                        code_blocks: vec![],
+                        canonical_uri: None,
+                        source_hash: None,
+                        generator: Some("test".to_string()),
+                        status: ArtifactStatus::Ready,
+                    }),
+                    attachment: None,
+                }],
+                response_mode: ResponseMode::Instant,
+                resolved_num_ctx: 8192,
+                answer_plan: Some(AnswerPlanSummary {
+                    intent: "answer".to_string(),
+                    answer_style: "direct".to_string(),
+                    context_strategy: Some("test".to_string()),
+                }),
+                source: ContextSource::Weft,
+                weft_origin: Some(WeftOriginContext {
+                    context_id: "weft-origin-1".to_string(),
+                    weft_loom_id: "test-loom".to_string(),
+                    origin_loom_id: "origin-loom".to_string(),
+                    origin_response_id: "origin-response".to_string(),
+                    origin_capsule_id: Some("origin-capsule".to_string()),
+                    origin_summary: "Weft origin background".to_string(),
+                    source_hash: None,
+                    status: ArtifactStatus::Ready,
+                }),
+                checkpoint: None,
+                memory_messages: vec![ContextMessage::new(
+                    ContextMessageRole::System,
+                    "Saved memory context",
+                    None,
+                    Some("memory-1".to_string()),
+                )],
+                recent_messages: vec![
+                    ContextMessage::new(
+                        ContextMessageRole::User,
+                        "Recent user turn",
+                        None,
+                        Some("recent-user".to_string()),
+                    ),
+                    ContextMessage::new(
+                        ContextMessageRole::Assistant,
+                        "Recent assistant turn",
+                        None,
+                        Some("recent-assistant".to_string()),
+                    ),
+                ],
+            },
+        }
     }
 
     #[test]
@@ -1116,6 +1257,102 @@ mod tests {
         ));
         assert_eq!(stream_events.len(), 13);
         assert_eq!(terminal_event_count(&stream_events), 1);
+    }
+
+    #[tokio::test]
+    async fn test_agent_runtime_builds_provider_messages_from_legacy_context_manager() {
+        let events = vec![ProviderContractEvent::Completed {
+            done_reason: Some("stop".to_string()),
+            usage: ProviderUsageMetadata::unavailable("no-usage"),
+        }];
+        let (runtime, state) = make_test_runtime(events);
+        let mut request = make_request("legacy-context-response");
+        request.context_snapshot_id = Some("snapshot-deferred".to_string());
+        request.legacy_context = Some(legacy_context_input());
+
+        let stream_events = runtime.execute_run(request).collect::<Vec<_>>().await;
+        assert!(matches!(
+            stream_events.last(),
+            Some(AgentEvent::RunCompleted { .. })
+        ));
+
+        let provider_request = state
+            .lock()
+            .unwrap()
+            .last_request
+            .clone()
+            .expect("provider request captured");
+
+        assert!(provider_request.messages.len() > 1);
+        assert!(provider_request.messages.iter().any(|message| {
+            message.role == ProviderContractMessageRole::System
+                && message.content.contains("Recent user turn")
+        }));
+        assert!(provider_request.messages.iter().any(|message| {
+            message.role == ProviderContractMessageRole::System
+                && message.content.contains("Selected reference fragment")
+        }));
+        assert!(provider_request.messages.iter().any(|message| {
+            message.role == ProviderContractMessageRole::System
+                && message.content.contains("Capsule summary text")
+        }));
+        assert!(provider_request.messages.iter().any(|message| {
+            message.role == ProviderContractMessageRole::System
+                && message.content.contains("Weft origin background")
+        }));
+        assert!(provider_request.messages.iter().any(|message| {
+            message.role == ProviderContractMessageRole::System
+                && message.content.contains("Saved memory context")
+        }));
+        assert!(provider_request.messages.iter().any(|message| {
+            message.role == ProviderContractMessageRole::User
+                && message.content == "Use the legacy context."
+        }));
+
+        let metadata = provider_request.loom_context_metadata;
+        assert_eq!(metadata["contextBuilt"], true);
+        assert_eq!(metadata["contextSource"], "legacy_context_manager");
+        assert_eq!(metadata["contextSnapshotId"], "snapshot-deferred");
+        assert!(metadata["messageCount"].as_u64().unwrap_or_default() > 1);
+        assert_eq!(metadata["responseCapsuleCount"], 1);
+        assert_eq!(metadata["referenceCapsuleCount"], 1);
+        assert_eq!(metadata["hasWeftOrigin"], true);
+
+        let serialized_metadata = serde_json::to_string(&metadata).expect("metadata json");
+        assert!(!serialized_metadata.contains("Selected reference fragment"));
+        assert!(!serialized_metadata.contains("Capsule summary text"));
+        assert!(!serialized_metadata.contains("Weft origin background"));
+        assert!(!serialized_metadata.contains("Saved memory context"));
+        assert!(!serialized_metadata.contains("Use the legacy context."));
+    }
+
+    #[tokio::test]
+    async fn test_agent_runtime_without_legacy_context_preserves_minimal_request_path() {
+        let events = vec![ProviderContractEvent::Completed {
+            done_reason: Some("stop".to_string()),
+            usage: ProviderUsageMetadata::unavailable("no-usage"),
+        }];
+        let (runtime, state) = make_test_runtime(events);
+        let request = make_request("minimal-context-response");
+
+        let _ = runtime.execute_run(request).collect::<Vec<_>>().await;
+        let provider_request = state
+            .lock()
+            .unwrap()
+            .last_request
+            .clone()
+            .expect("provider request captured");
+
+        assert_eq!(provider_request.messages.len(), 1);
+        assert_eq!(
+            provider_request.messages[0].role,
+            ProviderContractMessageRole::User
+        );
+        assert_eq!(provider_request.messages[0].content, "ping");
+        assert_eq!(
+            provider_request.loom_context_metadata["contextBuilt"],
+            false
+        );
     }
 
     #[tokio::test]
@@ -1509,6 +1746,34 @@ mod tests {
             .iter()
             .filter(|event| event.event_type == "step_started")
             .all(|event| event.agent_step_id.is_some()));
+    }
+
+    #[tokio::test]
+    async fn test_legacy_context_content_is_not_persisted_in_agent_events() {
+        let events = vec![ProviderContractEvent::Completed {
+            done_reason: Some("stop".to_string()),
+            usage: ProviderUsageMetadata::unavailable("no-usage"),
+        }];
+        let (pipeline, _) = crate::agent_runtime::test_support::make_test_pipeline(events);
+        let database = crate::storage::db::test_database().await;
+        let repo = AgentRunRepository::from_pool(database.pool());
+        let runtime = AgentRuntime::new(pipeline).with_repository(repo.clone());
+        let mut request = make_request("legacy-context-persisted-response");
+        request.legacy_context = Some(legacy_context_input());
+
+        let stream_events = runtime.execute_run(request).collect::<Vec<_>>().await;
+        let run_id = extract_run_id(&stream_events);
+        let durable_events = repo.list_events_for_run(&run_id, 0, 100).await.unwrap();
+        let serialized_events = serde_json::to_string(&durable_events).expect("events json");
+
+        assert!(!serialized_events.contains("Selected reference fragment"));
+        assert!(!serialized_events.contains("Capsule summary text"));
+        assert!(!serialized_events.contains("Weft origin background"));
+        assert!(!serialized_events.contains("Saved memory context"));
+        assert!(!serialized_events.contains("Use the legacy context."));
+        assert!(!serialized_events.contains("raw_thinking"));
+        assert!(!serialized_events.contains("chain_of_thought"));
+        assert!(!serialized_events.contains("hidden_reasoning"));
     }
 
     #[tokio::test]
