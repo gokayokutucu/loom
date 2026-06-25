@@ -45,7 +45,7 @@ A **Phase** is a top-level unit of the roadmap. Phase IDs are global and never r
 | P18 | Agent Behavior | Agent Phase 5 | LOCKED | 100% | P16, P17 | — |
 | P19 | Settings IA, Privacy & Data Backlog | Ledger HOLD/BACKLOG block | HOLD-BACKLOG | 0% | P08 | Explicit hold, no blocker — deprioritized |
 | P20 | Multi-Agent Execution Topology | New in this rebase | ACTIVE | 30% | P17, P18 | — |
-| P21 | V1/V2 Boundary & AgentRun Shim Integration | New for context and execution bridge | ACTIVE | 80% | P12, P16 | — |
+| P21 | V1/V2 Boundary & AgentRun Shim Integration | New for context and execution bridge | ACTIVE | 90% | P12, P16 | — |
 Effort estimates (relative, not calendar time) are given per-Epic in §3, not per-Phase, since Phase-level estimates were the original problem (too coarse to act on).
 
 ---
@@ -171,7 +171,7 @@ This entire Phase needs a re-scoping pass before being reactivated — several i
   - Subtask: `TOOL-PERMISSION-MODEL-001` — NEXT
   - Subtask: `TOOL-ARTIFACTS-001` — NEXT
 
-### P21 — V1/V2 Boundary & AgentRun Shim Integration [ACTIVE, 80%]
+### P21 — V1/V2 Boundary & AgentRun Shim Integration [ACTIVE, 90%]
 - Epic: Boundary & Audits
   - Subtask: `LOOM-V1-V2-BOUNDARY-AUDIT-001` — DONE
   - Subtask: `LOOM-V1-V2-CODEBOUNDARY-MARKING-001` — DONE
@@ -182,7 +182,7 @@ This entire Phase needs a re-scoping pass before being reactivated — several i
   - Subtask: `MAIN-GENERATION-AGENTRUN-SHIM-001` — DONE
   - Subtask: `QUICK-ASK-AGENTRUN-SHIM-DESIGN-001` — NEXT
 - Epic: Bridges
-  - Subtask: `PROVIDER-RUNTIME-BRIDGE-001` — NEXT
+  - Subtask: `PROVIDER-RUNTIME-BRIDGE-001` — DONE
   - Subtask: `TOOL-RUNTIME-ADAPTER-CONTRACT-001` — HOLD
   - Subtask: `SUBAGENT-EXECUTION-SEAM-001` — HOLD
 
