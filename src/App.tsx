@@ -19145,6 +19145,16 @@ function PromptComposer({
   const modelScanGuardRef = useRef(false);
   const [discoveredProfiles, setDiscoveredProfiles] = useState<ProviderProfile[]>([]);
   const [loadingProfiles, setLoadingProfiles] = useState(false);
+  // engineClient is recreated (new identity) whenever providerSettings changes
+  // elsewhere in the app — including during active response streaming. Reading
+  // it through a ref lets the provider-status effect below depend only on
+  // modelPickerOpen, so an unrelated engineClient identity change cannot
+  // retrigger the fetch and flicker the Provider Status section while the
+  // picker is open. See MODEL-PICKER-PROVIDER-STATUS-FLICKER-AUDIT-001.
+  const engineClientRef = useRef(engineClient);
+  useEffect(() => {
+    engineClientRef.current = engineClient;
+  }, [engineClient]);
   const [modelPopoverStyle, setModelPopoverStyle] = useState<{
     left: number;
     top: number;
@@ -19896,11 +19906,18 @@ function PromptComposer({
       return;
     }
     let cancelled = false;
-    setLoadingProfiles(true);
+    // Stale-while-revalidate: only show the loading state when there is no
+    // cached provider status yet. A background refresh while the picker
+    // stays open keeps the previously known status visible instead of
+    // flickering back to "Loading provider statuses...".
+    if (discoveredProfiles.length === 0) {
+      setLoadingProfiles(true);
+    }
 
+    const client = engineClientRef.current;
     Promise.all([
-      engineClient.getRuntimeProviders().catch(() => []),
-      engineClient.getRuntimeModels().then((res) => res.models).catch(() => []),
+      client.getRuntimeProviders().catch(() => []),
+      client.getRuntimeModels().then((res) => res.models).catch(() => []),
     ])
       .then(([providers, models]) => {
         if (cancelled) return;
@@ -19916,7 +19933,12 @@ function PromptComposer({
     return () => {
       cancelled = true;
     };
-  }, [modelPickerOpen, engineClient]);
+    // engineClient is read via engineClientRef (see above) so an unrelated
+    // engineClient identity change (e.g. providerSettings updates during
+    // active response streaming) does not retrigger this fetch while the
+    // picker is open.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [modelPickerOpen]);
 
   useLayoutEffect(() => {
     if (!mention) return;
