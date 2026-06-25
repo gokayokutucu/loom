@@ -16,6 +16,7 @@ use crate::agent_runtime::types::{
     AgentRuntimeRequest, AgentStepId, AgentStepKind, AgentStepStatus, AgentUsage,
 };
 use crate::context::types::{BuiltContext, ContextMessageRole};
+use crate::provider_runtime::{ProviderExecutionRequest, ProviderRuntimeService};
 use crate::providers::adapter::ProviderRegistry;
 use crate::providers::contract::{
     ProviderContractEvent, ProviderContractMessage, ProviderContractMessageRole,
@@ -25,6 +26,11 @@ use crate::providers::pipeline::{ProviderPipeline, ProviderPipelineRegistry};
 use crate::storage::repositories::agent_runs::{
     AgentRunRepository, NewAgentEvent, NewAgentRun, NewAgentStep,
 };
+
+const PROVIDER_CALL_COMPLETED_SAFE_SUMMARY: &str = "provider_call_completed_via_bridge";
+const PROVIDER_CALL_FAILED_SAFE_CODE: &str = "provider_call_failed";
+const PROVIDER_STREAM_ENDED_WITHOUT_TERMINAL_EVENT_SAFE_CODE: &str =
+    "provider_stream_ended_without_terminal_event";
 
 fn now_epoch_ms() -> u64 {
     std::time::SystemTime::now()
@@ -290,14 +296,16 @@ fn safe_legacy_context_metadata(
 // LOOM_BOUNDARY:
 // marker: V2_CANONICAL_RUNTIME
 // owner_layer: V2 Runtime
-// migration_status: needs_bridge
+// migration_status: bridged
 // rules:
 // - AgentRuntime owns AgentRun lifecycle, steps, cancellation, and safe events.
-// - It must consume Context Pipeline and ProviderRuntimeService through bridge tasks.
-// next_task: PROVIDER-RUNTIME-BRIDGE-001
+// - It consumes the legacy Context Pipeline via LegacyContextRuntimeInput and drives
+//   ProviderRuntimeService lifecycle metadata around its own provider call (PROVIDER-RUNTIME-BRIDGE-001).
+// next_task: none
 #[derive(Debug)]
 pub struct AgentRuntime<R = ProviderRegistry> {
     pipeline: ProviderPipeline<R>,
+    provider_runtime: ProviderRuntimeService,
     run_store: AgentRunStore,
     tool_registry: Arc<std::sync::RwLock<crate::agent_runtime::tool_registry::ToolRegistry>>,
     run_repository: Option<AgentRunRepository>,
@@ -314,6 +322,7 @@ where
     pub fn with_run_store(pipeline: ProviderPipeline<R>, run_store: AgentRunStore) -> Self {
         Self {
             pipeline,
+            provider_runtime: ProviderRuntimeService::new(),
             run_store,
             tool_registry: Arc::new(std::sync::RwLock::new(
                 crate::agent_runtime::tool_registry::ToolRegistry::new(),
@@ -329,6 +338,7 @@ where
     ) -> Self {
         Self {
             pipeline,
+            provider_runtime: ProviderRuntimeService::new(),
             run_store,
             tool_registry,
             run_repository: None,
@@ -347,6 +357,10 @@ where
         &self.run_store
     }
 
+    pub fn provider_runtime(&self) -> &ProviderRuntimeService {
+        &self.provider_runtime
+    }
+
     pub fn cancel_run(&self, run_id: &AgentRunId) -> AgentCancellationOutcome {
         let outcome = self.run_store.request_cancel(run_id);
         if matches!(
@@ -362,12 +376,13 @@ where
     }
 
     // LOOM_BOUNDARY_METHOD:
-    // marker: NEEDS_BRIDGE
-    // role: executes AgentRun lifecycle and currently calls ProviderPipeline directly
-    // rules: Preserve safe events; future provider execution must route through ProviderRuntimeService and Knowledge Layer context.
-    // next_task: PROVIDER-RUNTIME-BRIDGE-001
+    // marker: V2_CANONICAL_RUNTIME
+    // role: executes AgentRun lifecycle; drives ProviderRuntimeService lifecycle metadata around its own provider call
+    // rules: Preserve safe events; ProviderRuntimeService tracks lifecycle only, the real call stays here.
+    // next_task: none
     pub fn execute_run(&self, request: AgentRuntimeRequest) -> impl Stream<Item = AgentEvent> {
         let pipeline = self.pipeline.clone();
+        let provider_runtime = self.provider_runtime.clone();
         let run_store = self.run_store.clone();
         let tool_registry = self.tool_registry.clone();
         let run_repository = self.run_repository.clone();
@@ -481,6 +496,10 @@ where
                 .and_then(|o| o.max_output_tokens)
                 .or(default_opts.max_output_tokens);
 
+            let provider_execution_id = format!("{run_id}-provider-exec");
+            let provider_profile_id_for_runtime = provider_profile_id.clone();
+            let model_id_for_runtime = model_id.clone();
+
             let provider_request = ProviderContractRequest {
                 provider_kind,
                 provider_profile_id,
@@ -501,6 +520,23 @@ where
                 loom_context_metadata,
             };
 
+            // ProviderRuntimeService tracks safe lifecycle metadata for this provider
+            // call; the call itself still runs through `pipeline` below
+            // (PROVIDER-RUNTIME-BRIDGE-001 — see docs/provider_runtime_seam_audit.md).
+            let _ = provider_runtime.submit_noop(ProviderExecutionRequest {
+                execution_id: provider_execution_id.clone(),
+                root_run_id: run_id.clone(),
+                agent_run_id: run_id.clone(),
+                provider_profile_id: Some(provider_profile_id_for_runtime),
+                model_id: Some(model_id_for_runtime),
+                requested_at: Some(started_at_str.clone()),
+                timeout_ms: None,
+                diagnostics_json: None,
+                auto_complete_noop: false,
+                force_noop_failure: false,
+            });
+            let _ = provider_runtime.transition_to_running(&provider_execution_id);
+
             let start_time = std::time::Instant::now();
             let mut provider_stream = pipeline.stream_chat(provider_request);
             let mut completed_successfully = false;
@@ -511,6 +547,7 @@ where
                     biased;
                     changed = cancel_rx.changed() => {
                         if changed.is_ok() && *cancel_rx.borrow() {
+                            let _ = provider_runtime.cancel_execution(&provider_execution_id);
                             let transition = run_store.transition_terminal(
                                 &store_run_id,
                                 AgentRunStatus::Cancelled,
@@ -559,6 +596,10 @@ where
                     }
                     ProviderContractEvent::Completed { done_reason, usage }
                     | ProviderContractEvent::Truncated { done_reason, usage } => {
+                        let _ = provider_runtime.complete_execution(
+                            &provider_execution_id,
+                            PROVIDER_CALL_COMPLETED_SAFE_SUMMARY,
+                        );
                         run_usage = AgentUsage::from_provider(&usage);
                         let completed_event = AgentEvent::ProviderCompleted {
                             run_id: run_id.clone(),
@@ -573,6 +614,10 @@ where
                         break;
                     }
                     ProviderContractEvent::Error { error } => {
+                        let _ = provider_runtime.fail_execution(
+                            &provider_execution_id,
+                            PROVIDER_CALL_FAILED_SAFE_CODE,
+                        );
                         let transition = run_store.transition_terminal(
                             &store_run_id,
                             AgentRunStatus::Failed,
@@ -597,6 +642,7 @@ where
                         return;
                     }
                     ProviderContractEvent::Cancelled => {
+                        let _ = provider_runtime.cancel_execution(&provider_execution_id);
                         let transition = run_store.transition_terminal(
                             &store_run_id,
                             AgentRunStatus::Cancelled,
@@ -624,6 +670,10 @@ where
             }
 
             if !completed_successfully {
+                let _ = provider_runtime.fail_execution(
+                    &provider_execution_id,
+                    PROVIDER_STREAM_ENDED_WITHOUT_TERMINAL_EVENT_SAFE_CODE,
+                );
                 let transition = run_store.transition_terminal(
                     &store_run_id,
                     AgentRunStatus::Failed,
@@ -649,6 +699,10 @@ where
             }
 
             if *cancel_rx.borrow() {
+                // Race outcome: the provider call already completed (handled above,
+                // provider_runtime is already terminal there) but cancellation was
+                // also requested. cancel_execution is a safe no-op on a terminal record.
+                let _ = provider_runtime.cancel_execution(&provider_execution_id);
                 let transition = run_store.transition_terminal(
                     &store_run_id,
                     AgentRunStatus::Cancelled,
@@ -1257,6 +1311,96 @@ mod tests {
         ));
         assert_eq!(stream_events.len(), 13);
         assert_eq!(terminal_event_count(&stream_events), 1);
+    }
+
+    #[tokio::test]
+    async fn test_agent_runtime_provider_runtime_reflects_completion() {
+        let events = vec![
+            ProviderContractEvent::Delta {
+                text: "hello".to_string(),
+            },
+            ProviderContractEvent::Completed {
+                done_reason: Some("stop".to_string()),
+                usage: ProviderUsageMetadata::unavailable("no-usage"),
+            },
+        ];
+        let (runtime, _) = make_test_runtime(events);
+        let request = make_request("provider-runtime-completion");
+
+        let stream_events = runtime.execute_run(request).collect::<Vec<_>>().await;
+        let run_id = extract_run_id(&stream_events);
+        let execution_id = format!("{run_id}-provider-exec");
+
+        let execution = runtime
+            .provider_runtime()
+            .get_execution(&execution_id)
+            .expect("lookup does not error")
+            .expect("provider execution recorded for this run");
+        assert_eq!(
+            execution.status,
+            crate::provider_runtime::ProviderExecutionStatus::Completed
+        );
+        assert_eq!(
+            execution.safe_summary.as_deref(),
+            Some("provider_call_completed_via_bridge")
+        );
+
+        let serialized = serde_json::to_string(&execution).expect("serialize execution");
+        assert!(!serialized.to_ascii_lowercase().contains("prompt"));
+        assert!(!serialized.to_ascii_lowercase().contains("raw_thinking"));
+    }
+
+    #[tokio::test]
+    async fn test_agent_runtime_provider_runtime_reflects_failure() {
+        let error = ProviderError::new(ProviderErrorKind::Unauthorized, ProviderKind::Ollama)
+            .with_technical_message("auth failed");
+        let events = vec![ProviderContractEvent::Error { error }];
+        let (runtime, _) = make_test_runtime(events);
+        let request = make_request("provider-runtime-failure");
+
+        let stream_events = runtime.execute_run(request).collect::<Vec<_>>().await;
+        let run_id = extract_run_id(&stream_events);
+        let execution_id = format!("{run_id}-provider-exec");
+
+        let execution = runtime
+            .provider_runtime()
+            .get_execution(&execution_id)
+            .expect("lookup does not error")
+            .expect("provider execution recorded for this run");
+        assert_eq!(
+            execution.status,
+            crate::provider_runtime::ProviderExecutionStatus::Failed
+        );
+        assert_eq!(
+            execution.safe_error_code.as_deref(),
+            Some("provider_call_failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_agent_runtime_provider_runtime_reflects_cancellation() {
+        let events = vec![
+            ProviderContractEvent::Delta {
+                text: "partial".to_string(),
+            },
+            ProviderContractEvent::Cancelled,
+        ];
+        let (runtime, _) = make_test_runtime(events);
+        let request = make_request("provider-runtime-cancel");
+
+        let stream_events = runtime.execute_run(request).collect::<Vec<_>>().await;
+        let run_id = extract_run_id(&stream_events);
+        let execution_id = format!("{run_id}-provider-exec");
+
+        let execution = runtime
+            .provider_runtime()
+            .get_execution(&execution_id)
+            .expect("lookup does not error")
+            .expect("provider execution recorded for this run");
+        assert_eq!(
+            execution.status,
+            crate::provider_runtime::ProviderExecutionStatus::Cancelled
+        );
     }
 
     #[tokio::test]

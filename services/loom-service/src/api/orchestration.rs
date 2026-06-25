@@ -36,6 +36,7 @@ use crate::{
         progress::OrchestrationProgressEvent,
         workflow::{RepositoryWorkflowRunner, WorkflowRun, WorkflowRunner},
     },
+    provider_runtime::{ProviderExecutionRequest, ProviderRuntimeService},
     providers::{
         contract::{
             ProviderContractEvent, ProviderContractMessage, ProviderContractMessageRole,
@@ -2831,6 +2832,12 @@ struct MainGenerationAgentRunShim {
     repository: AgentRunRepository,
     agent_run_id: String,
     provider_step_id: String,
+    // PROVIDER-RUNTIME-BRIDGE-001: tracks safe provider lifecycle metadata around
+    // Main Generation's real provider call. The call itself still runs through
+    // `create_provider_pipeline_for_request`/`stream_chat` below; this seam never
+    // performs provider I/O itself (see provider_runtime.rs static guard).
+    provider_runtime: ProviderRuntimeService,
+    provider_execution_id: String,
 }
 
 fn main_generation_agent_runtime_request(
@@ -2902,6 +2909,7 @@ async fn create_main_generation_agent_run_shim(
     let agent_run_id = new_agent_run_id().0;
     let context_step_id = format!("{agent_run_id}-context-build");
     let provider_step_id = format!("{agent_run_id}-provider-call");
+    let provider_execution_id = format!("{agent_run_id}-provider-exec");
     let started_at = unix_timestamp_millis().to_string();
     let loom_id = lifecycle
         .map(|record| record.loom_id.as_str())
@@ -2969,6 +2977,8 @@ async fn create_main_generation_agent_run_shim(
         repository,
         agent_run_id,
         provider_step_id,
+        provider_runtime: ProviderRuntimeService::new(),
+        provider_execution_id,
     })
 }
 
@@ -2985,6 +2995,26 @@ async fn start_main_generation_agent_provider_step(shim: Option<&MainGenerationA
                 started_at: Some(&started_at),
             })
             .await;
+
+        // PROVIDER-RUNTIME-BRIDGE-001: register safe lifecycle metadata for the
+        // real provider call this Main Generation run is about to make. The
+        // call itself still runs through `create_provider_pipeline_for_request`
+        // and `stream_chat` below; this seam never performs provider I/O.
+        let _ = shim.provider_runtime.submit_noop(ProviderExecutionRequest {
+            execution_id: shim.provider_execution_id.clone(),
+            root_run_id: shim.agent_run_id.clone(),
+            agent_run_id: shim.agent_run_id.clone(),
+            provider_profile_id: None,
+            model_id: None,
+            requested_at: Some(started_at),
+            timeout_ms: None,
+            diagnostics_json: None,
+            auto_complete_noop: false,
+            force_noop_failure: false,
+        });
+        let _ = shim
+            .provider_runtime
+            .transition_to_running(&shim.provider_execution_id);
     }
 }
 
@@ -3006,6 +3036,29 @@ async fn finish_main_generation_agent_run(
         .repository
         .finish_step(&shim.provider_step_id, step_status, error_kind)
         .await;
+
+    // PROVIDER-RUNTIME-BRIDGE-001: mirror the real provider call's outcome into
+    // the safe lifecycle seam. Always use static safe codes here (never
+    // `error_kind` verbatim) so an unanticipated provider error classification
+    // can never collide with a forbidden marker at this boundary.
+    match status {
+        AgentRunStatus::Completed => {
+            let _ = shim.provider_runtime.complete_execution(
+                &shim.provider_execution_id,
+                "provider_call_completed_via_bridge",
+            );
+        }
+        AgentRunStatus::Cancelled => {
+            let _ = shim
+                .provider_runtime
+                .cancel_execution(&shim.provider_execution_id);
+        }
+        _ => {
+            let _ = shim
+                .provider_runtime
+                .fail_execution(&shim.provider_execution_id, "provider_call_failed");
+        }
+    }
     let event_type = match status {
         AgentRunStatus::Completed => "run_completed",
         AgentRunStatus::Cancelled => "run_cancelled",
@@ -5730,6 +5783,22 @@ mod tests {
         assert_no_forbidden_context_keys(&serialized);
         assert!(!serialized.contains("providerRequest"));
         assert!(!serialized.contains("providerResponse"));
+
+        // PROVIDER-RUNTIME-BRIDGE-001: the bridge mirrors the real provider
+        // call's completion into the safe lifecycle seam.
+        let provider_execution = shim
+            .provider_runtime
+            .get_execution(&shim.provider_execution_id)
+            .expect("lookup does not error")
+            .expect("provider execution recorded");
+        assert_eq!(
+            provider_execution.status,
+            crate::provider_runtime::ProviderExecutionStatus::Completed
+        );
+        assert_eq!(
+            provider_execution.safe_summary.as_deref(),
+            Some("provider_call_completed_via_bridge")
+        );
     }
 
     #[tokio::test]
@@ -5802,6 +5871,85 @@ mod tests {
             Some("run_failed")
         );
         assert_no_forbidden_context_keys(&serde_json::to_string(&events).unwrap());
+
+        // PROVIDER-RUNTIME-BRIDGE-001: failure mirrors into the safe lifecycle
+        // seam using a static safe code, never the raw error_kind string.
+        let provider_execution = shim
+            .provider_runtime
+            .get_execution(&shim.provider_execution_id)
+            .expect("lookup does not error")
+            .expect("provider execution recorded");
+        assert_eq!(
+            provider_execution.status,
+            crate::provider_runtime::ProviderExecutionStatus::Failed
+        );
+        assert_eq!(
+            provider_execution.safe_error_code.as_deref(),
+            Some("provider_call_failed")
+        );
+    }
+
+    #[tokio::test]
+    async fn main_generation_agent_run_shim_mirrors_cancelled_generation() {
+        let database = test_database().await;
+        let repository = crate::storage::repositories::agent_runs::AgentRunRepository::from_pool(
+            database.pool(),
+        );
+        LoomRepository::new(&database)
+            .insert_loom(&NewLoom {
+                loom_id: "loom-agent-shim-cancelled".to_string(),
+                title: "Agent shim cancelled".to_string(),
+                summary: None,
+                code: None,
+                canonical_uri: None,
+                kind: "loom".to_string(),
+                origin_loom_id: None,
+                origin_response_id: None,
+                created_at: "1".to_string(),
+                updated_at: "1".to_string(),
+                metadata_json: None,
+            })
+            .await
+            .expect("insert loom");
+        let context_input = context_input("Summarize Event Sourcing.");
+        let built_context = ContextManager::default().build_context(context_input.clone());
+        let execution_input = execute_input(Some("loom-agent-shim-cancelled"));
+        let runtime_request = main_generation_agent_runtime_request(
+            &execution_input,
+            "loom-agent-shim-cancelled",
+            None,
+            &context_input,
+        );
+        let shim = create_main_generation_agent_run_shim(
+            repository.clone(),
+            &execution_input,
+            "workflow-agent-shim-cancelled",
+            "loom-agent-shim-cancelled",
+            None,
+            &runtime_request,
+            &built_context,
+        )
+        .await
+        .expect("agent run shim");
+        start_main_generation_agent_provider_step(Some(&shim)).await;
+        finish_main_generation_agent_run(Some(&shim), AgentRunStatus::Cancelled, None, None).await;
+
+        let run = repository
+            .get_run(&shim.agent_run_id)
+            .await
+            .expect("get run")
+            .expect("run exists");
+        assert_eq!(run.status, "cancelled");
+
+        let provider_execution = shim
+            .provider_runtime
+            .get_execution(&shim.provider_execution_id)
+            .expect("lookup does not error")
+            .expect("provider execution recorded");
+        assert_eq!(
+            provider_execution.status,
+            crate::provider_runtime::ProviderExecutionStatus::Cancelled
+        );
     }
 
     #[test]

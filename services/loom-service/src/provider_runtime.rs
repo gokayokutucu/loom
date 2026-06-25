@@ -1,18 +1,24 @@
 #![allow(dead_code)]
 // LOOM_BOUNDARY:
-// marker: V2_EXPERIMENTAL_DISCONNECTED
+// marker: V2_CANONICAL_RUNTIME
 // owner_layer: V2 Runtime
-// migration_status: disconnected
+// migration_status: bridged
 // rules:
 // - ProviderRuntimeService is the canonical safe provider execution seam for V2.
 // - Do not persist prompts, provider payloads, raw output, tokens, secrets, or raw thinking.
-// next_task: PROVIDER-RUNTIME-BRIDGE-001
+// - This seam never calls a provider directly (see provider_runtime_static_guard_no_real_execution);
+//   AgentRuntime/orchestration drive its lifecycle methods around their own low-level provider call.
+// next_task: none
 //! Provider Runtime seam.
 //!
 //! This module owns provider execution metadata and lifecycle orchestration for
 //! AgentRun-bound model work. It intentionally performs no real provider calls,
 //! opens no streams, and stores no prompt, provider envelope, raw output, token,
-//! secret, or raw-thinking content.
+//! secret, or raw-thinking content. `AgentRuntime::execute_run` and Main
+//! Generation's `MainGenerationAgentRunShim` (orchestration.rs) drive its
+//! lifecycle methods around their own real streaming provider call, which
+//! remains the only place a real provider request is made
+//! (`PROVIDER-RUNTIME-BRIDGE-001`).
 
 use crate::error::ServiceError;
 use serde::{Deserialize, Serialize};
@@ -260,11 +266,13 @@ impl ProviderExecutionRecord {
 // LOOM_BOUNDARY:
 // marker: V2_CANONICAL_RUNTIME
 // owner_layer: V2 Runtime
-// migration_status: needs_bridge
+// migration_status: bridged
 // rules:
-// - Canonical safe provider execution seam; currently not wired into AgentRuntime.
-// - AgentRuntime should route provider work through this service in a bridge task.
-// next_task: PROVIDER-RUNTIME-BRIDGE-001
+// - Canonical safe provider execution seam; wired into both AgentRuntime::execute_run
+//   and Main Generation's MainGenerationAgentRunShim (orchestration.rs).
+// - The caller (AgentRuntime/orchestration) still owns the real streaming provider call;
+//   this service only tracks safe lifecycle metadata around it.
+// next_task: none
 #[derive(Debug, Clone, Default)]
 pub struct ProviderRuntimeService {
     records: Arc<RwLock<HashMap<String, ProviderExecutionRecord>>>,
@@ -276,10 +284,10 @@ impl ProviderRuntimeService {
     }
 
     // LOOM_BOUNDARY_METHOD:
-    // marker: V2_EXPERIMENTAL_DISCONNECTED
-    // role: test-only no-I/O provider execution lifecycle
-    // rules: Keep as metadata-only until real provider bridge is designed and implemented.
-    // next_task: PROVIDER-RUNTIME-BRIDGE-001
+    // marker: V2_CANONICAL_RUNTIME
+    // role: registers a provider execution's lifecycle metadata (real or noop callers)
+    // rules: Keep metadata-only; real provider I/O happens in the caller's own pipeline.
+    // next_task: none
     pub fn submit_noop(
         &self,
         request: ProviderExecutionRequest,
@@ -365,6 +373,24 @@ impl ProviderRuntimeService {
             execution_id,
             ProviderExecutionStatus::Failed,
             Some(safe_error_code),
+        )
+    }
+
+    // LOOM_BOUNDARY_METHOD:
+    // marker: V2_CANONICAL_RUNTIME
+    // role: marks a real (non-noop) provider execution completed with a caller-supplied safe summary
+    // rules: safe_summary must describe lifecycle only, never prompt/output/payload content.
+    // next_task: none
+    pub fn complete_execution(
+        &self,
+        execution_id: &str,
+        safe_summary: &str,
+    ) -> Result<ProviderExecutionResult, ServiceError> {
+        validate_safe_provider_runtime_text("provider safe_summary", safe_summary)?;
+        self.transition(
+            execution_id,
+            ProviderExecutionStatus::Completed,
+            Some(safe_summary),
         )
     }
 
@@ -722,6 +748,47 @@ mod tests {
         assert_eq!(result.safe_error_code.as_deref(), Some("policy_skipped"));
         assert!(result.skipped_at.is_some());
         assert!(result.completed_at.is_none());
+    }
+
+    #[test]
+    fn complete_execution_accepts_custom_safe_summary() {
+        let runtime = ProviderRuntimeService::new();
+        let mut queued = request("provider-exec-real-call");
+        queued.auto_complete_noop = false;
+        runtime.submit_noop(queued).unwrap();
+        runtime
+            .transition_to_running("provider-exec-real-call")
+            .unwrap();
+
+        let result = runtime
+            .complete_execution(
+                "provider-exec-real-call",
+                "provider_call_completed_via_bridge",
+            )
+            .unwrap();
+
+        assert_eq!(result.status, ProviderExecutionStatus::Completed);
+        assert_eq!(
+            result.safe_summary.as_deref(),
+            Some("provider_call_completed_via_bridge")
+        );
+        assert!(result.completed_at.is_some());
+    }
+
+    #[test]
+    fn complete_execution_rejects_forbidden_marker_in_summary() {
+        let runtime = ProviderRuntimeService::new();
+        let mut queued = request("provider-exec-bad-summary");
+        queued.auto_complete_noop = false;
+        runtime.submit_noop(queued).unwrap();
+        runtime
+            .transition_to_running("provider-exec-bad-summary")
+            .unwrap();
+
+        let error = runtime
+            .complete_execution("provider-exec-bad-summary", "leaked the prompt")
+            .unwrap_err();
+        assert!(error.to_string().contains("prompt"));
     }
 
     #[test]
