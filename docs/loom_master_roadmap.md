@@ -45,7 +45,7 @@ A **Phase** is a top-level unit of the roadmap. Phase IDs are global and never r
 | P18 | Agent Behavior | Agent Phase 5 | LOCKED | 100% | P16, P17 | — |
 | P19 | Settings IA, Privacy & Data Backlog | Ledger HOLD/BACKLOG block | HOLD-BACKLOG | 0% | P08 | Explicit hold, no blocker — deprioritized |
 | P20 | Multi-Agent Execution Topology | New in this rebase | ACTIVE | 30% | P17, P18 | — |
-
+| P21 | V1/V2 Boundary & AgentRun Shim Integration | New for context and execution bridge | ACTIVE | 80% | P12, P16 | — |
 Effort estimates (relative, not calendar time) are given per-Epic in §3, not per-Phase, since Phase-level estimates were the original problem (too coarse to act on).
 
 ---
@@ -130,6 +130,8 @@ Ledger §19 Agent Phase 2G is marked "deferred." This is stale — both Plan doc
 - Epic: Context Manager design + implementation — DONE (AGENT-CONTEXT-MANAGER-001)
 - Epic: Context Snapshot — DONE (CONTEXT-SNAPSHOT-MIGRATION-001, CONTEXT-SNAPSHOT-LINKING-001)
 
+**DRIFT CORRECTION FOR P15 & P16**: While fully completed and LOCKED as architectures, `ContextSelectionService` and `AgentContextManager` are **not yet the production path**. Main Generation currently uses the legacy `ContextManager`. Do not wire the V2 services directly into `AgentRun` without the bridging strategy defined in `CONTEXT-INTEGRATION-SPEC-AMEND-001`.
+
 ### P17 — Memory Subsystem [LOCKED, 100%]
 - Epic: Schema foundation — DONE (MEMORY-POLICY-SQLITE-001, 10/10)
 - Epic: Write pipeline
@@ -169,6 +171,21 @@ This entire Phase needs a re-scoping pass before being reactivated — several i
   - Subtask: `TOOL-PERMISSION-MODEL-001` — NEXT
   - Subtask: `TOOL-ARTIFACTS-001` — NEXT
 
+### P21 — V1/V2 Boundary & AgentRun Shim Integration [ACTIVE, 80%]
+- Epic: Boundary & Audits
+  - Subtask: `LOOM-V1-V2-BOUNDARY-AUDIT-001` — DONE
+  - Subtask: `LOOM-V1-V2-CODEBOUNDARY-MARKING-001` — DONE
+  - Subtask: `CONTEXT-PIPELINE-FLOW-AUDIT-001` — DONE
+  - Subtask: `CONTEXT-INTEGRATION-SPEC-AMEND-001` — DONE
+- Epic: Execution Shims
+  - Subtask: `AGENTRUN-CONTEXT-CONSUMPTION-001` — DONE
+  - Subtask: `MAIN-GENERATION-AGENTRUN-SHIM-001` — DONE
+  - Subtask: `QUICK-ASK-AGENTRUN-SHIM-DESIGN-001` — NEXT
+- Epic: Bridges
+  - Subtask: `PROVIDER-RUNTIME-BRIDGE-001` — NEXT
+  - Subtask: `TOOL-RUNTIME-ADAPTER-CONTRACT-001` — HOLD
+  - Subtask: `SUBAGENT-EXECUTION-SEAM-001` — HOLD
+
 ---
 
 ## 4. Big Picture Tracking
@@ -199,16 +216,19 @@ Counting only Phases with tracked Task-level checklists (P02, P08–P17; P00/P01
 | P18 | DONE | None |
 | P19 | Re-scope, then implement whatever survives the scope cut | Medium, pending re-scope |
 | P20 | Tool Scheduler Implementation | Large |
+| P21 | Finish Execution Shims & Bridges | Medium |
 
 ### 4.4 Critical path
 
 ```
-P20 Tool Scheduler Implementation
+P21 V1/V2 AgentRun Shim Integration -> P20 Tool Scheduler Implementation
 ```
+
+P21 is now on the critical path. The V1/V2 bridging strategy (AgentRun Context Consumption -> Provider Runtime Bridge -> Main Generation Shim) must be completed before the new Tool Scheduler (P20) can be wired into a real execution loop.
 
 P11's drift resolution is **not on the critical path for P17/P18** but **is on the critical path for P20** (TOOL-SCHEDULER-DESIGN-001 explicitly depends on Tool Registry status). It should be resolved opportunistically, not urgently — unless multi-agent work is imminent.
 
-P08 (packaging/signing) and P09 (STT E2E) are independent side branches — they do not block P17/P18/P20 and can proceed in parallel at any time.
+P08 (packaging/signing) and P09 (STT E2E) are independent side branches — they do not block P17/P18/P20/P21 and can proceed in parallel at any time.
 
 P19 is explicitly deprioritized (HOLD-BACKLOG) and is off the critical path entirely until someone re-scopes it.
 
