@@ -372,6 +372,7 @@ mod tests {
     async fn create_agent_run_tree(repo: &AgentRunRepository) {
         repo.create_run(&NewAgentRun {
             agent_run_id: "root-run",
+            run_mode: crate::agent_runtime::types::AgentRunMode::FullConversation,
             agent_id: None,
             agent_revision: None,
             loom_id: None,
@@ -390,6 +391,7 @@ mod tests {
         .unwrap();
         repo.create_run(&NewAgentRun {
             agent_run_id: "child-run",
+            run_mode: crate::agent_runtime::types::AgentRunMode::FullConversation,
             agent_id: None,
             agent_revision: None,
             loom_id: None,

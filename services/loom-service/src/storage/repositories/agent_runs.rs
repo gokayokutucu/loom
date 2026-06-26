@@ -13,7 +13,9 @@
 //! - agent_events is append-only: no UPDATE or DELETE on that table.
 
 use crate::{
-    agent_runtime::types::{AgentRunStatus, AgentStepKind, AgentStepStatus, AgentUsage},
+    agent_runtime::types::{
+        AgentRunMode, AgentRunStatus, AgentStepKind, AgentStepStatus, AgentUsage,
+    },
     error::ServiceError,
     providers::types::sanitize_provider_text,
 };
@@ -139,6 +141,7 @@ fn step_status_str(status: AgentStepStatus) -> &'static str {
 #[serde(rename_all = "camelCase")]
 pub struct AgentRunRecord {
     pub agent_run_id: String,
+    pub run_mode: String,
     pub agent_id: Option<String>,
     pub agent_revision: Option<String>,
     pub loom_id: Option<String>,
@@ -218,6 +221,7 @@ pub struct AgentDefinitionRecord {
 
 pub struct NewAgentRun<'a> {
     pub agent_run_id: &'a str,
+    pub run_mode: AgentRunMode,
     pub agent_id: Option<&'a str>,
     pub agent_revision: Option<&'a str>,
     pub loom_id: Option<&'a str>,
@@ -409,13 +413,14 @@ impl AgentRunRepository {
         let root_run_id = run.root_run_id.unwrap_or(run.agent_run_id);
         sqlx::query(
             "INSERT OR IGNORE INTO agent_runs
-             (agent_run_id, agent_id, agent_revision, loom_id, response_id, parent_response_id,
+             (agent_run_id, run_mode, agent_id, agent_revision, loom_id, response_id, parent_response_id,
               correlation_id, causation_id, root_run_id, parent_run_id, context_snapshot_id,
               provider_profile_id, model_id, status, cancel_requested,
               started_at, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'running',0,?14,?14)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'running',0,?15,?15)",
         )
         .bind(run.agent_run_id)
+        .bind(run.run_mode.as_str())
         .bind(run.agent_id)
         .bind(run.agent_revision)
         .bind(run.loom_id)
@@ -472,12 +477,13 @@ impl AgentRunRepository {
 
         sqlx::query(
             "INSERT INTO agent_runs
-             (agent_run_id, agent_id, agent_revision, loom_id, response_id, parent_response_id,
+             (agent_run_id, run_mode, agent_id, agent_revision, loom_id, response_id, parent_response_id,
               correlation_id, causation_id, root_run_id, parent_run_id, context_snapshot_id,
               provider_profile_id, model_id, status, cancel_requested, started_at, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,'created',0,?14,?14)",
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,'created',0,?15,?15)",
         )
         .bind(run.agent_run_id)
+        .bind(run.run_mode.as_str())
         .bind(run.agent_id)
         .bind(run.agent_revision)
         .bind(run.loom_id)
@@ -504,6 +510,7 @@ impl AgentRunRepository {
                 "runId": run.agent_run_id,
                 "rootRunId": root_run_id,
                 "parentRunId": run.parent_run_id,
+                "runMode": run.run_mode.as_str(),
                 "state": "created"
             }),
         )
@@ -516,6 +523,120 @@ impl AgentRunRepository {
         self.get_run(run.agent_run_id)
             .await?
             .ok_or_else(|| ServiceError::storage("created Agent Run not found"))
+    }
+
+    pub async fn create_lightweight_quick_ask_run(
+        &self,
+        run: &NewAgentRun<'_>,
+    ) -> Result<AgentRunRecord, ServiceError> {
+        if run.run_mode != AgentRunMode::LightweightQuickAsk {
+            return Err(ServiceError::storage(
+                "lightweight Quick Ask run must use lightweight_quick_ask mode",
+            ));
+        }
+        if run.context_snapshot_id.is_some() {
+            return Err(ServiceError::storage(
+                "lightweight Quick Ask run cannot link context snapshots",
+            ));
+        }
+        let root_run_id = run.root_run_id.unwrap_or(run.agent_run_id);
+        let mut tx = self.pool.begin().await.map_err(|e| {
+            ServiceError::storage(format!(
+                "failed to begin lightweight agent run create transaction: {e}"
+            ))
+        })?;
+
+        if let Some(parent_run_id) = run.parent_run_id {
+            let parent =
+                sqlx::query("SELECT root_run_id, status FROM agent_runs WHERE agent_run_id = ?1")
+                    .bind(parent_run_id)
+                    .fetch_optional(&mut *tx)
+                    .await
+                    .map_err(|e| {
+                        ServiceError::storage(format!("failed to inspect parent agent run: {e}"))
+                    })?
+                    .ok_or_else(|| ServiceError::storage("parent Agent Run not found"))?;
+            use sqlx::Row;
+            let parent_root_run_id: String = parent.get("root_run_id");
+            let parent_status: String = parent.get("status");
+            if parent_root_run_id != root_run_id {
+                return Err(ServiceError::storage(
+                    "child Agent Run root_run_id must match parent root_run_id",
+                ));
+            }
+            if is_terminal_status(&parent_status) || parent_status == "cancelled" {
+                return Err(ServiceError::storage(
+                    "child Agent Run cannot be created under a terminal parent",
+                ));
+            }
+        } else if root_run_id != run.agent_run_id {
+            return Err(ServiceError::storage(
+                "root Agent Run must use its own agent_run_id as root_run_id",
+            ));
+        }
+
+        sqlx::query(
+            "INSERT INTO agent_runs
+             (agent_run_id, run_mode, agent_id, agent_revision, loom_id, response_id, parent_response_id,
+              correlation_id, causation_id, root_run_id, parent_run_id, context_snapshot_id,
+              provider_profile_id, model_id, status, cancel_requested, started_at, created_at)
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,NULL,?12,?13,'running',0,?14,?14)",
+        )
+        .bind(run.agent_run_id)
+        .bind(run.run_mode.as_str())
+        .bind(run.agent_id)
+        .bind(run.agent_revision)
+        .bind(run.loom_id)
+        .bind(run.response_id)
+        .bind(run.parent_response_id)
+        .bind(run.correlation_id)
+        .bind(run.causation_id)
+        .bind(root_run_id)
+        .bind(run.parent_run_id)
+        .bind(run.provider_profile_id)
+        .bind(run.model_id)
+        .bind(run.started_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ServiceError::storage(format!("failed to create lightweight agent run: {e}")))?;
+
+        append_lifecycle_event_tx(
+            &mut tx,
+            run.agent_run_id,
+            None,
+            "run_created",
+            serde_json::json!({
+                "runId": run.agent_run_id,
+                "rootRunId": root_run_id,
+                "parentRunId": run.parent_run_id,
+                "runMode": run.run_mode.as_str(),
+                "state": "created"
+            }),
+        )
+        .await?;
+        append_lifecycle_event_tx(
+            &mut tx,
+            run.agent_run_id,
+            None,
+            "run_started",
+            serde_json::json!({
+                "runId": run.agent_run_id,
+                "from": "created",
+                "to": "running",
+                "runMode": run.run_mode.as_str()
+            }),
+        )
+        .await?;
+
+        tx.commit().await.map_err(|e| {
+            ServiceError::storage(format!(
+                "failed to commit lightweight agent run create: {e}"
+            ))
+        })?;
+
+        self.get_run(run.agent_run_id)
+            .await?
+            .ok_or_else(|| ServiceError::storage("created lightweight Agent Run not found"))
     }
 
     pub async fn transition_run(
@@ -976,7 +1097,7 @@ impl AgentRunRepository {
 
     pub async fn get_run(&self, run_id: &str) -> Result<Option<AgentRunRecord>, ServiceError> {
         let row = sqlx::query(
-            "SELECT agent_run_id, agent_id, agent_revision, loom_id, response_id, parent_response_id,
+            "SELECT agent_run_id, run_mode, agent_id, agent_revision, loom_id, response_id, parent_response_id,
                     correlation_id, causation_id, root_run_id, parent_run_id, context_snapshot_id,
                     provider_profile_id, model_id, status, cancel_requested,
                     started_at, completed_at, input_tokens, output_tokens, total_tokens,
@@ -997,7 +1118,7 @@ impl AgentRunRepository {
         limit: i64,
     ) -> Result<Vec<AgentRunRecord>, ServiceError> {
         sqlx::query(
-            "SELECT agent_run_id, agent_id, agent_revision, loom_id, response_id, parent_response_id,
+            "SELECT agent_run_id, run_mode, agent_id, agent_revision, loom_id, response_id, parent_response_id,
                     correlation_id, causation_id, root_run_id, parent_run_id, context_snapshot_id,
                     provider_profile_id, model_id, status, cancel_requested,
                     started_at, completed_at, input_tokens, output_tokens, total_tokens,
@@ -1127,6 +1248,7 @@ fn agent_run_record_from_row(row: sqlx::sqlite::SqliteRow) -> AgentRunRecord {
     let cancel_requested: i64 = row.get("cancel_requested");
     AgentRunRecord {
         agent_run_id: row.get("agent_run_id"),
+        run_mode: row.get("run_mode"),
         agent_id: row.get("agent_id"),
         agent_revision: row.get("agent_revision"),
         loom_id: row.get("loom_id"),
@@ -1200,6 +1322,7 @@ mod tests {
     fn run_input(run_id: &str) -> NewAgentRun<'_> {
         NewAgentRun {
             agent_run_id: run_id,
+            run_mode: AgentRunMode::FullConversation,
             agent_id: None,
             agent_revision: None,
             loom_id: Some("loom-test"),
@@ -1264,7 +1387,88 @@ mod tests {
             Some("context-snapshot-001")
         );
         assert_eq!(record.status, "running");
+        assert_eq!(record.run_mode, AgentRunMode::FullConversation.as_str());
         assert!(!record.cancel_requested);
+    }
+
+    #[tokio::test]
+    async fn lightweight_quick_ask_run_combines_create_start_and_creates_no_steps() {
+        let repo = make_repo().await;
+        let mut input = run_input("lightweight-run-001");
+        input.run_mode = AgentRunMode::LightweightQuickAsk;
+        input.context_snapshot_id = None;
+
+        let record = repo.create_lightweight_quick_ask_run(&input).await.unwrap();
+        assert_eq!(record.agent_run_id, "lightweight-run-001");
+        assert_eq!(record.run_mode, AgentRunMode::LightweightQuickAsk.as_str());
+        assert_eq!(record.status, "running");
+        assert_eq!(record.context_snapshot_id, None);
+
+        let steps = repo
+            .list_steps_for_run("lightweight-run-001")
+            .await
+            .unwrap();
+        assert!(steps.is_empty());
+
+        let events = repo
+            .list_events_for_run("lightweight-run-001", 0, 10)
+            .await
+            .unwrap();
+        let event_types: Vec<_> = events
+            .iter()
+            .map(|event| event.event_type.as_str())
+            .collect();
+        assert_eq!(event_types, vec!["run_created", "run_started"]);
+
+        let finished = repo
+            .finish_run(
+                "lightweight-run-001",
+                AgentRunStatus::Completed,
+                None,
+                None,
+                "lightweight-run-001-completed",
+                "run_completed",
+                2,
+                Some(
+                    serde_json::json!({
+                        "runId": "lightweight-run-001",
+                        "runMode": AgentRunMode::LightweightQuickAsk.as_str(),
+                        "summary": "quick_ask_completed"
+                    })
+                    .to_string(),
+                ),
+            )
+            .await
+            .unwrap();
+        assert!(finished);
+
+        let steps = repo
+            .list_steps_for_run("lightweight-run-001")
+            .await
+            .unwrap();
+        assert!(steps.is_empty());
+        let completed = repo
+            .get_run("lightweight-run-001")
+            .await
+            .unwrap()
+            .expect("run");
+        assert_eq!(completed.status, "completed");
+    }
+
+    #[tokio::test]
+    async fn lightweight_quick_ask_run_rejects_context_snapshot_links() {
+        let repo = make_repo().await;
+        let mut input = run_input("lightweight-run-context-reject");
+        input.run_mode = AgentRunMode::LightweightQuickAsk;
+        input.context_snapshot_id = Some("context-snapshot-not-allowed");
+
+        let error = repo
+            .create_lightweight_quick_ask_run(&input)
+            .await
+            .expect_err("context snapshots are not allowed");
+        assert!(error
+            .to_string()
+            .contains("lightweight Quick Ask run cannot link context snapshots"));
     }
 
     #[tokio::test]

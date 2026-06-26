@@ -10,7 +10,7 @@ use crate::providers::types::{sanitize_provider_text, OllamaStreamChunk, OllamaW
 // next_task: MAIN-GENERATION-AGENTRUN-SHIM-001
 use crate::{
     agent_runtime::types::{
-        new_agent_run_id, new_uuid, AgentRunStatus, AgentRuntimeProviderOptions,
+        new_agent_run_id, new_uuid, AgentRunMode, AgentRunStatus, AgentRuntimeProviderOptions,
         AgentRuntimeRequest, AgentStepKind, AgentStepStatus, AgentUsage, LegacyContextRuntimeInput,
     },
     capabilities::repository::NewModelRuntimeBenchmark,
@@ -2848,6 +2848,7 @@ fn main_generation_agent_runtime_request(
 ) -> AgentRuntimeRequest {
     AgentRuntimeRequest {
         prompt: execution_input.prompt.clone(),
+        run_mode: AgentRunMode::FullConversation,
         loom_id: lifecycle
             .map(|record| record.loom_id.clone())
             .or_else(|| Some(workflow_loom_id.to_string())),
@@ -2920,6 +2921,7 @@ async fn create_main_generation_agent_run_shim(
     repository
         .create_run(&NewAgentRun {
             agent_run_id: &agent_run_id,
+            run_mode: AgentRunMode::FullConversation,
             agent_id: None,
             agent_revision: None,
             loom_id,

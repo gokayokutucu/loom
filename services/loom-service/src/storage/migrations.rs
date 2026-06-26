@@ -177,6 +177,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0028_tool_scheduler_foundation.sql"),
         transactional: true,
     },
+    Migration {
+        version: 29,
+        name: "agent_run_mode",
+        sql: include_str!("../../migrations/0029_agent_run_mode.sql"),
+        transactional: true,
+    },
 ];
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {
@@ -777,6 +783,49 @@ mod tests {
             result.is_err(),
             "invalid status 'thinking' must be rejected"
         );
+    }
+
+    #[tokio::test]
+    async fn migration_0029_agent_run_mode_defaults_and_rejects_invalid_values() {
+        let database = test_database().await;
+        let now = "2026-01-01T00:00:00Z";
+        sqlx::query(
+            "INSERT INTO agent_runs
+             (agent_run_id, correlation_id, status, started_at, cancel_requested, created_at)
+             VALUES ('mode-default-run', 'mode-default-run', 'running', ?1, 0, ?1)",
+        )
+        .bind(now)
+        .execute(database.pool())
+        .await
+        .expect("insert default mode run");
+
+        let mode = sqlx::query_scalar::<_, String>(
+            "SELECT run_mode FROM agent_runs WHERE agent_run_id = 'mode-default-run'",
+        )
+        .fetch_one(database.pool())
+        .await
+        .expect("select mode");
+        assert_eq!(mode, "full_conversation");
+
+        sqlx::query(
+            "INSERT INTO agent_runs
+             (agent_run_id, run_mode, correlation_id, status, started_at, cancel_requested, created_at)
+             VALUES ('mode-quick-ask-run', 'lightweight_quick_ask', 'mode-quick-ask-run', 'running', ?1, 0, ?1)",
+        )
+        .bind(now)
+        .execute(database.pool())
+        .await
+        .expect("insert lightweight mode run");
+
+        let result = sqlx::query(
+            "INSERT INTO agent_runs
+             (agent_run_id, run_mode, correlation_id, status, started_at, cancel_requested, created_at)
+             VALUES ('mode-invalid-run', 'quick_ask_with_context', 'mode-invalid-run', 'running', ?1, 0, ?1)",
+        )
+        .bind(now)
+        .execute(database.pool())
+        .await;
+        assert!(result.is_err(), "invalid AgentRun mode must be rejected");
     }
 
     #[tokio::test]

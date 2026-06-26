@@ -18,7 +18,7 @@ use serde::{Deserialize, Serialize};
 use crate::agent_runtime::events::AgentEvent;
 use crate::agent_runtime::runtime::AgentCancellationOutcome;
 use crate::agent_runtime::types::{
-    AgentRunId, AgentRunStatus, AgentRuntimeProviderOptions, AgentRuntimeRequest,
+    AgentRunId, AgentRunMode, AgentRunStatus, AgentRuntimeProviderOptions, AgentRuntimeRequest,
 };
 use crate::api::state::AppState;
 use crate::storage::repositories::agent_runs::{AgentEventRecord, AgentRunRecord, AgentStepRecord};
@@ -175,6 +175,7 @@ fn validate_run_request(
 
     Ok(AgentRuntimeRequest {
         prompt,
+        run_mode: AgentRunMode::FullConversation,
         loom_id: request.loom_id,
         response_id: request.response_id,
         parent_response_id: request.parent_response_id,
@@ -983,7 +984,7 @@ mod tests {
                 RegisteredTool, ToolAvailability, ToolPermissionRequirement,
             };
             use crate::agent_runtime::tools::{ToolName, ToolPermissionStatus};
-            use crate::agent_runtime::types::{AgentRunStatus, AgentRuntimeRequest};
+            use crate::agent_runtime::types::{AgentRunMode, AgentRunStatus, AgentRuntimeRequest};
             use crate::api::state::AppState;
             use crate::config::{ConfigManager, LoomServiceConfig, OllamaConfig};
             use crate::providers::ollama::OllamaRuntime;
@@ -1084,6 +1085,7 @@ mod tests {
             let events = service1
                 .execute(AgentRuntimeRequest {
                     prompt: "shared registry proof".to_string(),
+                    run_mode: AgentRunMode::FullConversation,
                     loom_id: Some("shared-registry-loom".to_string()),
                     response_id: Some("shared-registry-run".to_string()),
                     parent_response_id: None,

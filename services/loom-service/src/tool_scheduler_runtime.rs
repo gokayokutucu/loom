@@ -397,6 +397,7 @@ mod tests {
         agent_runs
             .create_run(&NewAgentRun {
                 agent_run_id: "run-root",
+                run_mode: crate::agent_runtime::types::AgentRunMode::FullConversation,
                 agent_id: None,
                 agent_revision: None,
                 loom_id: None,

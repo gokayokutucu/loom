@@ -90,6 +90,36 @@ pub enum AgentRunStatus {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
+pub enum AgentRunMode {
+    FullConversation,
+    LightweightQuickAsk,
+}
+
+impl Default for AgentRunMode {
+    fn default() -> Self {
+        Self::FullConversation
+    }
+}
+
+impl AgentRunMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentRunMode::FullConversation => "full_conversation",
+            AgentRunMode::LightweightQuickAsk => "lightweight_quick_ask",
+        }
+    }
+
+    pub fn from_storage(value: &str) -> Option<Self> {
+        match value {
+            "full_conversation" => Some(Self::FullConversation),
+            "lightweight_quick_ask" => Some(Self::LightweightQuickAsk),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
 pub enum AgentStepKind {
     ContextBuild,
     ProviderCall,
@@ -143,6 +173,8 @@ impl AgentUsage {
 #[serde(rename_all = "camelCase")]
 pub struct AgentRun {
     pub run_id: AgentRunId,
+    #[serde(default)]
+    pub run_mode: AgentRunMode,
     pub loom_id: Option<String>,
     pub response_id: Option<String>,
     pub parent_response_id: Option<String>,
@@ -205,6 +237,8 @@ pub struct LegacyContextRuntimeInput {
 #[serde(rename_all = "camelCase")]
 pub struct AgentRuntimeRequest {
     pub prompt: String,
+    #[serde(default)]
+    pub run_mode: AgentRunMode,
     pub loom_id: Option<String>,
     pub response_id: Option<String>,
     pub parent_response_id: Option<String>,
@@ -227,4 +261,35 @@ pub struct AgentRuntimeResult {
     pub output_text: Option<String>,
     pub error_message: Option<String>,
     pub usage: Option<AgentUsage>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn agent_run_mode_serializes_with_stable_storage_names() {
+        assert_eq!(
+            serde_json::to_string(&AgentRunMode::FullConversation).unwrap(),
+            "\"full_conversation\""
+        );
+        assert_eq!(
+            serde_json::to_string(&AgentRunMode::LightweightQuickAsk).unwrap(),
+            "\"lightweight_quick_ask\""
+        );
+        assert_eq!(
+            AgentRunMode::from_storage("full_conversation"),
+            Some(AgentRunMode::FullConversation)
+        );
+        assert_eq!(
+            AgentRunMode::from_storage("lightweight_quick_ask"),
+            Some(AgentRunMode::LightweightQuickAsk)
+        );
+        assert_eq!(AgentRunMode::from_storage("quick_ask"), None);
+    }
+
+    #[test]
+    fn agent_run_mode_defaults_to_full_conversation() {
+        assert_eq!(AgentRunMode::default(), AgentRunMode::FullConversation);
+    }
 }

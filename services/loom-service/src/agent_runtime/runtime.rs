@@ -403,6 +403,7 @@ where
 
             let mut cancel_rx = run_store.insert(AgentRun {
                 run_id: AgentRunId::from(run_id.clone()),
+                run_mode: request.run_mode,
                 loom_id: request.loom_id.clone(),
                 response_id: request.response_id.clone(),
                 parent_response_id: request.parent_response_id.clone(),
@@ -423,6 +424,7 @@ where
             if let Some(ref repo) = run_repository {
                 let _ = repo.insert_run(&NewAgentRun {
                     agent_run_id: &run_id,
+                    run_mode: request.run_mode,
                     agent_id: None,
                     agent_revision: None,
                     loom_id: request.loom_id.as_deref(),
@@ -962,7 +964,9 @@ mod tests {
     use super::*;
     use crate::agent_runtime::test_support::make_test_runtime;
     use crate::agent_runtime::tools::ToolPermissionStatus;
-    use crate::agent_runtime::types::{AgentRuntimeRequest, LegacyContextRuntimeInput};
+    use crate::agent_runtime::types::{
+        AgentRunMode, AgentRuntimeRequest, LegacyContextRuntimeInput,
+    };
     use crate::context::types::{
         AnswerPlanSummary, ArtifactStatus, AttachedReferenceInput, BuildContextInput,
         ContextMessage, ContextMessageRole, ContextSource, ReferenceContext,
@@ -975,6 +979,7 @@ mod tests {
     fn make_request(response_id: &str) -> AgentRuntimeRequest {
         AgentRuntimeRequest {
             prompt: "ping".to_string(),
+            run_mode: AgentRunMode::FullConversation,
             loom_id: Some("test-loom".to_string()),
             response_id: Some(response_id.to_string()),
             parent_response_id: None,
@@ -989,6 +994,7 @@ mod tests {
     fn make_stored_run(run_id: &str) -> AgentRun {
         AgentRun {
             run_id: AgentRunId::from(run_id),
+            run_mode: AgentRunMode::FullConversation,
             loom_id: Some("test-loom".to_string()),
             response_id: Some(run_id.to_string()),
             parent_response_id: None,

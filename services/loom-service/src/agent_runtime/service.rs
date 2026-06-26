@@ -140,7 +140,7 @@ mod tests {
         make_pending_test_service, make_test_service, FakeRegistry,
     };
     use crate::agent_runtime::types::{
-        AgentRunStatus, AgentRuntimeProviderOptions, AgentRuntimeRequest,
+        AgentRunMode, AgentRunStatus, AgentRuntimeProviderOptions, AgentRuntimeRequest,
     };
     use crate::providers::config::ProviderKind;
     use crate::providers::contract::{ProviderContractEvent, ProviderUsageMetadata};
@@ -150,6 +150,7 @@ mod tests {
     fn make_request(response_id: &str) -> AgentRuntimeRequest {
         AgentRuntimeRequest {
             prompt: "ping".to_string(),
+            run_mode: AgentRunMode::FullConversation,
             loom_id: Some("test-loom".to_string()),
             response_id: Some(response_id.to_string()),
             parent_response_id: None,
