@@ -183,6 +183,12 @@ const MIGRATIONS: &[Migration] = &[
         sql: include_str!("../../migrations/0029_agent_run_mode.sql"),
         transactional: true,
     },
+    Migration {
+        version: 30,
+        name: "execution_graph_foundation",
+        sql: include_str!("../../migrations/0030_execution_graph_foundation.sql"),
+        transactional: true,
+    },
 ];
 
 pub async fn run_migrations(pool: &SqlitePool) -> Result<(), ServiceError> {

@@ -5,6 +5,7 @@ pub mod bookmarks;
 pub mod code_blocks;
 pub mod context_artifacts;
 pub mod context_snapshots;
+pub mod execution_graph;
 pub mod looms;
 pub mod memory;
 pub mod model_runtime;
