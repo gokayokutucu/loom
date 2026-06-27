@@ -19,6 +19,7 @@ mod runtime;
 mod scope_resolution;
 mod speech;
 mod storage;
+mod tool_adapter_contract;
 mod tool_scheduler_runtime;
 
 use storage::repositories::agent_runs::AgentRunRepository;
