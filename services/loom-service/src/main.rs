@@ -9,6 +9,7 @@ mod display_code;
 mod domain;
 mod error;
 mod events;
+mod execution_scheduler;
 mod exports;
 mod graph;
 mod orchestration;

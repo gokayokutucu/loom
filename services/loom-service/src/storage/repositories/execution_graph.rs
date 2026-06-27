@@ -1080,6 +1080,30 @@ impl ExecutionGraphRepository {
             .ok_or_else(|| ServiceError::storage("node instance not found after update"))
     }
 
+    /// Atomically claims a `Ready` node instance by transitioning it to
+    /// `Leased`, conditioned on its current status still being `Ready`.
+    /// Returns `true` if this call won the claim, `false` if another
+    /// claimant already won (or the node was not `Ready`) — used by
+    /// `execution_scheduler::LeaseManager` as the single point of mutual
+    /// exclusion for concurrent claim attempts. This performs no execution;
+    /// it is a metadata-only conditional update.
+    pub async fn try_claim_node_instance(
+        &self,
+        node_instance_id: &str,
+    ) -> Result<bool, ServiceError> {
+        let result = sqlx::query(
+            "UPDATE graph_nodes SET status = 'leased', updated_at = CURRENT_TIMESTAMP
+             WHERE node_instance_id = ?1 AND status = 'ready'",
+        )
+        .bind(node_instance_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|error| {
+            ServiceError::storage(format!("failed to claim node instance: {error}"))
+        })?;
+        Ok(result.rows_affected() == 1)
+    }
+
     // -- Edge instances -----------------------------------------------------
 
     pub async fn create_edge_instance(
@@ -1392,6 +1416,26 @@ impl ExecutionGraphRepository {
         .await
         .map(|rows| rows.into_iter().map(lease_from_row).collect())
         .map_err(|error| ServiceError::storage(format!("failed to list expired leases: {error}")))
+    }
+
+    /// Lists every lease still marked `active`, regardless of
+    /// `lease_expires_at`. Used by startup recovery, which must treat every
+    /// lease issued by a now-dead process as abandoned unconditionally — a
+    /// fresh process cannot trust any `lease_expires_at` value it did not
+    /// itself set (engine design §2.4). Deliberately a separate query from
+    /// [`Self::list_expired_active_leases`] rather than a synthetic "far
+    /// future" timestamp comparison: `lease_expires_at` is a TEXT column, and
+    /// TEXT comparison of numeric strings is only reliably ordered when both
+    /// operands have equal digit counts (true for real epoch-millisecond
+    /// values, but not safely guaranteed for an arbitrary sentinel string).
+    pub async fn list_all_active_leases(&self) -> Result<Vec<LeaseRecord>, ServiceError> {
+        sqlx::query("SELECT * FROM graph_leases WHERE status = 'active' ORDER BY lease_expires_at")
+            .fetch_all(&self.pool)
+            .await
+            .map(|rows| rows.into_iter().map(lease_from_row).collect())
+            .map_err(|error| {
+                ServiceError::storage(format!("failed to list active leases: {error}"))
+            })
     }
 
     // -- Continuation checkpoints --------------------------------------------
@@ -2002,6 +2046,52 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn try_claim_node_instance_is_exclusive() {
+        let (repo, _, _) = seeded_repo().await;
+        let nodes = linear_v1_nodes();
+        repo.create_template(&NewGraphTemplate {
+            template_id: "linear-v1",
+            template_version: 1,
+            template_name: "Linear V1",
+            nodes: &nodes,
+            edges: &linear_v1_edges(),
+        })
+        .await
+        .unwrap();
+        repo.create_instance(&NewGraphInstance {
+            graph_instance_id: "gi-claim",
+            run_id: "run-graph-1",
+            template_id: "linear-v1",
+            template_version: 1,
+        })
+        .await
+        .unwrap();
+        repo.create_node_instance(&NewNodeInstance {
+            node_instance_id: "ni-claim",
+            graph_instance_id: "gi-claim",
+            node_id: "provider-call",
+            node_type: NodeType::Provider,
+        })
+        .await
+        .unwrap();
+
+        // Pending nodes cannot be claimed directly.
+        assert!(!repo.try_claim_node_instance("ni-claim").await.unwrap());
+
+        repo.update_node_instance_status("ni-claim", NodeStatus::Ready)
+            .await
+            .unwrap();
+
+        let first_claim = repo.try_claim_node_instance("ni-claim").await.unwrap();
+        let second_claim = repo.try_claim_node_instance("ni-claim").await.unwrap();
+        assert!(first_claim, "first claimant should win");
+        assert!(!second_claim, "second claimant must lose the race");
+
+        let node = repo.get_node_instance("ni-claim").await.unwrap().unwrap();
+        assert_eq!(node.status, "leased");
+    }
+
+    #[tokio::test]
     async fn lease_lifecycle_round_trip() {
         let (repo, _, _) = seeded_repo().await;
         let nodes = linear_v1_nodes();
@@ -2063,8 +2153,14 @@ mod tests {
         let still_expired = repo.list_expired_active_leases("3500").await.unwrap();
         assert_eq!(still_expired.len(), 1);
 
+        let all_active = repo.list_all_active_leases().await.unwrap();
+        assert_eq!(all_active.len(), 1);
+
         let released = repo.release_lease("lease-1").await.unwrap();
         assert_eq!(released.status, "released");
+
+        let all_active_after_release = repo.list_all_active_leases().await.unwrap();
+        assert!(all_active_after_release.is_empty());
     }
 
     #[tokio::test]
