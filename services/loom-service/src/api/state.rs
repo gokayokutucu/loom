@@ -4,6 +4,7 @@ use crate::{
     providers::{ollama::OllamaRuntime, secret_store::ProviderSecretStore},
     runtime::{OperationTracker, RestartState},
     storage::{db::Database, repositories::agent_runs::AgentRunRepository},
+    tool_scheduler_runtime::ToolSchedulerRuntime,
 };
 
 #[derive(Debug, Clone)]
@@ -32,6 +33,11 @@ impl AppState {
             self.agent_runs.clone(),
             self.tool_registry.clone(),
             self.agent_run_repository.clone(),
+            ToolSchedulerRuntime::new(
+                crate::storage::repositories::tool_scheduler::ToolSchedulerRepository::from_pool(
+                    self.database.pool(),
+                ),
+            ),
         )
     }
 }

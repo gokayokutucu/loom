@@ -10,23 +10,29 @@
 //! Tool Scheduler runtime seam.
 //!
 //! This module coordinates tool invocation metadata, permission evaluation,
-//! lifecycle transitions, and the built-in no-I/O noop executor used for tests.
+//! lifecycle transitions, adapter availability, and the built-in no-I/O noop
+//! executor used for tests.
 //! It intentionally does not execute shell, filesystem, network, MCP, provider,
 //! or arbitrary tool logic.
 
 use crate::{
     error::ServiceError,
     storage::repositories::tool_scheduler::{
-        validate_safe_persisted_text, NewToolArtifact, NewToolInvocation, NewToolPermissionGrant,
-        ToolArtifactKind, ToolArtifactRecord, ToolArtifactVisibility, ToolGrantStatus,
-        ToolInvocationPermissionStatus, ToolInvocationRecord, ToolInvocationStatus,
-        ToolPermissionLookup, ToolSchedulerRepository,
+        validate_safe_persisted_text, NewToolArtifact, NewToolDefinition, NewToolInvocation,
+        NewToolPermissionGrant, ToolArtifactKind, ToolArtifactRecord, ToolArtifactVisibility,
+        ToolGrantStatus, ToolInvocationPermissionStatus, ToolInvocationRecord,
+        ToolInvocationStatus, ToolPermissionLookup, ToolSchedulerRepository,
     },
+    tool_adapter_contract::ToolAdapter,
 };
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, RwLock};
 
 const NOOP_TOOL_NAME: &str = "runtime.noop";
 const NOOP_SUMMARY: &str = "Noop tool completed without external execution.";
+pub const AGENT_RUNTIME_PLACEHOLDER_TOOL_ID: &str = "runtime.agent.placeholder";
+pub const AGENT_RUNTIME_PLACEHOLDER_TOOL_NAME: &str = "runtime.agent.placeholder";
+pub const ADAPTER_NOT_IMPLEMENTED_SAFE_CODE: &str = "tool_adapter_not_implemented";
 
 fn now_iso() -> String {
     let ms = std::time::SystemTime::now()
@@ -66,6 +72,7 @@ pub enum ToolRuntimeOutcomeKind {
     Queued,
     Running,
     Completed,
+    Skipped,
     Cancelled,
     TimedOut,
 }
@@ -88,14 +95,85 @@ pub struct ToolRuntimeResult {
 // - Canonical scheduler/permission/artifact lifecycle seam for tools.
 // - Real adapters must enter through a future adapter contract, not ad hoc execution.
 // next_task: TOOL-RUNTIME-ADAPTER-CONTRACT-001
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ToolSchedulerRuntime {
     repository: ToolSchedulerRepository,
+    adapters: Arc<RwLock<Vec<Arc<dyn ToolAdapter>>>>,
+}
+
+impl std::fmt::Debug for ToolSchedulerRuntime {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ToolSchedulerRuntime")
+            .field("repository", &self.repository)
+            .field(
+                "adapter_count",
+                &self.adapters.read().map(|a| a.len()).unwrap_or(0),
+            )
+            .finish()
+    }
 }
 
 impl ToolSchedulerRuntime {
     pub fn new(repository: ToolSchedulerRepository) -> Self {
-        Self { repository }
+        Self {
+            repository,
+            adapters: Arc::new(RwLock::new(Vec::new())),
+        }
+    }
+
+    /// Registers an adapter contract implementation for later execution-loop
+    /// work. This bridge only resolves availability; it never calls execute.
+    pub fn register_adapter(&self, adapter: Arc<dyn ToolAdapter>) {
+        self.adapters
+            .write()
+            .expect("tool adapter registry lock poisoned")
+            .push(adapter);
+    }
+
+    fn has_adapter_for(&self, tool_kind: &str) -> bool {
+        self.adapters
+            .read()
+            .expect("tool adapter registry lock poisoned")
+            .iter()
+            .any(|adapter| adapter.supported_tool_kinds().contains(&tool_kind))
+    }
+
+    /// Ensures the metadata-only AgentRuntime bridge definition exists.
+    ///
+    /// This is deliberately not an adapter registration. It gives the
+    /// scheduler a durable definition against which it can record the safe
+    /// no-adapter outcome while real adapters remain absent.
+    pub async fn ensure_agent_runtime_placeholder_definition(&self) -> Result<(), ServiceError> {
+        if self
+            .repository
+            .get_tool_definition(AGENT_RUNTIME_PLACEHOLDER_TOOL_ID)
+            .await?
+            .is_none()
+        {
+            match self
+                .repository
+                .create_tool_definition(&NewToolDefinition {
+                    tool_id: AGENT_RUNTIME_PLACEHOLDER_TOOL_ID,
+                    tool_name: AGENT_RUNTIME_PLACEHOLDER_TOOL_NAME,
+                    tool_kind: "adapter_contract",
+                    trust_level: "sandboxed",
+                    requires_permission: false,
+                    is_enabled: true,
+                })
+                .await
+            {
+                Ok(_) => {}
+                Err(_error)
+                    if self
+                        .repository
+                        .get_tool_definition(AGENT_RUNTIME_PLACEHOLDER_TOOL_ID)
+                        .await?
+                        .is_some() => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     // LOOM_BOUNDARY_METHOD:
@@ -213,7 +291,25 @@ impl ToolSchedulerRuntime {
             .transition_invocation_status(&request.invocation_id, ToolInvocationStatus::Queued)
             .await?;
 
-        if !request.auto_complete_noop {
+        if tool.tool_name != NOOP_TOOL_NAME && !self.has_adapter_for(&tool.tool_kind) {
+            self.repository
+                .transition_invocation_status(&request.invocation_id, ToolInvocationStatus::Failed)
+                .await?;
+            let invocation = self
+                .repository
+                .get_invocation(&request.invocation_id)
+                .await?
+                .ok_or_else(|| ServiceError::storage("tool invocation not found"))?;
+            return Ok(ToolRuntimeResult {
+                outcome: ToolRuntimeOutcomeKind::Skipped,
+                invocation,
+                permission_grant_id: permission.matching_grant_id,
+                artifact: None,
+                safe_summary: Some(ADAPTER_NOT_IMPLEMENTED_SAFE_CODE.to_string()),
+            });
+        }
+
+        if tool.tool_name != NOOP_TOOL_NAME || !request.auto_complete_noop {
             let invocation = self
                 .repository
                 .get_invocation(&request.invocation_id)
@@ -227,13 +323,7 @@ impl ToolSchedulerRuntime {
                 safe_summary: None,
             });
         }
-
         self.start_invocation(&request.invocation_id).await?;
-        if tool.tool_name != NOOP_TOOL_NAME {
-            return Err(ServiceError::storage(
-                "only built-in noop tool execution is implemented",
-            ));
-        }
         self.complete_noop(
             &request.invocation_id,
             &request.root_run_id,
@@ -383,6 +473,27 @@ mod tests {
             tool_scheduler::{NewToolDefinition, ToolPermissionScope, ToolSchedulerRepository},
         },
     };
+    use crate::tool_adapter_contract::{ToolAdapterFuture, ToolAdapterRequest};
+
+    struct PanicIfExecutedAdapter;
+
+    impl ToolAdapter for PanicIfExecutedAdapter {
+        fn adapter_id(&self) -> &str {
+            "test.panic_if_executed"
+        }
+
+        fn adapter_version(&self) -> &str {
+            "0.0.0-test"
+        }
+
+        fn supported_tool_kinds(&self) -> &[&str] {
+            &["adapter_contract"]
+        }
+
+        fn execute(&self, _request: ToolAdapterRequest) -> ToolAdapterFuture<'_> {
+            panic!("TOOL-SCHEDULER-BRIDGE-001 must not execute adapters")
+        }
+    }
 
     fn timestamp() -> &'static str {
         "1700000000000"
@@ -532,6 +643,56 @@ mod tests {
         assert_eq!(result.outcome, ToolRuntimeOutcomeKind::PermissionDenied);
         assert_eq!(result.invocation.status, "permission_denied");
         assert_eq!(result.invocation.permission_status, "denied");
+        assert!(result.invocation.started_at.is_none());
+        assert!(result.artifact.is_none());
+    }
+
+    #[tokio::test]
+    async fn missing_adapter_returns_safe_skipped_result_without_execution() {
+        let (runtime, repo) = seeded_runtime(false).await;
+        runtime
+            .ensure_agent_runtime_placeholder_definition()
+            .await
+            .unwrap();
+        let mut unavailable = request("inv-no-adapter");
+        unavailable.tool_id = AGENT_RUNTIME_PLACEHOLDER_TOOL_ID.to_string();
+        unavailable.auto_complete_noop = false;
+        unavailable.create_noop_artifact = false;
+
+        let result = runtime.submit_invocation(unavailable).await.unwrap();
+
+        assert_eq!(result.outcome, ToolRuntimeOutcomeKind::Skipped);
+        assert_eq!(result.invocation.status, "failed");
+        assert!(result.invocation.started_at.is_none());
+        assert!(result.artifact.is_none());
+        assert_eq!(
+            result.safe_summary.as_deref(),
+            Some(ADAPTER_NOT_IMPLEMENTED_SAFE_CODE)
+        );
+        assert!(repo
+            .list_artifacts_by_invocation("inv-no-adapter")
+            .await
+            .unwrap()
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn registered_adapter_is_resolved_but_not_executed_by_bridge() {
+        let (runtime, _) = seeded_runtime(false).await;
+        runtime
+            .ensure_agent_runtime_placeholder_definition()
+            .await
+            .unwrap();
+        runtime.register_adapter(Arc::new(PanicIfExecutedAdapter));
+        let mut deferred = request("inv-adapter-deferred");
+        deferred.tool_id = AGENT_RUNTIME_PLACEHOLDER_TOOL_ID.to_string();
+        deferred.auto_complete_noop = true;
+        deferred.create_noop_artifact = false;
+
+        let result = runtime.submit_invocation(deferred).await.unwrap();
+
+        assert_eq!(result.outcome, ToolRuntimeOutcomeKind::Queued);
+        assert_eq!(result.invocation.status, "queued");
         assert!(result.invocation.started_at.is_none());
         assert!(result.artifact.is_none());
     }

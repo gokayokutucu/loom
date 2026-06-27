@@ -1062,7 +1062,8 @@ mod tests {
                 tool_registry: tool_registry.clone(),
             };
 
-            // 1. Confirm multiple AppState::agent_runtime() accessor calls share the same registry
+            // 1. Confirm the compatibility registry remains process-shared for
+            // introspection even though AgentRuntime scheduling is SQLite-backed.
             let service1 = state.agent_runtime();
             let _service2 = state.agent_runtime();
 
@@ -1081,7 +1082,8 @@ mod tests {
             tool_registry.write().unwrap().register(test_tool.clone());
 
             // 2. Execute through AppState -> AgentRuntimeService -> AgentRuntime
-            // -> ToolRuntimeBoundary and observe the shared registry policy.
+            // -> ToolSchedulerRuntime. The compatibility registry must not
+            // control this canonical scheduling path.
             let events = service1
                 .execute(AgentRuntimeRequest {
                     prompt: "shared registry proof".to_string(),
@@ -1106,8 +1108,8 @@ mod tests {
                     status: ToolPermissionStatus::Allowed,
                     reason: Some(reason),
                     ..
-                } if tool_name == "dummy_placeholder_tool"
-                    && reason.contains("is permitted")
+                } if tool_name == crate::tool_scheduler_runtime::AGENT_RUNTIME_PLACEHOLDER_TOOL_NAME
+                    && reason.contains("tool scheduler")
             )));
             assert!(events.iter().any(|event| matches!(
                 event,
@@ -1115,8 +1117,8 @@ mod tests {
                     tool_name,
                     reason,
                     ..
-                } if tool_name == "dummy_placeholder_tool"
-                    && reason == "TOOL_EXECUTION_NOT_IMPLEMENTED"
+                } if tool_name == crate::tool_scheduler_runtime::AGENT_RUNTIME_PLACEHOLDER_TOOL_NAME
+                    && reason == crate::tool_scheduler_runtime::ADAPTER_NOT_IMPLEMENTED_SAFE_CODE
             )));
             assert!(!events
                 .iter()
@@ -1133,15 +1135,30 @@ mod tests {
                 service1
                     .run_store()
                     .get(&crate::agent_runtime::types::AgentRunId::from(
-                        actual_run_id,
+                        actual_run_id.clone(),
                     ))
                     .expect("stored run")
                     .status,
                 AgentRunStatus::Completed
             );
+            let tool_repo =
+                crate::storage::repositories::tool_scheduler::ToolSchedulerRepository::from_pool(
+                    state.database.pool(),
+                );
+            let invocation = tool_repo
+                .get_invocation(&format!("{actual_run_id}-tool-call-invocation"))
+                .await
+                .unwrap()
+                .expect("scheduler-backed invocation");
+            assert_eq!(
+                invocation.tool_id,
+                crate::tool_scheduler_runtime::AGENT_RUNTIME_PLACEHOLDER_TOOL_ID
+            );
+            assert_eq!(invocation.status, "failed");
+            assert!(invocation.started_at.is_none());
 
-            // Verify that the service runtime uses the shared registry under the hood
-            // 3. Confirm listing tools via route extracts the exact registered metadata
+            // 3. Confirm the compatibility listing route still extracts the
+            // exact registered metadata.
             let response = super::super::list_tools(State(state.clone()))
                 .await
                 .into_response();

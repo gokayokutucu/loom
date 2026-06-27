@@ -8,12 +8,10 @@ use tokio::sync::watch;
 
 use crate::agent_runtime::event_writer::event_to_safe_record;
 use crate::agent_runtime::events::AgentEvent;
-use crate::agent_runtime::tools::{
-    SafeToolArguments, ToolCallId, ToolInvocationRequest, ToolName, ToolRuntimeBoundary,
-};
+use crate::agent_runtime::tools::ToolPermissionStatus;
 use crate::agent_runtime::types::{
     new_agent_run_id, AgentRun, AgentRunId, AgentRunStatus, AgentRuntimeProviderOptions,
-    AgentRuntimeRequest, AgentStepId, AgentStepKind, AgentStepStatus, AgentUsage,
+    AgentRuntimeRequest, AgentStepKind, AgentStepStatus, AgentUsage,
 };
 use crate::context::types::{BuiltContext, ContextMessageRole};
 use crate::provider_runtime::{ProviderExecutionRequest, ProviderRuntimeService};
@@ -25,6 +23,11 @@ use crate::providers::contract::{
 use crate::providers::pipeline::{ProviderPipeline, ProviderPipelineRegistry};
 use crate::storage::repositories::agent_runs::{
     AgentRunRepository, NewAgentEvent, NewAgentRun, NewAgentStep,
+};
+use crate::tool_scheduler_runtime::{
+    ToolInvocationRequest, ToolRuntimeOutcomeKind, ToolSchedulerRuntime,
+    ADAPTER_NOT_IMPLEMENTED_SAFE_CODE, AGENT_RUNTIME_PLACEHOLDER_TOOL_ID,
+    AGENT_RUNTIME_PLACEHOLDER_TOOL_NAME,
 };
 
 const PROVIDER_CALL_COMPLETED_SAFE_SUMMARY: &str = "provider_call_completed_via_bridge";
@@ -307,7 +310,7 @@ pub struct AgentRuntime<R = ProviderRegistry> {
     pipeline: ProviderPipeline<R>,
     provider_runtime: ProviderRuntimeService,
     run_store: AgentRunStore,
-    tool_registry: Arc<std::sync::RwLock<crate::agent_runtime::tool_registry::ToolRegistry>>,
+    tool_scheduler: Option<ToolSchedulerRuntime>,
     run_repository: Option<AgentRunRepository>,
 }
 
@@ -324,9 +327,7 @@ where
             pipeline,
             provider_runtime: ProviderRuntimeService::new(),
             run_store,
-            tool_registry: Arc::new(std::sync::RwLock::new(
-                crate::agent_runtime::tool_registry::ToolRegistry::new(),
-            )),
+            tool_scheduler: None,
             run_repository: None,
         }
     }
@@ -334,13 +335,13 @@ where
     pub fn with_run_store_and_registry(
         pipeline: ProviderPipeline<R>,
         run_store: AgentRunStore,
-        tool_registry: Arc<std::sync::RwLock<crate::agent_runtime::tool_registry::ToolRegistry>>,
+        _tool_registry: Arc<std::sync::RwLock<crate::agent_runtime::tool_registry::ToolRegistry>>,
     ) -> Self {
         Self {
             pipeline,
             provider_runtime: ProviderRuntimeService::new(),
             run_store,
-            tool_registry,
+            tool_scheduler: None,
             run_repository: None,
         }
     }
@@ -350,6 +351,11 @@ where
     /// history source of truth.
     pub fn with_repository(mut self, repo: AgentRunRepository) -> Self {
         self.run_repository = Some(repo);
+        self
+    }
+
+    pub fn with_tool_scheduler(mut self, tool_scheduler: ToolSchedulerRuntime) -> Self {
+        self.tool_scheduler = Some(tool_scheduler);
         self
     }
 
@@ -384,7 +390,7 @@ where
         let pipeline = self.pipeline.clone();
         let provider_runtime = self.provider_runtime.clone();
         let run_store = self.run_store.clone();
-        let tool_registry = self.tool_registry.clone();
+        let tool_scheduler = self.tool_scheduler.clone();
         let run_repository = self.run_repository.clone();
         stream! {
             // AgentRunId is an independent UUID v4 — never derived from response_id.
@@ -739,31 +745,56 @@ where
             persist_step_started(&run_repository, &run_id, &tool_step_id, AgentStepKind::ToolCallPlaceholder, 2, &started_at_str, &tool_step_started).await;
             yield tool_step_started;
 
-            let tool_boundary = ToolRuntimeBoundary::with_shared_registry(tool_registry);
+            let tool_invocation_id = format!("{tool_step_id}-invocation");
             let tool_request = ToolInvocationRequest {
-                call_id: ToolCallId::from(format!("{tool_step_id}-call")),
-                run_id: AgentRunId::from(run_id.clone()),
-                step_id: Some(AgentStepId::from(tool_step_id.clone())),
-                tool_name: ToolName::from("dummy_placeholder_tool"),
-                arguments: SafeToolArguments::empty(),
-                requested_at: now_epoch_ms(),
-                origin: Some("placeholder".to_string()),
+                invocation_id: tool_invocation_id,
+                root_run_id: run_id.clone(),
+                agent_run_id: run_id.clone(),
+                parent_invocation_id: None,
+                tool_id: AGENT_RUNTIME_PLACEHOLDER_TOOL_ID.to_string(),
+                requested_at: Some(now_epoch_ms().to_string()),
+                timeout_ms: None,
+                diagnostics_json: Some(r#"{"source":"agent_runtime_tool_placeholder"}"#.to_string()),
+                auto_complete_noop: false,
+                create_noop_artifact: false,
             };
             let tool_call_requested = AgentEvent::ToolCallRequested {
                 run_id: run_id.clone(),
                 step_id: tool_step_id.clone(),
-                tool_name: tool_request.tool_name.to_string(),
+                tool_name: AGENT_RUNTIME_PLACEHOLDER_TOOL_NAME.to_string(),
             };
             persist_event(&run_repository, &run_id, &tool_call_requested).await;
             yield tool_call_requested;
 
-            let tool_result = tool_boundary.invoke(&tool_request);
+            let tool_result = if let Some(scheduler) = tool_scheduler.as_ref() {
+                match scheduler
+                    .ensure_agent_runtime_placeholder_definition()
+                    .await
+                {
+                    Ok(()) => scheduler.submit_invocation(tool_request).await.ok(),
+                    Err(_) => None,
+                }
+            } else {
+                None
+            };
+            let permission_status = match tool_result.as_ref().map(|result| &result.outcome) {
+                Some(ToolRuntimeOutcomeKind::PendingPermission) => {
+                    ToolPermissionStatus::RequiresUserApproval
+                }
+                Some(ToolRuntimeOutcomeKind::PermissionDenied) => ToolPermissionStatus::Denied,
+                Some(_) => ToolPermissionStatus::Allowed,
+                None => ToolPermissionStatus::NotAvailable,
+            };
             let tool_perm = AgentEvent::ToolPermissionEvaluated {
                 run_id: run_id.clone(),
                 step_id: tool_step_id.clone(),
-                tool_name: tool_result.tool_name.to_string(),
-                status: tool_result.permission.status,
-                reason: tool_result.permission.reason.clone(),
+                tool_name: AGENT_RUNTIME_PLACEHOLDER_TOOL_NAME.to_string(),
+                status: permission_status,
+                reason: Some(if tool_result.is_some() {
+                    "permission evaluated by tool scheduler".to_string()
+                } else {
+                    "tool scheduler unavailable".to_string()
+                }),
             };
             persist_event(&run_repository, &run_id, &tool_perm).await;
             yield tool_perm;
@@ -771,13 +802,10 @@ where
             let tool_skipped = AgentEvent::ToolCallSkipped {
                 run_id: run_id.clone(),
                 step_id: tool_step_id.clone(),
-                tool_name: tool_result.tool_name.to_string(),
+                tool_name: AGENT_RUNTIME_PLACEHOLDER_TOOL_NAME.to_string(),
                 reason: tool_result
-                    .error
-                    .as_ref()
-                    .map(|error| error.code.clone())
-                    .or_else(|| tool_result.permission.reason.clone())
-                    .unwrap_or_else(|| "tool execution not implemented".to_string()),
+                    .and_then(|result| result.safe_summary)
+                    .unwrap_or_else(|| ADAPTER_NOT_IMPLEMENTED_SAFE_CODE.to_string()),
             };
             persist_event(&run_repository, &run_id, &tool_skipped).await;
             yield tool_skipped;
@@ -1278,19 +1306,21 @@ mod tests {
         ));
         assert!(matches!(
             stream_events[6],
-            AgentEvent::ToolCallRequested { ref tool_name, .. } if tool_name == "dummy_placeholder_tool"
+            AgentEvent::ToolCallRequested { ref tool_name, .. }
+                if tool_name == AGENT_RUNTIME_PLACEHOLDER_TOOL_NAME
         ));
         assert!(matches!(
             stream_events[7],
             AgentEvent::ToolPermissionEvaluated {
                 ref tool_name,
-                status: ToolPermissionStatus::UnknownTool,
+                status: ToolPermissionStatus::NotAvailable,
                 ..
-            } if tool_name == "dummy_placeholder_tool"
+            } if tool_name == AGENT_RUNTIME_PLACEHOLDER_TOOL_NAME
         ));
         assert!(matches!(
             stream_events[8],
-            AgentEvent::ToolCallSkipped { ref tool_name, .. } if tool_name == "dummy_placeholder_tool"
+            AgentEvent::ToolCallSkipped { ref tool_name, .. }
+                if tool_name == AGENT_RUNTIME_PLACEHOLDER_TOOL_NAME
         ));
         assert!(matches!(
             stream_events[9],
@@ -1852,7 +1882,13 @@ mod tests {
         let (pipeline, _) = crate::agent_runtime::test_support::make_test_pipeline(events);
         let database = crate::storage::db::test_database().await;
         let repo = AgentRunRepository::from_pool(database.pool());
-        let runtime = AgentRuntime::new(pipeline).with_repository(repo.clone());
+        let tool_repo =
+            crate::storage::repositories::tool_scheduler::ToolSchedulerRepository::from_pool(
+                database.pool(),
+            );
+        let runtime = AgentRuntime::new(pipeline)
+            .with_repository(repo.clone())
+            .with_tool_scheduler(ToolSchedulerRuntime::new(tool_repo.clone()));
 
         let stream_events = runtime
             .execute_run(make_request("persisted-response"))
@@ -1875,6 +1911,27 @@ mod tests {
         assert_eq!(steps[2].kind, "tool_call_placeholder");
         assert_eq!(steps[2].status, "skipped");
         assert!(steps.iter().all(|step| step.completed_at.is_some()));
+
+        let invocation = tool_repo
+            .get_invocation(&format!("{run_id}-tool-call-invocation"))
+            .await
+            .unwrap()
+            .expect("scheduler invocation");
+        assert_eq!(invocation.tool_id, AGENT_RUNTIME_PLACEHOLDER_TOOL_ID);
+        assert_eq!(invocation.status, "failed");
+        assert!(invocation.started_at.is_none());
+        assert!(invocation.sanitized_summary.is_none());
+        let serialized_invocation = serde_json::to_string(&invocation).unwrap();
+        for forbidden in [
+            "raw_output",
+            "stdout",
+            "stderr",
+            "prompt",
+            "provider_payload",
+            "raw_thinking",
+        ] {
+            assert!(!serialized_invocation.contains(forbidden));
+        }
 
         let durable_events = repo.list_events_for_run(&run_id, 0, 100).await.unwrap();
         assert_eq!(

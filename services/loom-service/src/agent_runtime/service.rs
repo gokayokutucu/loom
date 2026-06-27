@@ -9,6 +9,7 @@ use crate::providers::adapter::ProviderRegistry;
 use crate::providers::ollama::OllamaRuntime;
 use crate::providers::pipeline::{ProviderPipeline, ProviderPipelineRegistry};
 use crate::storage::repositories::agent_runs::AgentRunRepository;
+use crate::tool_scheduler_runtime::ToolSchedulerRuntime;
 
 // LOOM_BOUNDARY:
 // marker: V2_CANONICAL_RUNTIME
@@ -55,12 +56,14 @@ impl AgentRuntimeService<ProviderRegistry> {
         run_store: AgentRunStore,
         tool_registry: Arc<std::sync::RwLock<crate::agent_runtime::tool_registry::ToolRegistry>>,
         repo: AgentRunRepository,
+        tool_scheduler: ToolSchedulerRuntime,
     ) -> Self {
         Self::with_run_store_registry_and_repo(
             ProviderPipeline::new(ollama),
             run_store,
             tool_registry,
             repo,
+            tool_scheduler,
         )
     }
 }
@@ -100,11 +103,13 @@ where
         run_store: AgentRunStore,
         tool_registry: Arc<std::sync::RwLock<crate::agent_runtime::tool_registry::ToolRegistry>>,
         repo: AgentRunRepository,
+        tool_scheduler: ToolSchedulerRuntime,
     ) -> Self {
         Self {
             runtime: Arc::new(
                 AgentRuntime::with_run_store_and_registry(pipeline, run_store, tool_registry)
-                    .with_repository(repo),
+                    .with_repository(repo)
+                    .with_tool_scheduler(tool_scheduler),
             ),
         }
     }
